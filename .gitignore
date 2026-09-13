@@ -1,0 +1,23 @@
+﻿# Build and Output Folders
+bin/
+obj/
+TestResults/
+BenchmarkDotNet.Artifacts/
+.vs/
+.idea/
+.vscode/
+
+# Packages
+*.nupkg
+*.snupkg
+!dist/*.nupkg
+!dist/*.snupkg
+
+# OS Files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+*.tmp
+*~

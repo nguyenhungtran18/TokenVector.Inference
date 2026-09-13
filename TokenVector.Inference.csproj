@@ -1,0 +1,45 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Optimize>true</Optimize>
+    <LangVersion>12</LangVersion>
+    <RootNamespace>TokenVector.Inference</RootNamespace>
+    <AssemblyName>TokenVector.Inference</AssemblyName>
+    <Version>1.0.0</Version>
+    <PackageId>TokenVector.Inference</PackageId>
+    <Title>TokenVector.Inference - Ultra Low-Latency Model Serving &amp; Quantization Engine</Title>
+    <Description>Zero-GC, SIMD AVX2/AVX-512 accelerated ONNX inference runtime, INT8/FP8 quantization, and micro-serving engine for the TokenVector ecosystem.</Description>
+    <Authors>TokenVector Project Team</Authors>
+    <Company>TokenVector</Company>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageTags>inference;onnx;quantization;int8;fp8;deep-learning;serving;simd;zero-gc;tokenvector</PackageTags>
+    <IsAotCompatible>true</IsAotCompatible>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/nguyenhungtran18/TokenVector</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="tests\**;benchmarks\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="D:\TokenVector Numerics\src\TokenVector.Numerics\TokenVector.Numerics.csproj" />
+  </ItemGroup>
+
+</Project>

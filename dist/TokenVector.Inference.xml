@@ -1,0 +1,191 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>TokenVector.Inference</name>
+    </assembly>
+    <members>
+        <member name="T:TokenVector.Inference.Interop.TokenVectorInterop">
+            <summary>
+            Static CIL Interop Bridge for TokenVector Compiler (stdlib/tv/inference).
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.ONNX.FastProtobufReader">
+            <summary>
+            Ultra-fast zero-allocation binary Protobuf wire reader operating directly on ReadOnlySpan&lt;byte&gt;.
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.ONNX.GraphTranslator">
+            <summary>
+            Translates ONNX Model Proto into TokenVector ExecutionGraph with Topological Sort (Kahn Algorithm).
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.ONNX.OnnxModelParser">
+            <summary>
+            High-performance zero-copy ONNX Protobuf Binary Parser.
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.Optimization.ConstantFoldingPass">
+            <summary>
+            Evaluates static subgraphs (e.g. constant weights reshape, transpose, permute) at graph compile time.
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.Optimization.DeadCodeEliminationPass">
+            <summary>
+            Eliminates unused operations and intermediate tensors that do not contribute to graph outputs.
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.Optimization.FusedKernels">
+            <summary>
+            Highly-optimized hardware-accelerated SIMD Fused Computation Kernels (AVX2 / FMA).
+            Eliminates intermediate memory traffic by fusing MatMul/Conv with Bias, Norm and Activation in L1/L2 Cache.
+            </summary>
+        </member>
+        <member name="M:TokenVector.Inference.Optimization.FusedKernels.FusedMatMulBiasAct(System.Single*,System.Single*,System.Single*,System.Single*,System.Int32,System.Int32,System.Int32,TokenVector.Inference.Optimization.ActivationFunction,System.Boolean)">
+            <summary>
+            Fused Linear: Y = Activation(X * W^T + Bias) or Activation(X * W + Bias).
+            Dimensions: X (M x K), W (N x K if transB else K x N), Bias (N), Y (M x N).
+            </summary>
+        </member>
+        <member name="M:TokenVector.Inference.Optimization.FusedKernels.FusedRMSNorm(System.Single*,System.Single*,System.Single*,System.Int32,System.Int32,System.Single)">
+            <summary>
+            Fused RMSNorm Kernel: Computes X / sqrt(mean(X^2) + eps) * Gamma in a single pass.
+            </summary>
+        </member>
+        <member name="M:TokenVector.Inference.Optimization.FusedKernels.FusedLayerNorm(System.Single*,System.Single*,System.Single*,System.Single*,System.Int32,System.Int32,System.Single)">
+            <summary>
+            Fused LayerNorm Kernel: Y = (X - mean) / sqrt(var + eps) * Gamma + Beta.
+            </summary>
+        </member>
+        <member name="M:TokenVector.Inference.Optimization.FusedKernels.FusedConv2DBatchNormReLU(System.Single*,System.Single*,System.Single*,System.Single*,System.Single*,System.Single*,System.Single*,System.Single*,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Int32,System.Single)">
+            <summary>
+            Fused Conv2D + BatchNorm + ReLU.
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.Optimization.OperatorFusionPass">
+            <summary>
+            Fuses consecutive operators into single-pass SIMD accelerated execution kernels.
+            Supports:
+            - MatMul + BiasAdd + Activation (ReLU/GELU/SiLU) -> FusedLinear
+            - Conv2D + BatchNorm + BiasAdd + ReLU -> FusedConv2D
+            - RMSNorm sequences -> FusedRMSNorm
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.Quantization.FP8E4M3">
+            <summary>
+            Implementation of 8-bit floating point formats (FP8):
+            - E4M3 (1 sign, 4 exponent bits, 3 mantissa bits, bias = 7): High precision for weights and activations.
+            - E5M2 (1 sign, 5 exponent bits, 2 mantissa bits, bias = 15): High dynamic range for gradients / attention logits.
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.Quantization.QuantizationEngine">
+            <summary>
+            Engine for Static Post-Training Quantization (PTQ) and Dynamic Quantization.
+            Supports MinMax, KL-Divergence calibration, and symmetric/asymmetric mapping.
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.Quantization.QuantizedMatMulKernels">
+            <summary>
+            AVX2 / AVX-512 VNNI Accelerated INT8 Matrix Multiplication Kernels.
+            Uses VPMADDUBSW + VPMADDWD pipeline to achieve up to 4x throughput over FP32 on CPU.
+            </summary>
+        </member>
+        <member name="M:TokenVector.Inference.Quantization.QuantizedMatMulKernels.MatMulInt8Symmetric(System.SByte*,System.SByte*,System.Single*,System.Single*,System.Int32,System.Int32,System.Int32,System.Single,System.Single)">
+            <summary>
+            Symmetric INT8 MatMul: Y = (A * W^T) * (scaleA * scaleW) + Bias.
+            Dimensions: A (M x K, int8), W (N x K, int8), Y (M x N, float32).
+            </summary>
+        </member>
+        <member name="M:TokenVector.Inference.Quantization.QuantizedMatMulKernels.MatMulInt8Asymmetric(System.SByte*,System.SByte*,System.Single*,System.Single*,System.Int32,System.Int32,System.Int32,System.Single,System.Int32,System.Single,System.Int32)">
+            <summary>
+            Asymmetric INT8 MatMul with ZeroPoint correction:
+            Y = sum((A - zpA) * (W - zpW)) * scaleA * scaleW + Bias.
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.Runtime.ExecutionGraph">
+            <summary>
+            Topologically sorted execution graph with Tensor Liveness Analysis and automated memory scratchpad reuse.
+            </summary>
+        </member>
+        <member name="M:TokenVector.Inference.Runtime.ExecutionGraph.AnalyzeLivenessAndAllocateOffsets">
+            <summary>
+            Analyzes tensor lifetime intervals and allocates compact memory offsets with buffer reuse.
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.Runtime.ExecutionMemoryArena">
+            <summary>
+            Linear unmanaged memory scratchpad arena aligned to 64-byte boundaries for AVX2/AVX-512 SIMD kernels.
+            Provides zero-allocation tensor slices throughout the entire inference hot-path.
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.Runtime.ExecutionNode">
+            <summary>
+            Node in the execution graph. Operates directly on the unmanaged memory arena with zero allocations.
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.Runtime.InferenceSession">
+            <summary>
+            High-performance Deep Learning Inference Engine with Zero-GC Allocation Hot Path.
+            Executes optimized execution graphs directly against pre-allocated unmanaged memory arenas.
+            </summary>
+        </member>
+        <member name="M:TokenVector.Inference.Runtime.InferenceSession.Run(System.ReadOnlySpan{TokenVector.Inference.Runtime.NamedNDArray},System.Span{TokenVector.Inference.Runtime.NamedNDArray})">
+            <summary>
+            ZERO-ALLOCATION HOT PATH: Runs inference without allocating any memory on the managed heap.
+            </summary>
+        </member>
+        <member name="M:TokenVector.Inference.Runtime.InferenceSession.Run(TokenVector.Numerics.Core.NDArray{System.Single},System.String,System.String)">
+            <summary>
+            Single-tensor inference helper.
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.Runtime.NamedNDArray">
+            <summary>
+            Lightweight zero-allocation struct holding a named tensor input or output.
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.Runtime.TensorDesc">
+            <summary>
+            Metadata descriptor for a tensor in the execution graph, including shape, data type, and memory allocation slot.
+            </summary>
+        </member>
+        <member name="T:TokenVector.Inference.Server.DynamicBatcher">
+            <summary>
+            Lock-Free Micro-Batching Engine using System.Threading.Channels and spin-wait timeout window (100 - 500 microseconds).
+            </summary>
+        </member>
+        <member name="P:TokenVector.Inference.Server.InferenceJsonContext.Single">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:TokenVector.Inference.Server.InferenceJsonContext.SingleArray">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:TokenVector.Inference.Server.InferenceJsonContext.Default">
+            <summary>
+            The default <see cref="T:System.Text.Json.Serialization.JsonSerializerContext"/> associated with a default <see cref="T:System.Text.Json.JsonSerializerOptions"/> instance.
+            </summary>
+        </member>
+        <member name="P:TokenVector.Inference.Server.InferenceJsonContext.GeneratedSerializerOptions">
+            <summary>
+            The source-generated options associated with this context.
+            </summary>
+        </member>
+        <member name="M:TokenVector.Inference.Server.InferenceJsonContext.#ctor">
+            <inheritdoc/>
+        </member>
+        <member name="M:TokenVector.Inference.Server.InferenceJsonContext.#ctor(System.Text.Json.JsonSerializerOptions)">
+            <inheritdoc/>
+        </member>
+        <member name="M:TokenVector.Inference.Server.InferenceJsonContext.GetTypeInfo(System.Type)">
+            <inheritdoc/>
+        </member>
+        <member name="T:TokenVector.Inference.Server.EmbeddedServer">
+            <summary>
+            Ultra-lightweight in-process HTTP/REST Micro-Server (&lt;1ms response latency) for embedded AI serving.
+            </summary>
+        </member>
+    </members>
+</doc>

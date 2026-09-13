@@ -1,0 +1,24 @@
+﻿// TokenVector Standard Library: Inference & Model Serving Module
+// Namespace: tv.inference
+
+module tv.inference
+
+import tv.numerics.tensor
+import tv.numerics.linalg
+
+public class ModelSession:
+    def __init__(self, model_path: str):
+        self.handle = tv_inference_create_session(model_path)
+
+    def run(self, input_tensor: NDArray[float32]) -> NDArray[float32]:
+        output_tensor = zeros_like(input_tensor)
+        tv_inference_run_ptr(self.handle, input_tensor.data_ptr, input_tensor.length, output_tensor.data_ptr, output_tensor.length)
+        return output_tensor
+
+    def close(self):
+        if self.handle != 0:
+            tv_inference_destroy_session(self.handle)
+            self.handle = 0
+
+public def load_onnx(model_path: str) -> ModelSession:
+    return ModelSession(model_path)
