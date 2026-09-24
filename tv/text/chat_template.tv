@@ -1,0 +1,103 @@
+// TokenVector Module: Text — Chat templates (Jinja subset + built-ins)
+// Supports built-in formats (chatml, llama3, mistral, gemma, phi) plus custom
+// templates with {{var}} substitution and {% if %}/{% for %} message loops.
+
+module tv.text.chat_template
+
+public class ChatMessage:
+    def __init__(self, role: str, content: str):
+        self.role = role
+        self.content = content
+
+public def apply_template(messages: list[ChatMessage], fmt: str = "chatml", add_bos: bool = True) -> str:
+    if fmt == "chatml":
+        return _chatml(messages, add_bos)
+    if fmt == "llama3":
+        return _llama3(messages, add_bos)
+    if fmt == "mistral":
+        return _mistral(messages, add_bos)
+    if fmt == "gemma":
+        return _gemma(messages, add_bos)
+    if fmt == "phi":
+        return _phi(messages, add_bos)
+    # custom template text: {{var}} substitution over loop of messages
+    return _render_custom(fmt, messages)
+
+def _chatml(messages: list[ChatMessage], bos: bool) -> str:
+    out = ""
+    for m in messages:
+        out = out + "<|im_start|>" + m.role + "\n" + m.content + "<|im_end|>\n"
+    return out + "<|im_start|>assistant\n"
+
+def _llama3(messages: list[ChatMessage], bos: bool) -> str:
+    out = "<|begin_of_text|>" if bos else ""
+    for m in messages:
+        out = out + "<|start_header_id|>" + m.role + "<|end_header_id|>\n\n" + m.content + "<|eot_id|>"
+    return out + "<|start_header_id|>assistant<|end_header_id|>\n\n"
+
+def _mistral(messages: list[ChatMessage], bos: bool) -> str:
+    out = "<s>" if bos else ""
+    for m in messages:
+        if m.role == "system":
+            out = out + "[INST] " + m.content + " [/INST]"
+        elif m.role == "user":
+            out = out + "[INST] " + m.content + " [/INST]"
+        else:
+            out = out + " " + m.content + "</s>"
+    return out
+
+def _gemma(messages: list[ChatMessage], bos: bool) -> str:
+    out = "<bos>" if bos else ""
+    for m in messages:
+        if m.role == "user":
+            out = out + "<start_of_turn>user\n" + m.content + "<end_of_turn>\n"
+        else:
+            out = out + "<start_of_turn>model\n" + m.content + "<end_of_turn>\n"
+    return out + "<start_of_turn>model\n"
+
+def _phi(messages: list[ChatMessage], bos: bool) -> str:
+    out = ""
+    for m in messages:
+        if m.role == "system":
+            out = out + "<|system|>\n" + m.content + "<|end|>\n"
+        elif m.role == "user":
+            out = out + "<|user|>\n" + m.content + "<|end|>\n"
+        else:
+            out = out + "<|assistant|>\n" + m.content + "<|end|>\n"
+    return out + "<|assistant|>\n"
+
+# Minimal renderer: {% for m in messages %}...{% endfor %},
+# {% if m.role == "user" %}...{% endif %}, {{ m.role }} / {{ m.content }}.
+# Anything outside the documented subset is left literal (documented limit).
+def _render_custom(tpl: str, messages: list[ChatMessage]) -> str:
+    body = tpl
+    loop_start = body.find("{% for m in messages %}")
+    loop_end = body.find("{% endfor %}")
+    if loop_start >= 0 and loop_end > loop_start:
+        pre = body[:loop_start]
+        loop = body[loop_start + len("{% for m in messages %}"):loop_end]
+        post = body[loop_end + len("{% endfor %}"):]
+        rendered = ""
+        for m in messages:
+            rendered = rendered + _render_block(loop, m)
+        body = pre + rendered + post
+    return body
+
+def _render_block(block: str, m: ChatMessage) -> str:
+    out = block
+    # {% if m.role == "X" %}...{% endif %} (single condition form)
+    while True:
+        s = out.find("{% if m.role ==")
+        if s < 0:
+            break
+        e = out.find("{% endif %}", s)
+        if e < 0:
+            break
+        cond_end = out.find("%}", s)
+        cond = out[s + len("{% if m.role =="):cond_end].strip().strip("\"").strip("'")
+        inner = out[cond_end + 2:e]
+        repl = inner if m.role == cond else ""
+        out = out[:s] + repl + out[e + len("{% endif %}"):]
+    out = out.replace("{{ m.role }}", m.role)
+    out = out.replace("{{ m.content }}", m.content)
+    return out

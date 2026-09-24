@@ -1,0 +1,45 @@
+// TokenVector Module: Runtime — Append-only KV-cache for autoregressive decoding
+// Pre-allocates once (construction time); Append copies rows with no hot-path allocation.
+// Caller feeds cache contents back as the Attention node's K/V inputs each decode step.
+
+module tv.runtime.kv_cache
+
+import tv.numerics.tensor
+
+public class AttentionKvCache:
+    def __init__(self, max_seq: int, hidden_dim: int):
+        if max_seq <= 0:
+            raise Arg("max_seq must be > 0")
+        if hidden_dim <= 0:
+            raise Arg("hidden_dim must be > 0")
+        self.max_seq = max_seq
+        self.hidden_dim = hidden_dim
+        self.length = 0
+        self._kbuf = NDArray[float32]([max_seq * hidden_dim])
+        self._vbuf = NDArray[float32]([max_seq * hidden_dim])
+        for i in range(max_seq * hidden_dim):
+            self._kbuf[i] = 0.0
+            self._vbuf[i] = 0.0
+
+    public def append(self, k_row: NDArray[float32], v_row: NDArray[float32]):
+        if len(k_row) != self.hidden_dim:
+            raise Arg(f"k_row length {len(k_row)} != hidden_dim {self.hidden_dim}")
+        if len(v_row) != self.hidden_dim:
+            raise Arg(f"v_row length {len(v_row)} != hidden_dim {self.hidden_dim}")
+        if self.length >= self.max_seq:
+            raise Full(f"KV-cache full ({self.max_seq} tokens). Call reset() or grow max_seq.")
+        base = self.length * self.hidden_dim
+        for d in range(self.hidden_dim):
+            self._kbuf[base + d] = k_row[d]
+            self._vbuf[base + d] = v_row[d]
+        self.length = self.length + 1
+
+    # Zero-copy window views over cached prefix [0, length)
+    public def get_k(self) -> NDArray[float32]:
+        return self._kbuf[0:self.length * self.hidden_dim]
+
+    public def get_v(self) -> NDArray[float32]:
+        return self._vbuf[0:self.length * self.hidden_dim]
+
+    def reset(self):
+        self.length = 0

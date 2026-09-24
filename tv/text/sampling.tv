@@ -1,0 +1,140 @@
+// TokenVector Module: Text — Sampling stack (logits -> token id)
+// temperature / top-k / top-p (nucleus) / min-p / repetition penalty / greedy.
+// Mirrors the llama.cpp sampler chain semantics on NDArray[float32] logits.
+
+module tv.text.sampling
+
+import tv.numerics.tensor
+
+public class SampleParams:
+    def __init__(self):
+        self.temperature: float32 = 1.0
+        self.top_k: int = 0          # 0 = disabled
+        self.top_p: float32 = 1.0    # 1.0 = disabled
+        self.min_p: float32 = 0.0    # 0.0 = disabled
+        self.repeat_penalty: float32 = 1.0
+        self.repeat_last_n: int = 64
+        self.seed: int = 42
+
+public def sample_token(logits: NDArray[float32], params: SampleParams, history: list[int]) -> int:
+    n = len(logits)
+    work = NDArray[float32]([n])
+    for i in range(n):
+        work[i] = logits[i]
+    # repetition penalty over trailing history window
+    if params.repeat_penalty != 1.0 and params.repeat_last_n > 0:
+        start = max(0, len(history) - params.repeat_last_n)
+        for k in range(start, len(history)):
+            t = history[k]
+            if t >= 0 and t < n:
+                if work[t] > 0.0:
+                    work[t] = work[t] / params.repeat_penalty
+                else:
+                    work[t] = work[t] * params.repeat_penalty
+    # greedy fast path
+    if params.temperature <= 0.0:
+        return _argmax(work)
+    inv = 1.0 / params.temperature
+    # top-k pre-filter on raw logits (stable: threshold, not full sort)
+    keep = _topk_mask(work, params.top_k) if params.top_k > 0 else None
+    # softmax
+    mx = work[0]
+    for i in range(1, n):
+        if (keep is None or keep[i]) and work[i] > mx:
+            mx = work[i]
+    probs = NDArray[float32]([n])
+    s = 0.0
+    for i in range(n):
+        if keep is not None and not keep[i]:
+            probs[i] = 0.0
+        else:
+            e = exp((work[i] - mx) * inv)
+            probs[i] = e
+            s = s + e
+    inv_s = 1.0 / (s if s > 1e-12 else 1e-12)
+    for i in range(n):
+        probs[i] = probs[i] * inv_s
+    # top-p nucleus filter via iterative max-extraction (O(n*kept), no full sort)
+    if params.top_p < 1.0:
+        allowed: dict[int, bool] = {}
+        cum = 0.0
+        while True:
+            best = -1
+            for i in range(n):
+                if i not in allowed and (best < 0 or probs[i] > probs[best]):
+                    best = i
+            if best < 0 or probs[best] <= 0.0:
+                break
+            allowed[best] = True
+            cum = cum + probs[best]
+            if cum >= params.top_p:
+                break
+        s2 = 0.0
+        for i in range(n):
+            if i not in allowed:
+                probs[i] = 0.0
+            else:
+                s2 = s2 + probs[i]
+        inv2 = 1.0 / (s2 if s2 > 1e-12 else 1e-12)
+        for i in range(n):
+            probs[i] = probs[i] * inv2
+    # min-p filter (linear max only)
+    if params.min_p > 0.0:
+        pmax = probs[0]
+        for i in range(1, n):
+            if probs[i] > pmax:
+                pmax = probs[i]
+        floor = pmax * params.min_p
+        s3 = 0.0
+        for i in range(n):
+            if probs[i] < floor:
+                probs[i] = 0.0
+            else:
+                s3 = s3 + probs[i]
+        inv3 = 1.0 / (s3 if s3 > 1e-12 else 1e-12)
+        for i in range(n):
+            probs[i] = probs[i] * inv3
+    # multinomial draw (deterministic LCG stream seeded per call chain)
+    r = _rand_next(params.seed)
+    params.seed = r
+    u = (r % 1000000) / 1000000.0
+    cum = 0.0
+    for i in range(n):
+        cum = cum + probs[i]
+        if u < cum:
+            return i
+    return _argmax(probs)
+
+def _argmax(a: NDArray[float32]) -> int:
+    best = 0
+    for i in range(1, len(a)):
+        if a[i] > a[best]:
+            best = i
+    return best
+
+# boolean keep-mask for top-k via threshold select (no full sort)
+def _topk_mask(a: NDArray[float32], k: int) -> list[bool]:
+    kk = min(k, len(a))
+    # quickselect threshold
+    vals = [a[i] for i in range(len(a))]
+    lo = 0
+    hi = len(vals) - 1
+    while lo < hi:
+        p = vals[(lo + hi) // 2]
+        i = lo
+        j = hi
+        while i <= j:
+            while vals[i] > p: i = i + 1
+            while vals[j] < p: j = j - 1
+            if i <= j:
+                t = vals[i]; vals[i] = vals[j]; vals[j] = t
+                i = i + 1; j = j - 1
+        if j < kk - 1: lo = i
+        if kk - 1 < i: hi = j
+        if lo >= hi: break
+    thr = vals[kk - 1]
+    return [a[i] >= thr for i in range(len(a))]
+
+def _rand_next(seed: int) -> int:
+    # 64-bit LCG (deterministic across runs with same seed chain)
+    return (seed * 6364136223846793005 + 1442695040888963407) & 0xFFFFFFFFFFFFFFFF

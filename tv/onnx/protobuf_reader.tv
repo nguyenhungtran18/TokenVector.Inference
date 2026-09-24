@@ -1,0 +1,110 @@
+// TokenVector Native Module: ONNX — Fast Protobuf Reader (zero-copy)
+// Ported from: ONNX/FastProtobufReader.cs
+
+module tv.onnx.protobuf_reader
+
+public enum WireType:
+    Varint = 0
+    Fixed64 = 1
+    LengthDelimited = 2
+    StartGroup = 3
+    EndGroup = 4
+    Fixed32 = 5
+
+public class FastProtobufReader:
+    def __init__(self, buf: bytes):
+        self.buf = buf
+        self.pos = 0
+
+    def has_more(self) -> bool:
+        return self.pos < len(self.buf)
+
+    def remaining(self) -> int:
+        return len(self.buf) - self.pos
+
+    public def read_tag(self) -> tuple[int, WireType]:
+        if self.pos >= len(self.buf):
+            return (0, WireType.Varint)
+        tag = self.read_varint32()
+        return (int(tag >> 3), WireType(tag & 0x07))
+
+    public def read_varint32(self) -> int:
+        result = 0
+        shift = 0
+        while self.pos < len(self.buf) and shift < 35:
+            b = self.buf[self.pos]
+            self.pos = self.pos + 1
+            result = result | ((b & 0x7F) << shift)
+            if (b & 0x80) == 0:
+                return result
+            shift = shift + 7
+        return result
+
+    public def read_varint64(self) -> int64:
+        result: int64 = 0
+        shift = 0
+        while self.pos < len(self.buf) and shift < 70:
+            b = self.buf[self.pos]
+            self.pos = self.pos + 1
+            result = result | (int64(b & 0x7F) << shift)
+            if (b & 0x80) == 0:
+                return result
+            shift = shift + 7
+        return result
+
+    public def read_float(self) -> float32:
+        if self.pos + 4 > len(self.buf):
+            raise EOF("Float32")
+        v = native_read_f32(self.buf, self.pos)
+        self.pos = self.pos + 4
+        return v
+
+    public def read_double(self) -> float64:
+        if self.pos + 8 > len(self.buf):
+            raise EOF("Float64")
+        v = native_read_f64(self.buf, self.pos)
+        self.pos = self.pos + 8
+        return v
+
+    public def read_fixed32(self) -> int:
+        v = native_read_u32(self.buf, self.pos)
+        self.pos = self.pos + 4
+        return v
+
+    public def read_fixed64(self) -> int64:
+        v = native_read_u64(self.buf, self.pos)
+        self.pos = self.pos + 8
+        return v
+
+    public def read_length_delimited(self) -> bytes:
+        ln = self.read_varint32()
+        if ln < 0 or self.pos + ln > len(self.buf):
+            raise Corrupt(f"bad LD segment {ln}")
+        sl = self.buf[self.pos:self.pos + ln]
+        self.pos = self.pos + ln
+        return sl
+
+    public def read_string(self) -> str:
+        raw = self.read_length_delimited()
+        if len(raw) == 0:
+            return ""
+        return utf8_decode(raw)
+
+    public def skip_field(self, wt: WireType):
+        if wt == WireType.Varint:
+            self.read_varint64()
+        elif wt == WireType.Fixed64:
+            self.pos = self.pos + 8
+        elif wt == WireType.LengthDelimited:
+            ln = self.read_varint32()
+            self.pos = self.pos + ln
+        elif wt == WireType.Fixed32:
+            self.pos = self.pos + 4
+        else:
+            raise Unsupported(f"wire {wt}")
+
+extern def native_read_f32(buf: bytes, pos: int) -> float32
+extern def native_read_f64(buf: bytes, pos: int) -> float64
+extern def native_read_u32(buf: bytes, pos: int) -> int
+extern def native_read_u64(buf: bytes, pos: int) -> int64
+extern def utf8_decode(raw: bytes) -> str

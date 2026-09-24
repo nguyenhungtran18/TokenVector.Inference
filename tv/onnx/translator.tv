@@ -1,0 +1,473 @@
+// TokenVector Module: ONNX — Graph Translator (Kahn topo-sort + shape inference)
+// Unknown ops raise UnsupportedOp (never silent). Intermediate tensor shapes are
+// inferred so arena offsets/byte sizes are exact before liveness analysis.
+
+module tv.onnx.translator
+
+import tv.onnx.models
+import tv.runtime.execution_graph
+import tv.runtime.execution_node
+import tv.runtime.tensor_desc
+import tv.numerics.tensor
+
+public class UnsupportedOp:
+    def __init__(self, msg: str):
+        self.message = msg
+
+public def translate(model: OnnxModel) -> ExecutionGraph:
+    gp = model.graph
+    g = ExecutionGraph(gp.name if gp.name != "" else "OnnxExecutionGraph")
+    # 1. initializers
+    for init in gp.initializers:
+        shape: list[int] = [int(d) for d in init.dims]
+        arr = init.extract_float_array()
+        if len(shape) == 0:
+            shape = [1]
+        nd = NDArray[float32](shape)
+        src = arr
+        n = min(len(src), len(nd))
+        for i in range(n):
+            nd[i] = src[i]
+        g.initializers[init.name] = nd
+        g.get_or_create_tensor(init.name, nd.shape, init.dtype)
+    # 2. inputs (skip weights)
+    for inp in gp.inputs:
+        if inp.name not in g.initializers:
+            shape = [int(d if d > 0 else 1) for d in inp.dims]
+            g.inputs.append(inp.name)
+            g.get_or_create_tensor(inp.name, shape, inp.dtype)
+    # 3. outputs
+    for out in gp.outputs:
+        shape = [int(d if d > 0 else 1) for d in out.dims]
+        g.outputs.append(out.name)
+        g.get_or_create_tensor(out.name, shape, out.dtype)
+    # 4. nodes (Constant ops fold straight into initializers — no runtime node)
+    raw: list[ExecutionNode] = []
+    for i in range(len(gp.nodes)):
+        on = gp.nodes[i]
+        if on.op_type == "Constant":
+            _fold_constant(g, on, i)
+            continue
+        op = map_op(on.op_type)
+        en = ExecutionNode(on.name if on.name != "" else f"{on.op_type}_{i}", op)
+        for nm in on.inputs:
+            if nm != "":
+                en.inputs.append(nm)
+                g.get_or_create_tensor(nm, [])
+        for nm in on.outputs:
+            if nm != "":
+                en.outputs.append(nm)
+                g.get_or_create_tensor(nm, [])
+        if "alpha" in on.attrs: en.alpha = on.attrs["alpha"].f
+        if "beta" in on.attrs: en.beta = on.attrs["beta"].f
+        if "transA" in on.attrs: en.trans_a = int(on.attrs["transA"].i)
+        if "transB" in on.attrs: en.trans_b = int(on.attrs["transB"].i)
+        if "epsilon" in on.attrs: en.epsilon = on.attrs["epsilon"].f
+        if "axis" in on.attrs: en.axis = int(on.attrs["axis"].i)
+        if "keepdims" in on.attrs: en.keepdims = int(on.attrs["keepdims"].i)
+        if "minimum" in on.attrs: en.clip_min = on.attrs["minimum"].f
+        if "maximum" in on.attrs: en.clip_max = on.attrs["maximum"].f
+        if "axes" in on.attrs and len(on.attrs["axes"].ints) > 0:
+            en.axes = [int(x) for x in on.attrs["axes"].ints]
+        if "kernel_shape" in on.attrs and len(on.attrs["kernel_shape"].ints) > 0:
+            en.kernel_shape = [int(x) for x in on.attrs["kernel_shape"].ints]
+        if "strides" in on.attrs and len(on.attrs["strides"].ints) > 0:
+            en.strides = [int(x) for x in on.attrs["strides"].ints]
+        if "pads" in on.attrs and len(on.attrs["pads"].ints) > 0:
+            en.pads = [int(x) for x in on.attrs["pads"].ints]
+        if on.op_type == "LeakyRelu" and "alpha" not in on.attrs:
+            en.alpha = 0.01
+        if "upper" in on.attrs: en.tri_upper = int(on.attrs["upper"].i)
+        if "k" in on.attrs: en.tri_k = int(on.attrs["k"].i)
+        if "largest" in on.attrs: en.topk_largest = int(on.attrs["largest"].i)
+        if "sorted" in on.attrs: en.topk_sorted = int(on.attrs["sorted"].i)
+        if on.op_type in ["QuantizeLinear", "DequantizeLinear"] and "axis" in on.attrs:
+            en.qlinear_axis = int(on.attrs["axis"].i)
+        # Gemm with default alpha/beta + bias folds to FusedLinear; general case keeps Gemm
+        if on.op_type == "Gemm":
+            a = on.attrs["alpha"].f if "alpha" in on.attrs else 1.0
+            b = on.attrs["beta"].f if "beta" in on.attrs else 1.0
+            if len(en.inputs) >= 3 and a == 1.0 and b == 1.0:
+                en.op_type = OperatorType.FusedLinear
+            else:
+                en.op_type = OperatorType.Gemm
+        raw.append(en)
+    # 5. topo sort + shape inference (fixes intermediate desc shapes/sizes)
+    for n in topo_sort(raw, g.inputs, list(g.initializers.keys())):
+        g.nodes.append(n)
+    infer_shapes(g)
+    return g
+
+public def map_op(op: str) -> OperatorType:
+    if op == "Gemm": return OperatorType.Gemm  # refined to FusedLinear in translate() when exact
+    if op == "MatMul": return OperatorType.MatMul
+    if op == "Conv": return OperatorType.Conv2D
+    if op == "Relu": return OperatorType.Relu
+    if op == "Gelu": return OperatorType.Gelu
+    if op == "LeakyRelu": return OperatorType.LeakyRelu
+    if op == "Elu": return OperatorType.Elu
+    if op == "Softplus": return OperatorType.Softplus
+    if op == "Sigmoid": return OperatorType.Sigmoid
+    if op == "Tanh": return OperatorType.Tanh
+    if op == "Add": return OperatorType.Add
+    if op == "Sub": return OperatorType.Sub
+    if op == "Mul": return OperatorType.Mul
+    if op == "Div": return OperatorType.Div
+    if op == "Pow": return OperatorType.Pow
+    if op == "Sqrt": return OperatorType.Sqrt
+    if op == "Exp": return OperatorType.Exp
+    if op == "Log": return OperatorType.Log
+    if op == "Neg": return OperatorType.Neg
+    if op == "Reciprocal": return OperatorType.Reciprocal
+    if op == "Abs": return OperatorType.Abs
+    if op == "Min": return OperatorType.Min
+    if op == "Max": return OperatorType.Max
+    if op == "Mean": return OperatorType.Mean
+    if op == "Sum": return OperatorType.Sum
+    if op == "Where": return OperatorType.Where
+    if op == "Clip": return OperatorType.Clip
+    if op == "Cast": return OperatorType.Cast
+    if op == "Dropout": return OperatorType.Dropout
+    if op == "Softmax": return OperatorType.Softmax
+    if op == "RMSNorm" or op == "SimplifiedLayerNormalization": return OperatorType.RMSNorm
+    if op == "LayerNormalization": return OperatorType.LayerNorm
+    if op == "BatchNormalization": return OperatorType.BatchNormalization
+    if op == "Attention" or op == "MultiHeadAttention" or op == "ScaledDotProductAttention" or op == "GQA": return OperatorType.Attention
+    if op == "GlobalAveragePool": return OperatorType.GlobalAveragePool
+    if op == "MaxPool": return OperatorType.MaxPool
+    if op == "AveragePool": return OperatorType.AveragePool
+    if op == "Gather": return OperatorType.Gather
+    if op == "Slice": return OperatorType.Slice
+    if op == "Split": return OperatorType.Split
+    if op == "Squeeze": return OperatorType.Squeeze
+    if op == "Unsqueeze": return OperatorType.Unsqueeze
+    if op == "Expand": return OperatorType.Expand
+    if op == "Reshape": return OperatorType.Reshape
+    if op == "Flatten": return OperatorType.Flatten
+    if op == "Transpose": return OperatorType.Transpose
+    if op == "Concat": return OperatorType.Concat
+    if op == "Pad": return OperatorType.Pad
+    if op == "ReduceMean": return OperatorType.ReduceMean
+    if op == "ReduceSum": return OperatorType.ReduceSum
+    if op == "ReduceMax": return OperatorType.ReduceMax
+    if op == "ArgMax": return OperatorType.ArgMax
+    if op == "Shape": return OperatorType.Shape
+    if op == "Size": return OperatorType.Size
+    if op == "Identity": return OperatorType.Identity
+    if op == "LogSoftmax": return OperatorType.LogSoftmax
+    if op == "Trilu": return OperatorType.Trilu
+    if op == "TopK": return OperatorType.TopK
+    if op == "QuantizeLinear": return OperatorType.QuantizeLinear
+    if op == "DequantizeLinear": return OperatorType.DequantizeLinear
+    if op == "QLinearMatMul": return OperatorType.QLinearMatMul
+    raise UnsupportedOp(f"ONNX op '{op}' is not supported by tv.runtime")
+
+# Constant -> initializer (value tensor / value_float(s) / value_int(s))
+def _fold_constant(g: ExecutionGraph, on: OnnxNode, idx: int):
+    if len(on.outputs) == 0:
+        return
+    name = on.outputs[0]
+    if "value" in on.attrs and on.attrs["value"].t is not None:
+        t = on.attrs["value"].t
+        shape = [int(d) for d in t.dims]
+        if len(shape) == 0:
+            shape = [1]
+        nd = NDArray[float32](shape)
+        src = t.extract_float_array()
+        n = min(len(src), len(nd))
+        for i in range(n):
+            nd[i] = src[i]
+        g.initializers[name] = nd
+        g.get_or_create_tensor(name, nd.shape, t.dtype)
+        return
+    if "value_float" in on.attrs:
+        v = NDArray[float32]([1])
+        v[0] = on.attrs["value_float"].f
+        g.initializers[name] = v
+        g.get_or_create_tensor(name, [1])
+        return
+    if "value_floats" in on.attrs and len(on.attrs["value_floats"].floats) > 0:
+        fs = on.attrs["value_floats"].floats
+        v = NDArray[float32]([len(fs)])
+        for i in range(len(fs)):
+            v[i] = fs[i]
+        g.initializers[name] = v
+        g.get_or_create_tensor(name, [len(fs)])
+        return
+    if "value_int" in on.attrs:
+        v = NDArray[float32]([1])
+        v[0] = float(on.attrs["value_int"].i)
+        g.initializers[name] = v
+        g.get_or_create_tensor(name, [1])
+        return
+    if "value_ints" in on.attrs and len(on.attrs["value_ints"].ints) > 0:
+        ii = on.attrs["value_ints"].ints
+        v = NDArray[float32]([len(ii)])
+        for i in range(len(ii)):
+            v[i] = float(ii[i])
+        g.initializers[name] = v
+        g.get_or_create_tensor(name, [len(ii)])
+        return
+    raise UnsupportedOp(f"Constant node '{on.name}' has no foldable value (sparse/string unsupported)")
+
+# --- shape inference: fills intermediate TensorDesc shapes/element counts ---
+public def infer_shapes(g: ExecutionGraph):
+    for node in g.nodes:
+        if len(node.outputs) == 0:
+            continue
+        in_shapes: list[list[int]] = []
+        for nm in node.inputs:
+            in_shapes.append(list(g.tensors[nm].shape) if nm in g.tensors else [])
+        out_shapes = _infer_node_shapes(node, in_shapes, g)
+        for k in range(min(len(node.outputs), len(out_shapes))):
+            nm = node.outputs[k]
+            if nm in g.tensors:
+                t = g.tensors[nm]
+                if len(t.shape) == 0 and len(out_shapes[k]) > 0:
+                    t.shape = out_shapes[k]
+                    t.element_count = TensorDesc.calc_element_count(t.shape)
+                    t.byte_size = t.element_count * TensorDesc.dtype_size(t.dtype)
+
+def _infer_node_shapes(node: ExecutionNode, ins: list[list[int]], g: ExecutionGraph) -> list[list[int]]:
+    op = node.op_type
+    same1 = [list(ins[0])] if len(ins) > 0 else [[]]
+    # elementwise same-shape family
+    if op in [OperatorType.Relu, OperatorType.Gelu, OperatorType.Silu, OperatorType.Sigmoid,
+              OperatorType.Tanh, OperatorType.LeakyRelu, OperatorType.Elu, OperatorType.Softplus,
+              OperatorType.Sqrt, OperatorType.Exp, OperatorType.Log, OperatorType.Neg,
+              OperatorType.Reciprocal, OperatorType.Abs, OperatorType.Clip, OperatorType.Cast,
+              OperatorType.Dropout, OperatorType.Softmax, OperatorType.RMSNorm, OperatorType.LayerNorm,
+              OperatorType.BatchNormalization, OperatorType.Attention, OperatorType.Identity]:
+        return same1
+    if op in [OperatorType.Add, OperatorType.Sub, OperatorType.Mul, OperatorType.Div,
+              OperatorType.Pow, OperatorType.Min, OperatorType.Max, OperatorType.Mean,
+              OperatorType.Sum, OperatorType.Where]:
+        shapes = [s for s in ins if len(s) > 0]
+        if len(shapes) == 0:
+            return [[]]
+        out = list(shapes[0])
+        for s in shapes[1:]:
+            out = _broadcast(out, s)
+        return [out]
+    if op == OperatorType.FusedLinear or op == OperatorType.MatMul or op == OperatorType.Gemm or op == OperatorType.QuantizedGemm:
+        if len(ins) >= 2 and len(ins[0]) == 2 and len(ins[1]) == 2:
+            m = ins[0][0]
+            k = ins[0][1]
+            if ins[1][1] == k:
+                return [[m, ins[1][0]]]
+            if ins[1][0] == k:
+                return [[m, ins[1][1]]]
+        if len(ins) > 0 and len(ins[0]) > 0:
+            return [[ins[0][0], ins[0][len(ins[0]) - 1]]]
+        return [[]]
+    if op == OperatorType.Transpose and len(ins) > 0 and len(ins[0]) == 2:
+        return [[ins[0][1], ins[0][0]]]
+    if op == OperatorType.Reshape and len(node.inputs) > 1:
+        dims = _init_ints(g, node.inputs[1])
+        if len(dims) > 0:
+            return [dims]
+        return same1
+    if op == OperatorType.Flatten and len(ins) > 0:
+        ax = node.axis if node.axis >= 0 else node.axis + len(ins[0])
+        if ax < 1: ax = 1
+        o1 = 1
+        for i in range(ax):
+            o1 = o1 * ins[0][i]
+        o2 = 1
+        for i in range(ax, len(ins[0])):
+            o2 = o2 * ins[0][i]
+        return [[o1, o2]]
+    if op == OperatorType.Squeeze and len(ins) > 0:
+        axes = node.axes
+        return [[d for i, d in enumerate(ins[0]) if not (len(axes) == 0 and d == 1) and not (len(axes) > 0 and _norm(i, len(ins[0])) in [_norm(a, len(ins[0])) for a in axes])]]
+    if op == OperatorType.Unsqueeze and len(ins) > 0:
+        axes = sorted([_norm(a, len(ins[0]) + len(node.axes)) for a in node.axes]) if len(node.axes) > 0 else []
+        out = list(ins[0])
+        for a in axes:
+            out.insert(a, 1)
+        return [out]
+    if op == OperatorType.Gather and len(ins) >= 2:
+        rank = len(ins[0])
+        ax = node.axis if node.axis >= 0 else node.axis + rank
+        idx_shape = list(ins[1]) if len(ins[1]) > 0 else [_init_len(g, node.inputs[1])]
+        return [ins[0][:ax] + idx_shape + ins[0][ax + 1:]]
+    if op == OperatorType.Slice and len(ins) > 0:
+        return [_slice_shape(ins[0], _init_ints(g, node.inputs[1]) if len(node.inputs) > 1 else [],
+                             _init_ints(g, node.inputs[2]) if len(node.inputs) > 2 else [],
+                             _init_ints(g, node.inputs[3]) if len(node.inputs) > 3 else [],
+                             _init_ints(g, node.inputs[4]) if len(node.inputs) > 4 else [])]
+    if op == OperatorType.Split and len(ins) > 0:
+        rank = len(ins[0])
+        ax = node.axis if node.axis >= 0 else node.axis + rank
+        sizes = _init_ints(g, node.inputs[1]) if len(node.inputs) > 1 else []
+        if len(sizes) != len(node.outputs):
+            each = ins[0][ax] // len(node.outputs) if len(node.outputs) > 0 else ins[0][ax]
+            sizes = [each] * len(node.outputs)
+        outs: list[list[int]] = []
+        for o in range(len(node.outputs)):
+            s = list(ins[0])
+            s[ax] = sizes[o] if o < len(sizes) else s[ax]
+            outs.append(s)
+        return outs
+    if op == OperatorType.Expand and len(node.inputs) > 1:
+        dims = _init_ints(g, node.inputs[1])
+        if len(dims) > 0:
+            return [dims]
+        return same1
+    if op in [OperatorType.ReduceMean, OperatorType.ReduceSum, OperatorType.ReduceMax] and len(ins) > 0:
+        axes = node.axes if len(node.axes) > 0 else list(range(len(ins[0])))
+        if len(node.inputs) > 1:
+            ia = _init_ints(g, node.inputs[1])
+            if len(ia) > 0:
+                axes = ia
+        normed = [_norm(a, len(ins[0])) for a in axes]
+        out: list[int] = []
+        for i, d in enumerate(ins[0]):
+            if i in normed:
+                if node.keepdims != 0:
+                    out.append(1)
+            else:
+                out.append(d)
+        return [out]
+    if op == OperatorType.GlobalAveragePool and len(ins) > 0:
+        return [[ins[0][0], ins[0][1]]] if len(ins[0]) > 1 else same1
+    if (op == OperatorType.MaxPool or op == OperatorType.AveragePool) and len(ins) > 0 and len(ins[0]) == 4:
+        kh = node.kernel_shape[0] if len(node.kernel_shape) > 0 else 2
+        kw = node.kernel_shape[1] if len(node.kernel_shape) > 1 else kh
+        sh = node.strides[0] if len(node.strides) > 0 else kh
+        sw = node.strides[1] if len(node.strides) > 1 else sh
+        pt = node.pads[0] if len(node.pads) > 0 else 0
+        pl = node.pads[1] if len(node.pads) > 1 else 0
+        pb = node.pads[2] if len(node.pads) > 2 else pt
+        pr = node.pads[3] if len(node.pads) > 3 else pl
+        oh = (ins[0][2] + pt + pb - kh) // sh + 1
+        ow = (ins[0][3] + pl + pr - kw) // sw + 1
+        return [[ins[0][0], ins[0][1], oh, ow]]
+    if op == OperatorType.Pad and len(ins) > 0:
+        pads = _init_ints(g, node.inputs[1]) if len(node.inputs) > 1 else []
+        out = list(ins[0])
+        for i in range(min(len(ins[0]), len(pads) // 2)):
+            out[i] = ins[0][i] + pads[i] + pads[i + len(ins[0])]
+        return [out]
+    if op == OperatorType.ArgMax and len(ins) > 0:
+        rank = len(ins[0])
+        axes = node.axes if len(node.axes) > 0 else [node.axis if node.axis != -1 else 0]
+        ax = _norm(axes[0], rank)
+        out: list[int] = []
+        for i, d in enumerate(ins[0]):
+            if i == ax:
+                if node.keepdims != 0:
+                    out.append(1)
+            else:
+                out.append(d)
+        return [out]
+    if op == OperatorType.Shape and len(ins) > 0:
+        return [[len(ins[0])]]
+    if op == OperatorType.Size:
+        return [[1]]
+    if op == OperatorType.LogSoftmax and len(ins) > 0:
+        return [list(ins[0])]
+    if op == OperatorType.Trilu and len(ins) > 0:
+        return [list(ins[0])]
+    if op == OperatorType.TopK and len(ins) > 0:
+        kk = _init_ints(g, node.inputs[1])[0] if len(node.inputs) > 1 and len(_init_ints(g, node.inputs[1])) > 0 else 1
+        rank = len(ins[0])
+        ax = _norm(node.axes[0] if len(node.axes) > 0 else rank - 1, rank)
+        vs = list(ins[0])
+        vs[ax] = kk
+        return [vs, vs]
+    if (op == OperatorType.QuantizeLinear or op == OperatorType.DequantizeLinear) and len(ins) > 0:
+        return [list(ins[0])]
+    if op == OperatorType.QLinearMatMul and len(ins) >= 6:
+        m = ins[0][0] if len(ins[0]) > 1 else 1
+        n = ins[3][1] if len(ins[3]) > 1 else ins[3][len(ins[3]) - 1]
+        return [[m, n]]
+    if op == OperatorType.Concat and len(ins) > 0:
+        rank = max([len(s) for s in ins])
+        ax = _norm(node.axis, rank)
+        out = [0] * rank
+        for s in ins:
+            for i in range(min(len(s), rank)):
+                if i == ax:
+                    out[i] = out[i] + s[i]
+                elif out[i] == 0:
+                    out[i] = s[i]
+        return [out]
+    return [[]]
+
+def _norm(a: int, rank: int) -> int:
+    return a + rank if a < 0 else a
+
+def _broadcast(a: list[int], b: list[int]) -> list[int]:
+    out: list[int] = []
+    i = len(a) - 1
+    j = len(b) - 1
+    while i >= 0 or j >= 0:
+        da = a[i] if i >= 0 else 1
+        db = b[j] if j >= 0 else 1
+        if da == db:
+            out.insert(0, da)
+        elif da == 1:
+            out.insert(0, db)
+        elif db == 1:
+            out.insert(0, da)
+        else:
+            out.insert(0, da)  # incompatible: keep left, runtime validates counts
+        i = i - 1
+        j = j - 1
+    return out
+
+def _slice_shape(shape: list[int], starts: list[int], ends: list[int], axes: list[int], steps: list[int]) -> list[int]:
+    if len(axes) == 0:
+        axes = list(range(min(len(starts), len(shape))))
+    if len(steps) == 0:
+        steps = [1] * len(axes)
+    out = list(shape)
+    for k in range(len(axes)):
+        a = _norm(axes[k], len(shape))
+        s = starts[k] if k < len(starts) else 0
+        e = ends[k] if k < len(ends) else shape[a]
+        if s < 0: s = s + shape[a]
+        if e < 0: e = e + shape[a]
+        if s < 0: s = 0
+        if e > shape[a]: e = shape[a]
+        st = steps[k] if k < len(steps) and steps[k] != 0 else 1
+        out[a] = (e - s + st - 1) // st if e > s else 0
+    return out
+
+def _init_ints(g: ExecutionGraph, name: str) -> list[int]:
+    if name in g.initializers:
+        arr = g.initializers[name]
+        return [int(arr[i]) for i in range(len(arr))]
+    return []
+
+def _init_len(g: ExecutionGraph, name: str) -> int:
+    if name in g.initializers:
+        return len(g.initializers[name])
+    return 1
+
+def topo_sort(nodes: list[ExecutionNode], inputs: list[str], inits: list[str]) -> list[ExecutionNode]:
+    ready: set[str] = set(inputs)
+    for k in inits:
+        ready.add(k)
+    remaining = list(nodes)
+    out: list[ExecutionNode] = []
+    while len(remaining) > 0:
+        progressed = False
+        for i in range(len(remaining)):
+            ok = True
+            for nm in remaining[i].inputs:
+                if nm not in ready:
+                    ok = False
+                    break
+            if ok:
+                out.append(remaining[i])
+                for o in remaining[i].outputs:
+                    ready.add(o)
+                remaining.pop(i)
+                progressed = True
+                break
+        if not progressed:
+            out.extend(remaining)
+            break
+    return out

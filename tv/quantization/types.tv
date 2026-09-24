@@ -1,0 +1,54 @@
+// TokenVector Native Module: Quantization — Types (FP8 bit-accurate)
+// Ported from: Quantization/QuantEnums.cs + Quantization/FP8Types.cs
+
+module tv.quantization.types
+
+public enum QuantPrecision:
+    FP32 = 0
+    FP16 = 1
+    INT8_Symmetric = 2
+    INT8_Asymmetric = 3
+    FP8_E4M3 = 4
+    FP8_E5M2 = 5
+
+public enum CalibrationMethod:
+    MinMax = 0
+    KLDivergence = 1
+    Percentile = 2
+
+public class QuantParams:
+    def __init__(self, scale: float32 = 1.0, zero_point: int = 0, min_v: float32 = -3.4e38, max_v: float32 = 3.4e38):
+        self.scale = scale
+        self.zero_point = zero_point
+        self.min_val = min_v
+        self.max_val = max_v
+
+    public static def identity() -> QuantParams:
+        return QuantParams(1.0, 0, -3.4e38, 3.4e38)
+
+# FP8 E4M3: s1.e4.m3, bias 7 — weights/activations
+public class FP8E4M3:
+    def __init__(self, v: int = 0):
+        self.value: int = v & 0xFF
+
+    public static def from_float(x: float32) -> FP8E4M3:
+        return FP8E4M3(native_fp8_e4m3_encode(x))
+
+    public def to_float(self) -> float32:
+        return native_fp8_e4m3_decode(self.value)
+
+# FP8 E5M2: s1.e5.m2, bias 15 — gradients / attention logits
+public class FP8E5M2:
+    def __init__(self, v: int = 0):
+        self.value: int = v & 0xFF
+
+    public static def from_float(x: float32) -> FP8E5M2:
+        return FP8E5M2(native_fp8_e5m2_encode(x))
+
+    public def to_float(self) -> float32:
+        return native_fp8_e5m2_decode(self.value)
+
+extern def native_fp8_e4m3_encode(x: float32) -> int
+extern def native_fp8_e4m3_decode(v: int) -> float32
+extern def native_fp8_e5m2_encode(x: float32) -> int
+extern def native_fp8_e5m2_decode(v: int) -> float32

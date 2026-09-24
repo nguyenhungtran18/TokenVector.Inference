@@ -1,24 +1,121 @@
 ﻿// TokenVector Standard Library: Inference & Model Serving Module
 // Namespace: tv.inference
+// Pure TokenVector implementation — no C# backend.
+// Covers: Runtime + ONNX + Optimization + Quantization + Server.
 
 module tv.inference
 
 import tv.numerics.tensor
 import tv.numerics.linalg
+import tv.runtime.session
+import tv.runtime.execution_graph
+import tv.runtime.execution_node
+import tv.runtime.kv_cache
+import tv.optimization.passes
+import tv.optimization.kernels
+import tv.quantization.engine
+import tv.quantization.types
+import tv.quantization.matmul
+import tv.server.batcher
+import tv.server.embedded_server
+import tv.text.tokenizer
+import tv.text.sampling
+import tv.text.chat_template
+import tv.text.generate
+import tv.onnx.parser
+import tv.onnx.translator
 
 public class ModelSession:
     def __init__(self, model_path: str):
-        self.handle = tv_inference_create_session(model_path)
+        self.session = InferenceSession.from_onnx_file(model_path)
+        self.batcher: DynamicBatcher = None
+        self.server: EmbeddedServer = None
+
+    public static def from_graph(graph: ExecutionGraph) -> ModelSession:
+        s = ModelSession.__alloc()
+        s.session = InferenceSession(graph, True)
+        s.batcher = None
+        s.server = None
+        return s
 
     def run(self, input_tensor: NDArray[float32]) -> NDArray[float32]:
-        output_tensor = zeros_like(input_tensor)
-        tv_inference_run_ptr(self.handle, input_tensor.data_ptr, input_tensor.length, output_tensor.data_ptr, output_tensor.length)
-        return output_tensor
+        return self.session.run_single(input_tensor)
+
+    def run_named(self, names: list[str], tensors: list[NDArray[float32]], out_names: list[str]) -> dict[str, NDArray[float32]]:
+        inputs: list[NamedTensor] = []
+        for i in range(len(names)):
+            inputs.append(NamedTensor(names[i], tensors[i]))
+        outs: list[NamedTensor] = []
+        for o in out_names:
+            desc = self.session.graph.tensors[o]
+            shape = desc.shape if len(desc.shape) > 0 else [desc.element_count]
+            outs.append(NamedTensor(o, NDArray[float32](shape)))
+        self.session.run(inputs, outs)
+        res: dict[str, NDArray[float32]] = {}
+        for o in outs:
+            res[o.name] = o.data
+        return res
+
+    def serve(self, port: int = 8080, options: ServerOptions = None) -> EmbeddedServer:
+        self.server = EmbeddedServer(self.session, port, options)
+        return self.server
+
+    # Text in -> text out (requires a tokenizer object with encode/decode/vocab_size)
+    def generate(self, tokenizer, prompt: str, max_new_tokens: int = 128, temperature: float32 = 0.0) -> GenResult:
+        cfg = GenConfig()
+        cfg.max_new_tokens = max_new_tokens
+        cfg.params.temperature = temperature
+        return generate_text(self.session, tokenizer, prompt, cfg)
+
+    def chat(self, tokenizer, messages: list[ChatMessage], max_new_tokens: int = 128, temperature: float32 = 0.0) -> GenResult:
+        cfg = GenConfig()
+        cfg.max_new_tokens = max_new_tokens
+        cfg.params.temperature = temperature
+        return chat_generate(self.session, tokenizer, messages, cfg)
+
+    def enable_batching(self, max_batch: int = 32, timeout_us: int = 200, workers: int = 4, max_queue: int = 10000) -> DynamicBatcher:
+        self.batcher = DynamicBatcher(self.session, max_batch, timeout_us, workers, max_queue)
+        return self.batcher
+
+    def make_kv_cache(self, max_seq: int, hidden_dim: int) -> AttentionKvCache:
+        return AttentionKvCache(max_seq, hidden_dim)
+
+    def quantize_int8(self, data: NDArray[float32], scale: float32) -> NDArray[int8]:
+        out = NDArray[int8](data.shape)
+        engine.quantize_int8_symmetric(data, out, scale)
+        return out
+
+    def quantize_int8_per_channel(self, data: NDArray[float32], rows: int, cols: int) -> tuple[NDArray[int8], list[float32]]:
+        params = engine.calibrate_per_channel_minmax(data, rows, cols, True)
+        scales = [params[r].scale for r in range(rows)]
+        out = NDArray[int8]([rows * cols])
+        engine.quantize_int8_per_channel(data, out, rows, cols, scales)
+        return (out, scales)
+
+    def calibrate(self, data: NDArray[float32], method: str = "minmax", symmetric: bool = True) -> QuantParams:
+        if method == "kl":
+            return engine.calibrate_kl(data)
+        if method == "percentile":
+            return engine.calibrate_percentile(data, 99.99, symmetric)
+        if method == "mse":
+            return engine.calibrate_mse(data)
+        return engine.calibrate_minmax(data, symmetric)
 
     def close(self):
-        if self.handle != 0:
-            tv_inference_destroy_session(self.handle)
-            self.handle = 0
+        if self.server is not None:
+            self.server.dispose()
+            self.server = None
+        if self.batcher is not None:
+            self.batcher.dispose()
+            self.batcher = None
+        if self.session is not None:
+            self.session.close()
+            self.session = None
 
 public def load_onnx(model_path: str) -> ModelSession:
+    # High-level API (matches TOKENVECTOR_SYNTAX_SPEC.md)
     return ModelSession(model_path)
+
+public def load_onnx_bytes(buf: bytes) -> ModelSession:
+    model = parser.parse_bytes(buf)
+    return ModelSession.from_graph(translator.translate(model))

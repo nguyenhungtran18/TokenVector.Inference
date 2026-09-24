@@ -1,0 +1,81 @@
+// TokenVector Module: Runtime — Inference Session (Zero-GC hot path)
+
+module tv.runtime.session
+
+import tv.runtime.execution_graph
+import tv.runtime.memory_arena
+import tv.runtime.tensor_desc
+import tv.runtime.execution_node
+import tv.runtime.device
+import tv.optimization.passes
+import tv.numerics.tensor
+import tv.onnx.parser
+import tv.onnx.translator
+
+public class NamedTensor:
+    def __init__(self, name: str, data: NDArray[float32]):
+        self.name = name
+        self.data = data
+
+public class InferenceSession:
+    def __init__(self, graph: ExecutionGraph, apply_optimizations: bool = True, provider: ExecutionProvider = None):
+        self.provider = provider if provider is not None else default_cpu()
+        require(self.provider)
+        self.graph = graph
+        if apply_optimizations:
+            ConstantFoldingPass().run(graph)
+            QdqFoldPass().run(graph)
+            OperatorFusionPass().run(graph)
+            DeadCodeEliminationPass().run(graph)
+        graph.analyze_liveness_and_allocate_offsets()
+        self.arena = ExecutionMemoryArena(graph.total_arena_bytes)
+        graph.initialize_weights(self.arena)
+        self._disposed = False
+
+    public static def from_onnx_file(path: str) -> InferenceSession:
+        model = parser.parse_file(path)
+        graph = translator.translate(model)
+        return InferenceSession(graph, True)
+
+    public static def from_onnx_bytes(buf: bytes) -> InferenceSession:
+        model = parser.parse_bytes(buf)
+        graph = translator.translate(model)
+        return InferenceSession(graph, True)
+
+    # ZERO-ALLOCATION HOT PATH
+    public def run(self, inputs: list[NamedTensor], outputs: list[NamedTensor]):
+        if self._disposed:
+            raise Disposed("InferenceSession")
+        for inp in inputs:
+            if inp.name in self.graph.tensors:
+                desc = self.graph.tensors[inp.name]
+                self.arena.copy_from(desc.offset, inp.data)
+        for node in self.graph.nodes:
+            node.execute(self.arena)
+        for out in outputs:
+            if out.name in self.graph.tensors:
+                desc = self.graph.tensors[out.name]
+                self.arena.copy_to(desc.offset, out.data)
+
+    public def run_single(self, input: NDArray[float32], input_name: str = "", output_name: str = "") -> NDArray[float32]:
+        in_name = input_name if input_name != "" else (self.graph.inputs[0] if len(self.graph.inputs) > 0 else "input")
+        out_name = output_name if output_name != "" else (self.graph.outputs[0] if len(self.graph.outputs) > 0 else "output")
+        if out_name not in self.graph.tensors:
+            raise NotFound(f"Output tensor '{out_name}' not found")
+        out_desc = self.graph.tensors[out_name]
+        shape = out_desc.shape if len(out_desc.shape) > 0 else [out_desc.element_count]
+        output = NDArray[float32](shape)
+        self.run([NamedTensor(in_name, input)], [NamedTensor(out_name, output)])
+        return output
+
+    public def total_bytes(self) -> int:
+        return self.arena.size_in_bytes
+
+    def close(self):
+        if not self._disposed:
+            self.arena.dispose()
+            self._disposed = True
+
+# Back-compat API used by TOKENVECTOR_SYNTAX_SPEC.md
+public def load_onnx(model_path: str) -> InferenceSession:
+    return InferenceSession.from_onnx_file(model_path)

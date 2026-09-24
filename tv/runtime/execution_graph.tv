@@ -1,0 +1,114 @@
+// TokenVector Native Module: Runtime — Execution Graph + Liveness Analysis
+// Ported from: Runtime/ExecutionGraph.cs
+
+module tv.runtime.execution_graph
+
+import tv.runtime.tensor_desc
+import tv.runtime.execution_node
+import tv.runtime.memory_arena
+import tv.numerics.tensor
+
+public class ExecutionGraph:
+    def __init__(self, name: str = "TokenVectorGraph"):
+        self.name = name
+        self.nodes: list[ExecutionNode] = []
+        self.tensors: dict[str, TensorDesc] = {}
+        self.inputs: list[str] = []
+        self.outputs: list[str] = []
+        self.initializers: dict[str, NDArray[float32]] = {}
+        self.total_arena_bytes: int = 0
+
+    public def get_or_create_tensor(self, name: str, shape: list[int], dtype: TensorDataType = TensorDataType.Float) -> TensorDesc:
+        if name in self.tensors:
+            existing = self.tensors[name]
+            if len(shape) > 0 and len(existing.shape) == 0:
+                existing.shape = shape
+                existing.element_count = TensorDesc.calc_element_count(shape)
+                existing.byte_size = existing.element_count * TensorDesc.dtype_size(dtype)
+            return existing
+        desc = TensorDesc(name, shape, dtype)
+        self.tensors[name] = desc
+        return desc
+
+    # Greedy interval allocation: persistent (weights+IO) + scratchpad reuse
+    public def analyze_liveness_and_allocate_offsets(self):
+        for i in range(len(self.nodes)):
+            node = self.nodes[i]
+            node.id = i
+            node.input_descs.clear()
+            for nm in node.inputs:
+                if nm in self.tensors:
+                    t = self.tensors[nm]
+                    node.input_descs.append(t)
+                    if t.lifetime_start == -1:
+                        t.lifetime_start = i
+                    t.lifetime_end = i
+            node.output_descs.clear()
+            for nm in node.outputs:
+                if nm in self.tensors:
+                    t = self.tensors[nm]
+                    node.output_descs.append(t)
+                    if t.lifetime_start == -1:
+                        t.lifetime_start = i
+                    t.lifetime_end = i
+        for nm in self.inputs:
+            if nm in self.tensors:
+                t = self.tensors[nm]
+                t.is_input = True
+                t.lifetime_start = 0
+                t.lifetime_end = len(self.nodes)
+        for nm in self.outputs:
+            if nm in self.tensors:
+                t = self.tensors[nm]
+                t.is_output = True
+                t.lifetime_start = 0
+                t.lifetime_end = len(self.nodes)
+        cur = 0
+        for nm in self.initializers:
+            if nm in self.tensors:
+                t = self.tensors[nm]
+                t.is_initializer = True
+                t.offset = cur
+                cur = cur + ((t.byte_size + 63) & ~63)
+        for nm in self.inputs:
+            if nm in self.tensors:
+                t = self.tensors[nm]
+                if t.offset == -1:
+                    t.offset = cur
+                    cur = cur + ((t.byte_size + 63) & ~63)
+        for nm in self.outputs:
+            if nm in self.tensors:
+                t = self.tensors[nm]
+                if t.offset == -1:
+                    t.offset = cur
+                    cur = cur + ((t.byte_size + 63) & ~63)
+        # scratchpad reuse, sorted by lifetime_start
+        scratch: list[TensorDesc] = []
+        for t in self.tensors.values():
+            if not t.is_initializer and not t.is_input and not t.is_output:
+                scratch.append(t)
+        scratch.sort(key=lambda x: x.lifetime_start)
+        active: list[tuple[int, int, int]] = []  # (offset, size, end)
+        max_scratch = 0
+        for t in scratch:
+            active = [s for s in active if s[2] >= t.lifetime_start]
+            chosen = -1
+            for idx in range(len(active)):
+                if active[idx][1] >= t.byte_size:
+                    chosen = active[idx][0]
+                    active[idx] = (chosen, active[idx][1], t.lifetime_end)
+                    break
+            if chosen == -1:
+                chosen = cur + max_scratch
+                aligned = (t.byte_size + 63) & ~63
+                max_scratch = max_scratch + aligned
+                active.append((chosen, aligned, t.lifetime_end))
+            t.offset = chosen
+        self.total_arena_bytes = cur + max_scratch + 64
+
+    public def initialize_weights(self, arena: ExecutionMemoryArena):
+        for nm in self.initializers:
+            if nm in self.tensors:
+                t = self.tensors[nm]
+                if t.offset >= 0:
+                    arena.copy_from(t.offset, self.initializers[nm])

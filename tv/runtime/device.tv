@@ -1,0 +1,49 @@
+// TokenVector Module: Runtime — Execution provider abstraction (ORT-EP parity)
+// A session binds one provider. CPU is always available; accelerator providers
+// report availability per build and raise a clear error instead of silently
+// falling back, so benchmark comparisons stay honest.
+
+module tv.runtime.device
+
+public enum DeviceKind:
+    CPU = 0
+    CUDA = 1
+    ROCM = 2
+    METAL = 3
+    VULKAN = 4
+    NPU = 5
+
+public interface ExecutionProvider:
+    def name(self) -> str
+    def kind(self) -> DeviceKind
+    def available(self) -> bool
+    def unavailable_reason(self) -> str
+
+public class CpuProvider implements ExecutionProvider:
+    def name(self) -> str: return "TokenVectorCPU"
+    def kind(self) -> DeviceKind: return DeviceKind.CPU
+    def available(self) -> bool: return True
+    def unavailable_reason(self) -> str: return ""
+
+public class AcceleratorStub implements ExecutionProvider:
+    def __init__(self, kind: DeviceKind, reason: str):
+        self._kind = kind
+        self._reason = reason
+
+    def name(self) -> str:
+        if self._kind == DeviceKind.CUDA: return "TokenVectorCUDA"
+        if self._kind == DeviceKind.ROCM: return "TokenVectorROCM"
+        if self._kind == DeviceKind.METAL: return "TokenVectorMetal"
+        if self._kind == DeviceKind.VULKAN: return "TokenVectorVulkan"
+        return "TokenVectorNPU"
+
+    def kind(self) -> DeviceKind: return self._kind
+    def available(self) -> bool: return False
+    def unavailable_reason(self) -> str: return self._reason
+
+public def default_cpu() -> ExecutionProvider:
+    return CpuProvider()
+
+public def require(provider: ExecutionProvider):
+    if not provider.available():
+        raise Unavailable(f"execution provider '{provider.name()}' unavailable: {provider.unavailable_reason()}")

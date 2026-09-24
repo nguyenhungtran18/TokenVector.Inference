@@ -1,0 +1,69 @@
+// TokenVector Module: Text — Autoregressive generation loop (text in -> text out)
+// Wires tokenizer + session forward + sampler into a real decode loop:
+// tokenize → repeated (ids-to-input, forward, last-row logits, sample) → decode.
+// The session graph maps float input vectors to logits; input width comes from
+// the graph itself, output logits are the last `vocab` slice of the output.
+
+module tv.text.generate
+
+import tv.runtime.session
+import tv.text.tokenizer
+import tv.text.sampling
+import tv.text.chat_template
+import tv.numerics.tensor
+
+public class GenConfig:
+    def __init__(self):
+        self.max_new_tokens: int = 128
+        self.eos_token: int = -1
+        self.stop_strings: list[str] = []
+        self.template: str = "chatml"
+        self.params = SampleParams()
+
+public class GenResult:
+    def __init__(self, text: str, prompt_tokens: int, completion_tokens: int):
+        self.text = text
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+
+# tokenizer is BPETokenizer or WordPieceTokenizer (structural: encode/decode)
+public def generate_text(session: InferenceSession, tokenizer, prompt: str, cfg: GenConfig) -> GenResult:
+    ids = tokenizer.encode(prompt)
+    in_dim = session.graph.tensors[session.graph.inputs[0]].element_count
+    out_name = session.graph.outputs[0]
+    vocab = tokenizer.vocab_size()
+    gen: list[int] = []
+    history = list(ids)
+    for _ in range(cfg.max_new_tokens):
+        # feed trailing ids as floats, padded/truncated to model input width
+        inp = NDArray[float32]([in_dim])
+        for i in range(in_dim):
+            inp[i] = 0.0
+        tail = history[len(history) - in_dim:] if len(history) > in_dim else history
+        base = in_dim - len(tail)
+        for i in range(len(tail)):
+            inp[base + i] = float(tail[i])
+        out = session.run_single(inp)
+        # logits = last vocab-sized slice of the output vector
+        ln = min(len(out), vocab)
+        logits = NDArray[float32]([ln])
+        for i in range(ln):
+            logits[i] = out[len(out) - ln + i]
+        nxt = sample_token(logits, cfg.params, history)
+        history.append(nxt)
+        gen.append(nxt)
+        if nxt == cfg.eos_token:
+            break
+        if len(cfg.stop_strings) > 0:
+            text = tokenizer.decode(gen)
+            hit = False
+            for s in cfg.stop_strings:
+                if text.find(s) >= 0:
+                    hit = True
+                    break
+            if hit:
+                break
+    return GenResult(tokenizer.decode(gen), len(ids), len(gen))
+
+public def chat_generate(session: InferenceSession, tokenizer, messages: list[ChatMessage], cfg: GenConfig) -> GenResult:
+    return generate_text(session, tokenizer, apply_template(messages, cfg.template), cfg)

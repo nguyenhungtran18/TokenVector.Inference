@@ -1,0 +1,84 @@
+// TokenVector Module: Quantization — INT8 MatMul kernels
+// Pure .tv dot-product kernels; the tv compiler backend emits packed SIMD
+// for the fixed 32-wide inner blocks with scalar head/tail handling.
+
+module tv.quantization.matmul
+
+import tv.numerics.tensor
+import tv.quantization.types
+
+# Y = (A @ W^T) * (sa*sw) + Bias ; A[M,K] W[N,K] int8 -> Y[M,N] fp32
+public def matmul_int8_symmetric(pa: NDArray[int8], pw: NDArray[int8], pbias: NDArray[float32],
+        py: NDArray[float32], m: int, n: int, k: int, scale_a: float32, scale_w: float32):
+    s = scale_a * scale_w
+    for mm in range(m):
+        for nn in range(n):
+            acc = _dot_int8(pa, mm * k, pw, nn * k, k)
+            bias = pbias[nn] if len(pbias) > 0 else 0.0
+            py[mm * n + nn] = acc * s + bias
+
+# Per-channel variant: weight scale per output channel (row of W).
+# Required for LLM quantization quality (see engine.calibrate_per_channel_minmax).
+public def matmul_int8_per_channel(pa: NDArray[int8], pw: NDArray[int8], pbias: NDArray[float32],
+        py: NDArray[float32], m: int, n: int, k: int, scale_a: float32, scales_w: list[float32]):
+    if len(scales_w) < n:
+        raise Arg("scales_w smaller than N")
+    for mm in range(m):
+        for nn in range(n):
+            acc = _dot_int8(pa, mm * k, pw, nn * k, k)
+            bias = pbias[nn] if len(pbias) > 0 else 0.0
+            py[mm * n + nn] = acc * scale_a * scales_w[nn] + bias
+
+# Y = sum((A-zpA)*(W-zpW)) * sa*sw + Bias
+public def matmul_int8_asymmetric(pa: NDArray[int8], pw: NDArray[int8], pbias: NDArray[float32],
+        py: NDArray[float32], m: int, n: int, k: int,
+        scale_a: float32, zp_a: int, scale_w: float32, zp_w: int):
+    s = scale_a * scale_w
+    for mm in range(m):
+        for nn in range(n):
+            acc = 0
+            for kk in range(k):
+                acc = acc + (int(pa[mm * k + kk]) - zp_a) * (int(pw[nn * k + kk]) - zp_w)
+            bias = pbias[nn] if len(pbias) > 0 else 0.0
+            py[mm * n + nn] = acc * s + bias
+
+# FP8 E4M3 GEMM compute path: Y = (A_fp8 @ W_fp8^T) + Bias.
+# Operands stay packed; decode-on-the-fly keeps memory at 1 byte/element.
+public def matmul_fp8_e4m3(pa: NDArray[int8], pw: NDArray[int8], pbias: NDArray[float32],
+        py: NDArray[float32], m: int, n: int, k: int):
+    for mm in range(m):
+        for nn in range(n):
+            acc = 0.0
+            for kk in range(k):
+                acc = acc + _fp8_decode(int(pa[mm * k + kk])) * _fp8_decode(int(pw[nn * k + kk]))
+            bias = pbias[nn] if len(pbias) > 0 else 0.0
+            py[mm * n + nn] = acc + bias
+
+public def quantize_fp8_e4m3(src: NDArray[float32], dst: NDArray[int8]):
+    if len(dst) < len(src):
+        raise Arg("dst too small")
+    for i in range(len(src)):
+        dst[i] = FP8E4M3.from_float(src[i]).value - 128
+
+public def dequantize_fp8_e4m3(src: NDArray[int8], dst: NDArray[float32]):
+    if len(dst) < len(src):
+        raise Arg("dst too small")
+    for i in range(len(src)):
+        dst[i] = _fp8_decode(int(src[i]))
+
+def _fp8_decode(v: int) -> float32:
+    return FP8E4M3(v + 128).to_float()
+
+# Shared 32-blocked int8 dot product (scalar-correct; backend vectorizes the blocks)
+def _dot_int8(a: NDArray[int8], ao: int, b: NDArray[int8], bo: int, k: int) -> int:
+    acc = 0
+    kk = 0
+    limit = k - 31
+    while kk < limit:
+        for l in range(32):
+            acc = acc + int(a[ao + kk + l]) * int(b[bo + kk + l])
+        kk = kk + 32
+    while kk < k:
+        acc = acc + int(a[ao + kk]) * int(b[bo + kk])
+        kk = kk + 1
+    return acc

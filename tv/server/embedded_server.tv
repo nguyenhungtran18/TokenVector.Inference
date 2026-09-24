@@ -1,0 +1,313 @@
+// TokenVector Module: Server — Embedded micro-server, OpenAI-compatible
+// Endpoints: /health, /metrics (Prometheus), /predict (legacy),
+//   /v1/models, /v1/embeddings, /v1/completions + /v1/chat/completions (JSON + SSE).
+// Guards: optional API key, per-IP token-bucket rate limit, max body size.
+
+module tv.server.embedded_server
+
+import tv.runtime.session
+import tv.server.batcher
+import tv.text.tokenizer
+import tv.text.sampling
+import tv.text.chat_template
+import tv.text.generate
+import tv.numerics.tensor
+
+public class ServerOptions:
+    def __init__(self):
+        self.api_key: str = ""          # empty = auth disabled
+        self.rate_limit_rps: int = 200  # 0 = disabled
+        self.max_body_bytes: int = 1048576
+        self.model_id: str = "tokenvector"
+        # text mode (chat/completions from raw text): empty kind = numeric-only
+        self.tokenizer_kind: str = ""   # "bpe" | "wordpiece" | ""
+        self.tokenizer_vocab: str = ""
+        self.tokenizer_merges: str = ""
+        self.chat_format: str = "chatml"
+        self.eos_token: int = -1
+        self.max_new_tokens: int = 128
+
+public class TokenBucket:
+    def __init__(self, rps: int):
+        self.rps = max(1, rps)
+        self.tokens: float = float(rps)
+        self.last_us: int = now_us()
+
+    def allow(self) -> bool:
+        t = now_us()
+        dt = float(t - self.last_us) / 1e6
+        self.last_us = t
+        self.tokens = min(float(self.rps), self.tokens + dt * self.rps)
+        if self.tokens >= 1.0:
+            self.tokens = self.tokens - 1.0
+            return True
+        return False
+
+public class EmbeddedServer:
+    def __init__(self, session: InferenceSession, port: int = 8080, options: ServerOptions = None):
+        self.session = session
+        self.batcher = DynamicBatcher(session)
+        self.port = port
+        self.opts = options if options is not None else ServerOptions()
+        self.total_requests: int = 0
+        self.total_lat_us: int = 0
+        self.errors_total: int = 0
+        self.dropped_total: int = 0
+        self.buckets: dict[str, TokenBucket] = {}
+        self._tok = None
+        self._closed = False
+        http_listen(port, self._on_request)
+
+    # Lazily built tokenizer; None = numeric-only mode
+    def _tokenizer(self):
+        if self._tok is not None:
+            return self._tok
+        if self.opts.tokenizer_kind == "bpe" and self.opts.tokenizer_vocab != "":
+            self._tok = BPETokenizer(self.opts.tokenizer_vocab, self.opts.tokenizer_merges)
+        elif self.opts.tokenizer_kind == "wordpiece" and self.opts.tokenizer_vocab != "":
+            self._tok = WordPieceTokenizer(self.opts.tokenizer_vocab)
+        return self._tok
+
+    def _check_auth(self, req: HttpRequest) -> bool:
+        if self.opts.api_key == "":
+            return True
+        if req.header("x-api-key") == self.opts.api_key:
+            return True
+        auth = req.header("authorization")
+        return auth == "Bearer " + self.opts.api_key
+
+    def _check_rate(self, req: HttpRequest) -> bool:
+        if self.opts.rate_limit_rps <= 0:
+            return True
+        ip = req.remote_ip()
+        if ip not in self.buckets:
+            self.buckets[ip] = TokenBucket(self.opts.rate_limit_rps)
+        return self.buckets[ip].allow()
+
+    def _on_request(self, req: HttpRequest) -> HttpResponse:
+        t0 = now_us()
+        try:
+            if req.method == "GET" and req.path == "/":
+                return HttpResponse(200, _web_ui(), "text/html")
+            if req.method == "GET" and req.path == "/health":
+                return HttpResponse(200, "{\"status\":\"healthy\",\"engine\":\"TokenVector.Inference\"}", "application/json")
+            if req.method == "GET" and req.path == "/metrics":
+                return HttpResponse(200, self._prometheus(), "text/plain")
+            if not self._check_auth(req):
+                return HttpResponse(401, "{\"error\":\"unauthorized\"}", "application/json")
+            if not self._check_rate(req):
+                self.dropped_total = self.dropped_total + 1
+                return HttpResponse(429, "{\"error\":\"rate limit exceeded\"}", "application/json")
+            if len(req.body) > self.opts.max_body_bytes:
+                return HttpResponse(413, "{\"error\":\"payload too large\"}", "application/json")
+            if req.method == "GET" and req.path == "/v1/models":
+                body = "{\"object\":\"list\",\"data\":[{\"id\":\"" + self.opts.model_id + "\",\"object\":\"model\"}]}"
+                return HttpResponse(200, body, "application/json")
+            if req.method == "POST" and req.path == "/predict":
+                return self._predict(req)
+            if req.method == "POST" and req.path == "/v1/embeddings":
+                return self._embeddings(req)
+            if req.method == "POST" and (req.path == "/v1/completions" or req.path == "/v1/chat/completions"):
+                return self._completions(req)
+            return HttpResponse(404, "{\"error\":\"not found\"}", "application/json")
+        except ServerBusy as b:
+            self.dropped_total = self.dropped_total + 1
+            return HttpResponse(429, "{\"error\":\"" + b.message + "\"}", "application/json")
+        except Exception as e:
+            self.errors_total = self.errors_total + 1
+            return HttpResponse(500, "{\"error\":\"" + str(e) + "\"}", "application/json")
+        finally:
+            self.total_requests = self.total_requests + 1
+            self.total_lat_us = self.total_lat_us + (now_us() - t0)
+
+    def _predict(self, req: HttpRequest) -> HttpResponse:
+        arr = json_parse_float_array(req.body)
+        if len(arr) == 0:
+            return HttpResponse(400, "{\"error\":\"empty input\"}", "application/json")
+        out = self._infer(arr)
+        return HttpResponse(200, json_stringify_float_array(out), "application/json")
+
+    def _embeddings(self, req: HttpRequest) -> HttpResponse:
+        inp = json_field(req.body, "input")
+        arr = json_to_float_array(inp)
+        if len(arr) == 0:
+            return HttpResponse(400, "{\"error\":\"input must be a numeric array\"}", "application/json")
+        out = self._infer(arr)
+        body = "{\"object\":\"list\",\"model\":\"" + self.opts.model_id + "\",\"data\":[{\"object\":\"embedding\",\"index\":0,\"embedding\":" + json_stringify_float_array(out) + "}]}"
+        return HttpResponse(200, body, "application/json")
+
+    def _completions(self, req: HttpRequest) -> HttpResponse:
+        # text mode first: raw prompt/messages + configured tokenizer = real generation
+        text_in = self._completion_text(req.body, req.path)
+        if text_in is not None and self._tokenizer() is not None:
+            return self._generate(req, text_in)
+        arr = self._completion_input(req.body)
+        if len(arr) == 0:
+            return HttpResponse(400, "{\"error\":\"no text prompt (tokenizer not configured?) and no numeric input found\"}", "application/json")
+        out = self._infer(arr)
+        if json_bool(req.body, "stream", False):
+            return self._stream_chunks(out)
+        if req.path == "/v1/chat/completions":
+            body = "{\"id\":\"tv-" + str(self.total_requests) + "\",\"object\":\"chat.completion\",\"model\":\"" + self.opts.model_id + "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":" + json_quote(json_stringify_float_array(out)) + "},\"finish_reason\":\"stop\"}]}"
+        else:
+            body = "{\"id\":\"tv-" + str(self.total_requests) + "\",\"object\":\"text_completion\",\"model\":\"" + self.opts.model_id + "\",\"choices\":[{\"index\":0,\"text\":" + json_quote(json_stringify_float_array(out)) + ",\"finish_reason\":\"stop\"}]}"
+        return HttpResponse(200, body, "application/json")
+
+    # raw text prompt if present (string prompt, or messages for chat); None = numeric path
+    def _completion_text(self, body: str, path: str) -> str:
+        if path == "/v1/chat/completions":
+            flat = json_chat_messages(body)
+            if len(flat) >= 2:
+                msgs: list[ChatMessage] = []
+                i = 0
+                while i + 1 < len(flat):
+                    msgs.append(ChatMessage(flat[i], flat[i + 1]))
+                    i = i + 2
+                return apply_template(msgs, self.opts.chat_format)
+            return None
+        s = json_string_field(body, "prompt", "")
+        if s != "":
+            return s
+        return None
+
+    def _gen_config(self, body: str) -> GenConfig:
+        cfg = GenConfig()
+        cfg.max_new_tokens = json_int_field(body, "max_tokens", self.opts.max_new_tokens)
+        if cfg.max_new_tokens < 1: cfg.max_new_tokens = 1
+        cfg.eos_token = self.opts.eos_token
+        cfg.template = self.opts.chat_format
+        stops = json_str_list_field(body, "stop")
+        if len(stops) > 0:
+            cfg.stop_strings = stops
+        cfg.params.temperature = json_float_field(body, "temperature", 1.0)
+        cfg.params.top_k = json_int_field(body, "top_k", 0)
+        cfg.params.top_p = json_float_field(body, "top_p", 1.0)
+        cfg.params.seed = json_int_field(body, "seed", 42)
+        return cfg
+
+    def _generate(self, req: HttpRequest, prompt_text: str) -> HttpResponse:
+        cfg = self._gen_config(req.body)
+        res = generate_text(self.session, self._tokenizer(), prompt_text, cfg)
+        usage = "\"usage\":{\"prompt_tokens\":" + str(res.prompt_tokens) + ",\"completion_tokens\":" + str(res.completion_tokens) + ",\"total_tokens\":" + str(res.prompt_tokens + res.completion_tokens) + "}"
+        if json_bool(req.body, "stream", False):
+            return self._stream_text(res.text, usage)
+        content = json_quote(res.text)
+        if req.path == "/v1/chat/completions":
+            body = "{\"id\":\"tv-" + str(self.total_requests) + "\",\"object\":\"chat.completion\",\"model\":\"" + self.opts.model_id + "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":" + content + "},\"finish_reason\":\"stop\"}]," + usage + "}"
+        else:
+            body = "{\"id\":\"tv-" + str(self.total_requests) + "\",\"object\":\"text_completion\",\"model\":\"" + self.opts.model_id + "\",\"choices\":[{\"index\":0,\"text\":" + content + ",\"finish_reason\":\"stop\"}]," + usage + "}"
+        return HttpResponse(200, body, "application/json")
+
+    # SSE over decoded text slices (token-ish chunks) + [DONE]
+    def _stream_text(self, text: str, usage: str) -> HttpResponse:
+        chunks: list[str] = []
+        step = 16
+        i = 0
+        while i < len(text):
+            piece = text[i:min(len(text), i + step)]
+            payload = "{\"id\":\"tv-" + str(self.total_requests) + "\",\"object\":\"chat.completion.chunk\",\"model\":\"" + self.opts.model_id + "\",\"choices\":[{\"index\":0,\"delta\":{\"content\":" + json_quote(piece) + "},\"finish_reason\":null}]}"
+            chunks.append("data: " + payload + "\n\n")
+            i = i + step
+        chunks.append("data: [DONE]\n\n")
+        return HttpResponse(200, "".join(chunks), "text/event-stream")
+
+    def _completion_input(self, body: str) -> list[float32]:
+        for field in ["input", "prompt"]:
+            v = json_field(body, field)
+            arr = json_to_float_array(v)
+            if len(arr) > 0:
+                return arr
+        msgs = json_field(body, "messages")
+        return json_messages_to_float_array(msgs)
+
+    def _infer(self, arr: list[float32]) -> NDArray[float32]:
+        inp = NDArray[float32]([1, len(arr)])
+        for i in range(len(arr)):
+            inp[i] = arr[i]
+        return self.batcher.enqueue(inp)
+
+    # SSE: output streamed back in slices so long vectors don't block the socket
+    def _stream_chunks(self, out: NDArray[float32]) -> HttpResponse:
+        chunks: list[str] = []
+        step = 64
+        i = 0
+        while i < len(out):
+            j = min(len(out), i + step)
+            payload = "{\"id\":\"tv-" + str(self.total_requests) + "\",\"object\":\"chat.completion.chunk\",\"model\":\"" + self.opts.model_id + "\",\"choices\":[{\"index\":0,\"delta\":{\"content\":" + json_quote(_slice_to_json(out, i, j)) + "},\"finish_reason\":null}]}"
+            chunks.append("data: " + payload + "\n\n")
+            i = j
+        chunks.append("data: [DONE]\n\n")
+        return HttpResponse(200, "".join(chunks), "text/event-stream")
+
+    def _prometheus(self) -> str:
+        avg = float(self.total_lat_us) / self.total_requests if self.total_requests > 0 else 0.0
+        return "tokenvector_requests_total " + str(self.total_requests) + "\n" \
+            + "tokenvector_latency_us_avg " + str(avg) + "\n" \
+            + "tokenvector_errors_total " + str(self.errors_total) + "\n" \
+            + "tokenvector_dropped_total " + str(self.dropped_total + self.batcher.dropped_total) + "\n" \
+            + "tokenvector_queue_depth " + str(self.batcher.queue_depth()) + "\n"
+
+    public def avg_latency_us(self) -> float:
+        if self.total_requests == 0:
+            return 0.0
+        return float(self.total_lat_us) / self.total_requests
+
+    def dispose(self):
+        if not self._closed:
+            self.batcher.dispose()
+            http_close(self.port)
+            self._closed = True
+
+# Minimal built-in chat web UI (no build step): posts to /v1/chat/completions.
+def _web_ui() -> str:
+    return "<!DOCTYPE html><html><head><meta charset='utf-8'><title>TokenVector</title>" \
+        + "<style>body{font-family:sans-serif;max-width:720px;margin:2em auto}#log{border:1px solid #ccc;height:320px;overflow:auto;padding:8px;white-space:pre-wrap}</style>" \
+        + "</head><body><h3>TokenVector.Inference</h3><div id='log'></div>" \
+        + "<input id='q' style='width:80%' placeholder='message'><button onclick='send()'>Send</button>" \
+        + "<script>async function send(){const q=document.getElementById('q').value;" \
+        + "const r=await fetch('/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'}," \
+        + "body:JSON.stringify({messages:[{role:'user',content:q}]})});" \
+        + "document.getElementById('log').textContent+=q+'\\n'+await r.text()+'\\n';}</script>" \
+        + "</body></html>"
+
+def _slice_to_json(out: NDArray[float32], lo: int, hi: int) -> str:
+    parts: list[str] = []
+    for i in range(lo, hi):
+        parts.append(str(out[i]))
+    return "[" + ",".join(parts) + "]"
+
+public class HttpRequest:
+    def __init__(self, method: str, path: str, body: str):
+        self.method = method
+        self.path = path
+        self.body = body
+
+    def header(self, name: str) -> str:
+        return http_req_header(self, name)
+
+    def remote_ip(self) -> str:
+        return http_req_ip(self)
+
+public class HttpResponse:
+    def __init__(self, status: int, body: str, content_type: str = "application/json"):
+        self.status = status
+        self.body = body
+        self.content_type = content_type
+
+extern def http_listen(port: int, handler: func(HttpRequest) -> HttpResponse)
+extern def http_close(port: int)
+extern def http_req_header(req: HttpRequest, name: str) -> str
+extern def http_req_ip(req: HttpRequest) -> str
+extern def json_parse_float_array(s: str) -> list[float32]
+extern def json_stringify_float_array(a: NDArray[float32]) -> str
+extern def json_field(body: str, name: str) -> str
+extern def json_to_float_array(v: str) -> list[float32]
+extern def json_messages_to_float_array(v: str) -> list[float32]
+extern def json_bool(body: str, name: str, default: bool) -> bool
+extern def json_quote(s: str) -> str
+extern def json_string_field(body: str, name: str, default: str) -> str
+extern def json_int_field(body: str, name: str, default: int) -> int
+extern def json_float_field(body: str, name: str, default: float) -> float
+extern def json_str_list_field(body: str, name: str) -> list[str]
+extern def json_chat_messages(body: str) -> list[str]
+extern def now_us() -> int

@@ -1,0 +1,600 @@
+// TokenVector Test Suite — ported from tests/*.cs (xUnit -> tv test runner)
+// Run: tv test tv/tests/
+
+module tv.tests.inference_tests
+
+import tv.inference
+import tv.runtime.session
+import tv.runtime.execution_graph
+import tv.runtime.execution_node
+import tv.optimization.passes
+import tv.optimization.kernels
+import tv.quantization.engine
+import tv.quantization.types
+import tv.onnx.parser
+import tv.onnx.translator
+import tv.runtime.kv_cache
+import tv.runtime.paged_kv
+import tv.runtime.device
+import tv.runtime.tensor_desc
+import tv.text.sampling
+import tv.text.chat_template
+import tv.text.generate
+import tv.quantization.int4
+import tv.quantization.matmul
+import tv.numerics.tensor
+
+public def test_zero_gc_hot_path():
+    # mirrors ZeroGCHotPathTests.cs: 5k runs must allocate 0 bytes
+    s = _graph_64()
+    x = NDArray[float32]([1, 64]); fill_const(x, 1.0)
+    for i in range(500): s.run_single(x)
+    gc_collect(); b0 = gc_allocated_bytes()
+    for i in range(5000): s.run_single(x)
+    assert gc_allocated_bytes() - b0 == 0, "hot path must be Zero-GC"
+    s.close()
+
+public def test_graph_optimization():
+    # mirrors GraphOptimizationTests.cs: MatMul+Add+GELU -> single FusedLinear
+    g = ExecutionGraph("opt")
+    g.inputs.append("X"); g.outputs.append("Z")
+    w = NDArray[float32]([32, 16]); b = NDArray[float32]([32])
+    g.initializers["W"] = w; g.initializers["B"] = b
+    g.get_or_create_tensor("X", [1, 16]); g.get_or_create_tensor("W", [32, 16])
+    g.get_or_create_tensor("B", [32]); g.get_or_create_tensor("T", [1, 32])
+    g.get_or_create_tensor("Z", [1, 32])
+    n1 = ExecutionNode("mm", OperatorType.MatMul); n1.inputs.extend(["X", "W"]); n1.outputs.append("T")
+    n2 = ExecutionNode("add", OperatorType.Add); n2.inputs.extend(["T", "B"]); n2.outputs.append("T2")
+    g.get_or_create_tensor("T2", [1, 32])
+    n3 = ExecutionNode("gelu", OperatorType.Gelu); n3.inputs.append("T2"); n3.outputs.append("Z")
+    g.nodes.extend([n1, n2, n3])
+    assert OperatorFusionPass().run(g) == True
+    assert len(g.nodes) == 1 and g.nodes[0].op_type == OperatorType.FusedLinear
+    assert g.nodes[0].activation == ActivationFunction.GELU
+
+public def test_quantization_roundtrip():
+    x = NDArray[float32]([128]); fill_rand(x, 99)
+    p = engine.calibrate_minmax(x, True)
+    q = NDArray[int8]([128]); engine.quantize_int8_symmetric(x, q, p.scale)
+    y = NDArray[float32]([128]); engine.dequantize_int8_symmetric(q, y, p.scale)
+    err = 0.0
+    for i in range(128): err = max(err, abs(x[i] - y[i]))
+    assert err < p.scale * 2.0, f"quant error {err} too large"
+    f = FP8E4M3.from_float(1.5)
+    assert abs(f.to_float() - 1.5) < 0.25
+
+public def test_per_channel_quant_roundtrip():
+    # 4x8 weight matrix: per-channel scales must beat/collapse-error vs outlier rows
+    w = NDArray[float32]([32]); fill_rand(w, 7)
+    for c in range(8):
+        w[c] = w[c] * 50.0  # row 0 carries outliers
+    params = engine.calibrate_per_channel_minmax(w, 4, 8, True)
+    assert len(params) == 4
+    assert params[0].scale > params[1].scale
+    scales = [params[r].scale for r in range(4)]
+    q = NDArray[int8]([32]); engine.quantize_int8_per_channel(w, q, 4, 8, scales)
+    y = NDArray[float32]([32]); engine.dequantize_int8_per_channel(q, y, 4, 8, scales)
+    err = 0.0
+    for i in range(32): err = max(err, abs(w[i] - y[i]))
+    assert err < max(scales) * 2.0, f"per-channel error {err} too large"
+
+public def test_dynamic_quant_rowwise():
+    x = NDArray[float32]([2, 8]); fill_rand(x, 3)
+    q = NDArray[int8]([16])
+    s = NDArray[float32]([2])
+    engine.quantize_dynamic_int8_rowwise(x, q, 2, 8, s)
+    assert s[0] > 0.0 and s[1] > 0.0
+    y = NDArray[float32]([16]); engine.dequantize_int8_per_channel(q, y, 2, 8, [s[0], s[1]])
+    err = 0.0
+    for i in range(16): err = max(err, abs(x[i] - y[i]))
+    assert err < max(s[0], s[1]) * 2.0
+
+public def test_calibration_variants_monotone():
+    # percentile/MSE/KL thresholds must lie within (0, absmax]
+    x = NDArray[float32]([512]); fill_rand(x, 11)
+    am = 0.0
+    for i in range(512):
+        if abs(x[i]) > am: am = abs(x[i])
+    for p in [engine.calibrate_percentile(x, 99.0, True), engine.calibrate_mse(x, 20), engine.calibrate_kl(x, 256, 32)]:
+        assert p.scale > 0.0 and p.max_val <= am + 1e-6
+
+public def test_attention_causal_and_mask():
+    # 3-token single-head attention: causal qi must ignore future keys;
+    # outputs must form a valid distribution row (V = one-hot => Y == weights)
+    g = _attention_graph(causal=True, heads=1)
+    s = InferenceSession(g, False)
+    q = NDArray[float32]([3, 4]); fill_const(q, 1.0)
+    k = NDArray[float32]([3, 4]); fill_const(k, 1.0)
+    v = NDArray[float32]([3, 4])
+    for i in range(3):
+        for d in range(4):
+            v[i * 4 + d] = 1.0 if d == i else 0.0
+    y = s.run_named(["Q", "K", "V"], [q, k, v], ["Y"])["Y"]
+    # row 0 (only key 0 visible) must equal V[0]; row sums must be 1
+    assert abs(y[0] - 1.0) < 1e-4 and abs(y[1]) < 1e-4
+    for r in range(3):
+        tot = y[r * 4] + y[r * 4 + 1] + y[r * 4 + 2] + y[r * 4 + 3]
+        assert abs(tot - 1.0) < 1e-4, f"row {r} not normalized: {tot}"
+    s.close()
+
+public def test_attention_gqa_grouping():
+    # 4 q-heads over 2 kv-heads: each group shares K/V, outputs finite
+    g = _attention_graph(causal=False, heads=4, kv_heads=2)
+    s = InferenceSession(g, False)
+    q = NDArray[float32]([2, 8]); fill_rand(q, 5)
+    k = NDArray[float32]([2, 8]); fill_rand(k, 6)
+    v = NDArray[float32]([2, 8]); fill_rand(v, 8)
+    y = s.run_named(["Q", "K", "V"], [q, k, v], ["Y"])["Y"]
+    assert len(y) == 16
+    for i in range(16):
+        assert y[i] == y[i] and abs(y[i]) < 1e6  # finite, no NaN
+    s.close()
+
+public def test_kv_cache_append_window():
+    c = AttentionKvCache(4, 2)
+    r = NDArray[float32]([2]); fill_const(r, 0.5)
+    c.append(r, r)
+    c.append(r, r)
+    assert c.length == 2 and len(c.get_k()) == 4
+    c.reset()
+    assert c.length == 0
+
+def _attention_graph(causal: bool, heads: int, kv_heads: int = 0) -> ExecutionGraph:
+    g = ExecutionGraph("attn")
+    g.inputs.extend(["Q", "K", "V"])
+    g.outputs.append("Y")
+    h = 8 if heads > 1 else 4
+    g.get_or_create_tensor("Q", [3 if heads == 1 else 2, h])
+    g.get_or_create_tensor("K", [3 if heads == 1 else 2, h])
+    g.get_or_create_tensor("V", [3 if heads == 1 else 2, h])
+    g.get_or_create_tensor("Y", [3 if heads == 1 else 2, h])
+    n = ExecutionNode("attn", OperatorType.Attention)
+    n.inputs.extend(["Q", "K", "V"])
+    n.outputs.append("Y")
+    n.causal = causal
+    n.num_heads = heads
+    n.num_kv_heads = kv_heads
+    g.nodes.append(n)
+    return g
+
+public def test_protobuf_and_translate():
+    # mirrors FastProtobufReaderTests + ExecutionModelTests (synthetic graph bytes)
+    g = ExecutionGraph("e2e")
+    g.inputs.append("X"); g.outputs.append("Y")
+    g.initializers["W"] = NDArray[float32]([8, 4])
+    g.get_or_create_tensor("X", [1, 4]); g.get_or_create_tensor("W", [8, 4])
+    g.get_or_create_tensor("Y", [1, 8])
+    n = ExecutionNode("mm", OperatorType.FusedLinear)
+    n.inputs.extend(["X", "W"]); n.outputs.append("Y")
+    g.nodes.append(n)
+    s = InferenceSession(g, True)
+    x = NDArray[float32]([1, 4]); fill_const(x, 0.5)
+    y = s.run_single(x)
+    assert len(y) == 8
+    s.close()
+
+public def test_unsupported_op_raises():
+    raised = False
+    try:
+        map_op("Einsum")
+    except UnsupportedOp:
+        raised = True
+    assert raised, "unknown ONNX op must raise UnsupportedOp, never silent Identity"
+    assert map_op("Identity") == OperatorType.Identity
+    assert map_op("Gather") == OperatorType.Gather
+
+def _run(g: ExecutionGraph, names: list[str], arrs: list[NDArray[float32]], out_name: str) -> NDArray[float32]:
+    s = InferenceSession(g, False)
+    ins: list[NamedTensor] = []
+    for i in range(len(names)):
+        ins.append(NamedTensor(names[i], arrs[i]))
+    desc = g.tensors[out_name]
+    out = NDArray[float32](desc.shape)
+    s.run(ins, [NamedTensor(out_name, out)])
+    s.close()
+    return out
+
+def _const_graph(op: OperatorType, in_shapes: list[list[int]], out_shape: list[int], extra_inputs: list[str] = []) -> ExecutionGraph:
+    g = ExecutionGraph("t")
+    names = ["I" + str(i) for i in range(len(in_shapes))]
+    for i in range(len(names)):
+        g.inputs.append(names[i])
+        g.get_or_create_tensor(names[i], in_shapes[i])
+    for nm in extra_inputs:
+        g.get_or_create_tensor(nm, [])
+    g.outputs.append("Y")
+    g.get_or_create_tensor("Y", out_shape)
+    n = ExecutionNode("n", op)
+    for nm in names:
+        n.inputs.append(nm)
+    for nm in extra_inputs:
+        n.inputs.append(nm)
+    n.outputs.append("Y")
+    g.nodes.append(n)
+    return g
+
+def _init_vec(g: ExecutionGraph, name: str, vals: list[float32]):
+    v = NDArray[float32]([len(vals)])
+    for i in range(len(vals)):
+        v[i] = vals[i]
+    g.initializers[name] = v
+    g.get_or_create_tensor(name, [len(vals)])
+
+public def test_gather_slice_split():
+    # Gather axis 0
+    g = _const_graph(OperatorType.Gather, [[4, 2], [2]], [2, 2])
+    d = NDArray[float32]([8])
+    for i in range(8):
+        d[i] = float(i)
+    idx = NDArray[float32]([2])
+    idx[0] = 3.0
+    idx[1] = 1.0
+    y = _run(g, ["I0", "I1"], [d, idx], "Y")
+    assert y[0] == 6.0 and y[1] == 7.0 and y[2] == 2.0 and y[3] == 3.0
+    # Slice [4,4] -> rows 1..3 -> [2,4]
+    g2 = _const_graph(OperatorType.Slice, [[4, 4]], [2, 4], ["S", "E"])
+    _init_vec(g2, "S", [1.0])
+    _init_vec(g2, "E", [3.0])
+    dd = NDArray[float32]([16])
+    for i in range(16):
+        dd[i] = float(i)
+    y2 = _run(g2, ["I0"], [dd], "Y")
+    assert y2[0] == 4.0 and y2[4] == 8.0
+    # Split [4,2] axis 0 even -> caller checks first half via dedicated graph
+    g3 = ExecutionGraph("sp")
+    g3.inputs.append("X")
+    g3.outputs.extend(["A", "B"])
+    g3.get_or_create_tensor("X", [4, 2])
+    g3.get_or_create_tensor("A", [2, 2])
+    g3.get_or_create_tensor("B", [2, 2])
+    n = ExecutionNode("sp", OperatorType.Split)
+    n.inputs.append("X")
+    n.outputs.extend(["A", "B"])
+    n.axis = 0
+    g3.nodes.append(n)
+    xx = NDArray[float32]([8])
+    for i in range(8):
+        xx[i] = float(i)
+    s = InferenceSession(g3, False)
+    a = NDArray[float32]([2, 2])
+    b = NDArray[float32]([2, 2])
+    s.run([NamedTensor("X", xx)], [NamedTensor("A", a), NamedTensor("B", b)])
+    s.close()
+    assert a[0] == 0.0 and a[3] == 3.0 and b[0] == 4.0 and b[3] == 7.0
+
+public def test_shape_copy_ops():
+    # Squeeze/Unsqueeze/Expand/Cast/Flatten preserve data; Shape/Size report metadata
+    x = NDArray[float32]([2, 2])
+    for i in range(4):
+        x[i] = float(i + 1)
+    for op in [OperatorType.Squeeze, OperatorType.Unsqueeze, OperatorType.Cast, OperatorType.Flatten, OperatorType.Dropout]:
+        g = _const_graph(op, [[2, 2]], [2, 2])
+        y = _run(g, ["I0"], [x], "Y")
+        assert y[0] == 1.0 and y[3] == 4.0
+    g = _const_graph(OperatorType.Expand, [[2]], [6])
+    e = _run(g, ["I0"], [NDArray[float32]([2])], "Y")
+    assert len(e) == 6
+    g = _const_graph(OperatorType.Shape, [[2, 3]], [2])
+    y = _run(g, ["I0"], [NDArray[float32]([2, 3])], "Y")
+    assert y[0] == 2.0 and y[1] == 3.0
+    g = _const_graph(OperatorType.Size, [[2, 3]], [1])
+    y = _run(g, ["I0"], [NDArray[float32]([2, 3])], "Y")
+    assert y[0] == 6.0
+
+public def test_reduce_pool_clip():
+    d = NDArray[float32]([2, 4])
+    for i in range(8):
+        d[i] = float(i)
+    g = _const_graph(OperatorType.ReduceMean, [[2, 4]], [2])
+    g.nodes[0].axes = [1]
+    g.nodes[0].keepdims = 0
+    y = _run(g, ["I0"], [d], "Y")
+    assert abs(y[0] - 1.5) < 1e-5 and abs(y[1] - 5.5) < 1e-5
+    g = _const_graph(OperatorType.ReduceMax, [[2, 4]], [2, 1])
+    g.nodes[0].axes = [1]
+    g.nodes[0].keepdims = 1
+    y = _run(g, ["I0"], [d], "Y")
+    assert y[0] == 3.0 and y[1] == 7.0
+    # MaxPool [1,1,4,4] k2 s2 -> [1,1,2,2]
+    g = _const_graph(OperatorType.MaxPool, [[1, 1, 4, 4]], [1, 1, 2, 2])
+    g.nodes[0].kernel_shape = [2, 2]
+    g.nodes[0].strides = [2, 2]
+    p = NDArray[float32]([16])
+    for i in range(16):
+        p[i] = float(i)
+    y = _run(g, ["I0"], [p], "Y")
+    assert y[0] == 5.0 and y[3] == 15.0
+    # Clip via min/max inputs
+    g = _const_graph(OperatorType.Clip, [[3]], [3], ["LO", "HI"])
+    _init_vec(g, "LO", [1.0])
+    _init_vec(g, "HI", [2.0])
+    c = NDArray[float32]([3])
+    c[0] = 0.0
+    c[1] = 1.5
+    c[2] = 9.0
+    y = _run(g, ["I0"], [c], "Y")
+    assert y[0] == 1.0 and y[1] == 1.5 and y[2] == 2.0
+
+public def test_gemm_where_argmax_concat():
+    # Gemm Y = 2*A*B + 1*C
+    g = ExecutionGraph("gemm")
+    for nm in ["A", "B", "C"]:
+        g.inputs.append(nm)
+    g.outputs.append("Y")
+    g.get_or_create_tensor("A", [2, 2])
+    g.get_or_create_tensor("B", [2, 2])
+    g.get_or_create_tensor("C", [2])
+    g.get_or_create_tensor("Y", [2, 2])
+    n = ExecutionNode("g", OperatorType.Gemm)
+    n.inputs.extend(["A", "B", "C"])
+    n.outputs.append("Y")
+    n.alpha = 2.0
+    n.beta = 1.0
+    g.nodes.append(n)
+    a = NDArray[float32]([2, 2])
+    b = NDArray[float32]([2, 2])
+    c = NDArray[float32]([2])
+    for i in range(4):
+        a[i] = 1.0
+        b[i] = 1.0
+    c[0] = 10.0
+    c[1] = 20.0
+    y = _run(g, ["A", "B", "C"], [a, b, c], "Y")
+    assert abs(y[0] - 14.0) < 1e-4 and abs(y[1] - 24.0) < 1e-4
+    # Where(cond, A, B)
+    g = _const_graph(OperatorType.Where, [[3], [3], [3]], [3])
+    cc = NDArray[float32]([3])
+    cc[0] = 1.0
+    cc[1] = 0.0
+    cc[2] = 5.0
+    aa = NDArray[float32]([3])
+    bb = NDArray[float32]([3])
+    for i in range(3):
+        aa[i] = 100.0
+        bb[i] = 200.0
+    y = _run(g, ["I0", "I1", "I2"], [cc, aa, bb], "Y")
+    assert y[0] == 100.0 and y[1] == 200.0 and y[2] == 100.0
+    # ArgMax axis 1 keepdims 0
+    g = _const_graph(OperatorType.ArgMax, [[2, 3]], [2])
+    g.nodes[0].axis = 1
+    g.nodes[0].keepdims = 0
+    m = NDArray[float32]([6])
+    m[0] = 1.0
+    m[1] = 9.0
+    m[2] = 2.0
+    m[3] = 7.0
+    m[4] = 0.0
+    m[5] = 3.0
+    y = _run(g, ["I0"], [m], "Y")
+    assert y[0] == 1.0 and y[1] == 0.0
+    # Concat axis 0: [1,2] + [2,2] -> [3,2]
+    g = ExecutionGraph("cc")
+    g.inputs.extend(["X", "Z"])
+    g.outputs.append("Y")
+    g.get_or_create_tensor("X", [1, 2])
+    g.get_or_create_tensor("Z", [2, 2])
+    g.get_or_create_tensor("Y", [3, 2])
+    n = ExecutionNode("c", OperatorType.Concat)
+    n.inputs.extend(["X", "Z"])
+    n.outputs.append("Y")
+    n.axis = 0
+    g.nodes.append(n)
+    x1 = NDArray[float32]([1, 2])
+    x1[0] = 1.0
+    x1[1] = 2.0
+    x2 = NDArray[float32]([2, 2])
+    for i in range(4):
+        x2[i] = 10.0 + i
+    y = _run(g, ["X", "Z"], [x1, x2], "Y")
+    assert y[0] == 1.0 and y[2] == 10.0 and y[5] == 13.0
+
+public def test_sampling_greedy_topk():
+    lg = NDArray[float32]([5])
+    lg[0] = 0.1
+    lg[1] = 2.0
+    lg[2] = 0.5
+    lg[3] = 1.0
+    lg[4] = 0.2
+    p = SampleParams()
+    p.temperature = 0.0
+    assert sample_token(lg, p, []) == 1
+    p.temperature = 1.0
+    p.top_k = 2
+    p.seed = 7
+    t1 = sample_token(lg, p, [])
+    p.seed = 7
+    t2 = sample_token(lg, p, [])
+    assert t1 == t2 and (t1 == 1 or t1 == 3)
+
+public def test_chat_template_builtin():
+    msgs = [ChatMessage("user", "hi")]
+    out = apply_template(msgs, "chatml")
+    assert out.find("<|im_start|>user") >= 0 and out.find("hi") >= 0
+    out = apply_template(msgs, "llama3")
+    assert out.find("start_header_id") >= 0
+
+public def test_int4_grouped_roundtrip():
+    w = NDArray[float32]([16])
+    for i in range(16):
+        w[i] = float(i) * 0.5 - 3.0
+    (packed, scales) = quantize_int4_grouped(w, 2, 8, 4)
+    assert len(packed) == 8 and len(scales) == 4
+    y = NDArray[float32]([16])
+    dequantize_int4_grouped(packed, y, 2, 8, 4, scales)
+    worst = max(scales)
+    for i in range(16):
+        assert abs(w[i] - y[i]) < worst * 2.0
+
+public def test_fp8_matmul_identity():
+    a = NDArray[float32]([2, 2])
+    a[0] = 1.0
+    a[3] = 1.0
+    w = NDArray[float32]([2, 2])
+    w[0] = 1.0
+    w[3] = 1.0
+    qa = NDArray[int8]([4])
+    qw = NDArray[int8]([4])
+    quantize_fp8_e4m3(a, qa)
+    quantize_fp8_e4m3(w, qw)
+    y = NDArray[float32]([2, 2])
+    nb = NDArray[float32]([2])
+    matmul_fp8_e4m3(qa, qw, nb, y, 2, 2, 2)
+    assert abs(y[0] - 1.0) < 1e-3 and abs(y[1]) < 1e-3 and abs(y[3] - 1.0) < 1e-3
+
+public def test_paged_pool_evict():
+    pool = PagedKVPool(2, 4, 8)
+    assert pool.alloc_page(1) >= 0
+    assert pool.alloc_page(2) >= 0
+    assert pool.alloc_page(3) < 0
+    (victim, page) = pool.evict_lru()
+    assert victim > 0 and page >= 0
+    pool.reclaim(page, 3)
+    assert pool.free_count() == 0
+    pool.release_seq(3)
+    assert pool.free_count() == 1
+
+public def test_qdq_fold_pass():
+    g = ExecutionGraph("q")
+    g.inputs.append("X")
+    g.outputs.append("Y")
+    g.get_or_create_tensor("X", [1, 4])
+    g.get_or_create_tensor("Q", [1, 4])
+    g.get_or_create_tensor("Y", [1, 4])
+    q = ExecutionNode("q", OperatorType.QuantizeLinear)
+    q.inputs.extend(["X", "S"])
+    q.outputs.append("Q")
+    d = ExecutionNode("d", OperatorType.DequantizeLinear)
+    d.inputs.extend(["Q", "S"])
+    d.outputs.append("Y")
+    g.get_or_create_tensor("S", [1])
+    _init_vec(g, "S", [0.5])
+    g.nodes.extend([q, d])
+    assert QdqFoldPass().run(g) == True
+    assert len(g.nodes) == 0
+
+public def test_logsoftmax_trilu_topk():
+    x = NDArray[float32]([2, 3])
+    for i in range(6):
+        x[i] = float(i)
+    g = _const_graph(OperatorType.LogSoftmax, [[2, 3]], [2, 3])
+    y = _run(g, ["I0"], [x], "Y")
+    # row 0: log_softmax([0,1,2]) — max element must be closest to 0
+    assert y[2] > y[1] and y[1] > y[0] and y[2] < 0.0
+    g = _const_graph(OperatorType.Trilu, [[3, 3]], [3, 3])
+    g.nodes[0].tri_upper = 1
+    m = NDArray[float32]([3, 3])
+    for i in range(9):
+        m[i] = 1.0
+    y = _run(g, ["I0"], [m], "Y")
+    assert y[0] == 1.0 and y[3] == 0.0 and y[8] == 1.0
+    # TopK k=2 along last axis: values [5,4], indices [1,3]
+    g = _const_graph(OperatorType.TopK, [[4]], [2], ["K"])
+    g.outputs.append("Z")
+    g.get_or_create_tensor("Z", [2])
+    g.nodes[0].outputs.append("Z")
+    _init_vec(g, "K", [2.0])
+    t = NDArray[float32]([4])
+    t[0] = 1.0
+    t[1] = 5.0
+    t[2] = 3.0
+    t[3] = 4.0
+    s = InferenceSession(g, False)
+    vv = NDArray[float32]([2])
+    ii = NDArray[float32]([2])
+    s.run([NamedTensor("I0", t)], [NamedTensor("Y", vv), NamedTensor("Z", ii)])
+    s.close()
+    assert vv[0] == 5.0 and vv[1] == 4.0 and ii[0] == 1.0 and ii[1] == 3.0
+
+public def test_quantize_dequantize_linear():
+    # X -> QuantizeLinear(S) -> Q(int8 arena) -> DequantizeLinear(S) -> Y (no fold: optimizations off)
+    assert map_op("QuantizeLinear") == OperatorType.QuantizeLinear
+    assert map_op("QLinearMatMul") == OperatorType.QLinearMatMul
+    assert map_op("TopK") == OperatorType.TopK
+    assert map_op("LogSoftmax") == OperatorType.LogSoftmax
+    assert map_op("Trilu") == OperatorType.Trilu
+    g = ExecutionGraph("qdq")
+    g.inputs.append("X")
+    g.outputs.append("Y")
+    g.get_or_create_tensor("X", [4])
+    g.get_or_create_tensor("Q", [4], TensorDataType.Int8)
+    g.get_or_create_tensor("Y", [4])
+    _init_vec(g, "S", [0.5])
+    q = ExecutionNode("q", OperatorType.QuantizeLinear)
+    q.inputs.extend(["X", "S"])
+    q.outputs.append("Q")
+    d = ExecutionNode("d", OperatorType.DequantizeLinear)
+    d.inputs.extend(["Q", "S"])
+    d.outputs.append("Y")
+    g.nodes.extend([q, d])
+    x = NDArray[float32]([4])
+    x[0] = 0.0
+    x[1] = 0.5
+    x[2] = 1.0
+    x[3] = -1.0
+    y = _run(g, ["X"], [x], "Y")
+    for i in range(4):
+        assert abs(x[i] - y[i]) < 1.0
+
+public def test_device_providers():
+    assert default_cpu().available() == True
+    stub = AcceleratorStub(DeviceKind.CUDA, "no GPU build")
+    assert stub.available() == False
+    raised = False
+    try:
+        InferenceSession(_graph_64_graph(), False, stub)
+    except Unavailable:
+        raised = True
+    assert raised, "unavailable provider must raise, never silent fallback"
+
+class StubTok:
+    def encode(self, text: str) -> list[int]:
+        return [1, 2]
+
+    def decode(self, ids: list[int]) -> str:
+        return "hi"
+
+    def vocab_size(self) -> int:
+        return 4
+
+public def test_generate_loop_text():
+    # X[4] -> Relu -> Y[4]; greedy decode must emit exactly max_new_tokens ids
+    g = _const_graph(OperatorType.Relu, [[4]], [4])
+    s = InferenceSession(g, False)
+    cfg = GenConfig()
+    cfg.max_new_tokens = 3
+    cfg.params.temperature = 0.0
+    res = generate_text(s, StubTok(), "hello", cfg)
+    s.close()
+    assert res.prompt_tokens == 2
+    assert res.completion_tokens == 3
+    assert res.text == "hi"
+
+def _graph_64_graph() -> ExecutionGraph:
+    g = ExecutionGraph("t")
+    g.inputs.append("X")
+    g.outputs.append("Y")
+    g.initializers["W"] = NDArray[float32]([64, 64])
+    g.get_or_create_tensor("X", [1, 64])
+    g.get_or_create_tensor("W", [64, 64])
+    g.get_or_create_tensor("Y", [1, 64])
+    n = ExecutionNode("n", OperatorType.FusedLinear)
+    n.inputs.extend(["X", "W"])
+    n.outputs.append("Y")
+    g.nodes.append(n)
+    return g
+
+def _graph_64() -> InferenceSession:
+    g = ExecutionGraph("t")
+    g.inputs.append("X"); g.outputs.append("Y")
+    g.initializers["W"] = NDArray[float32]([64, 64])
+    g.get_or_create_tensor("X", [1, 64]); g.get_or_create_tensor("W", [64, 64])
+    g.get_or_create_tensor("Y", [1, 64])
+    n = ExecutionNode("n", OperatorType.FusedLinear)
+    n.inputs.extend(["X", "W"]); n.outputs.append("Y")
+    g.nodes.append(n)
+    return InferenceSession(g, True)
+
+extern def fill_rand(a: NDArray[float32], seed: int)
+extern def fill_const(a: NDArray[float32], v: float32)
+extern def gc_collect()
+extern def gc_allocated_bytes() -> int

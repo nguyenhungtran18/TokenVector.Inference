@@ -1,0 +1,231 @@
+// TokenVector Native Module: ONNX — Model Parser
+// Ported from: ONNX/OnnxModelParser.cs (396 lines)
+
+module tv.onnx.parser
+
+import tv.onnx.models
+import tv.onnx.protobuf_reader
+
+public def parse_file(path: str) -> OnnxModel:
+    if path == "":
+        raise ArgNull("path")
+    buf = file_read_all_bytes(path)  # native fs; throws if missing
+    return parse_bytes(buf)
+
+public def parse_bytes(buf: bytes) -> OnnxModel:
+    r = FastProtobufReader(buf)
+    model = OnnxModel()
+    while r.has_more():
+        (field, wt) = r.read_tag()
+        if field == 0:
+            break
+        if field == 1:
+            model.ir_version = r.read_varint64()
+        elif field == 3:
+            model.producer_name = r.read_string()
+        elif field == 4:
+            model.producer_version = r.read_string()
+        elif field == 5:
+            model.domain = r.read_string()
+        elif field == 6:
+            model.model_version = r.read_varint64()
+        elif field == 7:
+            model.doc_string = r.read_string()
+        elif field == 8:
+            model.graph = _parse_graph(r.read_length_delimited())
+        else:
+            r.skip_field(wt)
+    return model
+
+def _parse_graph(buf: bytes) -> OnnxGraph:
+    r = FastProtobufReader(buf)
+    g = OnnxGraph()
+    while r.has_more():
+        (field, wt) = r.read_tag()
+        if field == 0: break
+        if field == 1:
+            g.nodes.append(_parse_node(r.read_length_delimited()))
+        elif field == 2:
+            g.name = r.read_string()
+        elif field == 5:
+            g.initializers.append(_parse_tensor(r.read_length_delimited()))
+        elif field == 11:
+            g.inputs.append(_parse_value_info(r.read_length_delimited()))
+        elif field == 12:
+            g.outputs.append(_parse_value_info(r.read_length_delimited()))
+        elif field == 13:
+            g.value_infos.append(_parse_value_info(r.read_length_delimited()))
+        else:
+            r.skip_field(wt)
+    return g
+
+def _parse_node(buf: bytes) -> OnnxNode:
+    r = FastProtobufReader(buf)
+    n = OnnxNode()
+    while r.has_more():
+        (field, wt) = r.read_tag()
+        if field == 0: break
+        if field == 1:
+            n.inputs.append(r.read_string())
+        elif field == 2:
+            n.outputs.append(r.read_string())
+        elif field == 3:
+            n.name = r.read_string()
+        elif field == 4:
+            n.op_type = r.read_string()
+        elif field == 5:
+            a = _parse_attr(r.read_length_delimited())
+            if a.name != "":
+                n.attrs[a.name] = a
+        else:
+            r.skip_field(wt)
+    return n
+
+def _parse_attr(buf: bytes) -> OnnxAttribute:
+    r = FastProtobufReader(buf)
+    a = OnnxAttribute()
+    while r.has_more():
+        (field, wt) = r.read_tag()
+        if field == 0: break
+        if field == 1:
+            a.name = r.read_string()
+        elif field == 2:
+            a.f = r.read_float()
+        elif field == 3:
+            a.i = r.read_varint64()
+        elif field == 4:
+            a.s = r.read_string()
+        elif field == 5:
+            a.t = _parse_tensor(r.read_length_delimited())
+        elif field == 7:
+            if wt == WireType.LengthDelimited:
+                sub = FastProtobufReader(r.read_length_delimited())
+                while sub.has_more():
+                    a.floats.append(sub.read_float())
+            else:
+                a.floats.append(r.read_float())
+        elif field == 8:
+            if wt == WireType.LengthDelimited:
+                sub = FastProtobufReader(r.read_length_delimited())
+                while sub.has_more():
+                    a.ints.append(sub.read_varint64())
+            else:
+                a.ints.append(r.read_varint64())
+        elif field == 9:
+            a.strings.append(r.read_string())
+        elif field == 20:
+            a.type = AttributeType(r.read_varint32())
+        else:
+            r.skip_field(wt)
+    return a
+
+def _parse_tensor(buf: bytes) -> OnnxTensor:
+    r = FastProtobufReader(buf)
+    t = OnnxTensor()
+    while r.has_more():
+        (field, wt) = r.read_tag()
+        if field == 0: break
+        if field == 1:
+            if wt == WireType.LengthDelimited:
+                sub = FastProtobufReader(r.read_length_delimited())
+                while sub.has_more():
+                    t.dims.append(sub.read_varint64())
+            else:
+                t.dims.append(r.read_varint64())
+        elif field == 2:
+            t.dtype = TensorDataType(r.read_varint32())
+        elif field == 4:
+            if wt == WireType.LengthDelimited:
+                sub = FastProtobufReader(r.read_length_delimited())
+                while sub.has_more():
+                    t.float_data.append(sub.read_float())
+            else:
+                t.float_data.append(r.read_float())
+        elif field == 5:
+            if wt == WireType.LengthDelimited:
+                sub = FastProtobufReader(r.read_length_delimited())
+                while sub.has_more():
+                    t.int32_data.append(sub.read_varint32())
+            else:
+                t.int32_data.append(r.read_varint32())
+        elif field == 7:
+            if wt == WireType.LengthDelimited:
+                sub = FastProtobufReader(r.read_length_delimited())
+                while sub.has_more():
+                    t.int64_data.append(sub.read_varint64())
+            else:
+                t.int64_data.append(r.read_varint64())
+        elif field == 8:
+            t.name = r.read_string()
+        elif field == 9:
+            t.raw = r.read_length_delimited()
+        elif field == 10:
+            if wt == WireType.LengthDelimited:
+                sub = FastProtobufReader(r.read_length_delimited())
+                while sub.has_more():
+                    t.double_data.append(sub.read_double())
+            else:
+                t.double_data.append(r.read_double())
+        else:
+            r.skip_field(wt)
+    return t
+
+def _parse_value_info(buf: bytes) -> OnnxValueInfo:
+    r = FastProtobufReader(buf)
+    vi = OnnxValueInfo()
+    while r.has_more():
+        (field, wt) = r.read_tag()
+        if field == 0: break
+        if field == 1:
+            vi.name = r.read_string()
+        elif field == 2:
+            _parse_type(r.read_length_delimited(), vi)
+        else:
+            r.skip_field(wt)
+    return vi
+
+def _parse_type(buf: bytes, target: OnnxValueInfo):
+    r = FastProtobufReader(buf)
+    while r.has_more():
+        (field, wt) = r.read_tag()
+        if field == 0: break
+        if field == 1:
+            _parse_tensor_type(r.read_length_delimited(), target)
+        else:
+            r.skip_field(wt)
+
+def _parse_tensor_type(buf: bytes, target: OnnxValueInfo):
+    r = FastProtobufReader(buf)
+    while r.has_more():
+        (field, wt) = r.read_tag()
+        if field == 0: break
+        if field == 1:
+            target.dtype = TensorDataType(r.read_varint32())
+        elif field == 2:
+            _parse_shape(r.read_length_delimited(), target.dims)
+        else:
+            r.skip_field(wt)
+
+def _parse_shape(buf: bytes, dims: list[int64]):
+    r = FastProtobufReader(buf)
+    while r.has_more():
+        (field, wt) = r.read_tag()
+        if field == 0: break
+        if field == 1:
+            dims.append(_parse_dim(r.read_length_delimited()))
+        else:
+            r.skip_field(wt)
+
+def _parse_dim(buf: bytes) -> int64:
+    r = FastProtobufReader(buf)
+    val: int64 = 1
+    while r.has_more():
+        (field, wt) = r.read_tag()
+        if field == 0: break
+        if field == 1:
+            val = r.read_varint64()
+        else:
+            r.skip_field(wt)
+    return val
+
+extern def file_read_all_bytes(path: str) -> bytes

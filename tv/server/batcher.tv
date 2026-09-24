@@ -1,0 +1,119 @@
+// TokenVector Module: Server — Dynamic micro-batcher with session pool
+// Batch members run in parallel over a pool of sessions (one arena each):
+// no shared-arena race and real concurrent throughput. Bounded queue with
+// backpressure (enqueue raises ServerBusy instead of growing memory blindly).
+
+module tv.server.batcher
+
+import tv.runtime.session
+import tv.numerics.tensor
+
+public class ServerBusy:
+    def __init__(self, msg: str):
+        self.message = msg
+
+public class BatchRequest:
+    def __init__(self, inp: NDArray[float32]):
+        self.input = inp
+        self.done = False
+        self.cancelled = False
+        self.result: NDArray[float32] = None
+        self.error: str = ""
+
+public class DynamicBatcher:
+    def __init__(self, session: InferenceSession, max_batch: int = 32, timeout_us: int = 200,
+            worker_count: int = 4, max_queue: int = 10000):
+        self.max_batch = max(1, max_batch)
+        self.timeout_us = timeout_us
+        self.max_queue = max(1, max_queue)
+        # pool[0] reuses the caller's (already optimized) session; the rest share
+        # its optimized graph with their own arenas — graph is read-only during run
+        self.pool: list[InferenceSession] = [session]
+        for i in range(1, max(1, worker_count)):
+            self.pool.append(InferenceSession(session.graph, False))
+        self.queue: Channel[BatchRequest] = Channel[BatchRequest]()
+        self.queued: int = 0
+        self.dropped_total: int = 0
+        self._closed = False
+        spawn(self._worker)
+
+    public def enqueue(self, inp: NDArray[float32]) -> NDArray[float32]:
+        if self._closed:
+            raise Disposed("DynamicBatcher")
+        if self.queued >= self.max_queue:
+            self.dropped_total = self.dropped_total + 1
+            raise ServerBusy(f"batcher queue full ({self.max_queue}). Retry later.")
+        req = BatchRequest(inp)
+        self.queued = self.queued + 1
+        self.queue.write(req)
+        while not req.done and not req.cancelled:
+            spin_yield()
+        self.queued = self.queued - 1
+        if req.cancelled:
+            raise Cancelled("request cancelled while queued")
+        if req.error != "":
+            raise Infer(req.error)
+        return req.result
+
+    public def cancel_all(self):
+        # best-effort drain: mark queued requests cancelled
+        while True:
+            req = self.queue.try_read()
+            if req is None:
+                break
+            req.cancelled = True
+            self.queued = self.queued - 1
+
+    def _worker(self):
+        batch: list[BatchRequest] = []
+        while not self._closed:
+            batch.clear()
+            first = self.queue.wait_read(timeout_ms=50)
+            if first is None:
+                continue
+            if first.cancelled:
+                self.queued = self.queued - 1
+                continue
+            batch.append(first)
+            t0 = now_us()
+            while len(batch) < self.max_batch and (now_us() - t0) < self.timeout_us:
+                nxt = self.queue.try_read()
+                if nxt is not None:
+                    if nxt.cancelled:
+                        self.queued = self.queued - 1
+                    else:
+                        batch.append(nxt)
+                else:
+                    spin_wait(10)
+            self._exec_batch(batch)
+
+    def _exec_batch(self, batch: list[BatchRequest]):
+        if len(self.pool) == 1 or len(batch) == 1:
+            for i in range(len(batch)):
+                _run_one(batch[i], self.pool[i % len(self.pool)])
+        else:
+            parallel_for(len(batch), len(self.pool), lambda i: _run_one(batch[i], self.pool[i % len(self.pool)]))
+
+    def queue_depth(self) -> int:
+        return self.queued
+
+    def dispose(self):
+        self._closed = True
+        self.queue.close()
+        for i in range(1, len(self.pool)):
+            self.pool[i].close()
+
+def _run_one(req: BatchRequest, session: InferenceSession):
+    if req.cancelled or req.done:
+        return
+    try:
+        req.result = session.run_single(req.input)
+        req.done = True
+    except Exception as e:
+        req.error = str(e)
+        req.done = True
+
+extern def now_us() -> int
+extern def spin_wait(n: int)
+extern def spin_yield()
+extern def parallel_for(n: int, workers: int, fn: func(int))

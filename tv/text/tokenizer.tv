@@ -1,0 +1,118 @@
+// TokenVector Module: Text — Tokenizers (byte-level BPE + WordPiece)
+// Pure .tv merge/encode loops; vocab & merges load through runtime intrinsics.
+// Covers the llama.cpp/HF-tokenizers "text in" half of the pipeline.
+
+module tv.text.tokenizer
+
+public class BPETokenizer:
+    def __init__(self, vocab_path: str, merges_path: str, unk_id: int = 0):
+        self.vocab = vocab_load_json(vocab_path)   # dict[str, int]
+        self.id_to_tok: dict[int, str] = {}
+        for t in self.vocab:
+            self.id_to_tok[self.vocab[t]] = t
+        self.merges = merges_load_txt(merges_path)  # list["a b"], rank = position
+        self.rank: dict[str, int] = {}
+        for i in range(len(self.merges)):
+            self.rank[self.merges[i]] = i
+        self.unk_id = unk_id
+        self._byte_map = _bytes_to_unicode()
+
+    public def encode(self, text: str) -> list[int]:
+        ids: list[int] = []
+        for word in _pretokenize(text):
+            ids.extend(self._encode_word(word))
+        return ids
+
+    public def decode(self, ids: list[int]) -> str:
+        parts: list[str] = []
+        for i in ids:
+            t = self.id_to_tok[i] if i in self.id_to_tok else ""
+            parts.append(t)
+        return _unicode_to_bytes("".join(parts))
+
+    def _encode_word(self, word: str) -> list[int]:
+        # byte-level symbols, then greedy lowest-rank merge (GPT-2 style)
+        syms: list[str] = []
+        for ch in word:
+            for b in utf8_bytes(ch):
+                syms.append(self._byte_map[b])
+        while len(syms) > 1:
+            best = -1
+            best_rank = -1
+            for i in range(len(syms) - 1):
+                r = self.rank[syms[i] + " " + syms[i + 1]] if (syms[i] + " " + syms[i + 1]) in self.rank else -1
+                if r >= 0 and (best < 0 or r < best_rank):
+                    best = i
+                    best_rank = r
+            if best < 0:
+                break
+            merged = syms[best] + syms[best + 1]
+            syms = syms[:best] + [merged] + syms[best + 2:]
+        ids: list[int] = []
+        for s in syms:
+            ids.append(self.vocab[s] if s in self.vocab else self.unk_id)
+        return ids
+
+    def vocab_size(self) -> int:
+        return len(self.id_to_tok)
+
+public class WordPieceTokenizer:
+    def __init__(self, vocab_path: str, unk_token: str = "[UNK]"):
+        lines = file_read_lines(vocab_path)
+        self.vocab: dict[str, int] = {}
+        for i in range(len(lines)):
+            self.vocab[lines[i]] = i
+        self.unk_id = self.vocab[unk_token] if unk_token in self.vocab else 0
+
+    public def encode(self, text: str) -> list[int]:
+        ids: list[int] = []
+        for word in _pretokenize(text):
+            ids.extend(self._encode_word(word))
+        return ids
+
+    def _encode_word(self, word: str) -> list[int]:
+        # greedy longest-match-first (BERT WordPiece)
+        ids: list[int] = []
+        start = 0
+        while start < len(word):
+            end = len(word)
+            cur = -1
+            while start < end:
+                sub = word[start:end]
+                if start > 0:
+                    sub = "##" + sub
+                if sub in self.vocab:
+                    cur = self.vocab[sub]
+                    break
+                end = end - 1
+            if cur < 0:
+                return [self.unk_id]
+            ids.append(cur)
+            start = end
+        return ids
+
+# whitespace + punctuation pre-tokenizer shared by both schemes
+def _pretokenize(text: str) -> list[str]:
+    return pretokenize_split(text)
+
+def _bytes_to_unicode() -> dict[int, str]:
+    # GPT-2 byte<->unicode table (256 entries)
+    m: dict[int, str] = {}
+    n = 0
+    for b in range(256):
+        if (b >= 33 and b <= 126) or (b >= 161 and b <= 172) or (b >= 174 and b <= 255):
+            m[b] = chr(b)
+        else:
+            m[b] = chr(256 + n)
+            n = n + 1
+    return m
+
+def _unicode_to_bytes(s: str) -> str:
+    return unicode_unescape(s)
+
+extern def vocab_load_json(path: str) -> dict[str, int]
+extern def merges_load_txt(path: str) -> list[str]
+extern def file_read_lines(path: str) -> list[str]
+extern def pretokenize_split(text: str) -> list[str]
+extern def utf8_bytes(ch: str) -> list[int]
+extern def unicode_unescape(s: str) -> str

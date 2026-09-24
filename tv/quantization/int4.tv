@@ -1,0 +1,71 @@
+// TokenVector Module: Quantization — INT4 group-wise (GPTQ/AWQ-class layout)
+// Symmetric 4-bit, group_size columns share one fp16-range scale (stored fp32).
+// Packing: two int4 nibbles per byte, low nibble first, values biased by +8.
+// Layout: weights [rows, cols] -> packed [rows, cols/2] + scales [rows, num_groups].
+
+module tv.quantization.int4
+
+import tv.numerics.tensor
+
+public def quantize_int4_grouped(src: NDArray[float32], rows: int, cols: int, group_size: int) -> tuple[NDArray[int8], list[float32]]:
+    if cols % group_size != 0:
+        raise Arg("cols must be a multiple of group_size")
+    if cols % 2 != 0:
+        raise Arg("cols must be even for nibble packing")
+    if len(src) < rows * cols:
+        raise Arg("src smaller than rows*cols")
+    ng = cols // group_size
+    packed = NDArray[int8]([rows * cols // 2])
+    for i in range(len(packed)):
+        packed[i] = 0
+    scales: list[float32] = []
+    for r in range(rows):
+        for g in range(ng):
+            am = 0.0
+            for c in range(group_size):
+                a = abs(src[r * cols + g * group_size + c])
+                if a > am: am = a
+            if am < 1e-8: am = 1e-8
+            scales.append(am / 7.0)
+    for r in range(rows):
+        for c in range(0, cols, 2):
+            g = c // group_size
+            sc = scales[r * ng + g]
+            inv = 1.0 / sc
+            q0 = max(-8, min(7, int(round(src[r * cols + c] * inv)))) + 8
+            q1 = max(-8, min(7, int(round(src[r * cols + c + 1] * inv)))) + 8
+            packed[r * cols // 2 + c // 2] = (q1 << 4) | q0
+    return (packed, scales)
+
+public def dequantize_int4_grouped(packed: NDArray[int8], dst: NDArray[float32], rows: int, cols: int, group_size: int, scales: list[float32]):
+    ng = cols // group_size
+    if len(scales) < rows * ng:
+        raise Arg("scales smaller than rows*num_groups")
+    if len(dst) < rows * cols:
+        raise Arg("dst too small")
+    for r in range(rows):
+        for c in range(0, cols, 2):
+            g = c // group_size
+            sc = scales[r * ng + g]
+            b = int(packed[r * cols // 2 + c // 2])
+            dst[r * cols + c] = float((b & 0xF) - 8) * sc
+            dst[r * cols + c + 1] = float(((b >> 4) & 0xF) - 8) * sc
+
+# Grouped INT4 GEMM: Y = (A_fp32 @ W_int4^T) + Bias with per-group scales.
+# Correctness-first path: streaming dequantize per K-block keeps memory O(block).
+public def matmul_int4_grouped(pa: NDArray[float32], packed_w: NDArray[int8], pbias: NDArray[float32],
+        py: NDArray[float32], m: int, n: int, k: int, group_size: int, scales_w: list[float32]):
+    ng = k // group_size
+    if len(scales_w) < n * ng:
+        raise Arg("scales_w smaller than N*num_groups")
+    for mm in range(m):
+        for nn in range(n):
+            acc = 0.0
+            for kk in range(k):
+                g = kk // group_size
+                b = int(packed_w[nn * k // 2 + kk // 2])
+                nib = (b & 0xF) if kk % 2 == 0 else ((b >> 4) & 0xF)
+                w = float(nib - 8) * scales_w[nn * ng + g]
+                acc = acc + pa[mm * k + kk] * w
+            bias = pbias[nn] if len(pbias) > 0 else 0.0
+            py[mm * n + nn] = acc + bias

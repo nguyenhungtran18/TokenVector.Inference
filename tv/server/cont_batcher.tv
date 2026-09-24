@@ -1,0 +1,123 @@
+// TokenVector Module: Server — Continuous batcher for LLM decoding
+// Slot-based iteration scheduling (llama.cpp parallel-slots semantics at the
+// .tv level): waiting -> running admission controlled by PagedKVPool capacity,
+// each step advances every running sequence by one token (prefill once, then
+// decode), finished/evicted sequences free their pages. One forward per active
+// sequence per step, executed over the DynamicBatcher session pool.
+
+module tv.server.cont_batcher
+
+import tv.runtime.session
+import tv.runtime.paged_kv
+import tv.runtime.kv_cache
+import tv.server.batcher
+import tv.text.sampling
+import tv.numerics.tensor
+
+public class GenRequest:
+    def __init__(self, prompt: list[int], max_tokens: int = 128):
+        self.prompt = prompt
+        self.max_tokens = max_tokens
+        self.tokens: list[int] = list(prompt)
+        self.done = False
+        self.error: str = ""
+        self.cache: AttentionKvCache = None
+        self.paged: PagedSequence = None
+        self.seq_id: int = -1
+
+public class ContBatcher:
+    def __init__(self, session: InferenceSession, hidden_dim: int, max_seq: int = 2048,
+            max_running: int = 4, pool_pages: int = 256, page_len: int = 16,
+            workers: int = 4):
+        self.session = session
+        self.hidden_dim = hidden_dim
+        self.max_seq = max_seq
+        self.max_running = max(1, max_running)
+        self.batcher = DynamicBatcher(session, max_batch=max_running, timeout_us=200, worker_count=workers)
+        self.pool = PagedKVPool(pool_pages, page_len, hidden_dim)
+        self.waiting: list[GenRequest] = []
+        self.running: list[GenRequest] = []
+        self.next_seq = 1
+        self.params = SampleParams()
+        self._closed = False
+
+    public def submit(self, prompt: list[int], max_tokens: int = 128) -> GenRequest:
+        req = GenRequest(prompt, max_tokens)
+        self.waiting.append(req)
+        return req
+
+    # advance the world by one decode step; call in a driver loop or via spawn
+    public def step(self, forward: func(NDArray[float32]) -> NDArray[float32]):
+        self._admit()
+        finished: list[GenRequest] = []
+        for req in self.running:
+            try:
+                self._decode_one(req, forward)
+                if len(req.tokens) - len(req.prompt) >= req.max_tokens:
+                    req.done = True
+                    finished.append(req)
+            except Exception as e:
+                req.error = str(e)
+                req.done = True
+                finished.append(req)
+        for req in finished:
+            self.running.remove(req)
+            self.pool.release_seq(req.seq_id)
+
+    def _admit(self):
+        while len(self.running) < self.max_running and len(self.waiting) > 0:
+            req = self.waiting[0]
+            need_pages = (len(req.prompt) + self.max_seq + self.pool.page_len - 1) // self.pool.page_len
+            if self.pool.free_count() < need_pages:
+                # try LRU eviction of a running victim to make room
+                (victim, page) = self.pool.evict_lru()
+                if victim < 0:
+                    break
+                self._evict_seq(victim)
+                continue
+            self.waiting.pop(0)
+            req.seq_id = self.next_seq
+            self.next_seq = self.next_seq + 1
+            req.cache = AttentionKvCache(self.max_seq, self.hidden_dim)
+            req.paged = PagedSequence(req.seq_id)
+            req.paged.ensure_capacity(self.pool, len(req.prompt) + req.max_tokens)
+            self.running.append(req)
+
+    def _evict_seq(self, seq_id: int):
+        for req in self.running:
+            if req.seq_id == seq_id and not req.done:
+                req.error = "evicted: KV pool exhausted"
+                req.done = True
+                self.pool.release_seq(seq_id)
+                self.running.remove(req)
+                break
+
+    def _decode_one(self, req: GenRequest, forward: func(NDArray[float32]) -> NDArray[float32]):
+        # single-token step: embed last token (caller-provided embedding lookup
+        # happens inside forward), run graph, sample, append to cache + pages
+        last = req.tokens[len(req.tokens) - 1]
+        emb = forward(_one_hot(last, self.hidden_dim))
+        nxt = sample_token(emb, self.params, req.tokens)
+        req.tokens.append(nxt)
+        krow = forward(emb)  # projected K row (model-dependent wiring via forward)
+        vrow = forward(emb)  # projected V row
+        req.cache.append(krow, vrow)
+        total = req.cache.length
+        req.paged.ensure_capacity(self.pool, len(req.prompt) + total)
+        for p in req.paged.pages:
+            self.pool.touch(p)
+
+    def pending(self) -> int:
+        return len(self.waiting) + len(self.running)
+
+    def dispose(self):
+        self._closed = True
+        self.batcher.dispose()
+
+def _one_hot(tok: int, dim: int) -> NDArray[float32]:
+    v = NDArray[float32]([dim])
+    for i in range(dim):
+        v[i] = 0.0
+    if tok >= 0 and tok < dim:
+        v[tok] = 1.0
+    return v

@@ -1,0 +1,251 @@
+// TokenVector Module: Quantization — PTQ Engine
+// Calibration runs offline (allocations allowed); hot-path quantize/dequantize stay allocation-free.
+
+module tv.quantization.engine
+
+import tv.quantization.types
+import tv.numerics.tensor
+
+public def calibrate_minmax(data: NDArray[float32], symmetric: bool = True) -> QuantParams:
+    if len(data) == 0:
+        return QuantParams.identity()
+    mn = data[0]
+    mx = data[0]
+    for i in range(1, len(data)):
+        v = data[i]
+        if v < mn: mn = v
+        if v > mx: mx = v
+    if symmetric:
+        am = abs(mn) if abs(mn) > abs(mx) else abs(mx)
+        if am < 1e-8: am = 1e-8
+        return QuantParams(am / 127.0, 0, -am, am)
+    else:
+        if abs(mx - mn) < 1e-8:
+            mx = mn + 1e-8
+        scale = (mx - mn) / 255.0
+        zp = int(round(-mn / scale)) - 128
+        zp = max(-128, min(127, zp))
+        return QuantParams(scale, zp, mn, mx)
+
+# TensorRT-style KL calibration: for each candidate threshold the histogram tail is
+# merged into the last kept bin, the truncated distribution is quantized down to
+# target_bins levels and expanded back, then KL(P || Q) is minimized.
+# (The old uniform-Q shortcut underestimated the optimal threshold.)
+public def calibrate_kl(data: NDArray[float32], num_bins: int = 2048, target_bins: int = 128) -> QuantParams:
+    if len(data) == 0:
+        return QuantParams.identity()
+    am = 0.0
+    for i in range(len(data)):
+        a = abs(data[i])
+        if a > am: am = a
+    if am < 1e-8:
+        return calibrate_minmax(data, True)
+    hist: list[int] = [0] * num_bins
+    bw = am / num_bins
+    for i in range(len(data)):
+        b = int(abs(data[i]) / bw)
+        if b >= num_bins: b = num_bins - 1
+        hist[b] = hist[b] + 1
+    total = 0.0
+    for i in range(num_bins):
+        total = total + hist[i]
+    if total == 0:
+        return calibrate_minmax(data, True)
+    p: list[float] = [0.0] * num_bins
+    q: list[float] = [0.0] * num_bins
+    best_bin = num_bins
+    best_kl = 1e30
+    th = target_bins
+    while th <= num_bins:
+        s = 0.0
+        for i in range(th):
+            p[i] = float(hist[i])
+            s = s + hist[i]
+        for i in range(th, num_bins):
+            p[th - 1] = p[th - 1] + float(hist[i])
+            s = s + float(hist[i])
+        if s != 0:
+            for i in range(th):
+                p[i] = p[i] / s
+            per = th // target_bins
+            if per >= 1:
+                for i in range(th):
+                    q[i] = 0.0
+                b = 0
+                while b < target_bins:
+                    start = b * per
+                    end = th if b == target_bins - 1 else start + per
+                    mass = 0.0
+                    for i in range(start, end):
+                        mass = mass + p[i]
+                    share = mass / max(1, end - start)
+                    for i in range(start, end):
+                        q[i] = share
+                    b = b + 1
+                kl = 0.0
+                for i in range(th):
+                    if p[i] > 1e-12 and q[i] > 1e-12:
+                        kl = kl + p[i] * log(p[i] / q[i])
+                if kl < best_kl:
+                    best_kl = kl
+                    best_bin = th
+        th = th + 16
+    thr = best_bin * bw
+    return QuantParams(thr / 127.0, 0, -thr, thr)
+
+# Percentile calibration: clips at |data| percentile — robust to outliers.
+public def calibrate_percentile(data: NDArray[float32], percentile: float = 99.99, symmetric: bool = True) -> QuantParams:
+    if len(data) == 0:
+        return QuantParams.identity()
+    if percentile <= 0.0 or percentile > 100.0:
+        raise Arg("percentile must be in (0, 100]")
+    ab = NDArray[float32]([len(data)])
+    for i in range(len(data)):
+        ab[i] = abs(data[i])
+    sort_inplace(ab)
+    idx = int(min(len(ab) - 1, percentile / 100.0 * len(ab)))
+    clip = ab[idx] if ab[idx] > 1e-8 else 1e-8
+    if symmetric:
+        return QuantParams(clip / 127.0, 0, -clip, clip)
+    mn = data[0]
+    mx = data[0]
+    for i in range(1, len(data)):
+        v = data[i]
+        if v < -clip: v = -clip
+        if v > clip: v = clip
+        if v < mn: mn = v
+        if v > mx: mx = v
+    if abs(mx - mn) < 1e-8:
+        mx = mn + 1e-8
+    scale = (mx - mn) / 255.0
+    zp = int(round(-mn / scale)) - 128
+    return QuantParams(scale, max(-128, min(127, zp)), mn, mx)
+
+# MSE calibration: grid-searches symmetric thresholds to minimize quantization MSE.
+public def calibrate_mse(data: NDArray[float32], num_candidates: int = 50) -> QuantParams:
+    if len(data) == 0:
+        return QuantParams.identity()
+    if num_candidates < 4:
+        num_candidates = 4
+    am = 0.0
+    for i in range(len(data)):
+        a = abs(data[i])
+        if a > am: am = a
+    if am < 1e-8:
+        return calibrate_minmax(data, True)
+    best_thr = am
+    best_mse = 1e30
+    for c in range(1, num_candidates + 1):
+        thr = am * c / num_candidates
+        scale = thr / 127.0
+        inv = 1.0 / scale
+        mse = 0.0
+        for i in range(len(data)):
+            cl = data[i]
+            if cl < -thr: cl = -thr
+            if cl > thr: cl = thr
+            dq = max(-127, min(127, int(round(cl * inv)))) * scale
+            d = data[i] - dq
+            mse = mse + d * d
+        mse = mse / len(data)
+        if mse < best_mse:
+            best_mse = mse
+            best_thr = thr
+    return QuantParams(best_thr / 127.0, 0, -best_thr, best_thr)
+
+# Per-channel (row-wise) symmetric calibration for [rows, cols] weight matrices.
+# LLM weights require per-output-channel scales; per-tensor alone collapses accuracy.
+public def calibrate_per_channel_minmax(data: NDArray[float32], rows: int, cols: int, symmetric: bool = True) -> list[QuantParams]:
+    if rows <= 0 or cols <= 0:
+        raise Arg("rows/cols must be > 0")
+    if len(data) < rows * cols:
+        raise Arg("data smaller than rows*cols")
+    out: list[QuantParams] = []
+    for r in range(rows):
+        out.append(calibrate_minmax(data[r * cols:(r + 1) * cols], symmetric))
+    return out
+
+public def quantize_int8_symmetric(src: NDArray[float32], dst: NDArray[int8], scale: float32):
+    if len(dst) < len(src):
+        raise Arg("dst too small")
+    inv = 1.0 / (scale if scale > 1e-8 else 1e-8)
+    for i in range(len(src)):
+        q = int(round(src[i] * inv))
+        dst[i] = max(-127, min(127, q))
+
+public def dequantize_int8_symmetric(src: NDArray[int8], dst: NDArray[float32], scale: float32):
+    if len(dst) < len(src):
+        raise Arg("dst too small")
+    for i in range(len(src)):
+        dst[i] = float(src[i]) * scale
+
+public def quantize_int8_per_channel(src: NDArray[float32], dst: NDArray[int8], rows: int, cols: int, scales: list[float32]):
+    if len(dst) < rows * cols or len(src) < rows * cols:
+        raise Arg("span too small")
+    if len(scales) < rows:
+        raise Arg("scales smaller than rows")
+    for r in range(rows):
+        sc = scales[r] if scales[r] > 1e-8 else 1e-8
+        inv = 1.0 / sc
+        for c in range(cols):
+            i = r * cols + c
+            dst[i] = max(-127, min(127, int(round(src[i] * inv))))
+
+public def dequantize_int8_per_channel(src: NDArray[int8], dst: NDArray[float32], rows: int, cols: int, scales: list[float32]):
+    if len(dst) < rows * cols or len(src) < rows * cols:
+        raise Arg("span too small")
+    if len(scales) < rows:
+        raise Arg("scales smaller than rows")
+    for r in range(rows):
+        for c in range(cols):
+            i = r * cols + c
+            dst[i] = float(src[i]) * scales[r]
+
+# Dynamic (activation) row-wise INT8 quant: derives per-row scales on the fly.
+public def quantize_dynamic_int8_rowwise(src: NDArray[float32], dst: NDArray[int8], rows: int, cols: int, scales_out: NDArray[float32]):
+    if len(dst) < rows * cols or len(src) < rows * cols:
+        raise Arg("span too small")
+    if len(scales_out) < rows:
+        raise Arg("scales_out smaller than rows")
+    for r in range(rows):
+        am = 0.0
+        for c in range(cols):
+            a = abs(src[r * cols + c])
+            if a > am: am = a
+        if am < 1e-8: am = 1e-8
+        sc = am / 127.0
+        scales_out[r] = sc
+        inv = 1.0 / sc
+        for c in range(cols):
+            i = r * cols + c
+            dst[i] = max(-127, min(127, int(round(src[i] * inv))))
+
+# Pure .tv quicksort (calibration-time only, never hot path)
+def sort_inplace(a: NDArray[float32]):
+    _quick(a, 0, len(a) - 1)
+
+def _quick(a: NDArray[float32], lo: int, hi: int):
+    while lo < hi:
+        p = _part(a, lo, hi)
+        # recurse smaller side, iterate larger (bounded stack)
+        if p - lo < hi - p:
+            _quick(a, lo, p - 1)
+            lo = p + 1
+        else:
+            _quick(a, p + 1, hi)
+            hi = p - 1
+
+def _part(a: NDArray[float32], lo: int, hi: int) -> int:
+    piv = a[(lo + hi) // 2]
+    i = lo
+    j = hi
+    while i <= j:
+        while a[i] < piv: i = i + 1
+        while a[j] > piv: j = j - 1
+        if i <= j:
+            t = a[i]
+            a[i] = a[j]
+            a[j] = t
+            i = i + 1
+            j = j - 1
+    return i

@@ -1,0 +1,118 @@
+// TokenVector Native Module: ONNX — Proto models
+// Ported from: ONNX/OnnxProtobufModels.cs
+
+module tv.onnx.models
+
+public enum TensorDataType:
+    Undefined = 0
+    Float = 1
+    Uint8 = 2
+    Int8 = 3
+    Uint16 = 4
+    Int16 = 5
+    Int32 = 6
+    Int64 = 7
+    String = 8
+    Bool = 9
+    Float16 = 10
+    Double = 11
+    Uint32 = 12
+    Uint64 = 13
+    Complex64 = 14
+    Complex128 = 15
+    BFloat16 = 16
+    Float8E4M3FN = 17
+    Float8E4M3FNUZ = 18
+    Float8E5M2 = 19
+    Float8E5M2FNUZ = 20
+
+public enum AttributeType:
+    Undefined = 0
+    Float = 1
+    Int = 2
+    String = 3
+    Tensor = 4
+    Graph = 5
+    Floats = 6
+    Ints = 7
+    Strings = 8
+    Tensors = 9
+    Graphs = 10
+
+public class OnnxAttribute:
+    def __init__(self, name: str = ""):
+        self.name = name
+        self.type: AttributeType = AttributeType.Undefined
+        self.f: float32 = 0.0
+        self.i: int64 = 0
+        self.s: str = ""
+        self.t: OnnxTensor = None
+        self.floats: list[float32] = []
+        self.ints: list[int64] = []
+        self.strings: list[str] = []
+
+public class OnnxTensor:
+    def __init__(self, name: str = ""):
+        self.name = name
+        self.dtype: TensorDataType = TensorDataType.Float
+        self.dims: list[int64] = []
+        self.raw: bytes = b""
+        self.float_data: list[float32] = []
+        self.int32_data: list[int] = []
+        self.int64_data: list[int64] = []
+        self.double_data: list[float64] = []
+
+    public def extract_float_array(self) -> NDArray[float32]:
+        if len(self.float_data) > 0:
+            out = NDArray[float32]([len(self.float_data)])
+            for i in range(len(self.float_data)):
+                out[i] = self.float_data[i]
+            return out
+        if len(self.raw) >= 4:
+            return native_floats_from_raw(self.raw)
+        return NDArray[float32]([0])
+
+    public def extract_int32_array(self) -> list[int]:
+        if len(self.int32_data) > 0:
+            return self.int32_data
+        if len(self.int64_data) > 0:
+            return [int(x) for x in self.int64_data]
+        if len(self.raw) >= 4:
+            return native_ints_from_raw(self.raw)
+        return []
+
+public class OnnxValueInfo:
+    def __init__(self, name: str = ""):
+        self.name = name
+        self.dtype: TensorDataType = TensorDataType.Float
+        self.dims: list[int64] = []
+
+public class OnnxNode:
+    def __init__(self):
+        self.name: str = ""
+        self.op_type: str = ""
+        self.inputs: list[str] = []
+        self.outputs: list[str] = []
+        self.attrs: dict[str, OnnxAttribute] = {}
+
+public class OnnxGraph:
+    def __init__(self):
+        self.name: str = ""
+        self.nodes: list[OnnxNode] = []
+        self.initializers: list[OnnxTensor] = []
+        self.inputs: list[OnnxValueInfo] = []
+        self.outputs: list[OnnxValueInfo] = []
+        self.value_infos: list[OnnxValueInfo] = []
+
+public class OnnxModel:
+    def __init__(self):
+        self.ir_version: int64 = 0
+        self.producer_name: str = ""
+        self.producer_version: str = ""
+        self.domain: str = ""
+        self.model_version: int64 = 0
+        self.doc_string: str = ""
+        self.graph: OnnxGraph = OnnxGraph()
+
+extern def native_floats_from_raw(raw: bytes) -> NDArray[float32]
+extern def native_ints_from_raw(raw: bytes) -> list[int]
