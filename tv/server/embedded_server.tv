@@ -109,6 +109,8 @@ public class EmbeddedServer:
                 return self._embeddings(req)
             if req.method == "POST" and (req.path == "/v1/completions" or req.path == "/v1/chat/completions"):
                 return self._completions(req)
+            if req.method == "POST" and req.path == "/v1/rerank":
+                return self._rerank(req)
             return HttpResponse(404, "{\"error\":\"not found\"}", "application/json")
         except ServerBusy as b:
             self.dropped_total = self.dropped_total + 1
@@ -220,6 +222,65 @@ public class EmbeddedServer:
         msgs = json_field(body, "messages")
         return json_messages_to_float_array(msgs)
 
+    # Rerank: score each document against the query with one forward per pair
+    # (cross-encoder style: score = first output element). Text mode tokenizes
+    # "query + document"; numeric mode concatenates the float vectors.
+    def _rerank(self, req: HttpRequest) -> HttpResponse:
+        scored: list[tuple[int, float]] = []
+        top_n = json_int_field(req.body, "top_n", 0)
+        if self._tokenizer() is not None and json_is_str_array(req.body, "documents"):
+            docs = json_str_array_field(req.body, "documents")
+            if len(docs) == 0:
+                return HttpResponse(400, "{\"error\":\"documents must be a non-empty array\"}", "application/json")
+            q = json_string_field(req.body, "query", "")
+            for i in range(len(docs)):
+                pair = self._tokenizer().encode(q + " " + docs[i])
+                scored.append((i, self._score_ids(pair)))
+        else:
+            raws = json_nested_array_field(req.body, "documents")
+            if len(raws) == 0:
+                return HttpResponse(400, "{\"error\":\"documents must be a non-empty array\"}", "application/json")
+            q = json_to_float_array(json_field(req.body, "query"))
+            for i in range(len(raws)):
+                d = json_to_float_array(raws[i])
+                scored.append((i, self._score_vec(q, d)))
+        # descending selection sort by score
+        order: list[int] = []
+        used: dict[int, bool] = {}
+        for _ in range(len(scored)):
+            best = -1
+            for k in range(len(scored)):
+                if k not in used and (best < 0 or scored[k][1] > scored[best][1]):
+                    best = k
+            used[best] = True
+            order.append(best)
+        n = min(top_n, len(order)) if top_n > 0 else len(order)
+        parts: list[str] = []
+        for r in range(n):
+            k = order[r]
+            parts.append("{\"index\":" + str(scored[k][0]) + ",\"relevance_score\":" + str(scored[k][1]) + "}")
+        body = "{\"id\":\"tv-" + str(self.total_requests) + "\",\"object\":\"list\",\"model\":\"" + self.opts.model_id + "\",\"results\":[" + ",".join(parts) + "]}"
+        return HttpResponse(200, body, "application/json")
+
+    def _score_ids(self, ids: list[int]) -> float32:
+        in_dim = self.session.graph.tensors[self.session.graph.inputs[0]].element_count
+        inp = NDArray[float32]([in_dim])
+        for i in range(in_dim):
+            inp[i] = 0.0
+        tail = ids[len(ids) - in_dim:] if len(ids) > in_dim else ids
+        base = in_dim - len(tail)
+        for i in range(len(tail)):
+            inp[base + i] = float(tail[i])
+        return self.batcher.enqueue(inp)[0]
+
+    def _score_vec(self, q: list[float32], d: list[float32]) -> float32:
+        arr = list(q) + list(d)
+        in_dim = self.session.graph.tensors[self.session.graph.inputs[0]].element_count
+        inp = NDArray[float32]([in_dim])
+        for i in range(in_dim):
+            inp[i] = arr[i] if i < len(arr) else 0.0
+        return self.batcher.enqueue(inp)[0]
+
     def _infer(self, arr: list[float32]) -> NDArray[float32]:
         inp = NDArray[float32]([1, len(arr)])
         for i in range(len(arr)):
@@ -304,6 +365,9 @@ extern def json_field(body: str, name: str) -> str
 extern def json_to_float_array(v: str) -> list[float32]
 extern def json_messages_to_float_array(v: str) -> list[float32]
 extern def json_bool(body: str, name: str, default: bool) -> bool
+extern def json_is_str_array(body: str, name: str) -> bool
+extern def json_str_array_field(body: str, name: str) -> list[str]
+extern def json_nested_array_field(body: str, name: str) -> list[str]
 extern def json_quote(s: str) -> str
 extern def json_string_field(body: str, name: str, default: str) -> str
 extern def json_int_field(body: str, name: str, default: int) -> int

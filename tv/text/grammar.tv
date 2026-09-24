@@ -1,0 +1,315 @@
+// TokenVector Module: Text — Grammar-constrained generation (GBNF subset)
+// Compiles a documented subset (rule refs, "literals", [a-z] classes, (...),
+// * + ? alternation |) into a backtracking matcher with cycle guard, then
+// masks per-step logits to tokens that keep a live parse. Token filtering is
+// O(vocab) decode-checks per step — exact, suited to small vocabs / JSON modes.
+
+module tv.text.grammar
+
+import tv.runtime.session
+import tv.text.sampling
+import tv.numerics.tensor
+
+# element kinds
+public const G_LIT = 0
+public const G_CLASS = 1
+public const G_REF = 2
+public const G_REP = 3
+public const G_GROUP = 4  # parenthesized alt-list (sub = list of alts)
+
+public class GElem:
+    def __init__(self, kind: int, text: str = "", lo: list[int] = [], hi: list[int] = [], ref: str = "", sub: object = None, mn: int = 1, mx: int = 1):
+        self.kind = kind
+        self.text = text        # literal bytes (G_LIT)
+        self.lo = lo            # range starts (G_CLASS, parallel to hi)
+        self.hi = hi
+        self.ref = ref          # rule name (G_REF)
+        self.sub = sub          # inner GElem (G_REP)
+        self.mn = mn            # repeat min (G_REP)
+        self.mx = mx            # repeat max, -1 = unbounded (G_REP)
+
+public class Grammar:
+    def __init__(self):
+        self.rules: dict[str, list[list[GElem]]] = {}
+        self.root: str = "root"
+
+def _lines(s: str) -> list[str]:
+    out: list[str] = []
+    rest = s
+    while True:
+        i = rest.find("\n")
+        if i < 0:
+            out.append(rest)
+            break
+        out.append(rest[:i])
+        rest = rest[i + 1:]
+    return out
+
+def _sorted_ints(xs: dict[int, bool]) -> list[int]:
+    out: list[int] = []
+    for k in xs:
+        out.append(k)
+    for i in range(1, len(out)):
+        t = out[i]
+        j = i - 1
+        while j >= 0 and out[j] > t:
+            out[j + 1] = out[j]
+            j = j - 1
+        out[j + 1] = t
+    return out
+
+public def compile_grammar(text: str) -> Grammar:
+    g = Grammar()
+    for line in _lines(text):
+        line = line.strip()
+        if line == "" or line.startswith("#"):
+            continue
+        sep = line.find("::=")
+        if sep < 0:
+            continue
+        name = line[:sep].strip()
+        body = line[sep + 3:]
+        g.rules[name] = _parse_alts(body)
+        if g.root == "root":
+            g.root = name
+    if "root" in g.rules:
+        g.root = "root"
+    return g
+
+def _parse_alts(body: str) -> list[list[GElem]]:
+    alts: list[list[GElem]] = []
+    depth = 0
+    cur = ""
+    instr = False
+    inclass = False
+    for i in range(len(body)):
+        c = body[i:i + 1]
+        if c == "\"" and not inclass:
+            instr = not instr
+        if not instr and not inclass and c == "[":
+            inclass = True
+        if not instr and inclass and c == "]":
+            inclass = False
+        if not instr and not inclass and c == "|" and depth == 0:
+            alts.append(_parse_seq(cur))
+            cur = ""
+        else:
+            if not instr and not inclass and c == "(":
+                depth = depth + 1
+            if not instr and not inclass and c == ")":
+                depth = depth - 1
+            cur = cur + c
+    alts.append(_parse_seq(cur))
+    return alts
+
+def _parse_seq(s: str) -> list[GElem]:
+    out: list[GElem] = []
+    i = 0
+    n = len(s)
+    while i < n:
+        while i < n and s[i:i + 1] == " ":
+            i = i + 1
+        if i >= n:
+            break
+        c = s[i:i + 1]
+        el: GElem = None
+        if c == "\"":
+            j = s.find("\"", i + 1)
+            if j < 0:
+                break
+            el = GElem(G_LIT, text=s[i + 1:j])
+            i = j + 1
+        elif c == "[":
+            j = s.find("]", i)
+            if j < 0:
+                break
+            (lo, hi) = _parse_class(s[i + 1:j])
+            el = GElem(G_CLASS, lo=lo, hi=hi)
+            i = j + 1
+        elif c == "(":
+            depth = 1
+            j = i + 1
+            instr = False
+            while j < n and depth > 0:
+                if s[j:j + 1] == "\"":
+                    instr = not instr
+                if not instr and s[j:j + 1] == "(":
+                    depth = depth + 1
+                if not instr and s[j:j + 1] == ")":
+                    depth = depth - 1
+                j = j + 1
+            inner = _parse_alts(s[i + 1:j - 1])
+            el = GElem(G_GROUP, sub=inner)
+            i = j
+        else:
+            j = i
+            while j < n and s[j:j + 1] not in [" ", "\"", "[", "(", ")", "|", "*", "+", "?"]:
+                j = j + 1
+            el = GElem(G_REF, ref=s[i:j])
+            i = j
+        # repetition suffix
+        if i < n and s[i:i + 1] in ["*", "+", "?"]:
+            q = s[i:i + 1]
+            i = i + 1
+            if q == "*":
+                el = GElem(G_REP, sub=el, mn=0, mx=-1)
+            elif q == "+":
+                el = GElem(G_REP, sub=el, mn=1, mx=-1)
+            else:
+                el = GElem(G_REP, sub=el, mn=0, mx=1)
+        out.append(el)
+    return out
+
+def _parse_class(s: str) -> tuple[list[int], list[int]]:
+    lo: list[int] = []
+    hi: list[int] = []
+    i = 0
+    while i < len(s):
+        if i + 2 < len(s) and s[i + 1:i + 2] == "-":
+            lo.append(ord(s[i:i + 1]))
+            hi.append(ord(s[i + 2:i + 3]))
+            i = i + 3
+        else:
+            lo.append(ord(s[i:i + 1]))
+            hi.append(ord(s[i:i + 1]))
+            i = i + 1
+    return (lo, hi)
+
+# --- matcher: match(rule, text, pos) -> sorted unique end positions ---
+public def match_ends(g: Grammar, rule: str, text: str, pos: int) -> list[int]:
+    return _sorted_ints(_match_rule(g, rule, text, pos, [], 0))
+
+def _match_rule(g: Grammar, rule: str, text: str, pos: int, stack: list[str], depth: int) -> dict[int, bool]:
+    out: dict[int, bool] = {}
+    if depth > 32 or (rule + "@" + str(pos)) in stack:
+        return out
+    if rule not in g.rules:
+        return out
+    stack.append(rule + "@" + str(pos))
+    for alt in g.rules[rule]:
+        for e in _match_seq(g, alt, text, pos, stack, depth + 1):
+            out[e] = True
+    stack.pop()
+    return out
+
+def _match_seq(g: Grammar, seq: list[GElem], text: str, pos: int, stack: list[str], depth: int) -> dict[int, bool]:
+    cur: dict[int, bool] = {pos: True}
+    for el in seq:
+        nxt: dict[int, bool] = {}
+        for p in cur:
+            for e in _match_elem(g, el, text, p, stack, depth):
+                nxt[e] = True
+        cur = nxt
+        if len(cur) == 0:
+            break
+    return cur
+
+def _match_elem(g: Grammar, el: GElem, text: str, pos: int, stack: list[str], depth: int) -> dict[int, bool]:
+    out: dict[int, bool] = {}
+    if el.kind == G_LIT:
+        seg = text[pos:pos + len(el.text)]
+        if seg == el.text:
+            out[pos + len(el.text)] = True
+        elif el.text[:len(seg)] == seg and pos + len(seg) == len(text):
+            # text ends mid-literal: still a live prefix
+            out[len(text)] = True
+        return out
+    if el.kind == G_CLASS:
+        if pos < len(text):
+            c = ord(text[pos:pos + 1])
+            for i in range(len(el.lo)):
+                if c >= el.lo[i] and c <= el.hi[i]:
+                    out[pos + 1] = True
+                    break
+        return out
+    if el.kind == G_REF:
+        return _match_rule(g, el.ref, text, pos, stack, depth)
+    if el.kind == G_REP:
+        return _match_rep_elem(g, el.sub, el.mn, el.mx, text, pos, stack, depth)
+    # G_GROUP: sub is a list of alts, matched exactly once
+    cur: dict[int, bool] = {}
+    for alt in el.sub:
+        for e in _match_seq(g, alt, text, pos, stack, depth):
+            cur[e] = True
+    return cur
+
+def _match_rep_elem(g: Grammar, sub: GElem, mn: int, mx: int, text: str, pos: int, stack: list[str], depth: int) -> dict[int, bool]:
+    cur: dict[int, bool] = {pos: True}
+    reps = _match_rep_count(mn, mx)
+    for _ in range(reps):
+        nxt: dict[int, bool] = {}
+        for p in cur:
+            for e in _match_elem(g, sub, text, p, stack, depth):
+                nxt[e] = True
+        if _same_keys(nxt, cur):
+            break
+        cur = nxt
+        if len(cur) == 0:
+            break
+    if mn == 0:
+        cur[pos] = True
+    return cur
+
+def _match_rep_count(mn: int, mx: int) -> int:
+    if mx < 0:
+        return 64  # unbounded cap (documented)
+    return mx
+
+def _same_keys(a: dict[int, bool], b: dict[int, bool]) -> bool:
+    if len(a) != len(b):
+        return False
+    for k in a:
+        if k not in b:
+            return False
+    return True
+
+# live parse = some rule path consumed the WHOLE text (full match, or a
+# mid-literal partial at end-of-text). Trailing garbage is rejected.
+public def is_live(g: Grammar, text: str) -> bool:
+    ends = _match_rule(g, g.root, text, 0, [], 0)
+    return len(text) in ends
+
+# token mask: ids whose decoded text keeps the parse live
+public def allowed_token_ids(g: Grammar, decode: func(int) -> str, vocab_size: int, current: str) -> list[int]:
+    out: list[int] = []
+    for i in range(vocab_size):
+        if is_live(g, current + decode(i)):
+            out.append(i)
+    return out
+
+# guided loop: mask logits to allowed ids, sample, append decoded text
+public def generate_guided(session: InferenceSession, tok, prompt: str, grammar_text: str,
+        cfg, max_new_tokens: int) -> str:
+    g = compile_grammar(grammar_text)
+    ids = tok.encode(prompt)
+    cur = tok.decode(ids)
+    in_dim = session.graph.tensors[session.graph.inputs[0]].element_count
+    vocab = tok.vocab_size()
+    for _ in range(max_new_tokens):
+        allowed = allowed_token_ids(g, lambda i: tok.decode([i]), vocab, cur)
+        if len(allowed) == 0:
+            break
+        inp = NDArray[float32]([in_dim])
+        for i in range(in_dim):
+            inp[i] = 0.0
+        tail = ids[len(ids) - in_dim:] if len(ids) > in_dim else ids
+        base = in_dim - len(tail)
+        for i in range(len(tail)):
+            inp[base + i] = float(tail[i])
+        out = session.run_single(inp)
+        ln = min(len(out), vocab)
+        lg = NDArray[float32]([ln])
+        for i in range(ln):
+            lg[i] = out[len(out) - ln + i]
+        # mask: disallowed -> -inf equivalent
+        ok: dict[int, bool] = {}
+        for a in allowed:
+            if a < ln:
+                ok[a] = True
+        for i in range(ln):
+            if i not in ok:
+                lg[i] = -3.4e38
+        nxt = sample_token(lg, cfg.params, ids)
+        ids.append(nxt)
+        cur = cur + tok.decode([nxt])
+    return cur

@@ -87,3 +87,46 @@ public class PagedSequence:
     # logical token -> (page, offset-in-page)
     public def locate(self, pos: int, page_len: int) -> tuple[int, int]:
         return (self.pages[pos // page_len], pos % page_len)
+
+# Shared prefix store: content-hashed token blocks interned once and
+# referenced by many sequences (vLLM-style automatic prefix caching at the
+# block level). Physical rows live here; sequences hold (shared?, page, rows).
+# Memory is shared immediately; skipping recompute additionally requires
+# graph-level prefix attention (packed mask below covers the common case).
+public class PrefixStore:
+    def __init__(self, hidden_dim: int):
+        self.hidden_dim = hidden_dim
+        self.pages: dict[int, NDArray[float32]] = {}  # hash -> rows (page_len*hidden)
+        self.refs: dict[int, int] = {}
+        self.hits: int = 0
+        self.misses: int = 0
+
+    public def block_hash(self, toks: list[int]) -> int:
+        # FNV-1a 64-bit over the token block
+        h = 14695981039346656037
+        for t in toks:
+            h = (h ^ (t & 0xFFFFFFFF)) * 1099511628211 & 0xFFFFFFFFFFFFFFFF
+        return h
+
+    # returns True on hit (rows already stored), False on miss (caller fills)
+    public def intern(self, toks: list[int], page_len: int) -> tuple[int, bool]:
+        h = self.block_hash(toks)
+        if h in self.pages:
+            self.refs[h] = self.refs[h] + 1
+            self.hits = self.hits + 1
+            return (h, True)
+        self.pages[h] = NDArray[float32]([page_len * self.hidden_dim])
+        self.refs[h] = 1
+        self.misses = self.misses + 1
+        return (h, False)
+
+    public def release(self, h: int):
+        if h in self.refs:
+            self.refs[h] = self.refs[h] - 1
+            if self.refs[h] <= 0:
+                self.refs.pop(h)
+                self.pages.pop(h)
+
+    public def hit_rate(self) -> float:
+        tot = self.hits + self.misses
+        return float(self.hits) / tot if tot > 0 else 0.0

@@ -13,9 +13,14 @@ import tv.onnx.parser
 import tv.onnx.translator
 
 public class NamedTensor:
-    def __init__(self, name: str, data: NDArray[float32]):
+    # exactly one payload is set; dtype must match the graph tensor desc
+    # (float32 default, int8 for quantized IO, int for int32 outputs)
+    def __init__(self, name: str, data: NDArray[float32] = None,
+            qdata: NDArray[int8] = None, idata: NDArray[int] = None):
         self.name = name
         self.data = data
+        self.qdata = qdata
+        self.idata = idata
 
 public class InferenceSession:
     def __init__(self, graph: ExecutionGraph, apply_optimizations: bool = True, provider: ExecutionProvider = None):
@@ -49,13 +54,23 @@ public class InferenceSession:
         for inp in inputs:
             if inp.name in self.graph.tensors:
                 desc = self.graph.tensors[inp.name]
-                self.arena.copy_from(desc.offset, inp.data)
+                if inp.qdata is not None:
+                    self.arena.copy_from_int8(desc.offset, inp.qdata)
+                elif inp.idata is not None:
+                    self.arena.copy_from_int32(desc.offset, inp.idata)
+                else:
+                    self.arena.copy_from(desc.offset, inp.data)
         for node in self.graph.nodes:
             node.execute(self.arena)
         for out in outputs:
             if out.name in self.graph.tensors:
                 desc = self.graph.tensors[out.name]
-                self.arena.copy_to(desc.offset, out.data)
+                if out.qdata is not None:
+                    self.arena.copy_to_int8(desc.offset, out.qdata)
+                elif out.idata is not None:
+                    self.arena.copy_to_int32(desc.offset, out.idata)
+                else:
+                    self.arena.copy_to(desc.offset, out.data)
 
     public def run_single(self, input: NDArray[float32], input_name: str = "", output_name: str = "") -> NDArray[float32]:
         in_name = input_name if input_name != "" else (self.graph.inputs[0] if len(self.graph.inputs) > 0 else "input")
@@ -79,3 +94,58 @@ public class InferenceSession:
 # Back-compat API used by TOKENVECTOR_SYNTAX_SPEC.md
 public def load_onnx(model_path: str) -> InferenceSession:
     return InferenceSession.from_onnx_file(model_path)
+
+# --- packed sequence batching: many sequences, ONE forward ---
+# Rows of same-width 2D tensors concatenate; the caller splits outputs back.
+# For attention graphs pass the matching additive block mask (allow within a
+# sequence, large-negative across) as the 4th (mask) input — this is single-
+# GEMM token packing for both linear stacks and attention in one forward.
+public def pack_rows(parts: list[NDArray[float32]]) -> NDArray[float32]:
+    total = 0
+    width = len(parts[0]) if len(parts) > 0 else 0
+    for p in parts:
+        total = total + len(p)
+    out = NDArray[float32]([total])
+    o = 0
+    for p in parts:
+        for i in range(len(p)):
+            out[o] = p[i]
+            o = o + 1
+    return out
+
+public def unpack_rows(packed: NDArray[float32], sizes: list[int]) -> list[NDArray[float32]]:
+    out: list[NDArray[float32]] = []
+    o = 0
+    for s in sizes:
+        part = NDArray[float32]([s])
+        for i in range(s):
+            part[i] = packed[o + i]
+        o = o + s
+        out.append(part)
+    return out
+
+# block mask for packed Q/K/V: qs lens + kvs lens per sequence; allowed pairs
+# get 0.0, cross-sequence pairs get -1e30 (additive mask convention)
+public def pack_block_mask(q_lens: list[int], kv_lens: list[int], kv_offsets: list[int] = []) -> NDArray[float32]:
+    sq = 0
+    for q in q_lens:
+        sq = sq + q
+    sk = 0
+    for k in kv_lens:
+        sk = sk + k
+    m = NDArray[float32]([sq * sk])
+    for i in range(sq * sk):
+        m[i] = -1e30
+    qo = 0
+    ko = 0
+    for s in range(len(q_lens)):
+        off = kv_offsets[s] if s < len(kv_offsets) else 0
+        for i in range(q_lens[s]):
+            for j in range(kv_lens[s]):
+                # causal within sequence when q aligns to kv tail (decode mode)
+                kj = off + i if q_lens[s] == 1 and kv_lens[s] > 1 else j
+                if kj < kv_lens[s]:
+                    m[(qo + i) * sk + ko + j] = 0.0
+        qo = qo + q_lens[s]
+        ko = ko + kv_lens[s]
+    return m

@@ -1,0 +1,239 @@
+// TokenVector Module: ONNX — Model serializer (protobuf writer + export)
+// Emits spec-valid ONNX bytes for float graphs (TV->ORT interop) and QDQ
+// graphs. Wire encoding is pure .tv over int lists; only byte codecs
+// (utf8/float-bits/list->bytes) are host intrinsics, like the parser side.
+
+module tv.onnx.writer
+
+import tv.onnx.models
+import tv.runtime.execution_graph
+import tv.runtime.execution_node
+import tv.numerics.tensor
+
+# --- low-level wire writer (operates on list[int] byte buffers) ---
+def varint(buf: list[int], v: int):
+    n = v
+    if n < 0:
+        n = n + (1 << 64)
+    while n > 127:
+        buf.append((n & 0x7F) | 0x80)
+        n = n >> 7
+    buf.append(n & 0x7F)
+
+def tag(buf: list[int], field: int, wire: int):
+    varint(buf, (field << 3) | wire)
+
+def w_varint(buf: list[int], field: int, v: int):
+    tag(buf, field, 0)
+    varint(buf, v)
+
+def w_bytes(buf: list[int], field: int, payload: list[int]):
+    tag(buf, field, 2)
+    varint(buf, len(payload))
+    for b in payload:
+        buf.append(b)
+
+def w_str(buf: list[int], field: int, s: str):
+    w_bytes(buf, field, utf8_encode(s))
+
+def w_float(buf: list[int], field: int, x: float32):
+    tag(buf, field, 5)
+    bits = float_to_bits(x)
+    buf.append(bits & 0xFF)
+    buf.append((bits >> 8) & 0xFF)
+    buf.append((bits >> 16) & 0xFF)
+    buf.append((bits >> 24) & 0xFF)
+
+def w_packed_float(buf: list[int], field: int, xs: list[float32]):
+    raw: list[int] = []
+    for x in xs:
+        bits = float_to_bits(x)
+        raw.append(bits & 0xFF)
+        raw.append((bits >> 8) & 0xFF)
+        raw.append((bits >> 16) & 0xFF)
+        raw.append((bits >> 24) & 0xFF)
+    w_bytes(buf, field, raw)
+
+def w_packed_int64(buf: list[int], field: int, xs: list[int]):
+    inner: list[int] = []
+    for v in xs:
+        varint(inner, v)
+    w_bytes(buf, field, inner)
+
+# --- TensorProto (float weights via raw_data, int64 dims) ---
+def write_tensor(t: OnnxTensor, data: NDArray[float32]) -> list[int]:
+    buf: list[int] = []
+    w_packed_int64(buf, 1, [int(d) for d in t.dims])
+    w_varint(buf, 2, int(t.dtype))
+    raw: list[int] = []
+    for i in range(len(data)):
+        bits = float_to_bits(data[i])
+        raw.append(bits & 0xFF)
+        raw.append((bits >> 8) & 0xFF)
+        raw.append((bits >> 16) & 0xFF)
+        raw.append((bits >> 24) & 0xFF)
+    w_bytes(buf, 9, raw)
+    w_str(buf, 8, t.name)
+    return buf
+
+# --- ValueInfoProto (name + tensor elem_type + shape) ---
+def write_value_info(name: str, dtype: TensorDataType, shape: list[int]) -> list[int]:
+    dim_bufs: list[int] = []
+    for d in shape:
+        db: list[int] = []
+        w_varint(db, 1, d if d > 0 else 1)
+        dim_bufs.append(db)
+    shape_b: list[int] = []
+    for db in dim_bufs:
+        w_bytes(shape_b, 1, db)
+    tt: list[int] = []
+    w_varint(tt, 1, int(dtype))
+    w_bytes(tt, 2, shape_b)
+    tp: list[int] = []
+    w_bytes(tp, 1, tt)
+    buf: list[int] = []
+    w_str(buf, 1, name)
+    w_bytes(buf, 2, tp)
+    return buf
+
+# --- NodeProto (inputs/outputs/name/op + int/float/string attrs) ---
+def write_node(n: OnnxNode) -> list[int]:
+    buf: list[int] = []
+    for s in n.inputs:
+        w_str(buf, 1, s)
+    for s in n.outputs:
+        w_str(buf, 2, s)
+    w_str(buf, 3, n.name)
+    w_str(buf, 4, n.op_type)
+    for key in n.attrs:
+        a = n.attrs[key]
+        ab: list[int] = []
+        w_str(ab, 1, a.name)
+        if a.type == AttributeType.Float:
+            w_float(ab, 2, a.f)
+        elif a.type == AttributeType.Int:
+            w_varint(ab, 3, int(a.i))
+        elif a.type == AttributeType.String:
+            w_str(ab, 4, a.s)
+        elif len(a.floats) > 0:
+            w_packed_float(ab, 7, a.floats)
+        elif len(a.ints) > 0:
+            w_packed_int64(ab, 8, [int(x) for x in a.ints])
+        w_varint(ab, 20, int(a.type))
+        w_bytes(buf, 5, ab)
+    return buf
+
+# --- full float-graph export: ExecutionGraph -> ONNX ModelProto bytes ---
+# Initializer dtypes/shapes come from TensorDescs; every node keeps its
+# original ONNX op name where known (reverse map), else Identity.
+public def export_model(g: ExecutionGraph, producer: str = "tokenvector", opset: int = 17) -> bytes:
+    ibuf: list[int] = []
+    for name in g.initializers:
+        t = OnnxTensor(name)
+        d = g.tensors[name]
+        t.dims = [d.shape[i] for i in range(len(d.shape))]
+        t.dtype = d.dtype
+        w_bytes(ibuf, 5, write_tensor(t, g.initializers[name]))
+    nbuf: list[int] = []
+    for node in g.nodes:
+        on = OnnxNode()
+        on.name = node.name
+        on.op_type = _back_map(node.op_type)
+        on.inputs = list(node.inputs)
+        on.outputs = list(node.outputs)
+        w_bytes(nbuf, 1, write_node(on))
+    vbuf: list[int] = []
+    for nm in g.inputs:
+        d = g.tensors[nm]
+        w_bytes(vbuf, 11, write_value_info(nm, d.dtype, d.shape))
+    obuf: list[int] = []
+    for nm in g.outputs:
+        d = g.tensors[nm]
+        w_bytes(obuf, 12, write_value_info(nm, d.dtype, d.shape))
+    gr: list[int] = []
+    gr.extend(nbuf)
+    if g.name != "":
+        w_str(gr, 2, g.name)
+    gr.extend(ibuf)
+    gr.extend(vbuf)
+    gr.extend(obuf)
+    # opset import (default domain)
+    oi: list[int] = []
+    w_str(oi, 1, "")
+    w_varint(oi, 2, opset)
+    model: list[int] = []
+    w_varint(model, 1, 8)
+    w_str(model, 3, producer)
+    w_bytes(model, 13, oi)
+    w_bytes(model, 8, gr)
+    return bytes_from_list(model)
+
+def _back_map(op: OperatorType) -> str:
+    if op == OperatorType.FusedLinear: return "Gemm"
+    if op == OperatorType.MatMul: return "MatMul"
+    if op == OperatorType.Conv2D or op == OperatorType.FusedConv2D: return "Conv"
+    if op == OperatorType.RMSNorm: return "SimplifiedLayerNormalization"
+    if op == OperatorType.LayerNorm: return "LayerNormalization"
+    if op == OperatorType.Attention: return "Attention"
+    if op == OperatorType.Relu: return "Relu"
+    if op == OperatorType.Gelu: return "Gelu"
+    if op == OperatorType.Silu: return "Silu"
+    if op == OperatorType.Sigmoid: return "Sigmoid"
+    if op == OperatorType.Tanh: return "Tanh"
+    if op == OperatorType.LeakyRelu: return "LeakyRelu"
+    if op == OperatorType.Elu: return "Elu"
+    if op == OperatorType.Softplus: return "Softplus"
+    if op == OperatorType.Add: return "Add"
+    if op == OperatorType.Sub: return "Sub"
+    if op == OperatorType.Mul: return "Mul"
+    if op == OperatorType.Div: return "Div"
+    if op == OperatorType.Pow: return "Pow"
+    if op == OperatorType.Sqrt: return "Sqrt"
+    if op == OperatorType.Exp: return "Exp"
+    if op == OperatorType.Log: return "Log"
+    if op == OperatorType.Neg: return "Neg"
+    if op == OperatorType.Reciprocal: return "Reciprocal"
+    if op == OperatorType.Abs: return "Abs"
+    if op == OperatorType.Min: return "Min"
+    if op == OperatorType.Max: return "Max"
+    if op == OperatorType.Mean: return "Mean"
+    if op == OperatorType.Sum: return "Sum"
+    if op == OperatorType.Where: return "Where"
+    if op == OperatorType.Clip: return "Clip"
+    if op == OperatorType.Cast: return "Cast"
+    if op == OperatorType.Dropout: return "Dropout"
+    if op == OperatorType.Softmax: return "Softmax"
+    if op == OperatorType.LogSoftmax: return "LogSoftmax"
+    if op == OperatorType.Trilu: return "Trilu"
+    if op == OperatorType.TopK: return "TopK"
+    if op == OperatorType.Gather: return "Gather"
+    if op == OperatorType.Slice: return "Slice"
+    if op == OperatorType.Split: return "Split"
+    if op == OperatorType.Squeeze: return "Squeeze"
+    if op == OperatorType.Unsqueeze: return "Unsqueeze"
+    if op == OperatorType.Expand: return "Expand"
+    if op == OperatorType.Reshape: return "Reshape"
+    if op == OperatorType.Flatten: return "Flatten"
+    if op == OperatorType.Transpose: return "Transpose"
+    if op == OperatorType.Concat: return "Concat"
+    if op == OperatorType.Pad: return "Pad"
+    if op == OperatorType.ReduceMean: return "ReduceMean"
+    if op == OperatorType.ReduceSum: return "ReduceSum"
+    if op == OperatorType.ReduceMax: return "ReduceMax"
+    if op == OperatorType.ArgMax: return "ArgMax"
+    if op == OperatorType.Shape: return "Shape"
+    if op == OperatorType.Size: return "Size"
+    if op == OperatorType.GlobalAveragePool: return "GlobalAveragePool"
+    if op == OperatorType.MaxPool: return "MaxPool"
+    if op == OperatorType.AveragePool: return "AveragePool"
+    if op == OperatorType.BatchNormalization: return "BatchNormalization"
+    if op == OperatorType.Gemm: return "Gemm"
+    if op == OperatorType.QuantizeLinear: return "QuantizeLinear"
+    if op == OperatorType.DequantizeLinear: return "DequantizeLinear"
+    if op == OperatorType.QLinearMatMul: return "QLinearMatMul"
+    if op == OperatorType.QuantizedGemm: return "QLinearMatMul"
+    return "Identity"
+
+extern def utf8_encode(s: str) -> list[int]
+extern def float_to_bits(x: float32) -> int
+extern def bytes_from_list(xs: list[int]) -> bytes

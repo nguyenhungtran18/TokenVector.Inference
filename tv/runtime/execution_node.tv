@@ -77,6 +77,20 @@ public enum OperatorType:
     QuantizeLinear = 63
     DequantizeLinear = 64
     QLinearMatMul = 65
+    GatherND = 66
+    ScatterElements = 67
+    Range = 68
+    EyeLike = 69
+    ConstantOfShape = 70
+    CumSum = 71
+    InstanceNormalization = 72
+    Mish = 73
+    PRelu = 74
+    Resize = 75
+    Einsum = 76
+    QLinearConv = 77
+    MatMulInteger = 78
+    DynamicQuantizeLinear = 79
 
 public class ExecutionNode:
     def __init__(self, name: str, op: OperatorType):
@@ -107,6 +121,14 @@ public class ExecutionNode:
         self.topk_largest: int = 1
         self.topk_sorted: int = 1
         self.qlinear_axis: int = 1
+        self.cum_exclusive: int = 0
+        self.cum_reverse: int = 0
+        self.prelu_slope: float32 = 0.25
+        self.const_fill: float32 = 0.0
+        self.eq: str = ""
+        self.rs_mode: int = 0
+        self.rs_ctm: int = 0
+        self.rs_nearest: int = 0
         # quantization params
         self.scale_a: float32 = 1.0
         self.scale_b: float32 = 1.0
@@ -201,6 +223,34 @@ public class ExecutionNode:
             self._exec_dequantize_linear(arena)
         elif op == OperatorType.QLinearMatMul:
             self._exec_qlinear_matmul(arena)
+        elif op == OperatorType.GatherND:
+            self._exec_gather_nd(arena)
+        elif op == OperatorType.ScatterElements:
+            self._exec_scatter(arena)
+        elif op == OperatorType.Range:
+            self._exec_range(arena)
+        elif op == OperatorType.EyeLike:
+            self._exec_eye_like(arena)
+        elif op == OperatorType.ConstantOfShape:
+            self._exec_const_of_shape(arena)
+        elif op == OperatorType.CumSum:
+            self._exec_cumsum(arena)
+        elif op == OperatorType.InstanceNormalization:
+            self._exec_instance_norm(arena)
+        elif op == OperatorType.Mish:
+            self._exec_mish(arena)
+        elif op == OperatorType.PRelu:
+            self._exec_prelu(arena)
+        elif op == OperatorType.Resize:
+            self._exec_resize(arena)
+        elif op == OperatorType.Einsum:
+            self._exec_einsum(arena)
+        elif op == OperatorType.QLinearConv:
+            self._exec_qlinear_conv(arena)
+        elif op == OperatorType.MatMulInteger:
+            self._exec_matmul_integer(arena)
+        elif op == OperatorType.DynamicQuantizeLinear:
+            self._exec_dyn_quant(arena)
         elif op == OperatorType.Attention:
             self._exec_attention(arena)
         elif op == OperatorType.QuantizedGemm:
@@ -943,6 +993,390 @@ public class ExecutionNode:
                     acc = acc + (int(a[i * k + p]) - zpa) * (int(b[p * n + j]) - zpw)
                 y[i * n + j] = max(-128, min(127, int(round(acc * mult)) + zpy))
 
+    # GatherND: indices[..., K] index into data's first K dims
+    def _exec_gather_nd(self, arena: ExecutionMemoryArena):
+        dd = self.input_descs[0]
+        id = self.input_descs[1]
+        x = arena.get_float_span(dd.offset, dd.element_count)
+        idx = arena.get_float_span(id.offset, id.element_count)
+        y = arena.get_float_span(self.output_descs[0].offset, self.output_descs[0].element_count)
+        k = id.shape[len(id.shape) - 1]
+        slice_len = 1
+        for i in range(k, len(dd.shape)):
+            slice_len = slice_len * dd.shape[i]
+        dstr = _strides(dd.shape)
+        n_idx = id.element_count // k if k > 0 else 0
+        for s in range(n_idx):
+            off = 0
+            for j in range(k):
+                ii = int(idx[s * k + j])
+                if ii < 0: ii = ii + dd.shape[j]
+                if ii < 0 or ii >= dd.shape[j]:
+                    raise Arg(f"gathernd index {ii} out of range")
+                off = off + ii * dstr[j]
+            for t in range(slice_len):
+                y[s * slice_len + t] = x[off + t]
+
+    # ScatterElements (reduction=none): out = data; out[idx] = updates, axis-wise
+    def _exec_scatter(self, arena: ExecutionMemoryArena):
+        dd = self.input_descs[0]
+        x = arena.get_float_span(dd.offset, dd.element_count)
+        idx = arena.get_float_span(self.input_descs[1].offset, self.input_descs[1].element_count)
+        upd = arena.get_float_span(self.input_descs[2].offset, self.input_descs[2].element_count)
+        y = arena.get_float_span(self.output_descs[0].offset, self.output_descs[0].element_count)
+        for i in range(len(x)):
+            y[i] = x[i]
+        rank = len(dd.shape)
+        ax = self.axis if self.axis >= 0 else self.axis + rank
+        outer = 1
+        for i in range(ax):
+            outer = outer * dd.shape[i]
+        dim = dd.shape[ax]
+        inner = 1
+        for i in range(ax + 1, rank):
+            inner = inner * dd.shape[i]
+        for o in range(outer):
+            for j in range(dim):
+                ii = int(idx[o * dim * inner + j * inner]) if inner > 0 else int(idx[o * dim + j])
+                if ii < 0: ii = ii + dim
+                if ii < 0 or ii >= dim:
+                    raise Arg(f"scatter index {ii} out of range")
+                for t in range(inner):
+                    y[(o * dim + ii) * inner + t] = upd[(o * dim + j) * inner + t]
+
+    # Range(start, limit, delta): scalars in arena
+    def _exec_range(self, arena: ExecutionMemoryArena):
+        s = arena.get_float_span(self.input_descs[0].offset, 1)[0]
+        e = arena.get_float_span(self.input_descs[1].offset, 1)[0]
+        d = arena.get_float_span(self.input_descs[2].offset, 1)[0]
+        y = arena.get_float_span(self.output_descs[0].offset, self.output_descs[0].element_count)
+        if d == 0.0:
+            raise Arg("range delta must be non-zero")
+        v = s
+        i = 0
+        if d > 0.0:
+            while v < e and i < len(y):
+                y[i] = v
+                v = v + d
+                i = i + 1
+        else:
+            while v > e and i < len(y):
+                y[i] = v
+                v = v + d
+                i = i + 1
+
+    def _exec_eye_like(self, arena: ExecutionMemoryArena):
+        x = self.input_descs[0]
+        y = arena.get_float_span(self.output_descs[0].offset, self.output_descs[0].element_count)
+        if len(x.shape) != 2:
+            raise Shape("EyeLike requires rank 2")
+        for i in range(x.shape[0]):
+            for j in range(x.shape[1]):
+                y[i * x.shape[1] + j] = 1.0 if i == j else 0.0
+
+    def _exec_const_of_shape(self, arena: ExecutionMemoryArena):
+        y = arena.get_float_span(self.output_descs[0].offset, self.output_descs[0].element_count)
+        for i in range(len(y)):
+            y[i] = self.const_fill
+
+    # CumSum along axis (default 0): exclusive/reverse flags
+    def _exec_cumsum(self, arena: ExecutionMemoryArena):
+        dd = self.input_descs[0]
+        x = arena.get_float_span(dd.offset, dd.element_count)
+        y = arena.get_float_span(self.output_descs[0].offset, self.output_descs[0].element_count)
+        rank = len(dd.shape)
+        ax = self.axis
+        if len(self.axes) > 0:
+            ax = self.axes[0]
+        if ax < 0: ax = ax + rank
+        if ax < 0 or ax >= rank:
+            raise Arg("cumsum axis out of range")
+        outer = 1
+        for i in range(ax):
+            outer = outer * dd.shape[i]
+        dim = dd.shape[ax]
+        inner = 1
+        for i in range(ax + 1, rank):
+            inner = inner * dd.shape[i]
+        for o in range(outer):
+            for t in range(inner):
+                acc = 0.0
+                order = list(range(dim))
+                if self.cum_reverse != 0:
+                    order = order[::-1]
+                for si in range(dim):
+                    j = order[si]
+                    v = x[(o * dim + j) * inner + t]
+                    if self.cum_exclusive == 0:
+                        acc = acc + v
+                        y[(o * dim + j) * inner + t] = acc
+                    else:
+                        y[(o * dim + j) * inner + t] = acc
+                        acc = acc + v
+
+    # InstanceNormalization: normalize over spatial dims per (N, C)
+    def _exec_instance_norm(self, arena: ExecutionMemoryArena):
+        dd = self.input_descs[0]
+        x = arena.get_float_span(dd.offset, dd.element_count)
+        y = arena.get_float_span(self.output_descs[0].offset, self.output_descs[0].element_count)
+        n = dd.shape[0] if len(dd.shape) > 0 else 1
+        c = dd.shape[1] if len(dd.shape) > 1 else 1
+        spatial = dd.element_count // (n * c) if n * c > 0 else 1
+        sc = arena.get_float_span(self.input_descs[1].offset, self.input_descs[1].element_count)
+        bi = arena.get_float_span(self.input_descs[2].offset, self.input_descs[2].element_count)
+        for b in range(n):
+            for ch in range(c):
+                base = (b * c + ch) * spatial
+                s = 0.0
+                for t in range(spatial):
+                    s = s + x[base + t]
+                mean = s / spatial if spatial > 0 else 0.0
+                vs = 0.0
+                for t in range(spatial):
+                    df = x[base + t] - mean
+                    vs = vs + df * df
+                inv = 1.0 / sqrt(vs / spatial + self.epsilon) if spatial > 0 else 1.0
+                for t in range(spatial):
+                    y[base + t] = (x[base + t] - mean) * inv * sc[ch] + bi[ch]
+
+    def _exec_mish(self, arena: ExecutionMemoryArena):
+        x = arena.get_float_span(self.input_descs[0].offset, self.input_descs[0].element_count)
+        y = arena.get_float_span(self.output_descs[0].offset, self.output_descs[0].element_count)
+        for i in range(len(x)):
+            # mish(x) = x * tanh(softplus(x)), stable branch
+            ax = x[i] if x[i] >= 0.0 else -x[i]
+            sp = (x[i] if x[i] > 0.0 else 0.0) + log(1.0 + exp(-ax))
+            if sp > 10.0:
+                y[i] = x[i]
+            elif sp < -10.0:
+                y[i] = x[i] * -1.0
+            else:
+                e = exp(2.0 * sp)
+                y[i] = x[i] * (e - 1.0) / (e + 1.0)
+
+    def _exec_prelu(self, arena: ExecutionMemoryArena):
+        x = arena.get_float_span(self.input_descs[0].offset, self.input_descs[0].element_count)
+        s = arena.get_float_span(self.input_descs[1].offset, self.input_descs[1].element_count)
+        y = arena.get_float_span(self.output_descs[0].offset, self.output_descs[0].element_count)
+        same = len(s) == len(x)
+        for i in range(len(x)):
+            sl = s[i] if same else (s[0] if len(s) == 1 else s[i % len(s)])
+            y[i] = x[i] if x[i] >= 0.0 else sl * x[i]
+
+    # Resize NCHW: nearest / bilinear, CTM asymmetric / half_pixel
+    def _exec_resize(self, arena: ExecutionMemoryArena):
+        dd = self.input_descs[0]
+        x = arena.get_float_span(dd.offset, dd.element_count)
+        y = arena.get_float_span(self.output_descs[0].offset, self.output_descs[0].element_count)
+        n = dd.shape[0]
+        c = dd.shape[1]
+        ih = dd.shape[2]
+        iw = dd.shape[3]
+        oh = self.output_descs[0].shape[2]
+        ow = self.output_descs[0].shape[3]
+        sh = oh / ih
+        sw = ow / iw
+        for b in range(n):
+            for ch in range(c):
+                for o in range(oh):
+                    src_h = self._rs_coord(o, oh, ih, sh)
+                    for u in range(ow):
+                        src_w = self._rs_coord(u, ow, iw, sw)
+                        if self.rs_mode == 0:
+                            h = int(src_h)
+                            w = int(src_w)
+                            if self.rs_nearest == 1:
+                                h = int(src_h + 0.5)
+                                w = int(src_w + 0.5)
+                            elif self.rs_nearest == 2:
+                                h = int(src_h + 1.0) if src_h != int(src_h) else int(src_h)
+                                w = int(src_w + 1.0) if src_w != int(src_w) else int(src_w)
+                            if h < 0: h = 0
+                            if h >= ih: h = ih - 1
+                            if w < 0: w = 0
+                            if w >= iw: w = iw - 1
+                            y[((b * c + ch) * oh + o) * ow + u] = x[((b * c + ch) * ih + h) * iw + w]
+                        else:
+                            h0 = int(src_h)
+                            w0 = int(src_w)
+                            fh = src_h - h0
+                            fw = src_w - w0
+                            h1 = h0 + 1 if h0 + 1 < ih else h0
+                            w1 = w0 + 1 if w0 + 1 < iw else w0
+                            if h0 < 0: h0 = 0
+                            if w0 < 0: w0 = 0
+                            v00 = x[((b * c + ch) * ih + h0) * iw + w0]
+                            v01 = x[((b * c + ch) * ih + h0) * iw + w1]
+                            v10 = x[((b * c + ch) * ih + h1) * iw + w0]
+                            v11 = x[((b * c + ch) * ih + h1) * iw + w1]
+                            y[((b * c + ch) * oh + o) * ow + u] = v00 * (1.0 - fh) * (1.0 - fw) + v01 * (1.0 - fh) * fw + v10 * fh * (1.0 - fw) + v11 * fh * fw
+
+    def _rs_coord(self, o: int, out_len: int, in_len: int, scale: float32) -> float32:
+        if self.rs_ctm == 1:
+            return ((o + 0.5) / scale) - 0.5
+        return o / scale
+
+    # Generic 1-/2-operand einsum over single-letter labels with optional
+    # leading "..." batch dims (must match exactly across sides). Diagonals
+    # (repeated label in one operand) and reductions supported. O(1) memory.
+    def _exec_einsum(self, arena: ExecutionMemoryArena):
+        parts = _split2(self.eq, "->")
+        sides = _split2(parts[0], ",")
+        out_labs = parts[1] if len(parts) > 1 else ""
+        la = sides[0]
+        lb = sides[1] if len(sides) > 1 else ""
+        ca = la[3:] if la[:3] == "..." else la
+        cb = lb[3:] if lb[:3] == "..." else lb
+        co = out_labs[3:] if out_labs[:3] == "..." else out_labs
+        sa = self.input_descs[0].shape
+        sb = self.input_descs[1].shape if len(self.input_descs) > 1 else []
+        ba = sa[:len(sa) - len(ca)] if len(ca) > 0 else list(sa)
+        bb = sb[:len(sb) - len(cb)] if len(cb) > 0 and len(sb) > 0 else []
+        if len(bb) > 0 and bb != ba:
+            raise Shape("einsum batch dims must match exactly")
+        batch = ba
+        a = arena.get_float_span(self.input_descs[0].offset, self.input_descs[0].element_count)
+        b = arena.get_float_span(self.input_descs[1].offset, self.input_descs[1].element_count) if len(self.input_descs) > 1 else None
+        y = arena.get_float_span(self.output_descs[0].offset, self.output_descs[0].element_count)
+        sizes: dict[str, int] = {}
+        for i in range(len(ca)):
+            sizes[ca[i:i + 1]] = sa[len(sa) - len(ca) + i]
+        for i in range(len(cb)):
+            L = cb[i:i + 1]
+            sz = sb[len(sb) - len(cb) + i]
+            if L in sizes and sizes[L] != sz:
+                raise Shape("einsum label size mismatch for '" + L + "'")
+            sizes[L] = sz
+        red: list[str] = []
+        for L in sizes:
+            if co.find(L) < 0 and L not in red:
+                red.append(L)
+        nb = 1
+        for d in batch:
+            nb = nb * d
+        # decode batch coords per flat index
+        for bf in range(nb):
+            rem = bf
+            bc: list[int] = [0] * len(batch)
+            for i in range(len(batch) - 1, -1, -1):
+                bc[i] = rem % batch[i]
+                rem = rem // batch[i]
+            # output core coords
+            nout = 1
+            for i in range(len(co)):
+                nout = nout * sizes[co[i:i + 1]]
+            for of in range(nout):
+                rem = of
+                val: dict[str, int] = {}
+                for i in range(len(co) - 1, -1, -1):
+                    L = co[i:i + 1]
+                    val[L] = rem % sizes[L]
+                    rem = rem // sizes[L]
+                acc = 0.0
+                nred = 1
+                for L in red:
+                    nred = nred * sizes[L]
+                for rf in range(nred):
+                    rem = rf
+                    for i in range(len(red) - 1, -1, -1):
+                        val[red[i]] = rem % sizes[red[i]]
+                        rem = rem // sizes[red[i]]
+                    acc = acc + a[_einsum_off(val, bc, batch, sa, ca)] * (b[_einsum_off(val, bc, batch, sb, cb)] if b is not None else 1.0)
+                # output offset = batch part + core part
+                yo = bf * nout + of
+                y[yo] = acc
+
+    # QLinearConv (x, x_s, x_zp, w, w_s, w_zp, y_s, y_zp, [B]): streaming
+    # dequant conv, O(1) extra memory, int8 output.
+    def _exec_qlinear_conv(self, arena: ExecutionMemoryArena):
+        xd = self.input_descs[0]
+        wd = self.input_descs[3]
+        yd = self.output_descs[0]
+        x = arena.get_int8_span(xd.offset, xd.element_count)
+        w = arena.get_int8_span(wd.offset, wd.element_count)
+        y = arena.get_int8_span(yd.offset, yd.element_count)
+        xs = arena.get_float_span(self.input_descs[1].offset, 1)[0]
+        xzp = int(arena.get_float_span(self.input_descs[2].offset, 1)[0])
+        ws = arena.get_float_span(self.input_descs[4].offset, 1)[0]
+        wzp = int(arena.get_float_span(self.input_descs[5].offset, 1)[0])
+        ys = arena.get_float_span(self.input_descs[6].offset, 1)[0]
+        if ys == 0.0: ys = 1.0
+        yzp = int(arena.get_float_span(self.input_descs[7].offset, 1)[0])
+        has_b = len(self.input_descs) > 8
+        n = xd.shape[0]
+        ic = xd.shape[1]
+        ih = xd.shape[2]
+        iw = xd.shape[3]
+        oc = wd.shape[0]
+        kh = wd.shape[2]
+        kw = wd.shape[3]
+        sh = self.strides[0] if len(self.strides) > 0 else 1
+        sw = self.strides[1] if len(self.strides) > 1 else sh
+        ph = self.pads[0] if len(self.pads) > 0 else 0
+        pw = self.pads[1] if len(self.pads) > 1 else ph
+        oh = (ih + 2 * ph - kh) // sh + 1
+        ow = (iw + 2 * pw - kw) // sw + 1
+        mult = xs * ws / ys
+        for b in range(n):
+            for o in range(oc):
+                for r in range(oh):
+                    for u in range(ow):
+                        acc = 0
+                        for c in range(ic):
+                            for kr in range(kh):
+                                h = r * sh - ph + kr
+                                if h >= 0 and h < ih:
+                                    for kc in range(kw):
+                                        ww = u * sw - pw + kc
+                                        if ww >= 0 and ww < iw:
+                                            xv = int(x[((b * ic + c) * ih + h) * iw + ww]) - xzp
+                                            wv = int(w[((o * ic + c) * kh + kr) * kw + kc]) - wzp
+                                            acc = acc + xv * wv
+                        v = int(round(acc * mult)) + yzp
+                        if has_b:
+                            v = v + int(arena.get_float_span(self.input_descs[8].offset, self.input_descs[8].element_count)[o])
+                        y[((b * oc + o) * oh + r) * ow + u] = max(-128, min(127, v))
+
+    # MatMulInteger: int8 x int8 -> int32, no scales. Needs int32 arena views.
+    def _exec_matmul_integer(self, arena: ExecutionMemoryArena):
+        ad = self.input_descs[0]
+        bd = self.input_descs[1]
+        a = arena.get_int8_span(ad.offset, ad.element_count)
+        b = arena.get_int8_span(bd.offset, bd.element_count)
+        y = arena.get_int32_span(self.output_descs[0].offset, self.output_descs[0].element_count)
+        m = ad.shape[0] if len(ad.shape) > 1 else 1
+        k = ad.shape[1] if len(ad.shape) > 1 else ad.element_count
+        n = bd.shape[1] if len(bd.shape) > 1 else bd.element_count
+        for i in range(m):
+            for j in range(n):
+                acc = 0
+                for p in range(k):
+                    acc = acc + int(a[i * k + p]) * int(b[p * n + j])
+                y[i * n + j] = acc
+
+    # DynamicQuantizeLinear: derive scale/zp from data range (uint8 out).
+    # Stored into int8 view with +128 shift (0..255 <-> -128..127).
+    def _exec_dyn_quant(self, arena: ExecutionMemoryArena):
+        dd = self.input_descs[0]
+        x = arena.get_float_span(dd.offset, dd.element_count)
+        y = arena.get_int8_span(self.output_descs[0].offset, self.output_descs[0].element_count)
+        ys = arena.get_float_span(self.output_descs[1].offset, 1)
+        yz = arena.get_float_span(self.output_descs[2].offset, 1)
+        mn = x[0]
+        mx = x[0]
+        for i in range(1, len(x)):
+            if x[i] < mn: mn = x[i]
+            if x[i] > mx: mx = x[i]
+        if mn > 0.0: mn = 0.0
+        if mx < 0.0: mx = 0.0
+        if mx - mn < 1e-8: mx = mn + 1e-8
+        sc = (mx - mn) / 255.0
+        zp = max(0, min(255, int(round(-mn / sc))))
+        ys[0] = sc
+        yz[0] = float(zp)
+        for i in range(len(x)):
+            y[i] = max(-128, min(127, max(0, min(255, int(round(x[i] / sc)) + zp)) - 128))
+
     def _exec_concat(self, arena: ExecutionMemoryArena):
         yd = self.output_descs[0]
         y = arena.get_float_span(yd.offset, yd.element_count)
@@ -1038,6 +1472,19 @@ public class ExecutionNode:
         b = self.input_descs[1]
         return b.shape[0] if len(b.shape) > 1 else b.element_count
 
+# split without relying on str.split availability
+def _split2(s: str, sep: str) -> list[str]:
+    out: list[str] = []
+    rest = s
+    while True:
+        i = rest.find(sep)
+        if i < 0:
+            out.append(rest)
+            break
+        out.append(rest[:i])
+        rest = rest[i + len(sep):]
+    return out
+
 # row-major strides for a shape
 def _strides(shape: list[int]) -> list[int]:
     n = len(shape)
@@ -1057,6 +1504,24 @@ def _read_ints(arena: ExecutionMemoryArena, descs: list[TensorDesc], pos: int) -
     for i in range(len(v)):
         out.append(int(v[i]))
     return out
+
+# operand offset for einsum: batch part + core labels (diagonals share coords)
+def _einsum_off(val: dict[str, int], bc: list[int], batch: list[int], shape: list[int], core: str) -> int:
+    nb = 1
+    for d in batch:
+        nb = nb * d
+    core_n = 1
+    for i in range(len(shape) - len(batch), len(shape)):
+        core_n = core_n * shape[i]
+    bf = 0
+    for i in range(len(bc)):
+        bf = bf * batch[i] + bc[i]
+    st = _strides(shape)
+    off = bf * core_n
+    base = len(shape) - len(core)
+    for i in range(len(core)):
+        off = off + val[core[i:i + 1]] * st[base + i]
+    return off
 
 # output flat index for a reduction input element n
 def _reduce_out_index(n: int, shape: list[int], src_st: list[int], axes: list[int], keepdims: int, out_shape: list[int]) -> int:

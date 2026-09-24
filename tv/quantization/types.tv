@@ -48,7 +48,20 @@ public class FP8E5M2:
     public def to_float(self) -> float32:
         return native_fp8_e5m2_decode(self.value)
 
+# FP16 (1-5-10, IEEE): compute path mirrors FP8 (decode-on-the-fly GEMM).
+public class FP16:
+    def __init__(self, v: int = 0):
+        self.value: int = v & 0xFFFF
+
+    public static def from_float(x: float32) -> FP16:
+        return FP16(native_f16_encode(x))
+
+    public def to_float(self) -> float32:
+        return native_f16_decode(self.value)
+
 extern def native_fp8_e4m3_encode(x: float32) -> int
 extern def native_fp8_e4m3_decode(v: int) -> float32
 extern def native_fp8_e5m2_encode(x: float32) -> int
 extern def native_fp8_e5m2_decode(v: int) -> float32
+extern def native_f16_encode(x: float32) -> int
+extern def native_f16_decode(v: int) -> float32

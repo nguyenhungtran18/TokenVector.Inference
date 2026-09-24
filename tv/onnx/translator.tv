@@ -17,12 +17,28 @@ public class UnsupportedOp:
 public def translate(model: OnnxModel) -> ExecutionGraph:
     gp = model.graph
     g = ExecutionGraph(gp.name if gp.name != "" else "OnnxExecutionGraph")
-    # 1. initializers
+    # 1. initializers (float/shaped + int8 quantized weights for QDQ models)
     for init in gp.initializers:
         shape: list[int] = [int(d) for d in init.dims]
-        arr = init.extract_float_array()
         if len(shape) == 0:
             shape = [1]
+        if init.dtype == TensorDataType.Int8 or init.dtype == TensorDataType.Uint8:
+            nq = 1
+            for d in shape:
+                nq = nq * d
+            qd = NDArray[int8](shape)
+            if init.raw is not None and len(init.raw) >= nq:
+                for i in range(nq):
+                    v = init.raw[i]
+                    qd[i] = v - 256 if v > 127 else v
+            else:
+                src32 = init.extract_int32_array()
+                for i in range(min(len(src32), nq)):
+                    qd[i] = max(-128, min(127, src32[i] - (256 if init.dtype == TensorDataType.Uint8 else 0)))
+            g.initializers_int8[init.name] = qd
+            g.get_or_create_tensor(init.name, shape, init.dtype)
+            continue
+        arr = init.extract_float_array()
         nd = NDArray[float32](shape)
         src = arr
         n = min(len(src), len(nd))
@@ -41,10 +57,13 @@ public def translate(model: OnnxModel) -> ExecutionGraph:
         shape = [int(d if d > 0 else 1) for d in out.dims]
         g.outputs.append(out.name)
         g.get_or_create_tensor(out.name, shape, out.dtype)
+    # 3b. expand control-flow (If/Loop) and recurrent (LSTM/GRU/RNN) ops into
+    # primitive subgraphs. Everything downstream sees only ejecutable ops.
+    onnx_nodes = _expand_nodes(g, gp.nodes)
     # 4. nodes (Constant ops fold straight into initializers — no runtime node)
     raw: list[ExecutionNode] = []
-    for i in range(len(gp.nodes)):
-        on = gp.nodes[i]
+    for i in range(len(onnx_nodes)):
+        on = onnx_nodes[i]
         if on.op_type == "Constant":
             _fold_constant(g, on, i)
             continue
@@ -83,6 +102,23 @@ public def translate(model: OnnxModel) -> ExecutionGraph:
         if "sorted" in on.attrs: en.topk_sorted = int(on.attrs["sorted"].i)
         if on.op_type in ["QuantizeLinear", "DequantizeLinear"] and "axis" in on.attrs:
             en.qlinear_axis = int(on.attrs["axis"].i)
+        if "exclusive" in on.attrs: en.cum_exclusive = int(on.attrs["exclusive"].i)
+        if "reverse" in on.attrs: en.cum_reverse = int(on.attrs["reverse"].i)
+        if "mode" in on.attrs:
+            m = on.attrs["mode"].s
+            en.rs_mode = 1 if m == "linear" else 0
+        if "coordinate_transformation_mode" in on.attrs:
+            en.rs_ctm = 1 if on.attrs["coordinate_transformation_mode"].s == "half_pixel" else 0
+        if "nearest_mode" in on.attrs:
+            nm = on.attrs["nearest_mode"].s
+            en.rs_nearest = 1 if nm == "round_prefer_floor" else (2 if nm == "ceil" else 0)
+        if "equation" in on.attrs: en.eq = on.attrs["equation"].s
+        if on.op_type == "ConstantOfShape" and "value" in on.attrs:
+            t = on.attrs["value"].t
+            if t is not None:
+                vals = t.extract_float_array()
+                if len(vals) == 1:
+                    en.const_fill = vals[0]
         # Gemm with default alpha/beta + bias folds to FusedLinear; general case keeps Gemm
         if on.op_type == "Gemm":
             a = on.attrs["alpha"].f if "alpha" in on.attrs else 1.0
@@ -160,6 +196,20 @@ public def map_op(op: str) -> OperatorType:
     if op == "QuantizeLinear": return OperatorType.QuantizeLinear
     if op == "DequantizeLinear": return OperatorType.DequantizeLinear
     if op == "QLinearMatMul": return OperatorType.QLinearMatMul
+    if op == "GatherND": return OperatorType.GatherND
+    if op == "ScatterElements": return OperatorType.ScatterElements
+    if op == "Range": return OperatorType.Range
+    if op == "EyeLike": return OperatorType.EyeLike
+    if op == "ConstantOfShape": return OperatorType.ConstantOfShape
+    if op == "CumSum": return OperatorType.CumSum
+    if op == "InstanceNormalization": return OperatorType.InstanceNormalization
+    if op == "Mish": return OperatorType.Mish
+    if op == "PRelu": return OperatorType.PRelu
+    if op == "Resize" or op == "Upsample": return OperatorType.Resize
+    if op == "Einsum": return OperatorType.Einsum
+    if op == "QLinearConv": return OperatorType.QLinearConv
+    if op == "MatMulInteger": return OperatorType.MatMulInteger
+    if op == "DynamicQuantizeLinear": return OperatorType.DynamicQuantizeLinear
     raise UnsupportedOp(f"ONNX op '{op}' is not supported by tv.runtime")
 
 # Constant -> initializer (value tensor / value_float(s) / value_int(s))
@@ -382,6 +432,73 @@ def _infer_node_shapes(node: ExecutionNode, ins: list[list[int]], g: ExecutionGr
         m = ins[0][0] if len(ins[0]) > 1 else 1
         n = ins[3][1] if len(ins[3]) > 1 else ins[3][len(ins[3]) - 1]
         return [[m, n]]
+    if op == OperatorType.GatherND and len(ins) >= 2:
+        k = ins[1][len(ins[1]) - 1]
+        return [ins[1][:len(ins[1]) - 1] + ins[0][k:]]
+    if op in [OperatorType.ScatterElements, OperatorType.CumSum, OperatorType.EyeLike,
+              OperatorType.InstanceNormalization, OperatorType.Mish, OperatorType.PRelu] and len(ins) > 0:
+        return [list(ins[0])]
+    if op == OperatorType.Range and len(node.inputs) > 2:
+        s = _init_ints(g, node.inputs[0])
+        e = _init_ints(g, node.inputs[1])
+        d = _init_ints(g, node.inputs[2])
+        if len(s) > 0 and len(e) > 0 and len(d) > 0 and d[0] != 0:
+            n = (e[0] - s[0] + d[0] - 1) // d[0] if d[0] > 0 else (s[0] - e[0] - d[0] - 1) // (-d[0])
+            return [[max(0, n)]]
+        return [[]]
+    if op == OperatorType.ConstantOfShape and len(node.inputs) > 0:
+        dims = _init_ints(g, node.inputs[0])
+        if len(dims) > 0:
+            return [dims]
+        return [[]]
+    if op == OperatorType.Resize and len(ins) > 0 and len(ins[0]) == 4:
+        sizes = _init_ints(g, node.inputs[3]) if len(node.inputs) > 3 else []
+        if len(sizes) == 4:
+            return [sizes]
+        scales = _init_floats(g, node.inputs[2]) if len(node.inputs) > 2 else []
+        if len(scales) == 4:
+            return [[int(ins[0][i] * scales[i]) for i in range(4)]]
+        return [list(ins[0])]
+    if op == OperatorType.Einsum:
+        return [_einsum_out_shape(node.eq, [s for s in ins if len(s) > 0])]
+    if op == OperatorType.QLinearConv and len(ins) > 0 and len(ins[0]) == 4:
+        n = ins[0][0]
+        oc = ins[3][0] if len(ins) > 3 and len(ins[3]) > 0 else 1
+        kh = ins[3][2] if len(ins) > 3 and len(ins[3]) > 2 else 1
+        kw = ins[3][3] if len(ins) > 3 and len(ins[3]) > 3 else 1
+        return [[n, oc, ins[0][2] - kh + 1, ins[0][3] - kw + 1]]
+    if op == OperatorType.MatMulInteger and len(ins) >= 2 and len(ins[0]) == 2 and len(ins[1]) == 2:
+        return [[ins[0][0], ins[1][1]]]
+    if op == OperatorType.DynamicQuantizeLinear and len(ins) > 0:
+        return [list(ins[0]), [1], [1]]
+
+def _einsum_out_shape(eq: str, in_shapes: list[list[int]]) -> list[int]:
+    arrow = eq.find("->")
+    if arrow < 0 or len(in_shapes) == 0:
+        return []
+    left = eq[:arrow]
+    out_labs = eq[arrow + 2:]
+    comma = left.find(",")
+    la = left if comma < 0 else left[:comma]
+    lb = "" if comma < 0 else left[comma + 1:]
+    sa = in_shapes[0]
+    sb = in_shapes[1] if len(in_shapes) > 1 else []
+    ca = la[3:] if la[:3] == "..." else la
+    cb = lb[3:] if lb[:3] == "..." else lb
+    co = out_labs[3:] if out_labs[:3] == "..." else out_labs
+    batch = sa[:len(sa) - len(ca)] if len(ca) > 0 else list(sa)
+    sizes: dict[str, int] = {}
+    for i in range(len(ca)):
+        sizes[ca[i:i + 1]] = sa[len(sa) - len(ca) + i]
+    for i in range(len(cb)):
+        sizes[cb[i:i + 1]] = sb[len(sb) - len(cb) + i]
+    out = list(batch)
+    for i in range(len(co)):
+        L = co[i:i + 1]
+        if L not in sizes:
+            return []
+        out.append(sizes[L])
+    return out
     if op == OperatorType.Concat and len(ins) > 0:
         rank = max([len(s) for s in ins])
         ax = _norm(node.axis, rank)
@@ -435,6 +552,12 @@ def _slice_shape(shape: list[int], starts: list[int], ends: list[int], axes: lis
         out[a] = (e - s + st - 1) // st if e > s else 0
     return out
 
+def _init_floats(g: ExecutionGraph, name: str) -> list[float32]:
+    if name in g.initializers:
+        arr = g.initializers[name]
+        return [arr[i] for i in range(len(arr))]
+    return []
+
 def _init_ints(g: ExecutionGraph, name: str) -> list[int]:
     if name in g.initializers:
         arr = g.initializers[name]
@@ -445,6 +568,550 @@ def _init_len(g: ExecutionGraph, name: str) -> int:
     if name in g.initializers:
         return len(g.initializers[name])
     return 1
+
+# --- control-flow / recurrent expansion (ONNX level -> primitive ONNX nodes) ---
+def _expand_nodes(g: ExecutionGraph, nodes: list[OnnxNode]) -> list[OnnxNode]:
+    out: list[OnnxNode] = []
+    for on in nodes:
+        if on.op_type == "If":
+            out.extend(_expand_if(g, on))
+        elif on.op_type == "Loop":
+            out.extend(_expand_loop(g, on))
+        elif on.op_type == "LSTM":
+            out.extend(_expand_lstm(g, on))
+        elif on.op_type == "GRU":
+            out.extend(_expand_gru(g, on))
+        elif on.op_type == "RNN":
+            out.extend(_expand_rnn(g, on))
+        else:
+            out.append(on)
+    return out
+
+def _mk_node(name: str, op: str, ins: list[str], outs: list[str]) -> OnnxNode:
+    n = OnnxNode()
+    n.name = name
+    n.op_type = op
+    n.inputs = list(ins)
+    n.outputs = list(outs)
+    return n
+
+def _add_float_init(g: ExecutionGraph, name: str, shape: list[int], vals: list[float32]):
+    nd = NDArray[float32](shape)
+    for i in range(min(len(vals), len(nd))):
+        nd[i] = vals[i]
+    g.initializers[name] = nd
+    g.get_or_create_tensor(name, shape)
+
+def _add_int_init(g: ExecutionGraph, name: str, vals: list[int]):
+    _add_float_init(g, name, [len(vals)], [float(v) for v in vals])
+
+def _outer_names(g: ExecutionGraph) -> dict[str, bool]:
+    # names visible from enclosing scope (inputs + already-registered initializers)
+    o: dict[str, bool] = {}
+    for nm in g.inputs:
+        o[nm] = True
+    for nm in g.initializers:
+        o[nm] = True
+    return o
+
+def _inline_branch(g: ExecutionGraph, branch_nodes: list[OnnxNode], prefix: str, outer: dict[str, bool]) -> list[OnnxNode]:
+    out: list[OnnxNode] = []
+    for on in branch_nodes:
+        c = _mk_node(prefix + on.name, on.op_type, [], [])
+        for nm in on.inputs:
+            c.inputs.append(nm if nm == "" or nm in outer else prefix + nm)
+        for nm in on.outputs:
+            c.outputs.append(nm if nm == "" or nm in outer else prefix + nm)
+        c.attrs = on.attrs
+        out.append(c)
+    return out
+
+# If(cond, ...): inline both branches, select per output with Where.
+# Correct for side-effect-free inference graphs.
+def _expand_if(g: ExecutionGraph, on: OnnxNode) -> list[OnnxNode]:
+    if "then_branch" not in on.attrs or "else_branch" not in on.attrs:
+        raise UnsupportedOp("If without then/else branch")
+    outer = _outer_names(g)
+    out: list[OnnxNode] = []
+    tb = on.attrs["then_branch"].graph
+    eb = on.attrs["else_branch"].graph
+    if tb is None or eb is None:
+        raise UnsupportedOp("If with empty branch")
+    out.extend(_inline_branch(g, _expand_nodes(g, tb.nodes), on.name + "_t_", outer))
+    out.extend(_inline_branch(g, _expand_nodes(g, eb.nodes), on.name + "_e_", outer))
+    for k in range(len(on.outputs)):
+        t_out = tb.outputs[k].name if k < len(tb.outputs) else ""
+        e_out = eb.outputs[k].name if k < len(eb.outputs) else ""
+        t_full = t_out if t_out in outer else on.name + "_t_" + t_out
+        e_full = e_out if e_out in outer else on.name + "_e_" + e_out
+        out.append(_mk_node(on.name + f"_sel{k}", "Where", [on.inputs[0], t_full, e_full], [on.outputs[k]]))
+    return out
+
+# Loop with static trip count (M initializer, cap 128): full unroll.
+# Carried vars chain through iterations; per-iter cond gates via Where.
+# Scan outputs are not supported (raise).
+def _expand_loop(g: ExecutionGraph, on: OnnxNode) -> list[OnnxNode]:
+    if "body" not in on.attrs or on.attrs["body"].graph is None:
+        raise UnsupportedOp("Loop without body graph")
+    body = on.attrs["body"].graph
+    if len(on.inputs) < 2:
+        raise UnsupportedOp("Loop needs at least [M, cond]")
+    trip = _init_ints(g, on.inputs[0])
+    if len(trip) == 0:
+        raise UnsupportedOp("Loop without static trip count (M must be an initializer)")
+    n = trip[0]
+    if n < 0 or n > 128:
+        raise UnsupportedOp(f"Loop trip count {n} outside [0,128] unroll budget")
+    n_body_out = len(body.outputs)
+    n_carry = len(on.inputs) - 2
+    if n_body_out != n_carry + 1:
+        raise UnsupportedOp("Loop with scan outputs is not supported (carried-only)")
+    outer = _outer_names(g)
+    out: list[OnnxNode] = []
+    cond_prev = on.inputs[1] if len(on.inputs[1]) > 0 else ""
+    carry_prev = list(on.inputs[2:])
+    for i in range(n):
+        pre = on.name + f"_it{i}_"
+        it_name = pre + "iter"
+        _add_int_init(g, it_name, [i])
+        wiring: dict[str, str] = {}
+        if len(body.inputs) > 0:
+            wiring[body.inputs[0].name] = it_name
+        if len(body.inputs) > 1 and cond_prev != "":
+            wiring[body.inputs[1].name] = cond_prev
+        for k in range(n_carry):
+            if 2 + k < len(body.inputs):
+                wiring[body.inputs[2 + k].name] = carry_prev[k]
+        for bn in _expand_nodes(g, body.nodes):
+            c = _mk_node(pre + bn.name, bn.op_type, [], [])
+            for nm in bn.inputs:
+                if nm == "" or nm in outer:
+                    c.inputs.append(nm)
+                elif nm in wiring:
+                    c.inputs.append(wiring[nm])
+                else:
+                    c.inputs.append(pre + nm)
+            for nm in bn.outputs:
+                c.outputs.append(nm if nm == "" or nm in outer else pre + nm)
+            c.attrs = bn.attrs
+            out.append(c)
+        # outputs: [cond, carried...] with branch-output names (possibly renamed)
+        bouts: list[str] = []
+        for bo in body.outputs:
+            bouts.append(bo.name if bo.name in outer else pre + bo.name)
+        cond_new = bouts[0]
+        for k in range(n_carry):
+            new_val = bouts[1 + k]
+            if cond_prev != "":
+                sel = pre + f"carry{k}"
+                out.append(_mk_node(pre + f"sel{k}", "Where", [cond_new, new_val, carry_prev[k]], [sel]))
+                carry_prev[k] = sel
+            else:
+                carry_prev[k] = new_val
+        cond_prev = cond_new
+    # Loop outputs map to final carried values
+    for k in range(min(len(on.outputs), len(carry_prev))):
+        out.append(_mk_node(on.name + f"_out{k}", "Identity", [carry_prev[k]], [on.outputs[k]]))
+    return out
+
+# --- recurrent unrolling: LSTM/GRU/RNN, static seq_len, layout 0/1 ---
+def _subarray(vals: NDArray[float32], shape: list[int], ranges: list[tuple[int, int]]) -> tuple[list[float32], list[int]]:
+    # ranges per dim: (start, len); returns flat values + out shape
+    out_shape = [r[1] for r in ranges]
+    total = 1
+    for d in out_shape:
+        total = total * d
+    st: list[int] = [1] * len(shape)
+    for i in range(len(shape) - 2, -1, -1):
+        st[i] = st[i + 1] * shape[i + 1]
+    flat: list[float32] = []
+    for flat_i in range(total):
+        rem = flat_i
+        off = 0
+        for a in range(len(shape) - 1, -1, -1):
+            c = rem % out_shape[a]
+            rem = rem // out_shape[a]
+            off = off + (ranges[a][0] + c) * st[a]
+        flat.append(vals[off])
+    return (flat, out_shape)
+
+def _concat_axis(name: str, ins: list[str], out: str, axis: int) -> OnnxNode:
+    n = _mk_node(name, "Concat", ins, [out])
+    a = OnnxAttribute("axis")
+    a.type = AttributeType.Int
+    a.i = axis
+    n.attrs["axis"] = a
+    return n
+
+def _rnn_common(g: ExecutionGraph, on: OnnxNode, kind: str) -> tuple[int, int, int, int, int, list[str]]:
+    # returns (seq, batch, inp, hidden, ndir, [act names])
+    hid = 0
+    if "hidden_size" in on.attrs:
+        hid = int(on.attrs["hidden_size"].i)
+    acts: list[str] = []
+    if "activations" in on.attrs:
+        acts = list(on.attrs["activation_strings"] if "activation_strings" in on.attrs else on.attrs["activations"].strings)
+    if len(acts) == 0:
+        acts = ["Sigmoid", "Tanh", "Tanh"] if kind == "LSTM" else (["Sigmoid", "Sigmoid", "Tanh"] if kind == "GRU" else ["Tanh"])
+    inp0 = on.inputs[0]
+    sh = g.tensors[inp0].shape if inp0 in g.tensors and len(g.tensors[inp0].shape) == 3 else []
+    layout = 0
+    if "layout" in on.attrs:
+        layout = int(on.attrs["layout"].i)
+    if len(sh) == 3:
+        seq = sh[0] if layout == 0 else sh[1]
+        bat = sh[1] if layout == 0 else sh[0]
+        inp = sh[2]
+    else:
+        seq = 0
+        bat = 1
+        inp = 0
+    wkey = on.inputs[1]
+    ndir = 1
+    if wkey in g.initializers and len(g.tensors[wkey].shape) == 3:
+        ndir = g.tensors[wkey].shape[0]
+    return (seq, bat, inp, hid, ndir, acts)
+
+def _rnn_xtract(g: ExecutionGraph, on: OnnxNode, t: int, seq: int, bat: int, inp: int, layout: int, tag: str) -> str:
+    # per-step input slice [B, I] via Slice+Reshape (layout-aware)
+    x = on.inputs[0]
+    if layout == 0:
+        s1 = tag + "_s"
+        e1 = tag + "_e"
+        _add_int_init(g, s1, [t, 0, 0])
+        _add_int_init(g, e1, [t + 1, bat, inp])
+        mid = tag + "_m"
+        sh = tag + "_sh"
+        _add_int_init(g, sh, [bat, inp])
+        return (s1, e1, mid, sh)
+    s1 = tag + "_s"
+    e1 = tag + "_e"
+    _add_int_init(g, s1, [0, t, 0])
+    _add_int_init(g, e1, [bat, t + 1, inp])
+    mid = tag + "_m"
+    sh = tag + "_sh"
+    _add_int_init(g, sh, [bat, inp])
+    return (s1, e1, mid, sh)
+
+def _emit_step_slice(out: list[OnnxNode], g: ExecutionGraph, tag: str, x: str, mid: str, sh: str, s1: str, e1: str, y2d: str):
+    out.append(_mk_node(tag + "_sl", "Slice", [x, s1, e1], [mid]))
+    out.append(_mk_node(tag + "_rs", "Reshape", [mid, sh], [y2d]))
+
+def _gate_mm(out: list[OnnxNode], g: ExecutionGraph, tag: str, a2d: str, wmat: str, h2d: str, rmat: str,
+        bw: str, br: str, y2d: str):
+    # y = a@Wg^T + h@Rg^T + (bw + br)
+    t1 = tag + "_xw"
+    t2 = tag + "_hr"
+    t3 = tag + "_s"
+    out.append(_mk_node(tag + "_mm1", "MatMul", [a2d, wmat], [t1]))
+    out.append(_mk_node(tag + "_mm2", "MatMul", [h2d, rmat], [t2]))
+    out.append(_mk_node(tag + "_ad1", "Add", [t1, t2], [t3]))
+    out.append(_mk_node(tag + "_ad2", "Add", [t3, bw], [t3 + "b"]))
+    out.append(_mk_node(tag + "_ad3", "Add", [t3 + "b", br], [y2d]))
+
+def _dir_weights(g: ExecutionGraph, on: OnnxNode, d: int, rows_per_gate: int, gates: int, in_dim: int,
+        hid: int, prefix: str) -> tuple[list[str], list[str], list[str], list[str]]:
+    # slice W[d, gates*H, I] -> per-gate [H, I]; R[d, gates*H, H] likewise; B[d, 2*gates*H] -> wb/rb per gate
+    w = g.initializers[on.inputs[1]]
+    r = g.initializers[on.inputs[2]]
+    wnames: list[str] = []
+    rnames: list[str] = []
+    for gg in range(gates):
+        (wf, ws) = _subarray(w, g.tensors[on.inputs[1]].shape, [(d, 1), (gg * hid, hid), (0, in_dim)])
+        wn = prefix + f"_W{gg}"
+        _add_float_init(g, wn, ws[1:], wf)
+        wnames.append(wn)
+        (rf, rs) = _subarray(r, g.tensors[on.inputs[2]].shape, [(d, 1), (gg * hid, hid), (0, hid)])
+        rn = prefix + f"_R{gg}"
+        _add_float_init(g, rn, rs[1:], rf)
+        rnames.append(rn)
+    wbn: list[str] = []
+    rbn: list[str] = []
+    if len(on.inputs) > 3 and on.inputs[3] != "":
+        b = g.initializers[on.inputs[3]]
+        for gg in range(gates):
+            (bf, bs) = _subarray(b, g.tensors[on.inputs[3]].shape, [(d, 1), (gg * hid, hid)])
+            bn = prefix + f"_WB{gg}"
+            _add_float_init(g, bn, bs[1:], bf)
+            wbn.append(bn)
+            (bf2, bs2) = _subarray(b, g.tensors[on.inputs[3]].shape, [(d, 1), (gates * hid + gg * hid, hid)])
+            bn2 = prefix + f"_RB{gg}"
+            _add_float_init(g, bn2, bs2[1:], bf2)
+            rbn.append(bn2)
+    else:
+        for gg in range(gates):
+            wn = prefix + f"_WB{gg}"
+            _add_float_init(g, wn, [hid], [0.0] * hid)
+            wbn.append(wn)
+            wn2 = prefix + f"_RB{gg}"
+            _add_float_init(g, wn2, [hid], [0.0] * hid)
+            rbn.append(wn2)
+    return (wnames, rnames, wbn, rbn)
+
+def _rev_indices(g: ExecutionGraph, name: str, seq: int) -> str:
+    _add_int_init(g, name, [seq - 1 - i for i in range(seq)])
+    return name
+
+def _expand_lstm(g: ExecutionGraph, on: OnnxNode) -> list[OnnxNode]:
+    if "activation_alpha" in on.attrs or "activation_beta" in on.attrs:
+        raise UnsupportedOp("LSTM with custom activation alpha/beta")
+    if "P" in {nm: True for nm in on.inputs} and len(on.inputs) > 7 and on.inputs[7] != "":
+        raise UnsupportedOp("LSTM with peepholes (P)")
+    (seq, bat, inp, hid, ndir, acts) = _rnn_common(g, on, "LSTM")
+    if seq <= 0 or seq > 512 or hid <= 0:
+        raise UnsupportedOp("LSTM needs static seq_len in [1,512] and hidden_size")
+    layout = int(on.attrs["layout"].i) if "layout" in on.attrs else 0
+    dirs = [0]
+    if ndir == 2:
+        dirs = [0, 1]
+    out: list[OnnxNode] = []
+    dir_hiddens: list[list[str]] = []
+    dir_cells: list[list[str]] = []
+    for d in dirs:
+        pre = on.name + f"_d{d}_"
+        (wn, rn, wbn, rbn) = _dir_weights(g, on, d, hid, 4, inp, hid, pre + "w")
+        # input sequence (reversed for backward direction via Gather)
+        xseq = on.inputs[0]
+        if d == 1:
+            rev = pre + "rev_idx"
+            _rev_indices(g, rev, seq)
+            rx = pre + "rx"
+            out.append(_mk_node(pre + "rev", "Gather", [xseq, rev], [rx]))
+            xseq = rx
+        h_prev = on.inputs[5] if len(on.inputs) > 5 and on.inputs[5] != "" else ""
+        c_prev = on.inputs[6] if len(on.inputs) > 6 and on.inputs[6] != "" else ""
+        if h_prev == "":
+            h_prev = pre + "h0"
+            _add_float_init(g, h_prev, [bat, hid], [0.0] * (bat * hid))
+        if c_prev == "":
+            c_prev = pre + "c0"
+            _add_float_init(g, c_prev, [bat, hid], [0.0] * (bat * hid))
+        # h_prev may be [ndir, B, H] when user-supplied: slice direction
+        if h_prev in g.initializers and len(g.tensors[h_prev].shape) == 3:
+            (hf, hs) = _subarray(g.initializers[h_prev], g.tensors[h_prev].shape, [(d, 1), (0, bat), (0, hid)])
+            hn = pre + "hd"
+            _add_float_init(g, hn, hs[1:], hf)
+            h_prev = hn
+        if c_prev in g.initializers and len(g.tensors[c_prev].shape) == 3:
+            (cf, cs) = _subarray(g.initializers[c_prev], g.tensors[c_prev].shape, [(d, 1), (0, bat), (0, hid)])
+            cn = pre + "cd"
+            _add_float_init(g, cn, cs[1:], cf)
+            c_prev = cn
+        hs: list[str] = []
+        cs: list[str] = []
+        for t in range(seq):
+            tag = pre + f"t{t}_"
+            (s1, e1, mid, sh) = _rnn_xtract(g, on, t if d == 0 else t, seq, bat, inp, layout, tag)
+            xt = tag + "x"
+            _emit_step_slice(out, g, tag, xseq, mid, sh, s1, e1, xt)
+            # i, o, f, c gates
+            outs: list[str] = []
+            for gg in range(4):
+                _gate_mm(out, g, tag + f"g{gg}", xt, wn[gg], h_prev, rn[gg], wbn[gg], rbn[gg], tag + f"z{gg}")
+                outs.append(tag + f"z{gg}")
+            i_a = tag + "i"
+            o_a = tag + "o"
+            f_a = tag + "f"
+            g_a = tag + "g"
+            out.append(_mk_node(tag + "ai", acts[0], [outs[0]], [i_a]))
+            out.append(_mk_node(tag + "ao", acts[0], [outs[1]], [o_a]))
+            out.append(_mk_node(tag + "af", acts[0], [outs[2]], [f_a]))
+            out.append(_mk_node(tag + "ag", acts[1], [outs[3]], [g_a]))
+            fc = tag + "fc"
+            ig = tag + "ig"
+            c_new = tag + "c"
+            out.append(_mk_node(tag + "m1", "Mul", [f_a, c_prev], [fc]))
+            out.append(_mk_node(tag + "m2", "Mul", [i_a, g_a], [ig]))
+            out.append(_mk_node(tag + "a1", "Add", [fc, ig], [c_new]))
+            tc = tag + "tc"
+            h_new = tag + "h"
+            out.append(_mk_node(tag + "ah", acts[2], [c_new], [tc]))
+            out.append(_mk_node(tag + "m3", "Mul", [o_a, tc], [h_new]))
+            h_prev = h_new
+            c_prev = c_new
+            hs.append(h_new)
+            cs.append(c_new)
+        dir_hiddens.append(hs)
+        dir_cells.append(cs)
+    # capture last states before assembly mutates the per-step lists
+    lasts_h = [dir_hiddens[d][seq - 1] for d in range(len(dirs))]
+    lasts_c = [dir_cells[d][seq - 1] for d in range(len(dirs))]
+    # assemble Y [S, D, B, H] via Reshape [1,1,B,H] + Concat
+    for d in range(len(dirs)):
+        for t in range(seq):
+            r4 = on.name + f"_r4_{d}_{t}"
+            _add_int_init(g, on.name + f"_rsh_{d}_{t}", [1, 1, bat, hid])
+            out.append(_mk_node(on.name + f"_rs_{d}_{t}", "Reshape", [dir_hiddens[d][t], on.name + f"_rsh_{d}_{t}"], [r4]))
+            dir_hiddens[d][t] = r4
+    if len(on.outputs) > 1 and on.outputs[1] != "":
+        _assemble_last(g, out, on, lasts_h, bat, hid, on.outputs[1])
+    if len(on.outputs) > 2 and on.outputs[2] != "":
+        _assemble_last(g, out, on, lasts_c, bat, hid, on.outputs[2])
+    if len(on.outputs) > 0 and on.outputs[0] != "":
+        per_dir: list[str] = []
+        for d in range(len(dirs)):
+            cd = on.name + f"_cd{d}"
+            out.append(_concat_axis(on.name + f"_cc{d}", dir_hiddens[d], cd, 0))
+            per_dir.append(cd)
+        if len(per_dir) > 1:
+            out.append(_concat_axis(on.name + "_y", per_dir, on.outputs[0], 1))
+        else:
+            out.append(_mk_node(on.name + "_y1", "Identity", per_dir, [on.outputs[0]]))
+    return out
+
+def _assemble_seq(g: ExecutionGraph, out: list[OnnxNode], on: OnnxNode, per_dir_hs: list[list[str]],
+        seq: int, bat: int, hid: int, y_name: str):
+    # per-dir step hiddens [B,H] -> Reshape [1,1,B,H] -> concat axis 0 -> concat dirs axis 1
+    per_dir: list[str] = []
+    for d in range(len(per_dir_hs)):
+        for t in range(seq):
+            r4 = on.name + f"_r4_{d}_{t}"
+            _add_int_init(g, on.name + f"_rsh_{d}_{t}", [1, 1, bat, hid])
+            out.append(_mk_node(on.name + f"_rs_{d}_{t}", "Reshape", [per_dir_hs[d][t], on.name + f"_rsh_{d}_{t}"], [r4]))
+            per_dir_hs[d][t] = r4
+        cd = on.name + f"_cd{d}"
+        out.append(_concat_axis(on.name + f"_cc{d}", per_dir_hs[d], cd, 0))
+        per_dir.append(cd)
+    if len(per_dir) > 1:
+        out.append(_concat_axis(on.name + "_y", per_dir, y_name, 1))
+    else:
+        out.append(_mk_node(on.name + "_y1", "Identity", per_dir, [y_name]))
+
+def _assemble_last(g: ExecutionGraph, out: list[OnnxNode], on: OnnxNode, lasts: list[str],
+        bat: int, hid: int, y_name: str):
+    # lasts per dir [B,H] -> Reshape [1,B,H] -> concat axis 0 -> [D,B,H]
+    per_dir: list[str] = []
+    for d in range(len(lasts)):
+        r3 = on.name + f"_lr3_{d}"
+        _add_int_init(g, on.name + f"_lrsh_{d}", [1, bat, hid])
+        out.append(_mk_node(on.name + f"_lrs_{d}", "Reshape", [lasts[d], on.name + f"_lrsh_{d}"], [r3]))
+        per_dir.append(r3)
+    if len(per_dir) > 1:
+        out.append(_concat_axis(on.name + "_yh", per_dir, y_name, 0))
+    else:
+        out.append(_mk_node(on.name + "_yh1", "Identity", per_dir, [y_name]))
+
+def _expand_gru(g: ExecutionGraph, on: OnnxNode) -> list[OnnxNode]:
+    (seq, bat, inp, hid, ndir, acts) = _rnn_common(g, on, "GRU")
+    if seq <= 0 or seq > 512 or hid <= 0:
+        raise UnsupportedOp("GRU needs static seq_len in [1,512] and hidden_size")
+    layout = int(on.attrs["layout"].i) if "layout" in on.attrs else 0
+    lb = int(on.attrs["linear_before"].i) if "linear_before" in on.attrs else 0
+    dirs = [0, 1] if ndir == 2 else [0]
+    out: list[OnnxNode] = []
+    dir_hs: list[list[str]] = []
+    dir_last: list[str] = []
+    for d in dirs:
+        pre = on.name + f"_d{d}_"
+        (wn, rn, wbn, rbn) = _dir_weights(g, on, d, hid, 3, inp, hid, pre + "w")
+        xseq = on.inputs[0]
+        if d == 1:
+            rev = pre + "rev_idx"
+            _rev_indices(g, rev, seq)
+            rx = pre + "rx"
+            out.append(_mk_node(pre + "rev", "Gather", [xseq, rev], [rx]))
+            xseq = rx
+        h_prev = on.inputs[5] if len(on.inputs) > 5 and on.inputs[5] != "" else ""
+        if h_prev == "":
+            h_prev = pre + "h0"
+            _add_float_init(g, h_prev, [bat, hid], [0.0] * (bat * hid))
+        if h_prev in g.initializers and len(g.tensors[h_prev].shape) == 3:
+            (hf, hs) = _subarray(g.initializers[h_prev], g.tensors[h_prev].shape, [(d, 1), (0, bat), (0, hid)])
+            hn = pre + "hd"
+            _add_float_init(g, hn, hs[1:], hf)
+            h_prev = hn
+        hs: list[str] = []
+        # constant one vector for (1 - z)
+        _add_float_init(g, pre + "one", [bat, hid], [1.0] * (bat * hid))
+        for t in range(seq):
+            tag = pre + f"t{t}_"
+            (s1, e1, mid, sh) = _rnn_xtract(g, on, t, seq, bat, inp, layout, tag)
+            xt = tag + "x"
+            _emit_step_slice(out, g, tag, xseq, mid, sh, s1, e1, xt)
+            _gate_mm(out, g, tag + "z", xt, wn[0], h_prev, rn[0], wbn[0], rbn[0], tag + "zz")
+            _gate_mm(out, g, tag + "r", xt, wn[1], h_prev, rn[1], wbn[1], rbn[1], tag + "rr")
+            zt = tag + "zt"
+            rt = tag + "rt"
+            out.append(_mk_node(tag + "az", acts[0], [tag + "zz"], [zt]))
+            out.append(_mk_node(tag + "ar", acts[1], [tag + "rr"], [rt]))
+            if lb == 0:
+                rh = tag + "rh"
+                out.append(_mk_node(tag + "mrh", "Mul", [rt, h_prev], [rh]))
+                _gate_mm(out, g, tag + "h", xt, wn[2], rh, rn[2], wbn[2], rbn[2], tag + "hh")
+            else:
+                t1 = tag + "t1"
+                t2 = tag + "t2"
+                out.append(_mk_node(tag + "mm1", "MatMul", [xt, wn[2]], [t1 + "a"]))
+                out.append(_mk_node(tag + "ad1", "Add", [t1 + "a", wbn[2]], [t1]))
+                out.append(_mk_node(tag + "mm2", "MatMul", [h_prev, rn[2]], [t2 + "a"]))
+                out.append(_mk_node(tag + "ad2", "Add", [t2 + "a", rbn[2]], [t2]))
+                rm = tag + "rm"
+                out.append(_mk_node(tag + "mrm", "Mul", [rt, t2], [rm]))
+                out.append(_mk_node(tag + "ad3", "Add", [t1, rm], [tag + "hh"]))
+            out.append(_mk_node(tag + "ah", acts[2], [tag + "hh"], [tag + "hc"]))
+            om = tag + "om"
+            out.append(_mk_node(tag + "m1", "Mul", [zt, h_prev], [om]))
+            zc = tag + "zc"
+            out.append(_mk_node(tag + "s1", "Sub", [pre + "one", zt], [zc]))
+            h_new = tag + "h"
+            out.append(_mk_node(tag + "m2", "Mul", [zc, tag + "hc"], [tag + "nh"]))
+            out.append(_mk_node(tag + "a2", "Add", [om, tag + "nh"], [h_new]))
+            h_prev = h_new
+            hs.append(h_new)
+        dir_hs.append(hs)
+        dir_last.append(h_prev)
+    if len(on.outputs) > 0 and on.outputs[0] != "":
+        _assemble_seq(g, out, on, dir_hs, seq, bat, hid, on.outputs[0])
+    if len(on.outputs) > 1 and on.outputs[1] != "":
+        _assemble_last(g, out, on, dir_last, bat, hid, on.outputs[1])
+    return out
+
+def _expand_rnn(g: ExecutionGraph, on: OnnxNode) -> list[OnnxNode]:
+    (seq, bat, inp, hid, ndir, acts) = _rnn_common(g, on, "RNN")
+    if seq <= 0 or seq > 512 or hid <= 0:
+        raise UnsupportedOp("RNN needs static seq_len in [1,512] and hidden_size")
+    layout = int(on.attrs["layout"].i) if "layout" in on.attrs else 0
+    dirs = [0, 1] if ndir == 2 else [0]
+    out: list[OnnxNode] = []
+    dir_hs: list[list[str]] = []
+    dir_last: list[str] = []
+    for d in dirs:
+        pre = on.name + f"_d{d}_"
+        (wn, rn, wbn, rbn) = _dir_weights(g, on, d, hid, 1, inp, hid, pre + "w")
+        xseq = on.inputs[0]
+        if d == 1:
+            rev = pre + "rev_idx"
+            _rev_indices(g, rev, seq)
+            rx = pre + "rx"
+            out.append(_mk_node(pre + "rev", "Gather", [xseq, rev], [rx]))
+            xseq = rx
+        h_prev = on.inputs[5] if len(on.inputs) > 5 and on.inputs[5] != "" else ""
+        if h_prev == "":
+            h_prev = pre + "h0"
+            _add_float_init(g, h_prev, [bat, hid], [0.0] * (bat * hid))
+        if h_prev in g.initializers and len(g.tensors[h_prev].shape) == 3:
+            (hf, hs) = _subarray(g.initializers[h_prev], g.tensors[h_prev].shape, [(d, 1), (0, bat), (0, hid)])
+            hn = pre + "hd"
+            _add_float_init(g, hn, hs[1:], hf)
+            h_prev = hn
+        hs: list[str] = []
+        for t in range(seq):
+            tag = pre + f"t{t}_"
+            (s1, e1, mid, sh) = _rnn_xtract(g, on, t, seq, bat, inp, layout, tag)
+            xt = tag + "x"
+            _emit_step_slice(out, g, tag, xseq, mid, sh, s1, e1, xt)
+            _gate_mm(out, g, tag + "g", xt, wn[0], h_prev, rn[0], wbn[0], rbn[0], tag + "z")
+            h_new = tag + "h"
+            out.append(_mk_node(tag + "a", acts[0], [tag + "z"], [h_new]))
+            h_prev = h_new
+            hs.append(h_new)
+        dir_hs.append(hs)
+        dir_last.append(h_prev)
+    if len(on.outputs) > 0 and on.outputs[0] != "":
+        _assemble_seq(g, out, on, dir_hs, seq, bat, hid, on.outputs[0])
+    if len(on.outputs) > 1 and on.outputs[1] != "":
+        _assemble_last(g, out, on, dir_last, bat, hid, on.outputs[1])
+    return out
 
 def topo_sort(nodes: list[ExecutionNode], inputs: list[str], inits: list[str]) -> list[ExecutionNode]:
     ready: set[str] = set(inputs)

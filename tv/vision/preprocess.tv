@@ -1,0 +1,61 @@
+// TokenVector Module: Vision — Image preprocessing frontend (NHWC float)
+// Bilinear resize, per-channel normalize, HWC->CHW transpose and patchify
+// (ViT-style [num_patches, patch_dim]). Encoder weights stay external;
+// this closes the input half of the multimodal gap honestly.
+
+module tv.vision.preprocess
+
+import tv.numerics.tensor
+
+# NHWC [1,H,W,C] -> NHWC [1,OH,OW,C], bilinear
+public def resize_bilinear_nhwc(x: NDArray[float32], h: int, w: int, c: int, oh: int, ow: int) -> NDArray[float32]:
+    y = NDArray[float32]([oh * ow * c])
+    sh = oh / h
+    sw = ow / w
+    for o in range(oh):
+        sh_src = (o + 0.5) / sh - 0.5
+        for u in range(ow):
+            sw_src = (u + 0.5) / sw - 0.5
+            h0 = int(sh_src)
+            w0 = int(sw_src)
+            fh = sh_src - h0
+            fw = sw_src - w0
+            if h0 < 0: h0 = 0
+            if w0 < 0: w0 = 0
+            h1 = h0 + 1 if h0 + 1 < h else h0
+            w1 = w0 + 1 if w0 + 1 < w else w0
+            for ch in range(c):
+                v00 = x[(h0 * w + w0) * c + ch]
+                v01 = x[(h0 * w + w1) * c + ch]
+                v10 = x[(h1 * w + w0) * c + ch]
+                v11 = x[(h1 * w + w1) * c + ch]
+                y[(o * ow + u) * c + ch] = v00 * (1.0 - fh) * (1.0 - fw) + v01 * (1.0 - fh) * fw + v10 * fh * (1.0 - fw) + v11 * fh * fw
+    return y
+
+public def normalize_inplace(x: NDArray[float32], mean: list[float32], std: list[float32], c: int):
+    for i in range(len(x) // c):
+        for ch in range(c):
+            x[i * c + ch] = (x[i * c + ch] - mean[ch]) / std[ch]
+
+public def hwc_to_chw(x: NDArray[float32], h: int, w: int, c: int) -> NDArray[float32]:
+    y = NDArray[float32]([c * h * w])
+    for r in range(h):
+        for u in range(w):
+            for ch in range(c):
+                y[(ch * h + r) * w + u] = x[(r * w + u) * c + ch]
+    return y
+
+# [H,W,C] -> [num_patches, P*P*C] row-major patch tokens (ViT input)
+public def patchify(x: NDArray[float32], h: int, w: int, c: int, p: int) -> NDArray[float32]:
+    if h % p != 0 or w % p != 0:
+        raise Arg("H and W must be multiples of patch size")
+    nh = h // p
+    nw = w // p
+    y = NDArray[float32]([nh * nw * p * p * c])
+    for i in range(nh):
+        for j in range(nw):
+            for r in range(p):
+                for u in range(p):
+                    for ch in range(c):
+                        y[(((i * nw + j) * p + r) * p + u) * c + ch] = x[(((i * p + r) * w) + (j * p + u)) * c + ch]
+    return y

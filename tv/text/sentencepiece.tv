@@ -1,0 +1,71 @@
+// TokenVector Module: Text — SentencePiece-unigram tokenizer (Gemma/Llama class)
+// Viterbi best-segmentation over a (piece, score) table loaded from plain text
+// files (piece per line + score per line; dump once from .model). Decode joins
+// pieces with U+2581 mapped back to space.
+
+module tv.text.sentencepiece
+
+public class SPUnigramTokenizer:
+    def __init__(self, vocab_path: str, scores_path: str, unk_id: int = 0):
+        self.pieces = file_read_lines(vocab_path)
+        raw_scores = file_read_lines(scores_path)
+        self.scores: list[float] = []
+        for i in range(len(raw_scores)):
+            self.scores.append(float(raw_scores[i]))
+        self.unk_id = unk_id
+        self.by_first: dict[str, list[int]] = {}
+        for i in range(len(self.pieces)):
+            p = self.pieces[i]
+            first = p[0:1]
+            if first not in self.by_first:
+                self.by_first[first] = []
+            self.by_first[first].append(i)
+
+    public def vocab_size(self) -> int:
+        return len(self.pieces)
+
+    public def encode(self, text: str) -> list[int]:
+        s = text.replace(" ", "\u2581")
+        n = len(s)
+        # best[i] = best score for suffix starting at i; nxt[i] = chosen length
+        best: list[float] = [-1e30] * (n + 1)
+        nxt: list[int] = [1] * (n + 1)
+        best[n] = 0.0
+        for i in range(n - 1, -1, -1):
+            cands = self.by_first[s[i:i + 1]] if s[i:i + 1] in self.by_first else []
+            for pid in cands:
+                p = self.pieces[pid]
+                L = len(p)
+                if i + L <= n and s[i:i + L] == p:
+                    sc = self.scores[pid] + best[i + L]
+                    if sc > best[i]:
+                        best[i] = sc
+                        nxt[i] = L
+            if best[i] <= -1e29:
+                # unknown char: emit single char as unk, advance 1
+                best[i] = -10.0 + best[i + 1]
+                nxt[i] = 1
+        ids: list[int] = []
+        i = 0
+        while i < n:
+            L = nxt[i]
+            piece = s[i:i + L]
+            ids.append(self._piece_id(piece))
+            i = i + L
+        return ids
+
+    public def decode(self, ids: list[int]) -> str:
+        out = ""
+        for i in ids:
+            if i >= 0 and i < len(self.pieces):
+                out = out + self.pieces[i]
+        return out.replace("\u2581", " ")
+
+    def _piece_id(self, piece: str) -> int:
+        cands = self.by_first[piece[0:1]] if piece[0:1] in self.by_first else []
+        for pid in cands:
+            if self.pieces[pid] == piece:
+                return pid
+        return self.unk_id
+
+extern def file_read_lines(path: str) -> list[str]

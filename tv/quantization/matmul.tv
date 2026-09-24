@@ -69,6 +69,32 @@ public def dequantize_fp8_e4m3(src: NDArray[int8], dst: NDArray[float32]):
 def _fp8_decode(v: int) -> float32:
     return FP8E4M3(v + 128).to_float()
 
+# FP16 GEMM compute path (decode-on-the-fly, 2 bytes/element resident)
+public def matmul_fp16(pa: NDArray[int8], pw: NDArray[int8], pbias: NDArray[float32],
+        py: NDArray[float32], m: int, n: int, k: int):
+    for mm in range(m):
+        for nn in range(n):
+            acc = 0.0
+            for kk in range(k):
+                a0 = int(pa[(mm * k + kk) * 2]) & 0xFF
+                a1 = int(pa[(mm * k + kk) * 2 + 1]) & 0xFF
+                w0 = int(pw[(nn * k + kk) * 2]) & 0xFF
+                w1 = int(pw[(nn * k + kk) * 2 + 1]) & 0xFF
+                acc = acc + FP16(a0 | (a1 << 8)).to_float() * FP16(w0 | (w1 << 8)).to_float()
+            bias = pbias[nn] if len(pbias) > 0 else 0.0
+            py[mm * n + nn] = acc + bias
+
+def _to_sbyte(u: int) -> int:
+    return u - 256 if u > 127 else u
+
+public def quantize_fp16(src: NDArray[float32], dst: NDArray[int8]):
+    if len(dst) < len(src) * 2:
+        raise Arg("dst too small (need 2 bytes/elem)")
+    for i in range(len(src)):
+        v = FP16.from_float(src[i]).value
+        dst[i * 2] = _to_sbyte(v & 0xFF)
+        dst[i * 2 + 1] = _to_sbyte((v >> 8) & 0xFF)
+
 # Shared 32-blocked int8 dot product (scalar-correct; backend vectorizes the blocks)
 def _dot_int8(a: NDArray[int8], ao: int, b: NDArray[int8], bo: int, k: int) -> int:
     acc = 0

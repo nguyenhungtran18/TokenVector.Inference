@@ -97,6 +97,8 @@ def _parse_attr(buf: bytes) -> OnnxAttribute:
             a.s = r.read_string()
         elif field == 5:
             a.t = _parse_tensor(r.read_length_delimited())
+        elif field == 6:
+            a.graph = _parse_graph(r.read_length_delimited())
         elif field == 7:
             if wt == WireType.LengthDelimited:
                 sub = FastProtobufReader(r.read_length_delimited())

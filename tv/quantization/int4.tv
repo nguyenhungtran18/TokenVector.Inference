@@ -51,6 +51,90 @@ public def dequantize_int4_grouped(packed: NDArray[int8], dst: NDArray[float32],
             dst[r * cols + c] = float((b & 0xF) - 8) * sc
             dst[r * cols + c + 1] = float(((b >> 4) & 0xF) - 8) * sc
 
+# AWQ-style asymmetric grouped INT4: per-group (scale, zero-point), uint4 0..15.
+# Returns (packed, scales, zero_points); zp[g] = clamp(round(-min/scale)).
+public def quantize_int4_grouped_asym(src: NDArray[float32], rows: int, cols: int, group_size: int) -> tuple[NDArray[int8], list[float32], list[int]]:
+    if cols % group_size != 0:
+        raise Arg("cols must be a multiple of group_size")
+    if cols % 2 != 0:
+        raise Arg("cols must be even for nibble packing")
+    ng = cols // group_size
+    packed = NDArray[int8]([rows * cols // 2])
+    for i in range(len(packed)):
+        packed[i] = 0
+    scales: list[float32] = []
+    zps: list[int] = []
+    for r in range(rows):
+        for gg in range(ng):
+            mn = src[r * cols + gg * group_size]
+            mx = mn
+            for c in range(1, group_size):
+                v = src[r * cols + gg * group_size + c]
+                if v < mn: mn = v
+                if v > mx: mx = v
+            if mx - mn < 1e-8:
+                mx = mn + 1e-8
+            sc = (mx - mn) / 15.0
+            zp = max(0, min(15, int(round(-mn / sc))))
+            scales.append(sc)
+            zps.append(zp)
+    for r in range(rows):
+        for c in range(0, cols, 2):
+            gg = c // group_size
+            sc = scales[r * ng + gg]
+            zp = zps[r * ng + gg]
+            mn = -zp * sc
+            q0 = max(0, min(15, int(round((src[r * cols + c] - mn) / sc))))
+            q1 = max(0, min(15, int(round((src[r * cols + c + 1] - mn) / sc))))
+            packed[r * cols // 2 + c // 2] = (q1 << 4) | q0
+    return (packed, scales, zps)
+
+public def dequantize_int4_grouped_asym(packed: NDArray[int8], dst: NDArray[float32], rows: int, cols: int,
+        group_size: int, scales: list[float32], zps: list[int]):
+    ng = cols // group_size
+    for r in range(rows):
+        for c in range(0, cols, 2):
+            gg = c // group_size
+            sc = scales[r * ng + gg]
+            zp = zps[r * ng + gg]
+            b = int(packed[r * cols // 2 + c // 2])
+            dst[r * cols + c] = float((b & 0xF) - zp) * sc
+            dst[r * cols + c + 1] = float(((b >> 4) & 0xF) - zp) * sc
+
+# GPTQ act-order support: permute columns by activation order at quant time,
+# gather activation columns inside the GEMM (O(1) memory, exact).
+public def permute_cols(src: NDArray[float32], rows: int, cols: int, perm: list[int]) -> NDArray[float32]:
+    if len(perm) != cols:
+        raise Arg("perm length must equal cols")
+    out = NDArray[float32]([rows * cols])
+    for r in range(rows):
+        for c in range(cols):
+            out[r * cols + c] = src[r * cols + perm[c]]
+    return out
+
+public def inv_permute_cols(src: NDArray[float32], rows: int, cols: int, perm: list[int]) -> NDArray[float32]:
+    if len(perm) != cols:
+        raise Arg("perm length must equal cols")
+    out = NDArray[float32]([rows * cols])
+    for r in range(rows):
+        for c in range(cols):
+            out[r * cols + perm[c]] = src[r * cols + c]
+    return out
+
+public def matmul_int4_grouped_ordered(pa: NDArray[float32], packed_w: NDArray[int8], pbias: NDArray[float32],
+        py: NDArray[float32], m: int, n: int, k: int, group_size: int, scales_w: list[float32], perm: list[int]):
+    ng = k // group_size
+    for mm in range(m):
+        for nn in range(n):
+            acc = 0.0
+            for kk in range(k):
+                gg = kk // group_size
+                b = int(packed_w[nn * k // 2 + kk // 2])
+                nib = (b & 0xF) if kk % 2 == 0 else ((b >> 4) & 0xF)
+                acc = acc + pa[mm * k + perm[kk]] * (float(nib - 8) * scales_w[nn * ng + gg])
+            bias = pbias[nn] if len(pbias) > 0 else 0.0
+            py[mm * n + nn] = acc + bias
+
 # Grouped INT4 GEMM: Y = (A_fp32 @ W_int4^T) + Bias with per-group scales.
 # Correctness-first path: streaming dequantize per K-block keeps memory O(block).
 public def matmul_int4_grouped(pa: NDArray[float32], packed_w: NDArray[int8], pbias: NDArray[float32],

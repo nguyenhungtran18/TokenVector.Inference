@@ -20,6 +20,15 @@ import tv.runtime.tensor_desc
 import tv.text.sampling
 import tv.text.chat_template
 import tv.text.generate
+import tv.text.speculative
+import tv.text.tools
+import tv.training.autograd
+import tv.onnx.writer
+import tv.onnx.models
+import tv.text.grammar
+import tv.quantization.int4
+import tv.quantization.matmul
+import tv.vision.preprocess
 import tv.quantization.int4
 import tv.quantization.matmul
 import tv.numerics.tensor
@@ -568,6 +577,482 @@ public def test_generate_loop_text():
     assert res.prompt_tokens == 2
     assert res.completion_tokens == 3
     assert res.text == "hi"
+
+public def test_writer_emits_modelproto():
+    g = _const_graph(OperatorType.Relu, [[2]], [2])
+    raw = export_model(g, "tv-test")
+    assert len(raw) > 16
+    assert raw[0] == 8  # ModelProto field 1 (ir_version), varint tag
+
+public def test_constant_fold_translate():
+    m = OnnxModel()
+    n = OnnxNode()
+    n.name = "c0"
+    n.op_type = "Constant"
+    n.outputs.append("K")
+    a = OnnxAttribute("v")
+    a.type = AttributeType.Floats
+    a.floats = [3.0, 4.0]
+    n.attrs["value_floats"] = a
+    m.graph.nodes.append(n)
+    g = translate(m)
+    assert "K" in g.initializers
+    assert len(g.nodes) == 0
+    assert g.initializers["K"][0] == 3.0 and g.initializers["K"][1] == 4.0
+
+public def test_gathernd_scatter():
+    g = _const_graph(OperatorType.GatherND, [[2, 2], [1, 2]], [1])
+    d = NDArray[float32]([2, 2])
+    for i in range(4):
+        d[i] = float(i + 1)
+    idx = NDArray[float32]([1, 2])
+    idx[0] = 1.0
+    idx[1] = 0.0
+    y = _run(g, ["I0", "I1"], [d, idx], "Y")
+    assert y[0] == 3.0
+    # ScatterElements axis 0: rows replaced by updates rows
+    g = _const_graph(OperatorType.ScatterElements, [[2, 2], [2, 2], [2, 2]], [2, 2])
+    g.nodes[0].axis = 0
+    ii = NDArray[float32]([2, 2])
+    ii[0] = 0.0
+    ii[1] = 0.0
+    ii[2] = 1.0
+    ii[3] = 1.0
+    u = NDArray[float32]([2, 2])
+    u[0] = 9.0
+    u[1] = 9.0
+    u[2] = 8.0
+    u[3] = 8.0
+    y = _run(g, ["I0", "I1", "I2"], [d, ii, u], "Y")
+    assert y[0] == 9.0 and y[2] == 8.0
+
+public def test_range_eye_cumsum():
+    # Range inputs are positional (start, limit, delta) -> dedicated graph
+    g = ExecutionGraph("rng")
+    g.inputs.extend(["S", "E", "D"])
+    g.outputs.append("Y")
+    for nm in ["S", "E", "D"]:
+        g.get_or_create_tensor(nm, [1])
+    g.get_or_create_tensor("Y", [3])
+    n = ExecutionNode("r", OperatorType.Range)
+    n.inputs.extend(["S", "E", "D"])
+    n.outputs.append("Y")
+    g.nodes.append(n)
+    s = NDArray[float32]([1])
+    e = NDArray[float32]([1])
+    d = NDArray[float32]([1])
+    e[0] = 5.0
+    d[0] = 2.0
+    y = _run(g, ["S", "E", "D"], [s, e, d], "Y")
+    assert y[0] == 0.0 and y[1] == 2.0 and y[2] == 4.0
+    g = _const_graph(OperatorType.EyeLike, [[2, 3]], [2, 3])
+    y = _run(g, ["I0"], [NDArray[float32]([2, 3])], "Y")
+    assert y[0] == 1.0 and y[1] == 0.0 and y[3] == 0.0 and y[4] == 1.0
+    g = _const_graph(OperatorType.CumSum, [[4]], [4])
+    g.nodes[0].axis = 0
+    c = NDArray[float32]([4])
+    for i in range(4):
+        c[i] = float(i + 1)
+    y = _run(g, ["I0"], [c], "Y")
+    assert y[0] == 1.0 and y[1] == 3.0 and y[3] == 10.0
+
+public def test_mish_prelu_instancenorm():
+    g = _const_graph(OperatorType.Mish, [[2]], [2])
+    m = NDArray[float32]([2])
+    m[1] = 1.0
+    y = _run(g, ["I0"], [m], "Y")
+    assert y[0] == 0.0 and y[1] > 0.8 and y[1] < 0.9
+    g = _const_graph(OperatorType.PRelu, [[2]], [2], ["SL"])
+    _init_vec(g, "SL", [0.5])
+    p = NDArray[float32]([2])
+    p[0] = -2.0
+    p[1] = 3.0
+    y = _run(g, ["I0"], [p], "Y")
+    assert y[0] == -1.0 and y[1] == 3.0
+    g = _const_graph(OperatorType.InstanceNormalization, [[1, 2, 2]], [1, 2, 2], ["SC", "BI"])
+    _init_vec(g, "SC", [1.0, 1.0])
+    _init_vec(g, "BI", [0.0, 0.0])
+    v = NDArray[float32]([1, 2, 2])
+    v[0] = 0.0
+    v[1] = 2.0
+    v[2] = 4.0
+    v[3] = 6.0
+    y = _run(g, ["I0"], [v], "Y")
+    assert abs(y[0] + 1.0) < 1e-4 and abs(y[1] - 1.0) < 1e-4 and abs(y[2] + 1.0) < 1e-4
+
+public def test_speculative_all_accept():
+    g = _const_graph(OperatorType.FusedLinear, [[4]], [4], ["W", "B"])
+    w = NDArray[float32]([4, 4])
+    _init_mat(g, "W", [4, 4], 0.0)
+    _init_vec(g, "B", [0.0, 10.0, 0.0, 0.0])
+    t = InferenceSession(g, False)
+    d = InferenceSession(g, False)
+    p = SampleParams()
+    p.temperature = 0.0
+    gen = speculative_generate(t, d, StubTok(), "hi", 4, 2, p, 4, 4, -1)
+    t.close()
+    d.close()
+    assert gen == [1, 1, 1, 1]
+
+def _init_mat(g: ExecutionGraph, name: str, shape: list[int], v: float32):
+    n = 1
+    for d in shape:
+        n = n * d
+    m = NDArray[float32](shape)
+    for i in range(n):
+        m[i] = v
+    g.initializers[name] = m
+    g.get_or_create_tensor(name, shape)
+
+public def test_tools_parse_validate():
+    tools = [ToolDef("search", "web search", ["q"])]
+    call = parse_tool_call("think ```json {\"name\": \"search\", \"arguments\": {\"q\": \"x\"}} ``` done")
+    assert call is not None and call.name == "search"
+    assert validate_args(call, tools) == ""
+    assert parse_tool_call("no json here") is None
+    bad = ToolCall("nope", "{}")
+    assert validate_args(bad, tools) != ""
+
+public def test_autograd_trains_step():
+    w = NDArray[float32]([1, 1])
+    w[0] = 0.5
+    b = NDArray[float32]([1])
+    head = LinHead(w, b, 1, 1, 1)
+    x = NDArray[float32]([1])
+    x[0] = 2.0
+    t = NDArray[float32]([1])
+    t[0] = 4.0
+    l1 = train_step(head, x, t, 0.1)
+    l2 = train_step(head, x, t, 0.1)
+    assert abs(l1 - 9.0) < 1e-4 and l2 < l1
+
+public def test_grammar_prefix_mask():
+    g = compile_grammar("root ::= \"hi\"")
+    assert is_live(g, "") == True
+    assert is_live(g, "h") == True
+    assert is_live(g, "hi") == True
+    assert is_live(g, "hx") == False
+    assert is_live(g, "hix") == False
+    ids = allowed_token_ids(g, lambda i: ["h", "i", "x"][i], 3, "h")
+    assert 1 in ids and 2 not in ids
+
+def _onnx_float_init(gr: OnnxGraph, name: str, vals: list[float32]):
+    # dims left empty: translator treats scalar initializers as shape [1]
+    t = OnnxTensor(name)
+    t.dtype = TensorDataType.Float
+    t.float_data = list(vals)
+    gr.initializers.append(t)
+
+def _vi1(name: str) -> OnnxValueInfo:
+    return OnnxValueInfo(name)
+
+public def test_if_loop_end_to_end():
+    # If(cond=1, X) with then=Relu / else=Neg -> 3.0
+    m = OnnxModel()
+    ifn = OnnxNode()
+    ifn.name = "br"
+    ifn.op_type = "If"
+    ifn.inputs.extend(["C", "X"])
+    ifn.outputs.append("Y")
+    tb = OnnxGraph()
+    rn = OnnxNode()
+    rn.name = "r"
+    rn.op_type = "Relu"
+    rn.inputs.append("X")
+    rn.outputs.append("T")
+    tb.nodes.append(rn)
+    vt = OnnxValueInfo("T")
+    tb.outputs.append(vt)
+    eb = OnnxGraph()
+    nn = OnnxNode()
+    nn.name = "n"
+    nn.op_type = "Neg"
+    nn.inputs.append("X")
+    nn.outputs.append("E")
+    eb.nodes.append(nn)
+    ve = OnnxValueInfo("E")
+    eb.outputs.append(ve)
+    at = OnnxAttribute("then_branch")
+    at.graph = tb
+    ae = OnnxAttribute("else_branch")
+    ae.graph = eb
+    ifn.attrs["then_branch"] = at
+    ifn.attrs["else_branch"] = ae
+    m.graph.nodes.append(ifn)
+    m.graph.inputs.append(_vi1("X"))
+    m.graph.outputs.append(_vi1("Y"))
+    g = translate(m)
+    _init_vec(g, "C", [1.0])
+    s = InferenceSession(g, True)
+    x = NDArray[float32]([1])
+    x[0] = 3.0
+    y = s.run_single(x, "X", "Y")
+    s.close()
+    assert abs(y[0] - 3.0) < 1e-5
+    # Loop trip=2: Y = X + 2
+    m2 = OnnxModel()
+    lp = OnnxNode()
+    lp.name = "loop"
+    lp.op_type = "Loop"
+    lp.inputs.extend(["M", "C", "X"])
+    lp.outputs.append("Y")
+    body = OnnxGraph()
+    bi0 = OnnxValueInfo("I")
+    bi1 = OnnxValueInfo("C0")
+    bi2 = OnnxValueInfo("X0")
+    body.inputs.extend([bi0, bi1, bi2])
+    add = OnnxNode()
+    add.name = "add"
+    add.op_type = "Add"
+    add.inputs.extend(["X0", "ONE"])
+    add.outputs.append("X1")
+    body.nodes.append(add)
+    ps = OnnxNode()
+    ps.name = "pass"
+    ps.op_type = "Identity"
+    ps.inputs.append("C0")
+    ps.outputs.append("C1")
+    body.nodes.append(ps)
+    bo0 = OnnxValueInfo("C1")
+    bo1 = OnnxValueInfo("X1")
+    body.outputs.extend([bo0, bo1])
+    ab = OnnxAttribute("body")
+    ab.graph = body
+    lp.attrs["body"] = ab
+    m2.graph.nodes.append(lp)
+    m2.graph.inputs.append(_vi1("X"))
+    m2.graph.outputs.append(_vi1("Y"))
+    # loop-invariant initializers must exist BEFORE translate (expansion reads M)
+    _onnx_float_init(m2.graph, "M", [2.0])
+    _onnx_float_init(m2.graph, "C", [1.0])
+    _onnx_float_init(m2.graph, "ONE", [1.0])
+    g2 = translate(m2)
+    s2 = InferenceSession(g2, True)
+    x2 = NDArray[float32]([1])
+    x2[0] = 5.0
+    y2 = s2.run_single(x2, "X", "Y")
+    s2.close()
+    assert abs(y2[0] - 7.0) < 1e-4
+
+public def test_awq_asym_and_fp16():
+    w = NDArray[float32]([8])
+    for i in range(8):
+        w[i] = float(i) - 2.0
+    (packed, scales, zps) = quantize_int4_grouped_asym(w, 1, 8, 4)
+    assert len(packed) == 4 and len(scales) == 2 and len(zps) == 2
+    y = NDArray[float32]([8])
+    dequantize_int4_grouped_asym(packed, y, 1, 8, 4, scales, zps)
+    for i in range(8):
+        assert abs(w[i] - y[i]) < max(scales) * 2.0
+    p = NDArray[float32]([2, 3])
+    q = inv_permute_cols(permute_cols(p, 2, 3, [2, 0, 1]), 2, 3, [2, 0, 1])
+    for i in range(6):
+        assert q[i] == p[i]
+    a = NDArray[float32]([2, 2])
+    a[0] = 1.0
+    a[3] = 1.0
+    qa = NDArray[int8]([8])
+    quantize_fp16(a, qa)
+    y2 = NDArray[float32]([2, 2])
+    nb = NDArray[float32]([2])
+    matmul_fp16(qa, qa, nb, y2, 2, 2, 2)
+    assert abs(y2[0] - 1.0) < 1e-3 and abs(y2[3] - 1.0) < 1e-3
+
+public def test_autograd_gradcheck_and_adam():
+    # scalar net: h = relu(w1*x+b1), y = w2*h+b2 ; check dw2 vs numeric grad
+    w1 = NDArray[float32]([1])
+    w1[0] = 0.7
+    b1 = NDArray[float32]([1])
+    w2 = NDArray[float32]([1])
+    w2[0] = -0.4
+    b2 = NDArray[float32]([1])
+    h1 = LinHead(w1, b1, 1, 1, 1)
+    h2 = LinHead(w2, b2, 1, 1, 1)
+    x = NDArray[float32]([1])
+    x[0] = 2.0
+    t = NDArray[float32]([1])
+    t[0] = 1.0
+    h = relu_forward(h1.forward(x))
+    y = h2.forward(h)
+    dy = NDArray[float32]([1])
+    mse_backward(y, t, dy)
+    dh = h2.backward(dy)
+    h1.backward(relu_backward(h, dh))
+    analytic = h2.gw[0]
+    e = 1e-3
+    w2[0] = w2[0] + e
+    lp = mse_forward(h2.forward(relu_forward(h1.forward(x))), t)
+    w2[0] = w2[0] - 2.0 * e
+    lm = mse_forward(h2.forward(relu_forward(h1.forward(x))), t)
+    w2[0] = w2[0] + e
+    numeric = (lp - lm) / (2.0 * e)
+    assert abs(analytic - numeric) < 1e-2
+    st = AdamState(1, 0.01)
+    p = NDArray[float32]([1])
+    p[0] = 1.0
+    gg = NDArray[float32]([1])
+    gg[0] = 2.0
+    st.step(p, gg)
+    assert p[0] < 1.0
+
+public def test_pack_mask_and_preprocess():
+    m = pack_block_mask([1, 2], [2, 2])
+    assert len(m) == 12
+    assert m[0] == 0.0 and m[2] == -1e30 and m[6] == 0.0
+    img = NDArray[float32]([2 * 2 * 1])
+    for i in range(4):
+        img[i] = float(i + 1)
+    normalize_inplace(img, [1.0], [2.0], 1)
+    assert img[0] == 0.0 and img[3] == 1.5
+    ch = hwc_to_chw(img, 2, 2, 1)
+    assert ch[0] == 0.0 and ch[3] == 1.5
+    pt = patchify(img, 2, 2, 1, 2)
+    assert len(pt) == 4 and pt[0] == 0.0 and pt[3] == 1.5
+
+def _onnx_tensor_init(gr: OnnxGraph, name: str, shape: list[int], vals: list[float32]):
+    t = OnnxTensor(name)
+    t.dtype = TensorDataType.Float
+    for d in shape:
+        t.dims.append(d)
+    t.float_data = list(vals)
+    gr.initializers.append(t)
+
+public def test_lstm_unrolled_end_to_end():
+    # seq=2, batch=1, input=2, hidden=2, forward only, zero bias path (no B input)
+    m = OnnxModel()
+    lstm = OnnxNode()
+    lstm.name = "lstm"
+    lstm.op_type = "LSTM"
+    lstm.inputs.extend(["X", "W", "R"])
+    lstm.outputs.extend(["Y", "YH"])
+    hs = OnnxAttribute("hidden_size")
+    hs.type = AttributeType.Int
+    hs.i = 2
+    lstm.attrs["hidden_size"] = hs
+    m.graph.nodes.append(lstm)
+    m.graph.inputs.append(_vi1("X"))
+    m.graph.outputs.append(_vi1("Y"))
+    m.graph.outputs.append(_vi1("YH"))
+    _onnx_tensor_init(m.graph, "W", [1, 8, 2], [0.1] * 16)
+    _onnx_tensor_init(m.graph, "R", [1, 8, 2], [0.1] * 16)
+    g = translate(m)
+    s = InferenceSession(g, True)
+    x = NDArray[float32]([2, 1, 2])
+    for i in range(4):
+        x[i] = 0.5
+    ins = [NamedTensor("X", x)]
+    y = NDArray[float32]([2, 1, 1, 2])
+    yh = NDArray[float32]([1, 1, 2])
+    s.run(ins, [NamedTensor("Y", y), NamedTensor("YH", yh)])
+    s.close()
+    assert len(y) == 4 and len(yh) == 2
+    for i in range(4):
+        assert y[i] == y[i] and abs(y[i]) < 2.0
+    assert yh[0] == y[2] and yh[1] == y[3]
+
+public def test_resize_nearest_einsum():
+    g = _const_graph(OperatorType.Resize, [[1, 1, 2, 2]], [1, 1, 4, 4], ["SC"])
+    _init_vec(g, "SC", [1.0, 1.0, 2.0, 2.0])
+    x = NDArray[float32]([1, 1, 2, 2])
+    for i in range(4):
+        x[i] = float(i + 1)
+    y = _run(g, ["I0"], [x], "Y")
+    assert y[0] == 1.0 and y[2] == 2.0 and y[8] == 3.0 and y[10] == 4.0
+    # einsum matmul + transpose
+    g = ExecutionGraph("e")
+    g.inputs.extend(["A", "B"])
+    g.outputs.append("Y")
+    g.get_or_create_tensor("A", [2, 3])
+    g.get_or_create_tensor("B", [3, 2])
+    g.get_or_create_tensor("Y", [2, 2])
+    n = ExecutionNode("e", OperatorType.Einsum)
+    n.inputs.extend(["A", "B"])
+    n.outputs.append("Y")
+    n.eq = "ij,jk->ik"
+    g.nodes.append(n)
+    a = NDArray[float32]([2, 3])
+    b = NDArray[float32]([3, 2])
+    for i in range(6):
+        a[i] = float(i + 1)
+        b[i] = float(i + 1)
+    y = _run(g, ["A", "B"], [a, b], "Y")
+    assert y[0] == 22.0 and y[1] == 28.0 and y[2] == 49.0 and y[3] == 64.0
+    g = _const_graph(OperatorType.Einsum, [[2, 3]], [3, 2])
+    g.nodes[0].eq = "ij->ji"
+    y = _run(g, ["I0"], [a], "Y")
+    assert y[0] == 1.0 and y[1] == 4.0 and y[2] == 2.0 and y[3] == 5.0 and y[4] == 3.0 and y[5] == 6.0
+
+public def test_qlinear_conv_matmulinteger_dynquant():
+    # QLinearConv 1x1x3x3, W 1x1x2x2 int8 init, all scales 1, zp 0.
+    # ones conv -> every output = 4.
+    g = ExecutionGraph("qc")
+    g.inputs.extend(["X", "XS", "XZ", "WS", "WZ", "YS", "YZ"])
+    g.outputs.append("Y")
+    g.get_or_create_tensor("X", [1, 1, 3, 3], TensorDataType.Int8)
+    g.get_or_create_tensor("Y", [1, 1, 2, 2], TensorDataType.Int8)
+    for nm in ["XS", "XZ", "WS", "WZ", "YS", "YZ"]:
+        g.get_or_create_tensor(nm, [1])
+    w = NDArray[int8]([1, 1, 2, 2])
+    for i in range(4):
+        w[i] = 1
+    g.initializers_int8["W"] = w
+    g.get_or_create_tensor("W", [1, 1, 2, 2], TensorDataType.Int8)
+    for nm, v in [("XS", 1.0), ("WS", 1.0), ("YS", 1.0)]:
+        _init_vec(g, nm, [v])
+    for nm in ["XZ", "WZ", "YZ"]:
+        _init_vec(g, nm, [0.0])
+    n = ExecutionNode("q", OperatorType.QLinearConv)
+    n.inputs.extend(["X", "XS", "XZ", "W", "WS", "WZ", "YS", "YZ"])
+    n.outputs.append("Y")
+    g.nodes.append(n)
+    s = InferenceSession(g, False)
+    x = NDArray[int8]([1, 1, 3, 3])
+    for i in range(9):
+        x[i] = 1
+    yq = NDArray[int8]([1, 1, 2, 2])
+    s.run([NamedTensor("X", qdata=x)], [NamedTensor("Y", qdata=yq)])
+    s.close()
+    assert yq[0] == 4 and yq[1] == 4 and yq[2] == 4 and yq[3] == 4
+    # MatMulInteger exact: [[1,2],[3,4]] @ ones -> [3,3,7,7]
+    g = ExecutionGraph("mi")
+    g.inputs.extend(["A", "B"])
+    g.outputs.append("Y")
+    g.get_or_create_tensor("A", [2, 2], TensorDataType.Int8)
+    g.get_or_create_tensor("B", [2, 2], TensorDataType.Int8)
+    g.get_or_create_tensor("Y", [2, 2], TensorDataType.Int32)
+    n = ExecutionNode("m", OperatorType.MatMulInteger)
+    n.inputs.extend(["A", "B"])
+    n.outputs.append("Y")
+    g.nodes.append(n)
+    s = InferenceSession(g, False)
+    a = NDArray[int8]([2, 2])
+    b = NDArray[int8]([2, 2])
+    for i in range(4):
+        a[i] = i + 1
+        b[i] = 1
+    yo = NDArray[int]([2, 2])
+    s.run([NamedTensor("A", qdata=a), NamedTensor("B", qdata=b)], [NamedTensor("Y", idata=yo)])
+    s.close()
+    assert yo[0] == 3 and yo[1] == 3 and yo[2] == 7 and yo[3] == 7
+    # DynamicQuantizeLinear [0,1,2]: scale 2/255, zp 0, shifted int8 out
+    g = _const_graph(OperatorType.DynamicQuantizeLinear, [[3]], [3])
+    g.outputs.extend(["YS", "YZ"])
+    g.get_or_create_tensor("YS", [1])
+    g.get_or_create_tensor("YZ", [1])
+    g.nodes[0].outputs.extend(["YS", "YZ"])
+    g.tensors["Y"].dtype = TensorDataType.Int8
+    g.tensors["Y"].byte_size = g.tensors["Y"].element_count * TensorDesc.dtype_size(TensorDataType.Int8)
+    d = NDArray[float32]([3])
+    d[1] = 1.0
+    d[2] = 2.0
+    s = InferenceSession(g, False)
+    yq = NDArray[int8]([3])
+    ysc = NDArray[float32]([1])
+    yzp = NDArray[float32]([1])
+    s.run([NamedTensor("I0", d)], [NamedTensor("Y", qdata=yq), NamedTensor("YS", ysc), NamedTensor("YZ", yzp)])
+    s.close()
+    assert abs(ysc[0] - 2.0 / 255.0) < 1e-6 and yzp[0] == 0.0
+    assert yq[0] == -128 and yq[2] == 127
 
 def _graph_64_graph() -> ExecutionGraph:
     g = ExecutionGraph("t")

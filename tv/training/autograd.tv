@@ -1,0 +1,186 @@
+// TokenVector Module: Training — Micro autograd for edge fine-tuning
+// Explicit-backward linear heads (no tape overhead): forward caches inputs,
+// backward accumulates weight/bias grads, SGD steps update in place.
+// Scope is honest: last-layer / LoRA-style head tuning on device, not
+// full-model pretraining (see COMPETITOR_COMPARISON §7).
+
+module tv.training.autograd
+
+import tv.numerics.tensor
+
+# y = x @ W^T + b ; x[M,K], W[N,K], b[N] -> y[M,N]. K-blocked forward.
+public class LinHead:
+    def __init__(self, w: NDArray[float32], b: NDArray[float32], m: int, n: int, k: int):
+        self.w = w
+        self.b = b
+        self.m = m
+        self.n = n
+        self.k = k
+        self.gw = NDArray[float32]([n * k])
+        self.gb = NDArray[float32]([n])
+        self._x: NDArray[float32] = None
+        self.zero_grad()
+
+    public def zero_grad(self):
+        for i in range(len(self.gw)):
+            self.gw[i] = 0.0
+        for i in range(len(self.gb)):
+            self.gb[i] = 0.0
+
+    public def forward(self, x: NDArray[float32]) -> NDArray[float32]:
+        self._x = x
+        y = NDArray[float32]([self.m * self.n])
+        for mm in range(self.m):
+            for nn in range(self.n):
+                acc = self.b[nn]
+                kk = 0
+                while kk + 32 <= self.k:
+                    for l in range(32):
+                        acc = acc + x[mm * self.k + kk + l] * self.w[nn * self.k + kk + l]
+                    kk = kk + 32
+                while kk < self.k:
+                    acc = acc + x[mm * self.k + kk] * self.w[nn * self.k + kk]
+                    kk = kk + 1
+                y[mm * self.n + nn] = acc
+        return y
+
+    # dy: upstream grad [M,N] -> accumulates gw [N,K], gb [N]; returns dx [M,K]
+    public def backward(self, dy: NDArray[float32]) -> NDArray[float32]:
+        dx = NDArray[float32]([self.m * self.k])
+        for i in range(len(dx)):
+            dx[i] = 0.0
+        for mm in range(self.m):
+            for nn in range(self.n):
+                g = dy[mm * self.n + nn]
+                self.gb[nn] = self.gb[nn] + g
+                for p in range(self.k):
+                    self.gw[nn * self.k + p] = self.gw[nn * self.k + p] + g * self._x[mm * self.k + p]
+                    dx[mm * self.k + p] = dx[mm * self.k + p] + g * self.w[nn * self.k + p]
+        return dx
+
+    public def sgd_step(self, lr: float32):
+        for i in range(len(self.w)):
+            self.w[i] = self.w[i] - lr * self.gw[i]
+        for i in range(len(self.b)):
+            self.b[i] = self.b[i] - lr * self.gb[i]
+
+# mean-squared error + its upstream grad
+public def mse_forward(y: NDArray[float32], t: NDArray[float32]) -> float32:
+    s = 0.0
+    for i in range(len(y)):
+        d = y[i] - t[i]
+        s = s + d * d
+    return s / len(y)
+
+public def mse_backward(y: NDArray[float32], t: NDArray[float32], dy: NDArray[float32]):
+    n = len(y)
+    for i in range(n):
+        dy[i] = 2.0 * (y[i] - t[i]) / n
+
+# one supervised step on a single row: returns loss before the update
+public def train_step(head: LinHead, x: NDArray[float32], t: NDArray[float32], lr: float32) -> float32:
+    y = head.forward(x)
+    loss = mse_forward(y, t)
+    dy = NDArray[float32]([len(y)])
+    mse_backward(y, t, dy)
+    head.backward(dy)
+    head.sgd_step(lr)
+    head.zero_grad()
+    return loss
+
+# --- activations with backward ---
+public def relu_forward(x: NDArray[float32]) -> NDArray[float32]:
+    y = NDArray[float32]([len(x)])
+    for i in range(len(x)):
+        y[i] = x[i] if x[i] > 0.0 else 0.0
+    return y
+
+public def relu_backward(x: NDArray[float32], dy: NDArray[float32]) -> NDArray[float32]:
+    dx = NDArray[float32]([len(x)])
+    for i in range(len(x)):
+        dx[i] = dy[i] if x[i] > 0.0 else 0.0
+    return dx
+
+# softmax cross-entropy (logits + integer target): returns (loss, dlogits)
+public def softmax_ce(logits: NDArray[float32], target: int) -> tuple[float32, NDArray[float32]]:
+    mx = logits[0]
+    for i in range(1, len(logits)):
+        if logits[i] > mx:
+            mx = logits[i]
+    s = 0.0
+    for i in range(len(logits)):
+        s = s + exp(logits[i] - mx)
+    loss = log(s) + mx - logits[target]
+    dy = NDArray[float32]([len(logits)])
+    for i in range(len(logits)):
+        p = exp(logits[i] - mx) / s
+        dy[i] = p - (1.0 if i == target else 0.0)
+    return (loss, dy)
+
+# --- Adam optimizer state (per-parameter m/v buffers) ---
+public class AdamState:
+    def __init__(self, size: int, lr: float32 = 1e-3, b1: float32 = 0.9, b2: float32 = 0.999, eps: float32 = 1e-8):
+        self.m = NDArray[float32]([size])
+        self.v = NDArray[float32]([size])
+        for i in range(size):
+            self.m[i] = 0.0
+            self.v[i] = 0.0
+        self.t = 0
+        self.lr = lr
+        self.b1 = b1
+        self.b2 = b2
+        self.eps = eps
+
+    public def step(self, p: NDArray[float32], g: NDArray[float32]):
+        self.t = self.t + 1
+        for i in range(len(p)):
+            self.m[i] = self.b1 * self.m[i] + (1.0 - self.b1) * g[i]
+            self.v[i] = self.v[i] * self.b2 + (1.0 - self.b2) * g[i] * g[i]
+            mh = self.m[i] / (1.0 - _pow(self.b1, self.t))
+            vh = self.v[i] / (1.0 - _pow(self.b2, self.t))
+            p[i] = p[i] - self.lr * mh / (sqrt(vh) + self.eps)
+
+def _pow(b: float32, e: int) -> float32:
+    r = 1.0
+    for _ in range(e):
+        r = r * b
+    return r
+
+# --- two-layer MLP classifier: LinHead -> ReLU -> LinHead -> softmaxCE ---
+public class MLPClassifier:
+    def __init__(self, in_dim: int, hidden: int, classes: int, seed: int = 7):
+        w1 = NDArray[float32]([hidden * in_dim])
+        b1 = NDArray[float32]([hidden])
+        w2 = NDArray[float32]([classes * hidden])
+        b2 = NDArray[float32]([classes])
+        s = seed
+        for i in range(len(w1)):
+            s = (s * 6364136223846793005 + 1442695040888963407) & 0xFFFFFFFFFFFFFFFF
+            w1[i] = (float(s % 1000) / 1000.0 - 0.5) * 2.0
+        for i in range(len(w2)):
+            s = (s * 6364136223846793005 + 1442695040888963407) & 0xFFFFFFFFFFFFFFFF
+            w2[i] = (float(s % 1000) / 1000.0 - 0.5) * 2.0
+        self.l1 = LinHead(w1, b1, 1, hidden, in_dim)
+        self.l2 = LinHead(w2, b2, 1, classes, hidden)
+
+    public def zero_grad(self):
+        self.l1.zero_grad()
+        self.l2.zero_grad()
+
+    public def predict(self, x: NDArray[float32]) -> int:
+        h = relu_forward(self.l1.forward(x))
+        y = self.l2.forward(h)
+        best = 0
+        for i in range(1, len(y)):
+            if y[i] > y[best]:
+                best = i
+        return best
+
+    # returns loss; accumulates grads into both heads (call sgd/adam externally)
+    public def train_row(self, x: NDArray[float32], target: int) -> float32:
+        h = relu_forward(self.l1.forward(x))
+        y = self.l2.forward(h)
+        (loss, dy) = softmax_ce(y, target)
+        dh = self.l2.backward(dy)
+        self.l1.backward(relu_backward(h, dh))
+        return loss

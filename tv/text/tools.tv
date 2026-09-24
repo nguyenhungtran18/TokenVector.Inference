@@ -1,0 +1,118 @@
+// TokenVector Module: Text — Tool-calling loop + schema-guided generation
+// Model-agnostic glue (what serving stacks do around the model): render tool
+// definitions into the prompt, extract ```json {"name":..,"arguments":..} ```
+// calls from decoded text, validate required args, dispatch to registered
+// functions, feed results back for up to max_iters turns. Plus a JSON-object
+// mode that generates then validates/repairs required fields.
+
+module tv.text.tools
+
+import tv.runtime.session
+import tv.text.generate
+import tv.text.tokenizer
+import tv.text.sampling
+import tv.text.chat_template
+import tv.numerics.tensor
+
+public class ToolDef:
+    def __init__(self, name: str, description: str, required: list[str] = []):
+        self.name = name
+        self.description = description
+        self.required = required
+
+public class ToolCall:
+    def __init__(self, name: str, args_raw: str):
+        self.name = name
+        self.args_raw = args_raw
+
+public def render_tools(tools: list[ToolDef]) -> str:
+    out = "Available tools (reply with ```json {\"name\": ..., \"arguments\": ...} ``` to call one):\n"
+    for t in tools:
+        out = out + "- " + t.name + ": " + t.description
+        if len(t.required) > 0:
+            out = out + " (required args: " + ",".join(t.required) + ")"
+        out = out + "\n"
+    return out
+
+# first ```json block whose body contains "name"; returns call or None
+public def parse_tool_call(text: str) -> ToolCall:
+    start = text.find("```json")
+    while start >= 0:
+        body_start = start + len("```json")
+        end = text.find("```", body_start)
+        if end < 0:
+            return None
+        body = text[body_start:end]
+        nm = _extract_field(body, "name")
+        if nm != "":
+            return ToolCall(nm, body)
+        start = text.find("```json", end)
+    return None
+
+def _extract_field(body: str, field: str) -> str:
+    key = "\"" + field + "\""
+    i = body.find(key)
+    if i < 0:
+        return ""
+    c = body.find(":", i + len(key))
+    if c < 0:
+        return ""
+    q1 = body.find("\"", c)
+    if q1 < 0:
+        return ""
+    q2 = body.find("\"", q1 + 1)
+    if q2 < 0:
+        return ""
+    return body[q1 + 1:q2]
+
+public def validate_args(call: ToolCall, tools: list[ToolDef]) -> str:
+    for t in tools:
+        if t.name == call.name:
+            for r in t.required:
+                if call.args_raw.find(r) < 0:
+                    return "missing required arg: " + r
+            return ""
+    return "unknown tool: " + call.name
+
+# Multi-turn loop: generate -> maybe call tool -> append result -> regenerate.
+# dispatch(name, args_raw) is host-registered (file/network/process access).
+public def run_tool_loop(session: InferenceSession, tokenizer, messages: list[ChatMessage],
+        tools: list[ToolDef], dispatch: func(str, str) -> str,
+        cfg: GenConfig, max_iters: int = 4) -> str:
+    sys_extra = ChatMessage("system", render_tools(tools))
+    convo = [sys_extra] + messages
+    for _ in range(max_iters + 1):
+        res = chat_generate(session, tokenizer, convo, cfg)
+        call = parse_tool_call(res.text)
+        if call is None:
+            return res.text
+        err = validate_args(call, tools)
+        if err != "":
+            convo.append(ChatMessage("assistant", res.text))
+            convo.append(ChatMessage("user", "Tool error: " + err + ". Fix the call."))
+            continue
+        result = dispatch(call.name, call.args_raw)
+        convo.append(ChatMessage("assistant", res.text))
+        convo.append(ChatMessage("user", "Tool result (" + call.name + "): " + result + ". Continue."))
+    last = chat_generate(session, tokenizer, convo, cfg)
+    return last.text
+
+# JSON-object mode: generate text, require it to parse as an object containing
+# all required fields (substring check on keys); else retry with repair hint.
+public def generate_json_object(session: InferenceSession, tokenizer, prompt: str,
+        required: list[str], cfg: GenConfig, max_iters: int = 3) -> str:
+    cur = prompt + "\nReply with a single JSON object only."
+    for _ in range(max_iters):
+        res = generate_text(session, tokenizer, cur, cfg)
+        ok = True
+        missing = ""
+        for r in required:
+            if res.text.find("\"" + r + "\"") < 0:
+                ok = False
+                missing = r
+                break
+        if ok:
+            return res.text
+        cur = cur + "\nPrevious reply missed required field \"" + missing + "\". Reply again with valid JSON."
+    res = generate_text(session, tokenizer, cur, cfg)
+    return res.text

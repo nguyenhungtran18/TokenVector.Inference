@@ -16,6 +16,7 @@ public class ExecutionGraph:
         self.inputs: list[str] = []
         self.outputs: list[str] = []
         self.initializers: dict[str, NDArray[float32]] = {}
+        self.initializers_int8: dict[str, NDArray[int8]] = {}
         self.total_arena_bytes: int = 0
 
     public def get_or_create_tensor(self, name: str, shape: list[int], dtype: TensorDataType = TensorDataType.Float) -> TensorDesc:
@@ -70,6 +71,12 @@ public class ExecutionGraph:
                 t.is_initializer = True
                 t.offset = cur
                 cur = cur + ((t.byte_size + 63) & ~63)
+        for nm in self.initializers_int8:
+            if nm in self.tensors:
+                t = self.tensors[nm]
+                t.is_initializer = True
+                t.offset = cur
+                cur = cur + ((t.byte_size + 63) & ~63)
         for nm in self.inputs:
             if nm in self.tensors:
                 t = self.tensors[nm]
@@ -112,3 +119,8 @@ public class ExecutionGraph:
                 t = self.tensors[nm]
                 if t.offset >= 0:
                     arena.copy_from(t.offset, self.initializers[nm])
+        for nm in self.initializers_int8:
+            if nm in self.tensors:
+                t = self.tensors[nm]
+                if t.offset >= 0:
+                    arena.copy_from_int8(t.offset, self.initializers_int8[nm])

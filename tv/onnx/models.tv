@@ -47,6 +47,7 @@ public class OnnxAttribute:
         self.i: int64 = 0
         self.s: str = ""
         self.t: OnnxTensor = None
+        self.graph: OnnxGraph = None
         self.floats: list[float32] = []
         self.ints: list[int64] = []
         self.strings: list[str] = []

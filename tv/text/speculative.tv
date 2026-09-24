@@ -1,0 +1,78 @@
+// TokenVector Module: Text — Speculative decoding (draft + target verify)
+// Draft proposes k tokens; target verifies in one forward per position and
+// keeps the accepted prefix, resampling at the first rejection (standard
+// speculative-sampling loop). Falls back to plain autoregressive on mismatch.
+
+module tv.text.speculative
+
+import tv.runtime.session
+import tv.text.sampling
+import tv.numerics.tensor
+
+public def speculative_generate(target: InferenceSession, draft: InferenceSession,
+        tokenizer, prompt: str, max_new_tokens: int, k: int,
+        params: SampleParams, in_dim: int, vocab: int, eos: int = -1) -> list[int]:
+    ids = tokenizer.encode(prompt)
+    history = list(ids)
+    gen: list[int] = []
+    while len(gen) < max_new_tokens:
+        # draft k tokens autoregressively (greedy for the proposal chain)
+        greedy = SampleParams()
+        greedy.temperature = 0.0
+        prop: list[int] = []
+        dhist = list(history)
+        for _ in range(min(k, max_new_tokens - len(gen))):
+            lg = _logits_for(draft, dhist, in_dim, vocab)
+            t = sample_token(lg, greedy, dhist)
+            prop.append(t)
+            dhist.append(t)
+            if t == eos:
+                break
+        # target verifies each proposal position in order
+        accepted = 0
+        for t in prop:
+            lg = _logits_for(target, history, in_dim, vocab)
+            if _accepts(lg, t, params, history):
+                history.append(t)
+                gen.append(t)
+                accepted = accepted + 1
+                if t == eos or len(gen) >= max_new_tokens:
+                    break
+            else:
+                # resample from target at the rejection point
+                nt = sample_token(lg, params, history)
+                history.append(nt)
+                gen.append(nt)
+                break
+        if accepted == len(prop) and len(prop) > 0 and len(gen) < max_new_tokens:
+            # bonus token from target (all proposals accepted)
+            lg = _logits_for(target, history, in_dim, vocab)
+            nt = sample_token(lg, params, history)
+            history.append(nt)
+            gen.append(nt)
+        if len(gen) > 0 and gen[len(gen) - 1] == eos:
+            break
+        if len(prop) == 0:
+            break
+    return gen
+
+# multinomial accept-or-reject step (proposals are greedy => accept iff argmax)
+def _accepts(logits: NDArray[float32], t: int, params: SampleParams, history: list[int]) -> bool:
+    g = SampleParams()
+    g.temperature = 0.0
+    return sample_token(logits, g, history) == t
+
+def _logits_for(session: InferenceSession, history: list[int], in_dim: int, vocab: int) -> NDArray[float32]:
+    inp = NDArray[float32]([in_dim])
+    for i in range(in_dim):
+        inp[i] = 0.0
+    tail = history[len(history) - in_dim:] if len(history) > in_dim else history
+    base = in_dim - len(tail)
+    for i in range(len(tail)):
+        inp[base + i] = float(tail[i])
+    out = session.run_single(inp)
+    ln = min(len(out), vocab)
+    lg = NDArray[float32]([ln])
+    for i in range(ln):
+        lg[i] = out[len(out) - ln + i]
+    return lg

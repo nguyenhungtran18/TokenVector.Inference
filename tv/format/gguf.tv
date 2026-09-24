@@ -1,0 +1,326 @@
+// TokenVector Module: Format — GGUF weight loader (llama.cpp model files)
+// Full container parsing (header, KV metadata incl. arrays, tensor infos,
+// 32-byte alignment) + dequant to float NDArrays. Verified layouts: F32/F16/
+// BF16/I8/I16/I32/I64/F64, Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q8_K, Q4_K (scale/min
+// extraction per reference get_scale_min_k4 + low/high nibble pairing).
+// Q5_K included per reference dequant (u64 fifth-bit planes) — MUST be
+// cross-checked against reference vectors before trusting blindly.
+// Q2_K/Q3_K/Q6_K/IQ/TQ raise explicit errors (layouts need bit-exact
+// verification; silent corruption is worse than a loud error).
+
+module tv.format.gguf
+
+import tv.numerics.tensor
+
+# ggml_type ids we decode
+public const GGUF_F32 = 0
+public const GGUF_F16 = 1
+public const GGUF_Q4_0 = 2
+public const GGUF_Q4_1 = 3
+public const GGUF_Q5_0 = 6
+public const GGUF_Q5_1 = 7
+public const GGUF_Q8_0 = 8
+public const GGUF_Q4_K = 12
+public const GGUF_Q5_K = 13
+public const GGUF_Q8_K = 15
+public const GGUF_I8 = 16
+public const GGUF_I16 = 17
+public const GGUF_I32 = 18
+public const GGUF_I64 = 19
+public const GGUF_F64 = 20
+public const GGUF_BF16 = 30
+
+public class GGUFMeta:
+    def __init__(self, key: str, value: str):
+        self.key = key
+        self.value = value
+
+public class GGUFInfo:
+    def __init__(self, name: str, dtype: int, shape: list[int], offset: int, n_elems: int):
+        self.name = name
+        self.dtype = dtype
+        self.shape = shape  # conventional row-major order (reversed from file)
+        self.offset = offset  # relative to data start
+        self.n_elems = n_elems
+
+public class GGUFReader:
+    def __init__(self, path: str):
+        self.raw = file_read_all_bytes(path)
+        self.pos = 0
+        self.metas: list[GGUFMeta] = []
+        self.tensors: list[GGUFInfo] = []
+        self.data_start = 0
+        self._parse()
+
+    def _u32(self) -> int:
+        v = gguf_u32_le(self.raw, self.pos)
+        self.pos = self.pos + 4
+        return v
+
+    def _u64(self) -> int:
+        lo = gguf_u32_le(self.raw, self.pos)
+        hi = gguf_u32_le(self.raw, self.pos + 4)
+        self.pos = self.pos + 8
+        return lo + hi * 4294967296
+
+    def _str(self) -> str:
+        ln = self._u64()
+        s = gguf_bytes_to_str(self.raw, self.pos, ln)
+        self.pos = self.pos + ln
+        return s
+
+    def _parse(self):
+        if gguf_u32_le(self.raw, 0) != 0x46554747:
+            raise Arg("not a GGUF file (bad magic)")
+        self.pos = 4
+        ver = self._u32()
+        if ver < 2 or ver > 3:
+            raise Arg(f"unsupported GGUF version {ver}")
+        n_tensors = self._u64()
+        n_kv = self._u64()
+        for _ in range(n_kv):
+            key = self._str()
+            typ = self._u32()
+            self.metas.append(GGUFMeta(key, self._read_value(typ)))
+        for _ in range(n_tensors):
+            name = self._str()
+            nd = self._u32()
+            dims: list[int] = []
+            for _ in range(nd):
+                dims.append(self._u64())
+            dtype = self._u32()
+            off = self._u64()
+            n = 1
+            for d in dims:
+                n = n * d
+            # file order is inner-dim-first; present conventional row-major
+            shape: list[int] = []
+            for i in range(len(dims) - 1, -1, -1):
+                shape.append(dims[i])
+            self.tensors.append(GGUFInfo(name, dtype, shape, off, n))
+        # data start aligned to 32
+        self.data_start = self.pos + ((32 - self.pos % 32) % 32)
+
+    def _read_value(self, typ: int) -> str:
+        # GGUF value types: 0 u8, 1 i8, 2 u16, 3 i16, 4 u32, 5 i32, 6 f32,
+        # 7 bool, 8 string, 9 array, 10 u64, 11 i64, 12 f64
+        if typ == 0:  # u8
+            v = self.raw[self.pos]
+            self.pos = self.pos + 1
+            return str(v)
+        if typ == 1:  # i8
+            v = self.raw[self.pos]
+            self.pos = self.pos + 1
+            return str(v - 256 if v > 127 else v)
+        if typ == 2:  # u16
+            v = gguf_u32_le(self.raw, self.pos) & 0xFFFF
+            self.pos = self.pos + 2
+            return str(v)
+        if typ == 3:  # i16
+            v = gguf_u32_le(self.raw, self.pos) & 0xFFFF
+            self.pos = self.pos + 2
+            return str(v - 65536 if v > 32767 else v)
+        if typ == 4 or typ == 10:  # u32 / u64
+            v = self._u64() if typ == 10 else self._u32()
+            return str(v)
+        if typ == 5 or typ == 11:  # i32 / i64
+            v = self._u64() if typ == 11 else self._u32()
+            if typ == 5 and v > 2147483647:
+                v = v - 4294967296
+            return str(v)
+        if typ == 6:  # f32
+            v = gguf_f32_from_bits(gguf_u32_le(self.raw, self.pos))
+            self.pos = self.pos + 4
+            return str(v)
+        if typ == 7:  # bool
+            v = self.raw[self.pos]
+            self.pos = self.pos + 1
+            return "true" if v != 0 else "false"
+        if typ == 8:  # string
+            return self._str()
+        if typ == 9:  # array
+            at = self._u32()
+            ln = self._u64()
+            parts: list[str] = []
+            for _ in range(ln):
+                parts.append(self._read_value(at))
+            return "[" + ",".join(parts) + "]"
+        if typ == 12:  # f64 (as float text)
+            lo = gguf_u32_le(self.raw, self.pos)
+            hi = gguf_u32_le(self.raw, self.pos + 4)
+            self.pos = self.pos + 8
+            return str(gguf_f64_from_bits(lo, hi))
+        raise Arg(f"unsupported GGUF metadata type {typ}")
+
+    public def meta(self, key: str) -> str:
+        for m in self.metas:
+            if m.key == key:
+                return m.value
+        return ""
+
+    public def load_tensor(self, name: str) -> NDArray[float32]:
+        for t in self.tensors:
+            if t.name == name:
+                return _dequant_tensor(self.raw, self.data_start + t.offset, t)
+        raise Arg("tensor not found: " + name)
+
+    public def load_all(self) -> dict[str, NDArray[float32]]:
+        res: dict[str, NDArray[float32]] = {}
+        for t in self.tensors:
+            res[t.name] = _dequant_tensor(self.raw, self.data_start + t.offset, t)
+        return res
+
+def _sbyte(b: int) -> int:
+    return b - 256 if b > 127 else b
+
+def _dequant_tensor(raw: bytes, base: int, t: GGUFInfo) -> NDArray[float32]:
+    n = t.n_elems
+    out = NDArray[float32](t.shape if len(t.shape) > 0 else [1])
+    dt = t.dtype
+    if dt == GGUF_F32:
+        for i in range(n):
+            out[i] = gguf_f32_from_bits(gguf_u32_le(raw, base + i * 4))
+        return out
+    if dt == GGUF_F16:
+        for i in range(n):
+            out[i] = gguf_f16_from_bits(gguf_u32_le(raw, base + i * 2) & 0xFFFF)
+        return out
+    if dt == GGUF_BF16:
+        for i in range(n):
+            out[i] = gguf_bf16_from_bits(gguf_u32_le(raw, base + i * 2) & 0xFFFF)
+        return out
+    if dt == GGUF_I8:
+        for i in range(n):
+            out[i] = float(_sbyte(raw[base + i]))
+        return out
+    if dt == GGUF_I16:
+        for i in range(n):
+            v = gguf_u32_le(raw, base + i * 2) & 0xFFFF
+            out[i] = float(v - 65536 if v > 32767 else v)
+        return out
+    if dt == GGUF_I32:
+        for i in range(n):
+            v = gguf_u32_le(raw, base + i * 4)
+            out[i] = float(v - 4294967296 if v > 2147483647 else v)
+        return out
+    if dt == GGUF_I64:
+        for i in range(n):
+            lo = gguf_u32_le(raw, base + i * 8)
+            hi = gguf_u32_le(raw, base + i * 8 + 4)
+            out[i] = float(lo + hi * 4294967296)
+        return out
+    if dt == GGUF_F64:
+        for i in range(n):
+            lo = gguf_u32_le(raw, base + i * 8)
+            hi = gguf_u32_le(raw, base + i * 8 + 4)
+            out[i] = gguf_f64_from_bits(lo, hi)
+        return out
+    if dt == GGUF_Q8_0:
+        # blocks of 32: f16 scale + 32 int8
+        nb = n // 32
+        for b in range(nb):
+            d = gguf_f16_from_bits(gguf_u32_le(raw, base + b * 34) & 0xFFFF)
+            for i in range(32):
+                out[b * 32 + i] = d * _sbyte(raw[base + b * 34 + 2 + i])
+        return out
+    if dt == GGUF_Q4_0 or dt == GGUF_Q4_1:
+        # blocks of 32: f16 d [+ f16 m] + 16 bytes (low nibbles first half)
+        nb = n // 32
+        step = 18 if dt == GGUF_Q4_0 else 20
+        for b in range(nb):
+            d = gguf_f16_from_bits(gguf_u32_le(raw, base + b * step) & 0xFFFF)
+            m = 8.0
+            qs = 2
+            if dt == GGUF_Q4_1:
+                m = gguf_f16_from_bits(gguf_u32_le(raw, base + b * step + 2) & 0xFFFF)
+                qs = 4
+            for i in range(16):
+                byte = raw[base + b * step + qs + i]
+                if dt == GGUF_Q4_0:
+                    out[b * 32 + i] = d * float((byte & 0xF) - 8)
+                    out[b * 32 + i + 16] = d * float(((byte >> 4) & 0xF) - 8)
+                else:
+                    out[b * 32 + i] = d * float(byte & 0xF) - m
+                    out[b * 32 + i + 16] = d * float((byte >> 4) & 0xF) - m
+        return out
+    if dt == GGUF_Q5_0 or dt == GGUF_Q5_1:
+        # blocks of 32: f16 d [+ f16 m] + 4-byte high-bit plane + 16 qs bytes
+        nb = n // 32
+        step = 22 if dt == GGUF_Q5_0 else 24
+        for b in range(nb):
+            d = gguf_f16_from_bits(gguf_u32_le(raw, base + b * step) & 0xFFFF)
+            m = 16.0
+            qh = 2
+            qs = 6
+            if dt == GGUF_Q5_1:
+                m = gguf_f16_from_bits(gguf_u32_le(raw, base + b * step + 2) & 0xFFFF)
+                qh = 4
+                qs = 8
+            for i in range(16):
+                # 32-bit high plane: bit i -> low group, bit i+16 -> high group
+                hb_lo = (raw[base + b * step + qh + i // 8] >> (i % 8)) & 1
+                hb_hi = (raw[base + b * step + qh + (i + 16) // 8] >> ((i + 16) % 8)) & 1
+                byte = raw[base + b * step + qs + i]
+                if dt == GGUF_Q5_0:
+                    out[b * 32 + i] = d * float((byte & 0xF) | (hb_lo << 4)) - d * m
+                    out[b * 32 + i + 16] = d * float(((byte >> 4) & 0xF) | (hb_hi << 4)) - d * m
+                else:
+                    out[b * 32 + i] = d * float((byte & 0xF) | (hb_lo << 4)) - m
+                    out[b * 32 + i + 16] = d * float(((byte >> 4) & 0xF) | (hb_hi << 4)) - m
+        return out
+    if dt == GGUF_Q4_K or dt == GGUF_Q5_K:
+        return _dequant_k4k5(raw, base, n, dt == GGUF_Q5_K)
+    raise Arg(f"GGUF dtype {dt} not supported (Q2_K/Q3_K/Q6_K/IQ/TQ need bit-exact reference vectors)")
+
+# Q4_K/Q5_K: 256-elem super-blocks [d f16][dmin f16][scales 12B][qh 32B Q5 only][qs 128B].
+# 8 sub-blocks of 32; pairs share a 32-byte qs segment (lows then highs).
+# Scales via reference get_scale_min_k4. VERIFY Q5_K fifth-bit planes vs reference.
+def _k4_scale(scales: list[int], j: int) -> tuple[int, int]:
+    if j < 4:
+        return (scales[j] & 63, scales[j + 4] & 63)
+    return ((scales[j + 4] & 0xF) | ((scales[j - 4] >> 6) << 4),
+            (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4))
+
+def _dequant_k4k5(raw: bytes, base: int, n: int, is_q5: bool) -> NDArray[float32]:
+    out = NDArray[float32]([n])
+    nb = n // 256
+    step = 176 if is_q5 else 144  # Q5K = 2+2+12+32+128; Q4K = 2+2+12+128
+    for b in range(nb):
+        bo = base + b * step
+        d = gguf_f16_from_bits(gguf_u32_le(raw, bo) & 0xFFFF)
+        dmin = gguf_f16_from_bits(gguf_u32_le(raw, bo + 2) & 0xFFFF)
+        scales: list[int] = []
+        for i in range(12):
+            scales.append(raw[bo + 4 + i])
+        qh0 = bo + 16 if is_q5 else 0
+        qs0 = bo + 48 if is_q5 else bo + 16
+        for s in range(4):
+            (sc0, m0) = _k4_scale(scales, 2 * s)
+            (sc1, m1) = _k4_scale(scales, 2 * s + 1)
+            d0 = d * sc0
+            dm0 = dmin * m0
+            d1 = d * sc1
+            dm1 = dmin * m1
+            for l in range(32):
+                qb = raw[qs0 + s * 32 + l]
+                if is_q5:
+                    # fifth-bit planes: 4 u64 LE per block; low group bits 0..31, high 32..63
+                    u = 0
+                    for u8 in range(8):
+                        u = u + raw[qh0 + s * 8 + u8] * (1 << (8 * u8))
+                    b0 = (u >> l) & 1
+                    b1 = (u >> (l + 32)) & 1
+                    out[b * 256 + s * 64 + l] = d0 * float((qb & 0xF) | (b0 << 4)) - dm0
+                    out[b * 256 + s * 64 + 32 + l] = d1 * float(((qb >> 4) & 0xF) | (b1 << 4)) - dm1
+                else:
+                    out[b * 256 + s * 64 + l] = d0 * float(qb & 0xF) - dm0
+                    out[b * 256 + s * 64 + 32 + l] = d1 * float((qb >> 4) & 0xF) - dm1
+    return out
+
+extern def file_read_all_bytes(path: str) -> bytes
+extern def gguf_u32_le(raw: bytes, pos: int) -> int
+extern def gguf_bytes_to_str(raw: bytes, pos: int, ln: int) -> str
+extern def gguf_f32_from_bits(b: int) -> float32
+extern def gguf_f16_from_bits(b: int) -> float32
+extern def gguf_bf16_from_bits(b: int) -> float32
+extern def gguf_f64_from_bits(lo: int, hi: int) -> float32

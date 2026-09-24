@@ -1,0 +1,140 @@
+// TokenVector Module: Tools — CLI (serve | gen | export | calibrate | latency)
+// Run: tv run tv/tools/cli.tv -- <command> [flags]
+// Flags are --key value pairs parsed from argv().
+
+module tv.tools.cli
+
+import tv.inference
+import tv.runtime.session
+import tv.onnx.parser
+import tv.onnx.translator
+import tv.onnx.writer
+import tv.server.embedded_server
+import tv.text.tokenizer
+import tv.text.sampling
+import tv.text.generate
+import tv.text.chat_template
+import tv.quantization.engine
+import tv.numerics.tensor
+
+def _flags(args: list[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a[:2] == "--" and i + 1 < len(args):
+            out[a[2:]] = args[i + 1]
+            i = i + 2
+        else:
+            i = i + 1
+    return out
+
+def _get(flags: dict[str, str], key: str, default: str) -> str:
+    return flags[key] if key in flags else default
+
+public def main():
+    args = argv()
+    if len(args) == 0:
+        print("usage: tv run tv/tools/cli.tv -- <serve|gen|export|calibrate|latency> [--key value]")
+        return
+    cmd = args[0]
+    flags = _flags(args[1:])
+    if cmd == "serve":
+        _cmd_serve(flags)
+    elif cmd == "gen":
+        _cmd_gen(flags)
+    elif cmd == "export":
+        _cmd_export(flags)
+    elif cmd == "calibrate":
+        _cmd_calibrate(flags)
+    elif cmd == "latency":
+        _cmd_latency(flags)
+    else:
+        print("unknown command: " + cmd)
+
+def _session_of(flags: dict[str, str]) -> InferenceSession:
+    model = _get(flags, "model", "")
+    if model == "":
+        raise Arg("--model <path.onnx> required")
+    return InferenceSession.from_onnx_file(model)
+
+def _cmd_serve(flags: dict[str, str]):
+    s = _session_of(flags)
+    opts = ServerOptions()
+    opts.port = int(_get(flags, "port", "8080"))
+    opts.api_key = _get(flags, "api-key", "")
+    opts.tokenizer_kind = _get(flags, "tokenizer", "")
+    opts.tokenizer_vocab = _get(flags, "vocab", "")
+    opts.tokenizer_merges = _get(flags, "merges", "")
+    opts.chat_format = _get(flags, "format", "chatml")
+    srv = EmbeddedServer(s, opts.port, opts)
+    print("serving on :" + str(opts.port))
+    wait_forever()
+
+def _cmd_gen(flags: dict[str, str]):
+    s = _session_of(flags)
+    kind = _get(flags, "tokenizer", "bpe")
+    tok = BPETokenizer(_get(flags, "vocab", "vocab.json"), _get(flags, "merges", "merges.txt")) if kind == "bpe" else WordPieceTokenizer(_get(flags, "vocab", "vocab.txt"))
+    ms = ModelSession.from_graph(s.graph)
+    cfg = GenConfig()
+    cfg.max_new_tokens = int(_get(flags, "max-tokens", "64"))
+    cfg.params.temperature = float(_get(flags, "temperature", "0.0"))
+    res = ms.generate(tok, _get(flags, "prompt", "Hello"), cfg.max_new_tokens, cfg.params.temperature)
+    print(res.text)
+    ms.close()
+
+def _cmd_export(flags: dict[str, str]):
+    # optimized graph (passes applied) -> ONNX bytes for ORT interop
+    s = _session_of(flags)
+    raw = export_model(s.graph, "tokenvector-opt")
+    file_write_bytes(_get(flags, "out", "model.opt.onnx"), raw)
+    print("exported " + str(len(raw)) + " bytes")
+    s.close()
+
+def _cmd_calibrate(flags: dict[str, str]):
+    # calibrate from a flat float list file? here: synthetic range demo is
+    # replaced by --data <raw-f32-le> + --count; emits scales JSON to stdout/file
+    s = _session_of(flags)
+    data = file_read_all_bytes(_get(flags, "data", "calib.bin"))
+    n = int(_get(flags, "count", str(len(data) // 4)))
+    vals = NDArray[float32]([n])
+    for i in range(n):
+        vals[i] = st_f32_le(data, i * 4)
+    method = _get(flags, "method", "minmax")
+    p = None
+    if method == "kl":
+        p = engine.calibrate_kl(vals)
+    elif method == "percentile":
+        p = engine.calibrate_percentile(vals)
+    elif method == "mse":
+        p = engine.calibrate_mse(vals)
+    else:
+        p = engine.calibrate_minmax(vals)
+    js = "{\"scale\":" + str(p.scale) + ",\"zero_point\":" + str(p.zero_point) + "}"
+    out = _get(flags, "out", "")
+    if out != "":
+        file_write_bytes(out, utf8_encode(js))
+    print(js)
+    s.close()
+
+def _cmd_latency(flags: dict[str, str]):
+    s = _session_of(flags)
+    dim = s.graph.tensors[s.graph.inputs[0]].element_count
+    x = NDArray[float32]([dim])
+    iters = int(_get(flags, "iters", "1000"))
+    for i in range(100):
+        s.run_single(x)
+    t0 = now_us()
+    for i in range(iters):
+        s.run_single(x)
+    dt = now_us() - t0
+    print("{\"iters\":" + str(iters) + ",\"avg_us\":" + str(float(dt) / iters) + "}")
+    s.close()
+
+extern def argv() -> list[str]
+extern def wait_forever()
+extern def now_us() -> int
+extern def file_read_all_bytes(path: str) -> bytes
+extern def file_write_bytes(path: str, data: bytes)
+extern def st_f32_le(raw: bytes, pos: int) -> float32
+extern def utf8_encode(s: str) -> list[int]
