@@ -24,6 +24,15 @@ import tv.text.chat_template
 import tv.text.generate
 import tv.onnx.parser
 import tv.onnx.translator
+import tv.onnx.string_ops
+import tv.runtime.string_tensor
+import tv.runtime.prefix_skip
+import tv.runtime.hal
+import tv.training.lora
+import tv.text.beam
+import tv.text.tree_speculative
+import tv.vision.vit
+import tv.format.gguf
 
 public class ModelSession:
     def __init__(self, model_path: str):
@@ -119,3 +128,16 @@ public def load_onnx(model_path: str) -> ModelSession:
 public def load_onnx_bytes(buf: bytes) -> ModelSession:
     model = parser.parse_bytes(buf)
     return ModelSession.from_graph(translator.translate(model))
+
+// --- TRIZ surface re-exports (module members stay under their own namespaces) ---
+public def make_lora(in_features: int, out_features: int, rank: int, alpha: float32, m: int = 1) -> LoRALinear:
+    w = NDArray[float32]([out_features * in_features])
+    b = NDArray[float32]([out_features])
+    for i in range(len(w)):
+        w[i] = 0.0
+    for i in range(len(b)):
+        b[i] = 0.0
+    return LoRALinear(w, b, m, out_features, in_features, rank, alpha)
+
+public def load_gguf(path: str, allow_unverified: bool = False):
+    return GGUFReader(path, allow_unverified)

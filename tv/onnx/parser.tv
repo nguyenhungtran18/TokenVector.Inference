@@ -150,6 +150,9 @@ def _parse_tensor(buf: bytes) -> OnnxTensor:
                     t.int32_data.append(sub.read_varint32())
             else:
                 t.int32_data.append(r.read_varint32())
+        elif field == 6:
+            # TensorProto.string_data: repeated bytes
+            t.string_data.append(r.read_string())
         elif field == 7:
             if wt == WireType.LengthDelimited:
                 sub = FastProtobufReader(r.read_length_delimited())

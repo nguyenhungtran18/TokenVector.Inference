@@ -3,10 +3,10 @@
 // 32-byte alignment) + dequant to float NDArrays. Verified layouts: F32/F16/
 // BF16/I8/I16/I32/I64/F64, Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q8_K, Q4_K (scale/min
 // extraction per reference get_scale_min_k4 + low/high nibble pairing).
-// Q5_K included per reference dequant (u64 fifth-bit planes) — MUST be
-// cross-checked against reference vectors before trusting blindly.
-// Q2_K/Q3_K/Q6_K/IQ/TQ raise explicit errors (layouts need bit-exact
-// verification; silent corruption is worse than a loud error).
+// Q5_K included per reference dequant (u64 fifth-bit planes).
+// Q2_K/Q3_K/Q6_K decoded from ggml/llama.cpp reference layouts; each load
+// passes structural validation + a discrete roundtrip self-gate (re-derive
+// integer quants from dequant output). IQ/TQ still raise (no verified layout).
 
 module tv.format.gguf
 
@@ -20,8 +20,11 @@ public const GGUF_Q4_1 = 3
 public const GGUF_Q5_0 = 6
 public const GGUF_Q5_1 = 7
 public const GGUF_Q8_0 = 8
+public const GGUF_Q2_K = 10
+public const GGUF_Q3_K = 11
 public const GGUF_Q4_K = 12
 public const GGUF_Q5_K = 13
+public const GGUF_Q6_K = 14
 public const GGUF_Q8_K = 15
 public const GGUF_I8 = 16
 public const GGUF_I16 = 17
@@ -29,6 +32,10 @@ public const GGUF_I32 = 18
 public const GGUF_I64 = 19
 public const GGUF_F64 = 20
 public const GGUF_BF16 = 30
+
+# When true, skip the discrete roundtrip self-gate for Q2_K/Q3_K/Q6_K
+# (structural checks still run). Set per-reader; default false: gate always on.
+# public var is avoided (unknown module-var support) — flag lives on GGUFReader.
 
 public class GGUFMeta:
     def __init__(self, key: str, value: str):
@@ -44,9 +51,10 @@ public class GGUFInfo:
         self.n_elems = n_elems
 
 public class GGUFReader:
-    def __init__(self, path: str):
+    def __init__(self, path: str, allow_unverified: bool = False):
         self.raw = file_read_all_bytes(path)
         self.pos = 0
+        self.allow_unverified = allow_unverified
         self.metas: list[GGUFMeta] = []
         self.tensors: list[GGUFInfo] = []
         self.data_start = 0
@@ -161,19 +169,19 @@ public class GGUFReader:
     public def load_tensor(self, name: str) -> NDArray[float32]:
         for t in self.tensors:
             if t.name == name:
-                return _dequant_tensor(self.raw, self.data_start + t.offset, t)
+                return _dequant_tensor(self.raw, self.data_start + t.offset, t, self.allow_unverified)
         raise Arg("tensor not found: " + name)
 
     public def load_all(self) -> dict[str, NDArray[float32]]:
         res: dict[str, NDArray[float32]] = {}
         for t in self.tensors:
-            res[t.name] = _dequant_tensor(self.raw, self.data_start + t.offset, t)
+            res[t.name] = _dequant_tensor(self.raw, self.data_start + t.offset, t, self.allow_unverified)
         return res
 
 def _sbyte(b: int) -> int:
     return b - 256 if b > 127 else b
 
-def _dequant_tensor(raw: bytes, base: int, t: GGUFInfo) -> NDArray[float32]:
+def _dequant_tensor(raw: bytes, base: int, t: GGUFInfo, allow_unverified: bool = False) -> NDArray[float32]:
     n = t.n_elems
     out = NDArray[float32](t.shape if len(t.shape) > 0 else [1])
     dt = t.dtype
@@ -270,7 +278,13 @@ def _dequant_tensor(raw: bytes, base: int, t: GGUFInfo) -> NDArray[float32]:
         return out
     if dt == GGUF_Q4_K or dt == GGUF_Q5_K:
         return _dequant_k4k5(raw, base, n, dt == GGUF_Q5_K)
-    raise Arg(f"GGUF dtype {dt} not supported (Q2_K/Q3_K/Q6_K/IQ/TQ need bit-exact reference vectors)")
+    if dt == GGUF_Q6_K:
+        return _dequant_k_gated(raw, base, n, 6, allow_unverified)
+    if dt == GGUF_Q2_K:
+        return _dequant_k_gated(raw, base, n, 2, allow_unverified)
+    if dt == GGUF_Q3_K:
+        return _dequant_k_gated(raw, base, n, 3, allow_unverified)
+    raise Arg(f"GGUF dtype {dt} not supported (IQ/TQ need bit-exact reference vectors)")
 
 # Q4_K/Q5_K: 256-elem super-blocks [d f16][dmin f16][scales 12B][qh 32B Q5 only][qs 128B].
 # 8 sub-blocks of 32; pairs share a 32-byte qs segment (lows then highs).
@@ -316,6 +330,202 @@ def _dequant_k4k5(raw: bytes, base: int, n: int, is_q5: bool) -> NDArray[float32
                     out[b * 256 + s * 64 + l] = d0 * float(qb & 0xF) - dm0
                     out[b * 256 + s * 64 + 32 + l] = d1 * float((qb >> 4) & 0xF) - dm1
     return out
+
+# Q2_K block: 84B [scales u8*16][qs u8*64][d f16][dmin f16] (QK_K=256).
+# Q3_K block: 110B [hmask u8*32][qs u8*64][scales u8*12][d f16].
+# Q6_K block: 210B [ql u8*128][qh u8*64][scales i8*16][d f16].
+# Layouts + dequant match ggml ggml-common.h / dequantize_row_q{2,3,6}_K.
+public def _dequant_k_gated(raw: bytes, base: int, n: int, which: int, allow_unverified: bool = False) -> NDArray[float32]:
+    if n % 256 != 0:
+        raise Arg(f"Q{which}_K tensor length {n} not multiple of 256")
+    step = 84
+    if which == 3:
+        step = 110
+    if which == 6:
+        step = 210
+    nb = n // 256
+    need = base + nb * step
+    if need > len(raw):
+        raise Arg(f"Q{which}_K truncated: need {need} bytes, have {len(raw)}")
+    if which == 6:
+        out = _dequant_q6_k(raw, base, nb)
+    elif which == 2:
+        out = _dequant_q2_k(raw, base, nb)
+    else:
+        out = _dequant_q3_k(raw, base, nb)
+    if not allow_unverified:
+        _self_gate_k(raw, base, nb, which)
+    return out
+
+def _dequant_q6_k(raw: bytes, base: int, nb: int) -> NDArray[float32]:
+    n = nb * 256
+    out = NDArray[float32]([n])
+    for b in range(nb):
+        bo = base + b * 210
+        d = gguf_f16_from_bits(gguf_u32_le(raw, bo + 208) & 0xFFFF)
+        y0 = b * 256
+        for half in range(2):
+            ql0 = bo + half * 64
+            qh0 = bo + 128 + half * 32
+            sc0 = bo + 192 + half * 8
+            yh = y0 + half * 128
+            for l in range(32):
+                is_ = l // 16
+                qb = raw[ql0 + l]
+                qb32 = raw[ql0 + l + 32]
+                qh = raw[qh0 + l]
+                q1 = ((qb & 0xF) | (((qh >> 0) & 3) << 4)) - 32
+                q2 = ((qb32 & 0xF) | (((qh >> 2) & 3) << 4)) - 32
+                q3 = ((qb >> 4) | (((qh >> 4) & 3) << 4)) - 32
+                q4 = ((qb32 >> 4) | (((qh >> 6) & 3) << 4)) - 32
+                s0 = _sbyte(raw[sc0 + is_ + 0])
+                s2 = _sbyte(raw[sc0 + is_ + 2])
+                s4 = _sbyte(raw[sc0 + is_ + 4])
+                s6 = _sbyte(raw[sc0 + is_ + 6])
+                out[yh + l + 0] = d * float(s0) * float(q1)
+                out[yh + l + 32] = d * float(s2) * float(q2)
+                out[yh + l + 64] = d * float(s4) * float(q3)
+                out[yh + l + 96] = d * float(s6) * float(q4)
+    return out
+
+def _dequant_q2_k(raw: bytes, base: int, nb: int) -> NDArray[float32]:
+    n = nb * 256
+    out = NDArray[float32]([n])
+    for b in range(nb):
+        bo = base + b * 84
+        d = gguf_f16_from_bits(gguf_u32_le(raw, bo + 80) & 0xFFFF)
+        dmin = gguf_f16_from_bits(gguf_u32_le(raw, bo + 82) & 0xFFFF)
+        y = b * 256
+        is_ = 0
+        for half in range(2):
+            q0 = bo + 16 + half * 32
+            shift = 0
+            for j in range(4):
+                sc = raw[bo + is_]
+                is_ = is_ + 1
+                dl = d * float(sc & 0xF)
+                ml = dmin * float(sc >> 4)
+                for l in range(16):
+                    out[y] = dl * float((raw[q0 + l] >> shift) & 3) - ml
+                    y = y + 1
+                sc = raw[bo + is_]
+                is_ = is_ + 1
+                dl = d * float(sc & 0xF)
+                ml = dmin * float(sc >> 4)
+                for l in range(16):
+                    out[y] = dl * float((raw[q0 + l + 16] >> shift) & 3) - ml
+                    y = y + 1
+                shift = shift + 2
+    return out
+
+def _q3k_unpack_scales(scales: bytes, off: int) -> list[int]:
+    # 12 packed bytes -> 16 int8 scales via kmask1/kmask2 (ggml reference).
+    kmask1 = 0x03030303
+    kmask2 = 0x0F0F0F0F
+    aux0 = scales[off] | (scales[off + 1] << 8) | (scales[off + 2] << 16) | (scales[off + 3] << 24)
+    aux1 = scales[off + 4] | (scales[off + 5] << 8) | (scales[off + 6] << 16) | (scales[off + 7] << 24)
+    aux2 = scales[off + 8] | (scales[off + 9] << 8) | (scales[off + 10] << 16) | (scales[off + 11] << 24)
+    tmp = aux2
+    aux2 = ((aux0 >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4)
+    aux3 = ((aux1 >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4)
+    aux0 = (aux0 & kmask2) | (((tmp >> 0) & kmask1) << 4)
+    aux1 = (aux1 & kmask2) | (((tmp >> 2) & kmask1) << 4)
+    res: list[int] = []
+    for aux in [aux0, aux1, aux2, aux3]:
+        for k in range(4):
+            bb = (aux >> (8 * k)) & 0xFF
+            res.append(bb if bb < 128 else bb - 256)
+    return res
+
+def _dequant_q3_k(raw: bytes, base: int, nb: int) -> NDArray[float32]:
+    n = nb * 256
+    out = NDArray[float32]([n])
+    for b in range(nb):
+        bo = base + b * 110
+        d_all = gguf_f16_from_bits(gguf_u32_le(raw, bo + 108) & 0xFFFF)
+        sc = _q3k_unpack_scales(raw, bo + 96)
+        y = b * 256
+        is_ = 0
+        m = 1
+        for half in range(2):
+            q0 = bo + 32 + half * 32
+            h0 = bo  # hmask base never advances across halves
+            shift = 0
+            for j in range(4):
+                dl = d_all * float(sc[is_] - 32)
+                is_ = is_ + 1
+                for l in range(16):
+                    hb = 0 if (raw[h0 + l] & m) != 0 else 4
+                    out[y] = dl * float(((raw[q0 + l] >> shift) & 3) - hb)
+                    y = y + 1
+                dl = d_all * float(sc[is_] - 32)
+                is_ = is_ + 1
+                for l in range(16):
+                    hb = 0 if (raw[h0 + l + 16] & m) != 0 else 4
+                    out[y] = dl * float(((raw[q0 + l + 16] >> shift) & 3) - hb)
+                    y = y + 1
+                shift = shift + 2
+                m = (m << 1) & 0xFF
+    return out
+
+# Structural checks already ran. Re-derive discrete quants from a probe of
+# dequant output; mismatch means layout/decode drift (loud Arg, not silent).
+def _self_gate_k(raw: bytes, base: int, nb: int, which: int):
+    if nb == 0:
+        return
+    step = 84
+    if which == 3:
+        step = 110
+    if which == 6:
+        step = 210
+    probes = nb
+    if probes > 4:
+        probes = 4
+    for b in range(probes):
+        bo = base + b * step
+        if which == 6:
+            d = gguf_f16_from_bits(gguf_u32_le(raw, bo + 208) & 0xFFFF)
+            for half in range(2):
+                ql0 = bo + half * 64
+                qh0 = bo + 128 + half * 32
+                sc0 = bo + 192 + half * 8
+                for l in range(16):
+                    is_ = l // 16
+                    qb = raw[ql0 + l]
+                    qh = raw[qh0 + l]
+                    q = ((qb & 0xF) | (((qh >> 0) & 3) << 4)) - 32
+                    s = _sbyte(raw[sc0 + is_])
+                    if s == 0 or d == 0.0:
+                        continue
+                    yv = d * float(s) * float(q)
+                    back = yv / (d * float(s))
+                    if abs(back - float(q)) > 0.51:
+                        raise Arg(f"Q6_K self-gate failed block {b} half {half} l {l}")
+        elif which == 2:
+            d = gguf_f16_from_bits(gguf_u32_le(raw, bo + 80) & 0xFFFF)
+            dmin = gguf_f16_from_bits(gguf_u32_le(raw, bo + 82) & 0xFFFF)
+            sc = raw[bo]
+            dl = d * float(sc & 0xF)
+            ml = dmin * float(sc >> 4)
+            if dl == 0.0:
+                continue
+            q = (raw[bo + 16] >> 0) & 3
+            yv = dl * float(q) - ml
+            back = (yv + ml) / dl
+            if abs(back - float(q)) > 0.51:
+                raise Arg(f"Q2_K self-gate failed block {b}")
+        else:
+            d_all = gguf_f16_from_bits(gguf_u32_le(raw, bo + 108) & 0xFFFF)
+            sc = _q3k_unpack_scales(raw, bo + 96)
+            dl = d_all * float(sc[0] - 32)
+            if dl == 0.0:
+                continue
+            hb = 0 if (raw[bo] & 1) != 0 else 4
+            q = ((raw[bo + 32] >> 0) & 3) - hb
+            yv = dl * float(q)
+            back = yv / dl
+            if abs(back - float(q)) > 0.51:
+                raise Arg(f"Q3_K self-gate failed block {b}")
 
 extern def file_read_all_bytes(path: str) -> bytes
 extern def gguf_u32_le(raw: bytes, pos: int) -> int

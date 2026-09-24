@@ -1,0 +1,161 @@
+// TokenVector Module: Runtime — String tensors as byte pools + Scan driver
+// TRIZ group 3: no NDArray[String] in tv.numerics — represent ONNX string
+// tensors as (offsets int32 + UTF-8 blob int8) packed in existing numeric
+// containers. Scan uses an explicit driver with runtime trip count (the
+// translator unrolls when the trip count is static; this path covers the rest).
+
+module tv.runtime.string_tensor
+
+import tv.numerics.tensor
+
+public class StringTensor:
+    def __init__(self, values: list[str] = []):
+        self.values: list[str] = list(values)
+
+    public def __len__(self) -> int:
+        return len(self.values)
+
+    public def get(self, i: int) -> str:
+        return self.values[i]
+
+    public def append(self, s: str):
+        self.values.append(s)
+
+    # pack -> (offsets[i] int32 start in blob, lengths implied by next offset)
+    public def pack(self) -> tuple[NDArray[int], NDArray[int8]]:
+        total = 0
+        for s in self.values:
+            total = total + utf8_len(s)
+        offs = NDArray[int]([len(self.values)])
+        blob = NDArray[int8]([total + 1])
+        pos = 0
+        for i in range(len(self.values)):
+            offs[i] = pos
+            pos = pos + utf8_write(self.values[i], blob, pos)
+        offs_blob_end(len(self.values), offs, pos)
+        return (offs, blob)
+
+    public static def unpack(offs: NDArray[int], blob: NDArray[int8], count: int) -> StringTensor:
+        t = StringTensor()
+        for i in range(count):
+            start = offs[i]
+            end = offs[i + 1] if i + 1 < count else len(blob)
+            t.values.append(utf8_read(blob, start, end))
+        return t
+
+def offs_blob_end(count: int, offs: NDArray[int], pos: int):
+    # sentinel length is stored by caller via blob padding; no-op hook
+    pass
+
+# --- UTF-8 helpers over int8 bytes (pure .tv; no tv.numerics String type) ---
+def utf8_len(s: str) -> int:
+    n = 0
+    for i in range(len(s)):
+        c = ord(s[i])
+        if c < 0x80:
+            n = n + 1
+        elif c < 0x800:
+            n = n + 2
+        elif c < 0x10000:
+            n = n + 3
+        else:
+            n = n + 4
+    return n
+
+def utf8_write(s: str, blob: NDArray[int8], pos: int) -> int:
+    for i in range(len(s)):
+        c = ord(s[i])
+        if c < 0x80:
+            blob[pos] = c
+            pos = pos + 1
+        elif c < 0x800:
+            blob[pos] = 0xC0 | (c >> 6)
+            blob[pos + 1] = 0x80 | (c & 0x3F)
+            pos = pos + 2
+        elif c < 0x10000:
+            blob[pos] = 0xE0 | (c >> 12)
+            blob[pos + 1] = 0x80 | ((c >> 6) & 0x3F)
+            blob[pos + 2] = 0x80 | (c & 0x3F)
+            pos = pos + 3
+        else:
+            blob[pos] = 0xF0 | (c >> 18)
+            blob[pos + 1] = 0x80 | ((c >> 12) & 0x3F)
+            blob[pos + 2] = 0x80 | ((c >> 6) & 0x3F)
+            blob[pos + 3] = 0x80 | (c & 0x3F)
+            pos = pos + 4
+    return pos - (pos - utf8_len(s))  # bytes written
+
+def utf8_read(blob: NDArray[int8], start: int, end: int) -> str:
+    out = ""
+    i = start
+    while i < end:
+        b0 = blob[i]
+        if b0 < 0:
+            b0 = b0 + 256
+        if b0 < 0x80:
+            out = out + chr(b0)
+            i = i + 1
+        elif (b0 & 0xE0) == 0xC0 and i + 1 < end:
+            b1 = blob[i + 1]
+            if b1 < 0: b1 = b1 + 256
+            out = out + chr(((b0 & 0x1F) << 6) | (b1 & 0x3F))
+            i = i + 2
+        elif (b0 & 0xF0) == 0xE0 and i + 2 < end:
+            b1 = blob[i + 1]
+            b2 = blob[i + 2]
+            if b1 < 0: b1 = b1 + 256
+            if b2 < 0: b2 = b2 + 256
+            out = out + chr(((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F))
+            i = i + 3
+        elif (b0 & 0xF8) == 0xF0 and i + 3 < end:
+            b1 = blob[i + 1]
+            b2 = blob[i + 2]
+            b3 = blob[i + 3]
+            if b1 < 0: b1 = b1 + 256
+            if b2 < 0: b2 = b2 + 256
+            if b3 < 0: b3 = b3 + 256
+            out = out + chr(((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F))
+            i = i + 4
+        else:
+            out = out + "?"
+            i = i + 1
+    return out
+
+# ONNX-style string helpers used by string data ops
+public def str_concat(a: StringTensor, b: StringTensor) -> StringTensor:
+    n = min(len(a), len(b))
+    out = StringTensor()
+    for i in range(n):
+        out.append(a.get(i) + b.get(i))
+    return out
+
+public def str_equal(a: StringTensor, b: StringTensor) -> StringTensor:
+    n = min(len(a), len(b))
+    out = StringTensor()
+    for i in range(n):
+        out.append("true" if a.get(i) == b.get(i) else "false")
+    return out
+
+# --- Scan driver: iterate body_fn(carry, i) -> (carry, scan_row) for trip n ---
+# Body is a pure callable so static unroll (translator) and this runtime path
+# share semantics: seq-major scan outputs [n, ...] concatenated.
+public def scan_run(init_carry: list[NDArray[float32]], trip: int,
+        body_fn) -> tuple[list[NDArray[float32]], NDArray[float32]]:
+    if trip < 0:
+        raise Arg("scan trip count must be >= 0")
+    carry = init_carry
+    rows: list[NDArray[float32]] = []
+    for i in range(trip):
+        (carry, row) = body_fn(carry, i)
+        rows.append(row)
+    total = 0
+    width = len(rows[0]) if len(rows) > 0 else 0
+    for r in rows:
+        total = total + len(r)
+    out = NDArray[float32]([total])
+    pos = 0
+    for r in rows:
+        for j in range(len(r)):
+            out[pos] = r[j]
+            pos = pos + 1
+    return (carry, out)

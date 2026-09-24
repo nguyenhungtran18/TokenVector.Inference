@@ -1,0 +1,39 @@
+// TokenVector Module: Runtime — Prefix compute-skip planner
+// TRIZ group 5: storage sharing already exists (PrefixStore); this planner
+// decides how many leading prompt positions can skip recompute by reusing
+// interned KV rows, so decode starts at suffix tokens only (kv_offset).
+
+module tv.runtime.prefix_skip
+
+import tv.runtime.paged_kv
+import tv.numerics.tensor
+
+public class PrefixPlan:
+    def __init__(self, skip_len: int, suffix_start: int, shared_blocks: int, hit: bool):
+        self.skip_len = skip_len
+        self.suffix_start = suffix_start
+        self.shared_blocks = shared_blocks
+        self.hit = hit
+
+public def plan_prefix(store: PrefixStore, tokens: list[int], page_len: int) -> PrefixPlan:
+    # intern maximal whole-block prefix: walk full blocks from the start
+    shared = 0
+    pos = 0
+    while pos + page_len <= len(tokens):
+        block = tokens[pos:pos + page_len]
+        h = store.block_hash(block)
+        if h in store.pages:
+            shared = shared + 1
+            pos = pos + page_len
+        else:
+            break
+    skip = shared * page_len
+    # remainder tokens (partial block + tail) must still be computed
+    return PrefixPlan(skip, skip, shared, shared > 0)
+
+# after planning: decode may pass kv_offset=skip_len so attention only scores
+# new suffix keys against the cached prefix (prefix rows stay in the store).
+public def apply_plan(plan: PrefixPlan, total_tokens: int) -> tuple[int, int]:
+    if plan.skip_len >= total_tokens:
+        return (total_tokens, total_tokens)
+    return (plan.skip_len, total_tokens - plan.skip_len)

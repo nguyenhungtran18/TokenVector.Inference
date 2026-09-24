@@ -1,0 +1,291 @@
+// TokenVector Module: Vision — ViT/CLIP-style encoder graph builder
+// TRIZ group 4 (vision encoder weights): preprocess.tv handled pixels; this
+// module builds the encoder ExecutionGraph (patch embed -> stacked blocks ->
+// norm/pool) from caller-supplied weights so real ViT checkpoints can run.
+// Random-init weights are for structure tests only, not quality claims.
+
+module tv.vision.vit
+
+import tv.runtime.execution_graph
+import tv.runtime.execution_node
+import tv.runtime.tensor_desc
+import tv.runtime.session
+import tv.numerics.tensor
+
+public class ViTConfig:
+    def __init__(self):
+        self.image_size: int = 224
+        self.patch_size: int = 16
+        self.in_channels: int = 3
+        self.hidden: int = 768
+        self.num_heads: int = 12
+        self.num_layers: int = 12
+        self.mlp_ratio: int = 4
+        self.num_classes: int = 0  # 0 = pooled features only
+        self.eps: float32 = 1e-5
+
+public def build_vit_graph(cfg: ViTConfig, seed: int = 3) -> ExecutionGraph:
+    if cfg.image_size % cfg.patch_size != 0:
+        raise Arg("image_size must be divisible by patch_size")
+    n_patches = (cfg.image_size // cfg.patch_size) * (cfg.image_size // cfg.patch_size)
+    dim = cfg.hidden
+    g = ExecutionGraph("vit")
+    g.inputs.append("images")
+    g.get_or_create_tensor("images", [1, cfg.in_channels, cfg.image_size, cfg.image_size])
+    rnd_state = [seed]
+    inv_scale = 0.02
+
+    def rnd() -> float32:
+        s = rnd_state[0]
+        s = (s * 6364136223846793005 + 1442695040888963407) & 0xFFFFFFFFFFFFFFFF
+        rnd_state[0] = s
+        return (float(s % 1000) / 1000.0 - 0.5) * inv_scale
+
+    def init_mat(name: str, rows: int, cols: int):
+        m = NDArray[float32]([rows * cols])
+        for i in range(len(m)):
+            m[i] = rnd()
+        g.initializers[name] = m
+        g.get_or_create_tensor(name, [rows, cols])
+
+    def init_vec(name: str, n: int):
+        v = NDArray[float32]([n])
+        for i in range(n):
+            v[i] = 0.0
+        g.initializers[name] = v
+        g.get_or_create_tensor(name, [n])
+
+    # patch embed: flatten conv -> [1, n_patches, dim] via MatMul on patches
+    # images NCHW -> reshape handled outside; here we model Linear patch proj
+    # on a flattened [1, in_ch*ps*ps] per patch using Reshape+MatMul chain.
+    in_feat = cfg.in_channels * cfg.patch_size * cfg.patch_size
+    init_mat("patch_w", in_feat, dim)
+    init_vec("patch_b", dim)
+    init_mat("cls_token", 1, dim)
+    init_mat("pos_embed", n_patches + 1, dim)
+
+    # reshape images -> [1, n_patches, in_feat]
+    sh = NDArray[float32]([3])
+    sh[0] = 1
+    sh[1] = n_patches
+    sh[2] = in_feat
+    g.initializers["reshape_to"] = sh
+    g.get_or_create_tensor("reshape_to", [3])
+
+    r = ExecutionNode("rshp", OperatorType.Reshape)
+    r.inputs.extend(["images", "reshape_to"])
+    r.outputs.append("patches")
+    g.get_or_create_tensor("patches", [1, n_patches, in_feat])
+    g.nodes.append(r)
+
+    # matmul patches [1*P, F] x patch_w [F, D] -> need 2D: flatten P via Reshape
+    sh2 = NDArray[float32]([2])
+    sh2[0] = n_patches
+    sh2[1] = in_feat
+    g.initializers["reshape_2d"] = sh2
+    g.get_or_create_tensor("reshape_2d", [2])
+    r2 = ExecutionNode("r2", OperatorType.Reshape)
+    r2.inputs.extend(["patches", "reshape_2d"])
+    r2.outputs.append("patches2d")
+    g.get_or_create_tensor("patches2d", [n_patches, in_feat])
+    g.nodes.append(r2)
+
+    mm = ExecutionNode("pp", OperatorType.MatMul)
+    mm.inputs.extend(["patches2d", "patch_w"])
+    mm.outputs.append("emb")
+    g.get_or_create_tensor("emb", [n_patches, dim])
+    g.nodes.append(mm)
+
+    ba = ExecutionNode("pb", OperatorType.Add)
+    ba.inputs.extend(["emb", "patch_b"])
+    ba.outputs.append("emb_b")
+    g.get_or_create_tensor("emb_b", [n_patches, dim])
+    g.nodes.append(ba)
+
+    # cls token concat axis0 -> [1+P, D]
+    cc = ExecutionNode("cls", OperatorType.Concat)
+    cc.inputs.extend(["cls_token", "emb_b"])
+    cc.outputs.append("with_cls")
+    cc.axis = 0
+    g.get_or_create_tensor("with_cls", [n_patches + 1, dim])
+    g.nodes.append(cc)
+
+    # + pos embed
+    pe = ExecutionNode("pos", OperatorType.Add)
+    pe.inputs.extend(["with_cls", "pos_embed"])
+    pe.outputs.append("x")
+    g.get_or_create_tensor("x", [n_patches + 1, dim])
+    g.nodes.append(pe)
+
+    cur = "x"
+    for layer in range(cfg.num_layers):
+        pre = f"L{layer}_"
+        # LN -> QKV-ish: project to 3*dim then attention on (Q,K,V) split
+        init_mat(pre + "ln1_g", 1, dim)
+        init_vec(pre + "ln1_b", dim)
+        for i in range(dim):
+            g.initializers[pre + "ln1_g"][i] = 1.0
+        ln1 = ExecutionNode(pre + "ln", OperatorType.LayerNorm)
+        ln1.inputs.extend([cur, pre + "ln1_g", pre + "ln1_b"])
+        ln1.outputs.append(pre + "h")
+        ln1.epsilon = cfg.eps
+        g.get_or_create_tensor(pre + "h", [n_patches + 1, dim])
+        g.nodes.append(ln1)
+
+        init_mat(pre + "qkv_w", dim, 3 * dim)
+        init_vec(pre + "qkv_b", 3 * dim)
+        qkv = ExecutionNode(pre + "qkv", OperatorType.MatMul)
+        qkv.inputs.extend([pre + "h", pre + "qkv_w"])
+        qkv.outputs.append(pre + "qkv_y")
+        g.get_or_create_tensor(pre + "qkv_y", [n_patches + 1, 3 * dim])
+        g.nodes.append(qkv)
+        qkvb = ExecutionNode(pre + "qkvb", OperatorType.Add)
+        qkvb.inputs.extend([pre + "qkv_y", pre + "qkv_b"])
+        qkvb.outputs.append(pre + "qkvb_y")
+        g.get_or_create_tensor(pre + "qkvb_y", [n_patches + 1, 3 * dim])
+        g.nodes.append(qkvb)
+
+        # split QKV -> three [P+1, D]
+        sp = ExecutionNode(pre + "split", OperatorType.Split)
+        sp.inputs.append(pre + "qkvb_y")
+        sp.outputs.extend([pre + "Q", pre + "K", pre + "V"])
+        sp.axis = 1
+        g.get_or_create_tensor(pre + "Q", [n_patches + 1, dim])
+        g.get_or_create_tensor(pre + "K", [n_patches + 1, dim])
+        g.get_or_create_tensor(pre + "V", [n_patches + 1, dim])
+        g.nodes.append(sp)
+
+        attn = ExecutionNode(pre + "attn", OperatorType.Attention)
+        attn.inputs.extend([pre + "Q", pre + "K", pre + "V"])
+        attn.outputs.append(pre + "A")
+        attn.num_heads = cfg.num_heads
+        attn.causal = False
+        g.get_or_create_tensor(pre + "A", [n_patches + 1, dim])
+        g.nodes.append(attn)
+
+        init_mat(pre + "proj_w", dim, dim)
+        init_vec(pre + "proj_b", dim)
+        pj = ExecutionNode(pre + "pj", OperatorType.MatMul)
+        pj.inputs.extend([pre + "A", pre + "proj_w"])
+        pj.outputs.append(pre + "pj_y")
+        g.get_or_create_tensor(pre + "pj_y", [n_patches + 1, dim])
+        g.nodes.append(pj)
+        pjb = ExecutionNode(pre + "pjb", OperatorType.Add)
+        pjb.inputs.extend([pre + "pj_y", pre + "proj_b"])
+        pjb.outputs.append(pre + "pj_b")
+        g.get_or_create_tensor(pre + "pj_b", [n_patches + 1, dim])
+        g.nodes.append(pjb)
+        res1 = ExecutionNode(pre + "r1", OperatorType.Add)
+        res1.inputs.extend([cur, pre + "pj_b"])
+        res1.outputs.append(pre + "a1")
+        g.get_or_create_tensor(pre + "a1", [n_patches + 1, dim])
+        g.nodes.append(res1)
+
+        # MLP: LN -> Linear(D,4D) -> GELU -> Linear(4D,D) -> residual
+        init_mat(pre + "ln2_g", 1, dim)
+        init_vec(pre + "ln2_b", dim)
+        for i in range(dim):
+            g.initializers[pre + "ln2_g"][i] = 1.0
+        ln2 = ExecutionNode(pre + "ln2", OperatorType.LayerNorm)
+        ln2.inputs.extend([pre + "a1", pre + "ln2_g", pre + "ln2_b"])
+        ln2.outputs.append(pre + "m")
+        ln2.epsilon = cfg.eps
+        g.get_or_create_tensor(pre + "m", [n_patches + 1, dim])
+        g.nodes.append(ln2)
+        hid = dim * cfg.mlp_ratio
+        init_mat(pre + "fc1_w", dim, hid)
+        init_vec(pre + "fc1_b", hid)
+        fc1 = ExecutionNode(pre + "fc1", OperatorType.MatMul)
+        fc1.inputs.extend([pre + "m", pre + "fc1_w"])
+        fc1.outputs.append(pre + "fc1_y")
+        g.get_or_create_tensor(pre + "fc1_y", [n_patches + 1, hid])
+        g.nodes.append(fc1)
+        fc1b = ExecutionNode(pre + "fc1b", OperatorType.Add)
+        fc1b.inputs.extend([pre + "fc1_y", pre + "fc1_b"])
+        fc1b.outputs.append(pre + "fc1_b_y")
+        g.get_or_create_tensor(pre + "fc1_b_y", [n_patches + 1, hid])
+        g.nodes.append(fc1b)
+        act = ExecutionNode(pre + "gelu", OperatorType.Gelu)
+        act.inputs.append(pre + "fc1_b_y")
+        act.outputs.append(pre + "g")
+        g.get_or_create_tensor(pre + "g", [n_patches + 1, hid])
+        g.nodes.append(act)
+        init_mat(pre + "fc2_w", hid, dim)
+        init_vec(pre + "fc2_b", dim)
+        fc2 = ExecutionNode(pre + "fc2", OperatorType.MatMul)
+        fc2.inputs.extend([pre + "g", pre + "fc2_w"])
+        fc2.outputs.append(pre + "fc2_y")
+        g.get_or_create_tensor(pre + "fc2_y", [n_patches + 1, dim])
+        g.nodes.append(fc2)
+        fc2b = ExecutionNode(pre + "fc2b", OperatorType.Add)
+        fc2b.inputs.extend([pre + "fc2_y", pre + "fc2_b"])
+        fc2b.outputs.append(pre + "fc2_b")
+        g.get_or_create_tensor(pre + "fc2_b", [n_patches + 1, dim])
+        g.nodes.append(fc2b)
+        res2 = ExecutionNode(pre + "r2", OperatorType.Add)
+        res2.inputs.extend([pre + "a1", pre + "fc2_b"])
+        res2.outputs.append(pre + "out")
+        g.get_or_create_tensor(pre + "out", [n_patches + 1, dim])
+        g.nodes.append(res2)
+        cur = pre + "out"
+
+    # final LN + take CLS row (Slice axis0 [0,1))
+    init_mat("lnf_g", 1, dim)
+    init_vec("lnf_b", dim)
+    for i in range(dim):
+        g.initializers["lnf_g"][i] = 1.0
+    lnf = ExecutionNode("lnf", OperatorType.LayerNorm)
+    lnf.inputs.extend([cur, "lnf_g", "lnf_b"])
+    lnf.outputs.append("feat_all")
+    g.get_or_create_tensor("feat_all", [n_patches + 1, dim])
+    g.nodes.append(lnf)
+
+    sh3 = NDArray[float32]([1])
+    g.initializers["cls_slice_s"] = sh3
+    g.get_or_create_tensor("cls_slice_s", [1])
+    sh4 = NDArray[float32]([1])
+    sh4[0] = 1.0
+    g.initializers["cls_slice_e"] = sh4
+    g.get_or_create_tensor("cls_slice_e", [1])
+    sl = ExecutionNode("cls_sl", OperatorType.Slice)
+    sl.inputs.extend(["feat_all", "cls_slice_s", "cls_slice_e"])
+    sl.outputs.append("cls_feat")
+    g.get_or_create_tensor("cls_feat", [1, dim])
+    g.nodes.append(sl)
+
+    if cfg.num_classes > 0:
+        init_mat("head_w", dim, cfg.num_classes)
+        init_vec("head_b", cfg.num_classes)
+        hw = ExecutionNode("head", OperatorType.MatMul)
+        hw.inputs.extend(["cls_feat", "head_w"])
+        hw.outputs.append("head_y")
+        g.get_or_create_tensor("head_y", [1, cfg.num_classes])
+        g.nodes.append(hw)
+        hb = ExecutionNode("headb", OperatorType.Add)
+        hb.inputs.extend(["head_y", "head_b"])
+        hb.outputs.append("logits")
+        g.get_or_create_tensor("logits", [1, cfg.num_classes])
+        g.nodes.append(hb)
+        g.outputs.append("logits")
+    else:
+        g.outputs.append("cls_feat")
+    return g
+
+# load a real checkpoint into a graph built by build_vit_graph (same names)
+public def load_vit_weights(g: ExecutionGraph, weights: dict[str, NDArray[float32]]):
+    missing: list[str] = []
+    for name in list(g.initializers.keys()):
+        if name in weights:
+            src = weights[name]
+            dst = g.initializers[name]
+            if len(src) == len(dst):
+                for i in range(len(dst)):
+                    dst[i] = src[i]
+            else:
+                missing.append(name + "(shape)")
+        else:
+            # positional / slice constants are structural; keep graph defaults
+            if name not in ["reshape_to", "reshape_2d", "cls_slice_s", "cls_slice_e"]:
+                missing.append(name)
+    if len(missing) > 0:
+        raise Arg("ViT weight mismatch: " + ",".join(missing))

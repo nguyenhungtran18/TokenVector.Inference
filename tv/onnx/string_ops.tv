@@ -1,0 +1,40 @@
+// TokenVector Module: ONNX — string data ops (StringConcat/Length/Equal)
+// Delivered as graph helpers + translator mapping to pure-.tv string tensor
+// routines (runtime.string_tensor). String initializers ride on the graph's
+// str_values side table (not the numeric arena).
+
+module tv.onnx.string_ops
+
+import tv.runtime.string_tensor
+import tv.runtime.tensor_desc
+import tv.numerics.tensor
+
+public class StringUnsupported:
+    def __init__(self, msg: str):
+        self.message = msg
+
+# run a string op given input StringTensors -> output StringTensor
+public def exec_string_op(op: str, ins: list[StringTensor]) -> StringTensor:
+    if op == "StringConcat":
+        return str_concat(ins[0], ins[1])
+    if op == "StringEqual":
+        return str_equal(ins[0], ins[1])
+    if op == "StringLength":
+        out = StringTensor()
+        for i in range(len(ins[0])):
+            out.append(str(len(ins[0].get(i))))
+        return out
+    raise StringUnsupported(f"string op '{op}'")
+
+public def is_string_op(op: str) -> bool:
+    return op == "StringConcat" or op == "StringEqual" or op == "StringLength"
+
+# Map ONNX string ops onto OperatorType (used by translator).
+public def map_string_op(op: str) -> int:
+    if op == "StringConcat":
+        return 80
+    if op == "StringEqual":
+        return 81
+    if op == "StringLength":
+        return 82
+    return -1

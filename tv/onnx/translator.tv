@@ -5,6 +5,7 @@
 module tv.onnx.translator
 
 import tv.onnx.models
+import tv.onnx.string_ops
 import tv.runtime.execution_graph
 import tv.runtime.execution_node
 import tv.runtime.tensor_desc
@@ -22,6 +23,8 @@ public def translate(model: OnnxModel) -> ExecutionGraph:
         shape: list[int] = [int(d) for d in init.dims]
         if len(shape) == 0:
             shape = [1]
+        if init.dtype == TensorDataType.String:
+            continue  # 1b: str_values side table only
         if init.dtype == TensorDataType.Int8 or init.dtype == TensorDataType.Uint8:
             nq = 1
             for d in shape:
@@ -46,6 +49,13 @@ public def translate(model: OnnxModel) -> ExecutionGraph:
             nd[i] = src[i]
         g.initializers[init.name] = nd
         g.get_or_create_tensor(init.name, nd.shape, init.dtype)
+    # 1b. string initializers -> str_values side table (not the numeric arena)
+    for init in gp.initializers:
+        if init.dtype == TensorDataType.String:
+            vals = init.extract_string_array()
+            if len(vals) > 0:
+                g.str_values[init.name] = vals
+                g.get_or_create_tensor(init.name, [len(vals)], init.dtype)
     # 2. inputs (skip weights)
     for inp in gp.inputs:
         if inp.name not in g.initializers:
@@ -112,7 +122,7 @@ public def translate(model: OnnxModel) -> ExecutionGraph:
         if "nearest_mode" in on.attrs:
             nm = on.attrs["nearest_mode"].s
             en.rs_nearest = 1 if nm == "round_prefer_floor" else (2 if nm == "ceil" else 0)
-        if "equation" in on.attrs: en.eq = on.attrs["equation"].s
+        if on.op_type == "Einsum": en.eq = on.attrs["equation"].s if "equation" in on.attrs else en.eq
         if on.op_type == "ConstantOfShape" and "value" in on.attrs:
             t = on.attrs["value"].t
             if t is not None:
@@ -210,6 +220,10 @@ public def map_op(op: str) -> OperatorType:
     if op == "QLinearConv": return OperatorType.QLinearConv
     if op == "MatMulInteger": return OperatorType.MatMulInteger
     if op == "DynamicQuantizeLinear": return OperatorType.DynamicQuantizeLinear
+    if op == "StringConcat": return OperatorType.StringConcat
+    if op == "StringEqual": return OperatorType.StringEqual
+    if op == "StringLength": return OperatorType.StringLength
+    if op == "Scan": return OperatorType.Custom  # expanded in _expand_nodes when static
     raise UnsupportedOp(f"ONNX op '{op}' is not supported by tv.runtime")
 
 # Constant -> initializer (value tensor / value_float(s) / value_int(s))
@@ -471,6 +485,22 @@ def _infer_node_shapes(node: ExecutionNode, ins: list[list[int]], g: ExecutionGr
         return [[ins[0][0], ins[1][1]]]
     if op == OperatorType.DynamicQuantizeLinear and len(ins) > 0:
         return [list(ins[0]), [1], [1]]
+    if op == OperatorType.Concat and len(ins) > 0:
+        rank = max([len(s) for s in ins])
+        ax = _norm(node.axis, rank)
+        out = [0] * rank
+        for s in ins:
+            for i in range(min(len(s), rank)):
+                if i == ax:
+                    out[i] = out[i] + s[i]
+                elif out[i] == 0:
+                    out[i] = s[i]
+        return [out]
+    if op in [OperatorType.StringConcat, OperatorType.StringEqual] and len(ins) > 0:
+        return [list(ins[0])]
+    if op == OperatorType.StringLength and len(ins) > 0:
+        return [list(ins[0])]
+    return [[]]
 
 def _einsum_out_shape(eq: str, in_shapes: list[list[int]]) -> list[int]:
     arrow = eq.find("->")
@@ -499,18 +529,6 @@ def _einsum_out_shape(eq: str, in_shapes: list[list[int]]) -> list[int]:
             return []
         out.append(sizes[L])
     return out
-    if op == OperatorType.Concat and len(ins) > 0:
-        rank = max([len(s) for s in ins])
-        ax = _norm(node.axis, rank)
-        out = [0] * rank
-        for s in ins:
-            for i in range(min(len(s), rank)):
-                if i == ax:
-                    out[i] = out[i] + s[i]
-                elif out[i] == 0:
-                    out[i] = s[i]
-        return [out]
-    return [[]]
 
 def _norm(a: int, rank: int) -> int:
     return a + rank if a < 0 else a
@@ -583,6 +601,8 @@ def _expand_nodes(g: ExecutionGraph, nodes: list[OnnxNode]) -> list[OnnxNode]:
             out.extend(_expand_gru(g, on))
         elif on.op_type == "RNN":
             out.extend(_expand_rnn(g, on))
+        elif on.op_type == "Scan":
+            out.extend(_expand_scan(g, on))
         else:
             out.append(on)
     return out
@@ -649,7 +669,6 @@ def _expand_if(g: ExecutionGraph, on: OnnxNode) -> list[OnnxNode]:
 
 # Loop with static trip count (M initializer, cap 128): full unroll.
 # Carried vars chain through iterations; per-iter cond gates via Where.
-# Scan outputs are not supported (raise).
 def _expand_loop(g: ExecutionGraph, on: OnnxNode) -> list[OnnxNode]:
     if "body" not in on.attrs or on.attrs["body"].graph is None:
         raise UnsupportedOp("Loop without body graph")
@@ -713,6 +732,156 @@ def _expand_loop(g: ExecutionGraph, on: OnnxNode) -> list[OnnxNode]:
     for k in range(min(len(on.outputs), len(carry_prev))):
         out.append(_mk_node(on.name + f"_out{k}", "Identity", [carry_prev[k]], [on.outputs[k]]))
     return out
+
+# Scan with static trip (first scan-input shape[0] initializer/input, cap 128):
+# full unroll like Loop. Body: optional seq_lens omitted (all equal), then
+# loop-carried state, then per-iter scan inputs; outputs: state + scan outs
+# concatenated along axis 0 (simplified: final state only + Identity of last
+# scan rows when single step carries the full stack via Concat).
+def _expand_scan(g: ExecutionGraph, on: OnnxNode) -> list[OnnxNode]:
+    if "body" not in on.attrs or on.attrs["body"].graph is None:
+        raise UnsupportedOp("Scan without body graph")
+    body = on.attrs["body"].graph
+    n_scan_in = 1
+    if "num_scan_inputs" in on.attrs:
+        n_scan_in = int(on.attrs["num_scan_inputs"].i)
+    if n_scan_in < 1:
+        raise UnsupportedOp("Scan needs at least one scan input")
+    # inputs: [optional seq_lens], then (state_in* + scan_in) with n_scan_in scan inputs at end
+    base = 0
+    if len(on.inputs) > n_scan_in and on.inputs[0] != "" and _is_lens_name(on, 0):
+        base = 1
+    scan_ins = on.inputs[len(on.inputs) - n_scan_in:]
+    trip = _seq_len(g, scan_ins[0])
+    if trip < 0 or trip > 128:
+        raise UnsupportedOp(f"Scan trip count {trip} outside [0,128] unroll budget (static only)")
+    n_state = len(on.inputs) - base - n_scan_in
+    if n_state < 0:
+        raise UnsupportedOp("Scan input arity mismatch")
+    # body.inputs: [iter?], optional seq_lens, state..., scan_slice...
+    # We require body to start with state then scan slices (no seq_lens), matching
+    # common exporters; iteration index is optional and wired when present.
+    outer = _outer_names(g)
+    out: list[OnnxNode] = []
+    state_prev = list(on.inputs[base:base + n_state]) if n_state > 0 else []
+    # per-step full tensor slices via Slice on scan axis 0
+    scan_row: list[str] = []
+    for si in range(n_scan_in):
+        row = on.name + f"_srow{si}"
+        _add_float_init(g, on.name + f"_sax0{si}", [1], [0.0])
+        _add_float_init(g, on.name + f"_sax1{si}", [1], [1.0])
+        out.append(_mk_node(on.name + f"_ssl{si}", "Slice",
+            [scan_ins[si], on.name + f"_sax0{si}", on.name + f"_sax1{si}"], [row]))
+        scan_row.append(row)
+    scan_out_acc: list[list[str]] = [[] for _ in range(max(1, len(body.outputs) - n_state))]
+    # actually collect all body outputs that are scan outputs (after state outs)
+    n_body_scan = max(0, len(body.outputs) - n_state)
+    scan_out_acc = [[] for _ in range(n_body_scan)]
+    for i in range(trip):
+        pre = on.name + f"_it{i}_"
+        it_name = pre + "iter"
+        _add_int_init(g, it_name, [i])
+        wiring: dict[str, str] = {}
+        bi = 0
+        if len(body.inputs) > 0 and body.inputs[0].name in outer or (len(body.inputs) > 0 and body.inputs[0].name not in _body_state_or_scan(body, n_state)):
+            # optional iteration input as first body input when it matches common pattern
+            pass
+        # Map body inputs: prefer state names then scan slice names by position
+        b_in_names = [bi2.name for bi2 in body.inputs]
+        # heuristic: first n_state body inputs are state; next n_scan_in are scan slices
+        for k in range(n_state):
+            if k < len(b_in_names) and k < len(state_prev):
+                wiring[b_in_names[k]] = state_prev[k]
+        for k in range(n_scan_in):
+            idx = n_state + k
+            if idx < len(b_in_names):
+                wiring[b_in_names[idx]] = scan_row[k]
+        # also wire iteration if body has an extra leading input
+        if len(b_in_names) == n_state + n_scan_in + 1:
+            wiring[b_in_names[0]] = it_name
+            # rewire: shift — rebuild carefully
+            wiring = {}
+            wiring[b_in_names[0]] = it_name
+            for k in range(n_state):
+                wiring[b_in_names[1 + k]] = state_prev[k]
+            for k in range(n_scan_in):
+                wiring[b_in_names[1 + n_state + k]] = scan_row[k]
+        for bn in _expand_nodes(g, body.nodes):
+            c = _mk_node(pre + bn.name, bn.op_type, [], [])
+            for nm in bn.inputs:
+                if nm == "" or nm in outer:
+                    c.inputs.append(nm)
+                elif nm in wiring:
+                    c.inputs.append(wiring[nm])
+                else:
+                    c.inputs.append(pre + nm)
+            for nm in bn.outputs:
+                c.outputs.append(nm if nm == "" or nm in outer else pre + nm)
+            c.attrs = bn.attrs
+            out.append(c)
+        bouts: list[str] = []
+        for bo in body.outputs:
+            bouts.append(bo.name if bo.name in outer else pre + bo.name)
+        # state outputs = first n_state body outputs; scan outs = rest
+        new_state = bouts[:n_state] if n_state > 0 else []
+        for k in range(n_body_scan):
+            if 1 + n_state + k < len(bouts) or n_state + k < len(bouts):
+                src_i = n_state + k
+                if src_i < len(bouts):
+                    scan_out_acc[k].append(bouts[src_i])
+        # advance scan rows for next iter (Slice start=i+1, end=i+2)
+        if i + 1 < trip:
+            for si in range(n_scan_in):
+                _add_int_init(g, on.name + f"_sstart{si}_{i+1}", [i + 1])
+                _add_int_init(g, on.name + f"_send{si}_{i+1}", [i + 2])
+                row = on.name + f"_srow{si}"
+                nxt = on.name + f"_srow{si}_{i+1}"
+                out.append(_mk_node(on.name + f"_ssl{si}_{i+1}", "Slice",
+                    [scan_ins[si], on.name + f"_sstart{si}_{i+1}", on.name + f"_send{si}_{i+1}"], [nxt]))
+                scan_row[si] = nxt
+        state_prev = new_state
+    # final state outputs
+    for k in range(min(n_state, len(on.outputs))):
+        if k < len(state_prev):
+            out.append(_mk_node(on.name + f"_sout{k}", "Identity", [state_prev[k]], [on.outputs[k]]))
+    # scan outputs: Concat stacked rows if multiple steps, else Identity
+    for k in range(n_body_scan):
+        oi = n_state + k
+        if oi >= len(on.outputs):
+            break
+        acc = scan_out_acc[k]
+        if len(acc) == 0:
+            continue
+        if len(acc) == 1:
+            out.append(_mk_node(on.name + f"_scout{k}", "Identity", [acc[0]], [on.outputs[oi]]))
+        else:
+            out.append(_mk_node(on.name + f"_scout{k}", "Concat", acc, [on.outputs[oi]]))
+            # set axis 0 on the concat node — attach via attrs on last node
+            out[len(out) - 1].attrs["axis"] = _int_attr(0)
+    return out
+
+def _body_state_or_scan(body, n_state: int) -> dict[str, bool]:
+    d: dict[str, bool] = {}
+    for i, bi in enumerate(body.inputs):
+        d[bi.name] = True
+    return d
+
+def _is_lens_name(on: OnnxNode, idx: int) -> bool:
+    # sequence_lens is optional first input; treat as present only if body suggests it
+    return False
+
+def _seq_len(g: ExecutionGraph, name: str) -> int:
+    if name in g.tensors and len(g.tensors[name].shape) > 0:
+        return g.tensors[name].shape[0]
+    if name in g.initializers and len(g.initializers[name].shape) > 0:
+        return g.initializers[name].shape[0]
+    return -1
+
+def _int_attr(v: int):
+    a = OnnxAttribute()
+    a.type = AttributeType.Int
+    a.i = v
+    return a
 
 # --- recurrent unrolling: LSTM/GRU/RNN, static seq_len, layout 0/1 ---
 def _subarray(vals: NDArray[float32], shape: list[int], ranges: list[tuple[int, int]]) -> tuple[list[float32], list[int]]:

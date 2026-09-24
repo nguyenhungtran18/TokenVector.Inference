@@ -1,7 +1,7 @@
 ﻿# So sánh Chức năng: TokenVector.Inference (thuần `.tv`) vs ONNX Runtime vs llama.cpp vs PyTorch
 
 > Phạm vi: so sánh **chức năng** (làm được gì), không phải tốc độ. Repo hiện 100% TokenVector —
-> 39 module `.tv`, 8.972 dòng (+ client Python mỏng `bindings/tv_client.py`), không còn C#/C++.
+> 47 module `.tv`, 9.970 dòng (+ client Python mỏng `bindings/tv_client.py`), không còn C#/C++.
 > Mọi compute đều thuần `.tv`; host intrinsic chỉ còn cấp phát thô, OS/HTTP/JSON/time-thread,
 > đọc/ghi file-mạng và byte codec.
 > Số latency ở §6 là **tham chiếu từ backend C# cũ**; cần đo lại bằng
@@ -15,7 +15,7 @@ Chú thích: (✅) có · (giới hạn) một phần · (thiếu) chưa có
 |---|---|---|---|---|
 | Định dạng đầu vào | ONNX (reader zero-copy, topo-sort Kahn, **writer/serializer**) + SafeTensors (F32/F16/BF16) + **GGUF** (`format/gguf.tv`: container, metadata KV, F32/F16/BF16/int, Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q8_K/Q4_K verified, Q5_K provisional) | ONNX đầy đủ + shape inference | GGUF (+ tự tải từ HF) | Native / SafeTensors / export ONNX |
 | Model lớn | ONNX single-file; không external-data / checkpoint chia shard | External data, >2 GB, symbolic shapes | GGUF chia shard, mmap, `--mlock` | SafeTensors chia shard, meta-device init |
-| Phủ op | Gemm đầy đủ, Gather/Slice/Split/Squeeze/Unsqueeze/Expand, Clip/Cast/Pad/Where, ReduceMean/Sum/Max, GAP/MaxPool/AvgPool, BatchNorm, Flatten, ArgMax, Shape/Size, Min/Max/Mean/Sum, Pow/Sqrt/Exp/Log/Neg/Reciprocal/Abs, LeakyReLU/ELU/Softplus, Dropout, LogSoftmax, Trilu, TopK, Constant (fold), Quantize/DequantizeLinear, QLinearMatMul/Conv, MatMulInteger, DynamicQuantizeLinear, GatherND, ScatterElements, Range, EyeLike, ConstantOfShape, CumSum, InstanceNormalization, Mish, PRelu, Resize/Upsample, Einsum tổng quát, If/Loop (unroll), LSTM/GRU/RNN (unroll 2 chiều, Y/Y_h/Y_c). **Op lạ báo lỗi rõ, không im lặng** + suy luận shape tĩnh. Còn thiếu: Scan, op string/sequence/image | **200+ ops**, full opset | Native LLM-arch | Full ATen + custom op, autograd |
+| Phủ op | Danh sách đóng 82 op (`execution_node.tv` + `translator.map_op`): Gemm đầy đủ, Gather/Slice/Split/Squeeze/Unsqueeze/Expand, Clip/Cast/Pad/Where, ReduceMean/Sum/Max, GAP/MaxPool/AvgPool, BatchNorm, Flatten, ArgMax, Shape/Size, Min/Max/Mean/Sum, Pow/Sqrt/Exp/Log/Neg/Reciprocal/Abs, LeakyReLU/ELU/Softplus, Dropout, LogSoftmax, Trilu, TopK, Constant (fold), Quantize/DequantizeLinear, QLinearMatMul/Conv, MatMulInteger, DynamicQuantizeLinear, GatherND, ScatterElements, Range, EyeLike, ConstantOfShape, CumSum, InstanceNormalization, Mish, PRelu, Resize/Upsample, Einsum tổng quát, If/Loop (unroll), LSTM/GRU/RNN (unroll 2 chiều, Y/Y_h/Y_c), `StringConcat`/`StringEqual`/`StringLength` (bảng `str_values`), `Scan` unroll tĩnh (trip ≤ 128). **Op lạ báo lỗi rõ, không im lặng** + suy luận shape tĩnh. Còn thiếu: Sequence*/image ops (cần kiểu sequence) và Scan trip runtime | **200+ ops**, full opset | Native LLM-arch | Full ATen + custom op, autograd |
 | Shape động | (thiếu) chỉ shape tĩnh | symbolic dims | context biến đổi | dynamic + `torch.compile` |
 | Training | (giới hạn) train model nhỏ (`autograd.tv`: LinHead+SGD, MLP + Adam, softmax-CE, gradcheck) | on-device training | chỉ inference | training đầy đủ |
 
@@ -78,13 +78,15 @@ Chú thích: (✅) có · (giới hạn) một phần · (thiếu) chưa có
 | Endurance 250K | **127.791 req/s** | ~15K | ~25K |
 | Burst 32-thread 10K | **169.735 req/s** | nghẽn lock | nghẽn interop |
 
-## 7. Còn lại (chặn bởi thứ ngoài repo, hoặc giai đoạn sau)
+## 7. Còn lại — lý do kỹ thuật chính xác từng mục
 
-1. **Pretrain full-model, compute GPU/NPU** — stub fail rõ theo thiết kế.
-2. **Scan, op string/sequence/image** — cần string dtype + sequence type ở `tv.numerics` (repo khác).
-3. **Q2_K/Q3_K/Q6_K/IQ/TQ, weight encoder vision, mmap GGUF-shard** — layout bit / weight cần vector tham chiếu bit-exact mới dám ship (chống corrupt im lặng).
-4. **Đo lại benchmark** — mọi số tốc độ vẫn là tham chiếu C# cũ tới khi `tv run` chạy trên engine thuần.
-5. **Speculative cây đa draft, compute-skip cho prefix, beam search ràng buộc** — P2 trên primitive đã có.
+**Đã đóng trong đợt TRIZ này:** (1) LoRA + CheckpointArena, (2) HAL + kernel lane-abstract, (3) string-as-bytes + Scan driver/unroll tĩnh, (4) gated Q2_K/Q3_K/Q6_K + graph ViT, (5) tree-speculative + prefix-skip + beam. Op phủ thêm: `StringConcat`/`StringEqual`/`StringLength` (bảng `str_values`), `Scan` unroll tĩnh (trip ≤ 128); GGUF đọc Q2_K/Q3_K/Q6_K theo layout ggml + structural check + roundtrip self-gate.
+
+1. **Pretrain full-model.** Autograd hiện chỉ có `LinHead` + ReLU + softmax-CE; LoRA + `CheckpointArena` cho fine-tune adapter, không phải backward đủ mọi op. Pretrain LLM trên CPU vẫn chậm hơn GPU 10–100 lần — chỉ có nghĩa khi kèm mục 2.
+2. **Compute GPU/NPU.** `.tv` không có cấu trúc GPU (thread block, shared memory, MMA, launch kernel). Backend GPU = mở rộng **compiler** tv (repo chính) + shim CUDA/TensorRT/QNN. `device.tv`/`hal.tv` fail loud; `HalDispatch` là seam đăng ký khi có backend.
+3. **Sequence container + image ops + Scan động.** String đã chạy trên `str_values` + UTF-8 (`string_tensor.tv`); Scan tĩnh unroll khi trip ≤ 128. Còn thiếu: kiểu sequence độ dài biến đổi cho Sequence*, codec image, Scan trip phụ thuộc runtime (cần primitive loop thật hoặc compiler).
+4. **IQ/TQ + weight vision + mmap shard.** Q2_K/Q3_K/Q6_K decode theo layout ggml bit-exact sau self-gate; IQ/TQ chưa có vector tham chiếu trong repo (vẫn raise loud — đúng). Vision graph builder đã có, thiếu weight thật. mmap shard cần intrinsic memory-map + index đa shard.
+5. **Đo lại benchmark.** Số §6 vẫn là backend C# cũ; suite thuần chỉ chạy dưới toolchain `tv` không có ở đây. Thuật toán (tree/beam/prefix-skip) đã trong repo — còn thiếu đo lại.
 
 ## 8. Khi nào chọn ai
 

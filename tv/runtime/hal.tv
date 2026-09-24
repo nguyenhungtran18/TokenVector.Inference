@@ -1,0 +1,108 @@
+// TokenVector Module: Runtime — Hardware abstraction layer (lane-abstract kernels)
+// TRIZ group 2 (GPU/NPU): without a GPU language in .tv, separate the WHAT from
+// the WHERE — kernels are written lane-abstract (outer blocks x inner lane[L])
+// so a future compiler maps blocks->thread-blocks, lanes->SIMD/warp lanes.
+// Backends register into a dispatch table; CPU lanes are the default target.
+// Unavailable accelerators still fail loudly (never silent fallback).
+
+module tv.runtime.hal
+
+import tv.runtime.device
+import tv.numerics.tensor
+
+public class DeviceCaps:
+    def __init__(self, name: str, kind: DeviceKind, lanes: int, max_threads: int,
+            shared_mem_bytes: int, tensor_cores: bool):
+        self.name = name
+        self.kind = kind
+        self.lanes = lanes
+        self.max_threads = max_threads
+        self.shared_mem_bytes = shared_mem_bytes
+        self.tensor_cores = tensor_cores
+
+public def cpu_caps() -> DeviceCaps:
+    return DeviceCaps("TokenVectorCPU", DeviceKind.CPU, 8, 1, 0, False)
+
+# lane-abstract GEMM: tiles of [TILE x TILE], inner product in lane chunks.
+# TILE/L are compile-time-ish constants here; a GPU lowering maps
+# (tile -> block, lane -> warp lane / tensor MMA fragment).
+public const TILE = 64
+public const LANE = 8
+
+public def hal_matmul(a: NDArray[float32], b: NDArray[float32], y: NDArray[float32],
+        m: int, n: int, k: int, lanes: int = LANE):
+    t = TILE
+    for i0 in range(0, m, t):
+        for j0 in range(0, n, t):
+            for ii in range(i0, min(i0 + t, m)):
+                for jj in range(j0, min(j0 + t, n)):
+                    acc = 0.0
+                    kk = 0
+                    kk2 = min(k, ((k + lanes - 1) // lanes) * lanes)
+                    while kk + lanes <= kk2:
+                        for l in range(lanes):
+                            acc = acc + a[ii * k + kk + l] * b[(kk + l) * n + jj]
+                        kk = kk + lanes
+                    while kk < k:
+                        acc = acc + a[ii * k + kk] * b[kk * n + jj]
+                        kk = kk + 1
+                    y[ii * n + jj] = acc
+
+public def hal_relu(x: NDArray[float32], y: NDArray[float32], lanes: int = LANE):
+    n = len(x)
+    i = 0
+    while i + lanes <= n:
+        for l in range(lanes):
+            v = x[i + l]
+            y[i + l] = v if v > 0.0 else 0.0
+        i = i + lanes
+    while i < n:
+        v = x[i]
+        y[i] = v if v > 0.0 else 0.0
+        i = i + 1
+
+public def hal_softmax_rows(x: NDArray[float32], y: NDArray[float32], rows: int, cols: int):
+    for r in range(rows):
+        base = r * cols
+        mx = x[base]
+        for j in range(1, cols):
+            if x[base + j] > mx:
+                mx = x[base + j]
+        s = 0.0
+        for j in range(cols):
+            e = exp(x[base + j] - mx)
+            y[base + j] = e
+            s = s + e
+        inv = 1.0 / s
+        for j in range(cols):
+            y[base + j] = y[base + j] * inv
+
+# dispatch: op name -> pure-.tv kernel (signature varies; caller binds args)
+public class HalDispatch:
+    def __init__(self):
+        self.kernels: dict[str, object] = {}
+        self.caps = cpu_caps()
+        self.backend: str = "cpu"
+
+    public def register(self, op: str, kernel):
+        self.kernels[op] = kernel
+
+    public def has(self, op: str) -> bool:
+        return op in self.kernels
+
+    public def get(self, op: str):
+        if op not in self.kernels:
+            raise NotFound(f"HAL kernel '{op}' not registered (backend={self.backend})")
+        return self.kernels[op]
+
+    # bind an accelerator: refuse when provider unavailable (loud, not silent)
+    public def bind_provider(self, provider: ExecutionProvider):
+        require(provider)
+        self.backend = provider.name()
+
+public def default_dispatch() -> HalDispatch:
+    d = HalDispatch()
+    d.register("matmul", hal_matmul)
+    d.register("relu", hal_relu)
+    d.register("softmax_rows", hal_softmax_rows)
+    return d

@@ -7,10 +7,12 @@ import tv.runtime.memory_arena
 import tv.runtime.tensor_desc
 import tv.runtime.execution_node
 import tv.runtime.device
+import tv.runtime.string_tensor
 import tv.optimization.passes
 import tv.numerics.tensor
 import tv.onnx.parser
 import tv.onnx.translator
+import tv.onnx.string_ops
 
 public class NamedTensor:
     # exactly one payload is set; dtype must match the graph tensor desc
@@ -61,7 +63,10 @@ public class InferenceSession:
                 else:
                     self.arena.copy_from(desc.offset, inp.data)
         for node in self.graph.nodes:
-            node.execute(self.arena)
+            if node.op_type == OperatorType.StringConcat or node.op_type == OperatorType.StringEqual or node.op_type == OperatorType.StringLength:
+                self._exec_string_node(node)
+            else:
+                node.execute(self.arena)
         for out in outputs:
             if out.name in self.graph.tensors:
                 desc = self.graph.tensors[out.name]
@@ -82,6 +87,28 @@ public class InferenceSession:
         output = NDArray[float32](shape)
         self.run([NamedTensor(in_name, input)], [NamedTensor(out_name, output)])
         return output
+
+    # String ops run on str_values side table (not the numeric arena).
+    def _exec_string_node(self, node: ExecutionNode):
+        op = "StringConcat"
+        if node.op_type == OperatorType.StringEqual:
+            op = "StringEqual"
+        elif node.op_type == OperatorType.StringLength:
+            op = "StringLength"
+        ins: list[StringTensor] = []
+        for nm in node.inputs:
+            if nm == "":
+                continue
+            if nm in self.graph.str_values:
+                ins.append(StringTensor(self.graph.str_values[nm]))
+            else:
+                ins.append(StringTensor())
+        out_t = string_ops.exec_string_op(op, ins)
+        vals: list[str] = []
+        for i in range(len(out_t)):
+            vals.append(out_t.get(i))
+        if len(node.outputs) > 0:
+            self.graph.str_values[node.outputs[0]] = vals
 
     public def total_bytes(self) -> int:
         return self.arena.size_in_bytes

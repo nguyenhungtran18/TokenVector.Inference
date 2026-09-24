@@ -1,7 +1,7 @@
 # Feature Comparison: TokenVector.Inference (pure `.tv`) vs ONNX Runtime vs llama.cpp vs PyTorch
 
 > Scope: **functional** comparison (what each stack can do), not speed. Repo is now 100% TokenVector —
-> 39 `.tv` modules, 8,972 lines (+ thin `bindings/tv_client.py` HTTP client), zero C#/C++
+> 47 `.tv` modules, 9,970 lines (+ thin `bindings/tv_client.py` HTTP client), zero C#/C++
 > (`remaining_cs=0`). All compute is pure `.tv`; host intrinsics remain only for raw allocation,
 > OS/HTTP/JSON/time-threads, file/network IO, and byte codecs (protobuf/utf8/FP8/FP16-bitcast).
 > Latency numbers in §6 are **legacy C#-backend references** (Nov-2025, .NET 8 AVX2); re-measure post-migration with
@@ -15,13 +15,13 @@ Legend: ✅ supported · ⚠️ partial/limited · ❌ missing
 |---|---|---|---|---|
 | Input format | ONNX (zero-copy reader, Kahn topo-sort, **writer/serializer**) + SafeTensors weights (F32/F16/BF16) + **GGUF** (`format/gguf.tv`: container, KV metadata, F32/F16/BF16/ints, Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q8_K/Q4_K verified, Q5_K provisional) | ONNX (full spec + shape inference) | GGUF (+ HF auto-download) | PyTorch native / SafeTensors / ONNX export |
 | Large-model support | Single-file ONNX; no external-data / sharded checkpoints | External data, >2 GB, symbolic shapes | Sharded GGUF, mmap, `--mlock`/`--no-mmap` | Sharded SafeTensors, meta-device init |
-| Op coverage | **~60 mapped** (`execution_node.tv` 60-type enum + `translator.map_op`): all previous + full Gemm (α/β), Gather/Slice/Split/Squeeze/Unsqueeze/Expand, Clip/Cast/Pad/Where, ReduceMean/Sum/Max, GAP/MaxPool/AvgPool, BatchNorm, Flatten, ArgMax, Shape/Size, Min/Max/Mean/Sum, Pow/Sqrt/Exp/Log/Neg/Reciprocal/Abs, LeakyReLU/ELU/Softplus, Dropout, LogSoftmax, Trilu, TopK,
+| Op coverage | **82-op closed list** (`execution_node.tv` enum + `translator.map_op`): all previous + full Gemm (α/β), Gather/Slice/Split/Squeeze/Unsqueeze/Expand, Clip/Cast/Pad/Where, ReduceMean/Sum/Max, GAP/MaxPool/AvgPool, BatchNorm, Flatten, ArgMax, Shape/Size, Min/Max/Mean/Sum, Pow/Sqrt/Exp/Log/Neg/Reciprocal/Abs, LeakyReLU/ELU/Softplus, Dropout, LogSoftmax, Trilu, TopK,
 Constant (folded), QuantizeLinear/DequantizeLinear (tensor-wise + per-axis), QLinearMatMul,
 QLinearConv, MatMulInteger, DynamicQuantizeLinear, GatherND, ScatterElements, Range, EyeLike,
 ConstantOfShape, CumSum, InstanceNormalization, Mish, PRelu, Resize/Upsample, Einsum (generic),
-If/Loop (unrolled), LSTM/GRU/RNN (unrolled, bidir, Y/Y_h/Y_c). **Unknown op → `UnsupportedOp`
-error (never silent)** + static shape inference. Still missing: Scan, string/sequence/image
-data ops (need string dtype in `tv.numerics`) | **200+ ops**, full ONNX opset, spec validation | LLM-arch native (Llama/Qwen/Gemma/Phi/…), not general ONNX | Full ATen + custom ops, autograd |
+If/Loop (unrolled), LSTM/GRU/RNN (unrolled, bidir, Y/Y_h/Y_c), `StringConcat`/`StringEqual`/`StringLength` (`str_values` side table), static `Scan` unroll (trip ≤ 128). **Unknown op → `UnsupportedOp`
+error (never silent)** + static shape inference. Still missing: first-class Sequence*/image data
+ops (need sequence dtype in `tv.numerics`) and Scan with runtime trip count | **200+ ops**, full ONNX opset, spec validation | LLM-arch native (Llama/Qwen/Gemma/Phi/…), not general ONNX | Full ATen + custom ops, autograd |
 | Dynamic shapes | ❌ static shapes only | ✅ symbolic dims | ✅ variable context, `--cont-batching` | ✅ dynamic shapes, `torch.compile` |
 | Training | ⚠️ small-model training (`training/autograd.tv`: LinHead+SGD, MLP + Adam, softmax-CE, grad-checked) — no full-model pretraining | ✅ on-device training | ❌ inference-only | ✅ full training |
 
@@ -81,20 +81,23 @@ data ops (need string dtype in `tv.numerics`) | **200+ ops**, full ONNX opset, s
 | 250K endurance | **127,791 req/s** | ~15K RPS | ~25K RPS |
 | 32-thread 10K burst | **169,735 req/s** | lock contention | interop bottleneck |
 
-## 7. Coverage status (was roadmap — now closed except below)
+## 7. Coverage status (closed list + remaining items with technical reasons)
 
-- [x] **Unknown-op fails silent → `UnsupportedOp` + ~40 new ops** (Gather/Slice/Split/Squeeze/Unsqueeze/Expand/Clip/Cast/Pad/Where, Reduce×3, GAP/MaxPool/AvgPool, BatchNorm, Flatten, ArgMax, Shape/Size, Min/Max/Mean/Sum, Pow/Sqrt/Exp/Log/Neg/Reciprocal/Abs, LeakyReLU/ELU/Softplus, Dropout, full Gemm, Concat runtime) + static shape inference.
-- [x] **Tokenizer + sampling + templates** (`tv/text/*`: BPE/WordPiece, temp/top-k/top-p/min-p/penalty/greedy, 5 built-in chat formats + Jinja subset).
-- [x] **Continuous batching + paged KV** (`cont_batcher.tv` slots + `paged_kv.tv` LRU blocks). Token-packing into one GEMM remains future work.
-- [x] **INT4 grouped + FP8 compute** (`int4.tv`, `matmul_fp8_e4m3`); AWQ-specific zero-point/asym-group variants not yet.
-- [x] **Provider abstraction + web UI + QDQ folding** (`device.tv`, `GET /`, `QdqFoldPass`).
+Closed:
+- [x] **Silent unknown-op → `UnsupportedOp` + 82-op coverage** (index/shape/reduce/pool/norm/elementwise/Gemm/quant/pooling/pool-family, `Constant` folding, `If`/`Loop` unrolling, `LSTM`/`GRU`/`RNN` unrolling with Y/Y_h/Y_c, `Resize`, generic `Einsum`, full QDQ family with exact math, `StringConcat`/`StringEqual`/`StringLength` via `str_values` side table, static `Scan` unroll) + static shape inference.
+- [x] **Text pipeline** (`tv/text/*`: BPE/WordPiece/SentencePiece-unigram, temp/top-k/top-p/min-p/penalty/greedy, 5 chat formats + Jinja subset, `generate_text`, speculative single-chain, **multi-draft tree speculative** (`tree_speculative.tv`), **constrained beam search** (`beam.tv`), tool loop, GBNF-subset grammar masking).
+- [x] **Serving** (slot continuous batching, paged KV + shared prefix store, **prefix compute-skip planner** `prefix_skip.tv`, packed single-forward batching, OpenAI API + SSE + rerank + auth/limits/metrics, web UI).
+- [x] **Quantization** (INT8 per-tensor/per-channel/dynamic, grouped INT4 sym + AWQ-asym + act-order, FP8/FP16 compute, 4 calibrations, QDQ folding; quantized int8/int32 IO + int8 initializers; **gated Q2_K/Q3_K/Q6_K dequant** from ggml reference layouts with structural checks + discrete roundtrip self-gate).
+- [x] **Formats & ecosystem** (ONNX reader + writer/serializer, SafeTensors, GGUF container + verified quants, HF-hub cache, CLI, thin Python client, vision preprocess frontend + **ViT graph builder** `vision/vit.tv`, micro-training with grad-checked autograd + **LoRA adapters + checkpoint arena** `training/lora.tv`, **HAL lane-abstract kernels** `runtime/hal.tv`).
+- [x] **TRIZ groups implemented this pass** — (1) LoRA + CheckpointArena, (2) HAL + lane-abstract kernels, (3) String-as-bytes + Scan driver/unroll, (4) Gated K-quants + ViT graph, (5) Tree-speculative + prefix-skip + beam.
 
-Remaining (blocked on things outside this repo, or next phase):
-1. **Full-model pretraining, GPU/NPU compute** — need a GPU-capable tv backend + cluster-scale dataflow; stubs fail loudly by design.
-2. **Scan op, string/sequence/image data ops** — need string dtype + sequence type in `tv.numerics` (separate repo) and loop-carried scan state.
-3. **Q2_K/Q3_K/Q6_K/IQ/TQ dequant, vision encoder weights, GGUF-shard mmap** — bit layouts / weights need bit-exact reference vectors to ship without silent-corruption risk.
-4. **Re-measured benchmarks** — all speed numbers are still legacy-C# references until `tv run` executes on the pure engine.
-5. **Speculative multi-draft trees, PagedAttention compute-skip, constrained beam search** — algorithmic P2 on top of the now-existing primitives.
+Remaining — each with its precise technical reason:
+
+1. **Full-model pretraining.** Our autograd covers `LinHead` + ReLU + softmax-CE only; LoRA adapters + `CheckpointArena` give a second allocation policy for adapter fine-tunes, not full backward for all ops. Pretraining needs backward kernels for every forward op **plus** multi-GB weight streaming. CPU pretraining at LLM scale is 10–100x too slow — it only makes sense together with item 2.
+2. **GPU/NPU compute.** The `.tv` language as defined has no GPU constructs: no thread blocks, shared memory, tensor-core MMA, or kernel-launch API — every existing `extern def` is scalar/host-side (alloc, IO, codecs, time). A GPU backend means extending the tv **compiler** itself (TokenVector main repo, not this one) plus vendor SDK shims (CUDA/TensorRT/QNN). `device.tv` / `hal.tv` stubs exist so this fails loudly instead of silently; `HalDispatch` is the registration seam once a backend exists.
+3. **Full sequence container + image data ops + dynamic Scan.** String tensors ride `str_values` + UTF-8 byte pools (`string_tensor.tv`); static `Scan` unrolls when trip ≤ 128 (`_expand_scan`). Remaining: first-class variable-length **sequence** type for Sequence* ops, image tensor codecs, and Scan whose trip depends on runtime data (needs a real loop primitive or compiler support).
+4. **IQ/TQ dequant + vision encoder weights + GGUF-shard mmap.** Q2_K/Q3_K/Q6_K are now decoded from bit-exact ggml layouts behind a self-gate; IQ/TQ nonlinear layouts still lack a checked reference vector set in-tree (silent-corruption risk remains — loud error is correct). Vision needs actual ViT/CLIP **weights** (graph builder exists). Sharded mmap needs a memory-mapped-file host intrinsic plus multi-shard index resolution.
+5. **Re-measured benchmarks.** Every §6 number was measured on the deleted C# backend; the pure engine's suite (`tv/benchmarks/compare_rivals.tv`, with regression gates) can only run under the `tv` toolchain, unavailable here — quoting old numbers for the new engine would be dishonest. Algorithm work (tree/beam/prefix-skip) is now in-tree; measurement is the remaining gap.
 
 ## 8. When to pick whom
 

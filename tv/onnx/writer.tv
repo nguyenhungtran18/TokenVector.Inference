@@ -231,6 +231,12 @@ def _back_map(op: OperatorType) -> str:
     if op == OperatorType.QuantizeLinear: return "QuantizeLinear"
     if op == OperatorType.DequantizeLinear: return "DequantizeLinear"
     if op == OperatorType.QLinearMatMul: return "QLinearMatMul"
+    if op == OperatorType.QLinearConv: return "QLinearConv"
+    if op == OperatorType.MatMulInteger: return "MatMulInteger"
+    if op == OperatorType.DynamicQuantizeLinear: return "DynamicQuantizeLinear"
+    if op == OperatorType.StringConcat: return "StringConcat"
+    if op == OperatorType.StringEqual: return "StringEqual"
+    if op == OperatorType.StringLength: return "StringLength"
     if op == OperatorType.QuantizedGemm: return "QLinearMatMul"
     return "Identity"
 

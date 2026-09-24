@@ -17,6 +17,9 @@ public class ExecutionGraph:
         self.outputs: list[str] = []
         self.initializers: dict[str, NDArray[float32]] = {}
         self.initializers_int8: dict[str, NDArray[int8]] = {}
+        # string tensors (StringConcat/Equal/Length): name -> UTF-8 values,
+        # side table outside the numeric arena (no NDArray[String] in numerics).
+        self.str_values: dict[str, list[str]] = {}
         self.total_arena_bytes: int = 0
 
     public def get_or_create_tensor(self, name: str, shape: list[int], dtype: TensorDataType = TensorDataType.Float) -> TensorDesc:

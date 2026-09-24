@@ -32,6 +32,15 @@ import tv.vision.preprocess
 import tv.quantization.int4
 import tv.quantization.matmul
 import tv.numerics.tensor
+import tv.training.lora
+import tv.runtime.hal
+import tv.runtime.string_tensor
+import tv.runtime.prefix_skip
+import tv.vision.vit
+import tv.text.beam
+import tv.text.tree_speculative
+import tv.onnx.string_ops
+import tv.format.gguf
 
 public def test_zero_gc_hot_path():
     # mirrors ZeroGCHotPathTests.cs: 5k runs must allocate 0 bytes
@@ -185,12 +194,14 @@ public def test_protobuf_and_translate():
 public def test_unsupported_op_raises():
     raised = False
     try:
-        map_op("Einsum")
+        map_op("ThisOpDoesNotExist")
     except UnsupportedOp:
         raised = True
     assert raised, "unknown ONNX op must raise UnsupportedOp, never silent Identity"
     assert map_op("Identity") == OperatorType.Identity
     assert map_op("Gather") == OperatorType.Gather
+    assert map_op("StringConcat") == OperatorType.StringConcat
+    assert map_op("Einsum") == OperatorType.Einsum
 
 def _run(g: ExecutionGraph, names: list[str], arrs: list[NDArray[float32]], out_name: str) -> NDArray[float32]:
     s = InferenceSession(g, False)
@@ -1078,6 +1089,138 @@ def _graph_64() -> InferenceSession:
     n.inputs.extend(["X", "W"]); n.outputs.append("Y")
     g.nodes.append(n)
     return InferenceSession(g, True)
+
+public def test_lora_forward_and_step():
+    w = NDArray[float32]([12]); fill_const(w, 0.1)
+    b = NDArray[float32]([3]); fill_const(b, 0.0)
+    l = LoRALinear(w, b, 1, 3, 4, 2, 1.0)
+    x = NDArray[float32]([4]); fill_const(x, 1.0)
+    y = l.forward(x)
+    assert len(y) == 3
+    t = NDArray[float32]([3]); fill_const(t, 0.0)
+    loss0 = lora_train_row(l, x, t, 0.1)
+    assert loss0 >= 0.0
+    y2 = l.forward(x)
+    changed = False
+    for i in range(3):
+        if abs(y2[i] - y[i]) > 1e-6:
+            changed = True
+    assert changed, "adapter_step must change outputs"
+
+public def test_hal_matmul_relu():
+    a = NDArray[float32]([4]); fill_const(a, 2.0)
+    b = NDArray[float32]([4]); fill_const(b, 3.0)
+    # 1x4 @ 4x1 via flat layout n=1: treat as outer product path — use 2x2
+    aa = NDArray[float32]([4])
+    bb = NDArray[float32]([4])
+    for i in range(4):
+        aa[i] = float(i + 1)
+        bb[i] = 1.0
+    yy = NDArray[float32]([4])
+    # aa=[[1,2],[3,4]], bb=[[1,1],[1,1]] -> y[0,0]=1*1+2*1=3
+    hal_matmul(aa, bb, yy, 2, 2, 2)
+    assert abs(yy[0] - 3.0) < 1e-5
+    assert abs(yy[3] - 7.0) < 1e-5
+    r = NDArray[float32]([3])
+    r[0] = -1.0; r[1] = 0.0; r[2] = 2.0
+    hal_relu(r, r)
+    assert r[0] == 0.0 and r[1] == 0.0 and r[2] == 2.0
+
+public def test_string_tensor_pack_roundtrip():
+    st = StringTensor()
+    st.append("hello")
+    st.append("x")
+    (offs, blob) = st.pack()
+    st2 = StringTensor.unpack(offs, blob, len(st))
+    assert len(st2) == 2
+    assert st2.get(0) == "hello"
+    assert st2.get(1) == "x"
+
+public def test_string_ops_and_session_side_table():
+    a = StringTensor(["foo", "bar"])
+    b = StringTensor(["!", "?"])
+    c = str_concat(a, b)
+    assert c.get(0) == "foo!" and c.get(1) == "bar?"
+    eq = str_equal(a, StringTensor(["foo", "zz"]))
+    assert eq.get(0) == "true" and eq.get(1) == "false"
+    assert is_string_op("StringConcat")
+    g = ExecutionGraph("s")
+    g.str_values["A"] = ["ab"]
+    g.str_values["B"] = ["cd"]
+    g.inputs.append("A"); g.inputs.append("B")
+    g.outputs.append("Y")
+    g.get_or_create_tensor("A", [1], TensorDataType.String)
+    g.get_or_create_tensor("B", [1], TensorDataType.String)
+    g.get_or_create_tensor("Y", [1], TensorDataType.String)
+    n = ExecutionNode("sc", OperatorType.StringConcat)
+    n.inputs.extend(["A", "B"]); n.outputs.append("Y")
+    g.nodes.append(n)
+    s = InferenceSession(g, False)
+    s.run([], [])
+    assert g.str_values["Y"][0] == "abcd"
+    s.close()
+
+public def test_scan_run_driver():
+    def body(carry, i):
+        c0 = NDArray[float32]([1])
+        c0[0] = carry[0][0] + 1.0
+        row = NDArray[float32]([1])
+        row[0] = float(i)
+        return ([c0], row)
+    init = [NDArray[float32]([1])]
+    init[0][0] = 0.0
+    (final, rows) = scan_run(init, 4, body)
+    assert final[0][0] == 4.0
+    assert len(rows) == 4
+    assert rows[0] == 0.0 and rows[3] == 3.0
+
+public def test_prefix_skip_plan():
+    store = PrefixStore(8)
+    toks = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    store.intern(toks, 16)
+    plan = plan_prefix(store, toks + [99, 100], 16)
+    assert plan.hit and plan.skip_len == 16
+    (sk, sf) = apply_plan(plan, 18)
+    assert sk == 16 and sf == 2
+
+public def test_beam_log_softmax_and_tree():
+    logits = NDArray[float32]([3])
+    logits[0] = 1.0; logits[1] = 2.0; logits[2] = 3.0
+    sm = log_softmax(logits)
+    assert len(sm) == 3
+    assert sm[2] > sm[1] and sm[1] > sm[0]
+    tree = TreeDraft()
+    c0 = tree.add(1, 0, 0.0)
+    c = tree.add(2, c0, -1.0)
+    assert tree.nodes[c].parent == c0
+    assert len(tree.path(c)) == 2
+
+public def test_vit_graph_builds():
+    cfg = ViTConfig()
+    cfg.image_size = 32
+    cfg.patch_size = 8
+    cfg.hidden = 64
+    cfg.num_layers = 1
+    cfg.num_heads = 4
+    cfg.num_classes = 10
+    g = build_vit_graph(cfg)
+    assert len(g.nodes) > 0
+    assert len(g.outputs) > 0
+
+public def test_gguf_k_quant_gate_structural():
+    # truncated / non-multiple lengths must raise before any decode
+    raised = False
+    try:
+        _dequant_k_gated(b"\x00" * 10, 0, 300, 6)
+    except Arg:
+        raised = True
+    assert raised
+    raised = False
+    try:
+        _dequant_k_gated(b"\x00" * 50, 0, 256, 6)
+    except Arg:
+        raised = True
+    assert raised, "truncated Q6_K block must raise"
 
 extern def fill_rand(a: NDArray[float32], seed: int)
 extern def fill_const(a: NDArray[float32], v: float32)

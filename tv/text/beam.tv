@@ -1,0 +1,140 @@
+// TokenVector Module: Text — Constrained beam search + tree speculative hooks
+// TRIZ group 5: beam search over logits with optional grammar mask (tokens
+// outside allowed set get -inf); length-normalized scoring. Tree speculative
+// decoding lives beside the single-chain loop in speculative.tv.
+
+module tv.text.beam
+
+import tv.runtime.session
+import tv.text.sampling
+import tv.text.tokenizer
+import tv.numerics.tensor
+
+public class Beam:
+    def __init__(self, tokens: list[int], score: float32):
+        self.tokens = list(tokens)
+        self.score = score
+
+    public def clone(self) -> Beam:
+        return Beam(self.tokens, self.score)
+
+public class BeamConfig:
+    def __init__(self):
+        self.width: int = 4
+        self.max_new_tokens: int = 32
+        self.length_penalty: float32 = 0.6  # score / (len^lp)
+        self.eos_token: int = -1
+        self.forbid_eos_until: int = 0
+
+public def log_softmax(logits: NDArray[float32]) -> NDArray[float32]:
+    n = len(logits)
+    mx = logits[0]
+    for i in range(1, n):
+        if logits[i] > mx:
+            mx = logits[i]
+    s = 0.0
+    for i in range(n):
+        s = s + exp(logits[i] - mx)
+    ls = log(s)
+    out = NDArray[float32]([n])
+    for i in range(n):
+        out[i] = logits[i] - mx - ls
+    return out
+
+# mask logits by grammar-allowed ids (allowed may be None)
+def _mask(logits: NDArray[float32], allowed: list[int] = None) -> NDArray[float32]:
+    if allowed is None:
+        return logits
+    allow: dict[int, bool] = {}
+    for t in allowed:
+        allow[t] = True
+    for i in range(len(logits)):
+        if i not in allow:
+            logits[i] = -1e30
+    return logits
+
+def _score(tokens: list[int], lp: float32, sum_logp: float32) -> float32:
+    ln = max(1, len(tokens))
+    pen = pow_float(ln, lp)
+    return sum_logp / pen
+
+def pow_float(x: float32, e: float32) -> float32:
+    # x^e for e >= 0 via exp(e*ln x); x^0 = 1
+    if e == 0.0:
+        return 1.0
+    if x <= 0.0:
+        return 1.0
+    return exp(e * log(x))
+
+def _logits_for(session: InferenceSession, history: list[int], in_dim: int, vocab: int) -> NDArray[float32]:
+    inp = NDArray[float32]([in_dim])
+    for i in range(in_dim):
+        inp[i] = 0.0
+    tail = history[len(history) - in_dim:] if len(history) > in_dim else history
+    base = in_dim - len(tail)
+    for i in range(len(tail)):
+        inp[base + i] = float(tail[i])
+    out = session.run_single(inp)
+    ln = min(len(out), vocab)
+    lg = NDArray[float32]([ln])
+    for i in range(ln):
+        lg[i] = out[len(out) - ln + i]
+    return lg
+
+public def beam_search(session: InferenceSession, tokenizer, prompt: str,
+        cfg: BeamConfig, in_dim: int, vocab: int,
+        allow_fn = None) -> Beam:
+    ids = tokenizer.encode(prompt)
+    beams: list[Beam] = [Beam(ids, 0.0)]
+    for step in range(cfg.max_new_tokens):
+        candidates: list[Beam] = []
+        for b in beams:
+            lg = _logits_for(session, b.tokens, in_dim, vocab)
+            allowed = allow_fn(b.tokens) if allow_fn is not None else None
+            lg = _mask(lg, allowed)
+            lp = log_softmax(lg)
+            # top-width expansions per beam (global merge after)
+            picked: list[tuple[int, float32]] = []
+            for _ in range(cfg.width):
+                best = -1
+                best_v = -3.4e38
+                for i in range(len(lp)):
+                    if i in [p[0] for p in picked]:
+                        continue
+                    if lp[i] > best_v:
+                        best_v = lp[i]
+                        best = i
+                if best >= 0 and best_v > -1e29:
+                    picked.append((best, best_v))
+            for (tok, lpp) in picked:
+                nb = b.clone()
+                nb.tokens.append(tok)
+                nb.score = b.score + lpp
+                candidates.append(nb)
+        # prune: sort by length-normalized score, keep width
+        for c in candidates:
+            c.score = _score(c.tokens, cfg.length_penalty, c.score)
+        candidates.sort(key=lambda b: -b.score)
+        beams = []
+        seen: dict[str, bool] = {}
+        for c in candidates:
+            key = ",".join([str(t) for t in c.tokens])
+            if key in seen:
+                continue
+            seen[key] = True
+            beams.append(c)
+            if len(beams) >= cfg.width:
+                break
+        done = True
+        for b in beams:
+            if cfg.eos_token < 0 or len(b.tokens) == 0 or b.tokens[len(b.tokens) - 1] != cfg.eos_token:
+                done = False
+                break
+        if done:
+            break
+    # pick best
+    bestb = beams[0]
+    for b in beams:
+        if b.score > bestb.score:
+            bestb = b
+    return bestb

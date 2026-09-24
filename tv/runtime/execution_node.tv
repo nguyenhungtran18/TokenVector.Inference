@@ -91,6 +91,9 @@ public enum OperatorType:
     QLinearConv = 77
     MatMulInteger = 78
     DynamicQuantizeLinear = 79
+    StringConcat = 80
+    StringEqual = 81
+    StringLength = 82
 
 public class ExecutionNode:
     def __init__(self, name: str, op: OperatorType):

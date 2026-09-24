@@ -1,0 +1,194 @@
+// TokenVector Module: Text — Tree speculative decoding (multi-draft)
+// TRIZ group 5: draft proposes a branching tree (width x depth); target
+// verifies paths in best-first order so one session call can accept several
+// tokens when siblings match. Falls back to single-chain on shallow trees.
+
+module tv.text.tree_speculative
+
+import tv.runtime.session
+import tv.text.sampling
+import tv.numerics.tensor
+
+public class DraftNode:
+    def __init__(self, token: int, parent: int, logp: float32):
+        self.token = token
+        self.parent = parent
+        self.logp = logp
+        self.children: list[int] = []
+        self.target_ok: bool = False
+
+public class TreeDraft:
+    def __init__(self):
+        self.nodes: list[DraftNode] = [DraftNode(-1, -1, 0.0)]  # root
+
+    public def add(self, token: int, parent: int, logp: float32) -> int:
+        self.nodes.append(DraftNode(token, parent, logp))
+        idx = len(self.nodes) - 1
+        self.nodes[parent].children.append(idx)
+        return idx
+
+    # path from root (exclusive) to node i
+    public def path(self, i: int) -> list[int]:
+        out: list[int] = []
+        while i > 0:
+            out.insert(0, self.nodes[i].token)
+            i = self.nodes[i].parent
+        return out
+
+def _logits_for(session: InferenceSession, history: list[int], in_dim: int, vocab: int) -> NDArray[float32]:
+    inp = NDArray[float32]([in_dim])
+    for i in range(in_dim):
+        inp[i] = 0.0
+    tail = history[len(history) - in_dim:] if len(history) > in_dim else history
+    base = in_dim - len(tail)
+    for i in range(len(tail)):
+        inp[base + i] = float(tail[i])
+    out = session.run_single(inp)
+    ln = min(len(out), vocab)
+    lg = NDArray[float32]([ln])
+    for i in range(ln):
+        lg[i] = out[len(out) - ln + i]
+    return lg
+
+def _greedy_top(logits: NDArray[float32], k: int) -> list[tuple[int, float32]]:
+    work = NDArray[float32]([len(logits)])
+    for i in range(len(logits)):
+        work[i] = logits[i]
+    out: list[tuple[int, float32]] = []
+    for _ in range(min(k, len(logits))):
+        best = -1
+        for i in range(len(logits)):
+            if any(p[0] == i for p in out):
+                continue
+            if best < 0 or work[i] > work[best]:
+                best = i
+        if best < 0:
+            break
+        out.append((best, work[best]))
+    return out
+
+# Expand draft tree: for each leaf at current depth, ask draft for top-`width`
+# continuations (greedy logits). Max depth `depth`, max nodes `max_nodes`.
+public def expand_tree(draft: InferenceSession, root_history: list[int],
+        width: int, depth: int, in_dim: int, vocab: int, max_nodes: int = 64) -> TreeDraft:
+    tree = TreeDraft()
+    frontier: list[int] = [0]
+    for _d in range(depth):
+        nxt: list[int] = []
+        for node in frontier:
+            if len(tree.nodes) >= max_nodes:
+                break
+            hist = list(root_history) + tree.path(node)
+            lg = _logits_for(draft, hist, in_dim, vocab)
+            for (tok, lp) in _greedy_top(lg, width):
+                idx = tree.add(tok, node, lp)
+                nxt.append(idx)
+        frontier = nxt
+        if len(frontier) == 0 or len(tree.nodes) >= max_nodes:
+            break
+    return tree
+
+# Verify tree against target along best-first (logp) paths; returns accepted
+# token list (single linearized path — first mismatch stops that branch).
+public def verify_tree(target: InferenceSession, tree: TreeDraft, history: list[int],
+        params: SampleParams, in_dim: int, vocab: int, eos: int = -1) -> list[int]:
+    # candidate internal nodes sorted by cumulative draft logp (best path first)
+    order: list[int] = list(range(1, len(tree.nodes)))
+    cum: dict[int, float32] = {}
+    for i in order:
+        p = tree.nodes[i].parent
+        cum[i] = tree.nodes[i].logp + (cum[p] if p in cum else 0.0)
+    order.sort(key=lambda i: -cum[i])
+    accepted: list[int] = []
+    prefix_ok: dict[int, bool] = {0: True}
+    for i in order:
+        parent = tree.nodes[i].parent
+        if not prefix_ok.get(parent, False):
+            continue
+        hist = list(history) + tree.path(i)
+        # target argmax at position len(history)+depth(path)-1 equals proposed?
+        # verify last token only when parent chain all accepted
+        lg = _logits_for(target, list(history) + tree.path(parent), in_dim, vocab)
+        g = SampleParams()
+        g.temperature = 0.0
+        nxt = sample_token(lg, g, list(history) + tree.path(parent))
+        if nxt == tree.nodes[i].token:
+            tree.nodes[i].target_ok = True
+            prefix_ok[i] = True
+        else:
+            prefix_ok[i] = False
+    # walk deepest accepted path from root
+    cur = 0
+    while True:
+        best = -1
+        best_d = -1
+        for c in tree.nodes[cur].children:
+            if tree.nodes[c].target_ok:
+                # depth preference then logp
+                d = len(tree.path(c))
+                if d > best_d or (d == best_d and (best < 0 or cum[c] > cum[best])):
+                    best = c
+                    best_d = d
+        if best < 0:
+            break
+        # only take child if its parent is on the accepted spine (chain)
+        # enforce chain: parent must be cur (already true) and all ancestors ok
+        chain_ok = True
+        p = best
+        while p > 0:
+            if not tree.nodes[p].target_ok:
+                chain_ok = False
+                break
+            p = tree.nodes[p].parent
+        if not chain_ok:
+            break
+        accepted.append(tree.nodes[best].token)
+        cur = best
+        if accepted[len(accepted) - 1] == eos:
+            break
+    return accepted
+
+public def tree_speculative_generate(target: InferenceSession, draft: InferenceSession,
+        tokenizer, prompt: str, max_new_tokens: int, width: int, depth: int,
+        params: SampleParams, in_dim: int, vocab: int, eos: int = -1) -> list[int]:
+    history = tokenizer.encode(prompt)
+    gen: list[int] = []
+    while len(gen) < max_new_tokens:
+        tree = expand_tree(draft, history, width, depth, in_dim, vocab)
+        if len(tree.nodes) <= 1:
+            lg = _logits_for(target, history, in_dim, vocab)
+            t = sample_token(lg, params, history)
+            history.append(t)
+            gen.append(t)
+            if t == eos:
+                break
+            continue
+        acc = verify_tree(target, tree, history, params, in_dim, vocab, eos)
+        if len(acc) == 0:
+            # no draft token accepted: sample one from target
+            lg = _logits_for(target, history, in_dim, vocab)
+            t = sample_token(lg, params, history)
+            history.append(t)
+            gen.append(t)
+            if t == eos:
+                break
+            continue
+        take = min(len(acc), max_new_tokens - len(gen))
+        for i in range(take):
+            history.append(acc[i])
+            gen.append(acc[i])
+        if take > 0 and gen[len(gen) - 1] == eos:
+            break
+        if take < len(acc):
+            break
+        if len(acc) == max_new_tokens - (len(gen) - take) and len(gen) >= max_new_tokens:
+            break
+        # bonus: when all leaves on spine accepted, sample continuation once
+        if len(gen) < max_new_tokens:
+            lg = _logits_for(target, history, in_dim, vocab)
+            t = sample_token(lg, params, history)
+            history.append(t)
+            gen.append(t)
+            if t == eos:
+                break
+    return gen

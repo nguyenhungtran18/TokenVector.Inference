@@ -62,6 +62,7 @@ public class OnnxTensor:
         self.int32_data: list[int] = []
         self.int64_data: list[int64] = []
         self.double_data: list[float64] = []
+        self.string_data: list[str] = []
 
     public def extract_float_array(self) -> NDArray[float32]:
         if len(self.float_data) > 0:
@@ -72,6 +73,14 @@ public class OnnxTensor:
         if len(self.raw) >= 4:
             return native_floats_from_raw(self.raw)
         return NDArray[float32]([0])
+
+    public def extract_string_array(self) -> list[str]:
+        if len(self.string_data) > 0:
+            return list(self.string_data)
+        if len(self.raw) > 0:
+            # raw_data for STRING tensors is repeated length-prefixed? rare; use utf8 whole as single
+            return [raw_bytes_to_str(self.raw)]
+        return []
 
     public def extract_int32_array(self) -> list[int]:
         if len(self.int32_data) > 0:
@@ -117,3 +126,4 @@ public class OnnxModel:
 
 extern def native_floats_from_raw(raw: bytes) -> NDArray[float32]
 extern def native_ints_from_raw(raw: bytes) -> list[int]
+extern def raw_bytes_to_str(raw: bytes) -> str
