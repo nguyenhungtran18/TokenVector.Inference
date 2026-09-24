@@ -1,6 +1,6 @@
 // TokenVector Module: ONNX — Model serializer (protobuf writer + export)
 // Emits spec-valid ONNX bytes for float graphs (TV->ORT interop) and QDQ
-// graphs. Wire encoding is pure .tv over int lists; only byte codecs
+// graphs. Wire encoding is pure .tkv over int lists; only byte codecs
 // (utf8/float-bits/list->bytes) are host intrinsics, like the parser side.
 
 module tv.onnx.writer

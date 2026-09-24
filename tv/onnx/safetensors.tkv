@@ -1,6 +1,6 @@
 // TokenVector Module: ONNX — SafeTensors weight loader
 // Reads .safetensors (JSON header + raw little-endian payload) into float
-// NDArrays for session initializers. Header scanning is pure .tv over the
+// NDArrays for session initializers. Header scanning is pure .tkv over the
 // known-flat header shape; float16/bfloat16 bit expansion and raw u32/f32
 // reads are host byte-codecs (same class as the protobuf codec).
 

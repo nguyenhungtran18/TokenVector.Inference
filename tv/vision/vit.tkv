@@ -1,5 +1,5 @@
 // TokenVector Module: Vision — ViT/CLIP-style encoder graph builder
-// TRIZ group 4 (vision encoder weights): preprocess.tv handled pixels; this
+// TRIZ group 4 (vision encoder weights): preprocess.tkv handled pixels; this
 // module builds the encoder ExecutionGraph (patch embed -> stacked blocks ->
 // norm/pool) from caller-supplied weights so real ViT checkpoints can run.
 // Random-init weights are for structure tests only, not quality claims.

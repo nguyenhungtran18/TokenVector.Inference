@@ -1,5 +1,5 @@
 // TokenVector Module: Tools — CLI (serve | gen | export | calibrate | latency)
-// Run: tv run tv/tools/cli.tv -- <command> [flags]
+// Run: tkvc build tv/tools/cli.tkv -- <command> [flags]
 // Flags are --key value pairs parsed from argv().
 
 module tv.tools.cli
@@ -35,7 +35,7 @@ def _get(flags: dict[str, str], key: str, default: str) -> str:
 public def main():
     args = argv()
     if len(args) == 0:
-        print("usage: tv run tv/tools/cli.tv -- <serve|gen|export|calibrate|latency> [--key value]")
+        print("usage: tkvc build tv/tools/cli.tkv -- <serve|gen|export|calibrate|latency> [--key value]")
         return
     cmd = args[0]
     flags = _flags(args[1:])

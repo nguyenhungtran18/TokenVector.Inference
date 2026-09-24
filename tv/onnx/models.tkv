@@ -1,5 +1,4 @@
-// TokenVector Native Module: ONNX — Proto models
-// Ported from: ONNX/OnnxProtobufModels.cs
+// TokenVector Module: ONNX — Proto models
 
 module tv.onnx.models
 

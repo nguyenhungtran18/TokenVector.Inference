@@ -47,7 +47,7 @@ def offs_blob_end(count: int, offs: NDArray[int], pos: int):
     # sentinel length is stored by caller via blob padding; no-op hook
     pass
 
-# --- UTF-8 helpers over int8 bytes (pure .tv; no tv.numerics String type) ---
+# --- UTF-8 helpers over int8 bytes (pure .tkv; no tv.numerics String type) ---
 def utf8_len(s: str) -> int:
     n = 0
     for i in range(len(s)):

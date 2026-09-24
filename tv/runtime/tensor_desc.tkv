@@ -1,6 +1,4 @@
-// TokenVector Native Module: Runtime — Tensor Descriptor
-// Ported from: Runtime/TensorDesc.cs
-// Native backend: TokenVector.Inference.Runtime.TensorDesc (C# AOT)
+// TokenVector Module: Runtime — Tensor Descriptor
 
 module tv.runtime.tensor_desc
 

@@ -1,49 +1,55 @@
 ﻿# Hướng dẫn Sử dụng TokenVector.Inference (Tiếng Việt)
 
 ## 1. Tổng quan
-`TokenVector.Inference` cung cấp nền tảng phục vụ suy luận mô hình học sâu, tối ưu hóa đồ thị tính toán và lượng tử hóa đa độ chính xác cho C# và Trình biên dịch TokenVector (`.tv`).
+`TokenVector.Inference` cung cấp nền tảng phục vụ suy luận mô hình học sâu, tối ưu hóa đồ thị tính toán và lượng tử hóa đa độ chính xác cho ngôn ngữ TokenVector (`.tkv`) và trình biên dịch `tkvc`.
 
 ## 2. Nạp Mô hình ONNX
-```csharp
-using TokenVector.Inference.Runtime;
-using TokenVector.Numerics.Core;
+```tokenvector
+import tv.inference
 
-// Nạp trực tiếp từ đường dẫn file hoặc byte array
-using var session = new InferenceSession("model.onnx");
+# Nạp từ đường dẫn file
+session = tv.inference.load_onnx("model.onnx")
 ```
 
-## 3. Thực thi Suy luận Zero-GC Hot Path
-Để đảm bảo tuyệt đối 0 Byte cấp phát trên Heap trong vòng lặp phục vụ:
-```csharp
-// Khởi tạo sẵn buffer I/O bên ngoài hot path
-var inputTensor = new NDArray<float>(1, 64);
-var outputTensor = new NDArray<float>(1, 10);
+## 3. Thực thi Hot Path
+```tokenvector
+import tv.inference
+import tv.numerics.tensor
 
-NamedNDArray[] inputs = new NamedNDArray[1] { new("input", inputTensor) };
-NamedNDArray[] outputs = new NamedNDArray[1] { new("output", outputTensor) };
-
-// Vòng lặp Hot Path (0 Byte GC)
-for (int i = 0; i < 100000; i++)
-{
-    session.Run(inputs.AsSpan(), outputs.AsSpan());
-}
+session = tv.inference.load_onnx("model.onnx")
+input_tensor = tensor.zeros([1, 64], dtype=float32)
+output_tensor = session.run(input_tensor)
+print("Output shape:", output_tensor.shape)
+session.close()
 ```
+
+Buffer được cấp phát sẵn cho đường tái sử dụng arena (mục tiêu Zero-GC).
 
 ## 4. Lượng tử hóa Mô hình (PTQ)
-```csharp
-using TokenVector.Inference.Quantization;
+```tokenvector
+import tv.quantization.engine
 
-float[] calibrationData = LayDuLieuHieuChuan();
-var qParams = QuantizationEngine.CalibrateMinMax(calibrationData, symmetric: true);
+# Hiệu chuẩn MinMax / KL / percentile / MSE trên activation,
+# rồi chuyển trọng số INT8 / INT4 / FP8 — xem tv/quantization/engine.tkv
+```
 
-sbyte[] quantized = new sbyte[calibrationData.Length];
-QuantizationEngine.QuantizeToInt8Symmetric(calibrationData, quantized, qParams.Scale);
+CLI:
+```powershell
+tkvc build tv/tools/cli.tkv
+# calibrate --model path.onnx ...
 ```
 
 ## 5. Phục vụ Nhúng & Dynamic Batching
-```csharp
-using TokenVector.Inference.Server;
+```tokenvector
+import tv.inference
 
-// Khởi chạy Embedded Micro-Server trên cổng 8080 (độ trễ < 1ms)
-using var server = new EmbeddedServer(session, port: 8080);
+session = tv.inference.load_onnx("model.onnx")
+server = session.serve(port=8080)
+# API tương thích OpenAI: /v1/chat/completions, SSE streaming, /metrics
+```
+
+## 6. Toolchain
+```powershell
+# Vị trí trình biên dịch
+D:\TokenVector\3.code\dist\tkvc.exe build <source.tkv> [--out app.exe]
 ```

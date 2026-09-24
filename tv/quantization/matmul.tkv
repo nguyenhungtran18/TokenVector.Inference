@@ -1,5 +1,5 @@
 // TokenVector Module: Quantization — INT8 MatMul kernels
-// Pure .tv dot-product kernels; the tv compiler backend emits packed SIMD
+// Pure .tkv dot-product kernels; the tv compiler backend emits packed SIMD
 // for the fixed 32-wide inner blocks with scalar head/tail handling.
 
 module tv.quantization.matmul

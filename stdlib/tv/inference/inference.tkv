@@ -1,6 +1,6 @@
-﻿// TokenVector Standard Library: Inference & Model Serving Module
+// TokenVector Standard Library: Inference & Model Serving Module
 // Namespace: tv.inference
-// Pure TokenVector implementation — no C# backend.
+// Pure TokenVector implementation.
 // Covers: Runtime + ONNX + Optimization + Quantization + Server.
 
 module tv.inference

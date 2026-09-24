@@ -1,5 +1,4 @@
-// TokenVector Native Module: Runtime — Execution Graph + Liveness Analysis
-// Ported from: Runtime/ExecutionGraph.cs
+// TokenVector Module: Runtime — Execution Graph + Liveness Analysis
 
 module tv.runtime.execution_graph
 

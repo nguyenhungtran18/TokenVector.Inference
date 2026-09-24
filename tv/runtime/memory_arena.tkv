@@ -19,7 +19,7 @@ public class ExecutionMemoryArena:
         self._check_range(byte_offset, count * 4)
         return native_arena_float_view(self.handle, byte_offset, count)
 
-    # Pure .tv copies through zero-copy views (no host memmove dependency)
+    # Pure .tkv copies through zero-copy views (no host memmove dependency)
     def copy_from(self, byte_offset: int, src: NDArray[float32]):
         dst = self.get_float_span(byte_offset, len(src))
         for i in range(len(src)):
@@ -68,7 +68,7 @@ public class ExecutionMemoryArena:
             self.handle = 0
 
 # --- host intrinsics: raw memory only (alloc/free/view), like libc malloc.
-# Everything built on top (copies, kernels, graphs) is pure .tv.
+# Everything built on top (copies, kernels, graphs) is pure .tkv.
 extern def native_arena_alloc(size_in_bytes: int) -> int
 extern def native_arena_free(handle: int)
 extern def native_arena_float_view(handle: int, byte_offset: int, count: int) -> NDArray[float32]

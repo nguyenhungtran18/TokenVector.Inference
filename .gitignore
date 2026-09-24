@@ -2,16 +2,15 @@
 bin/
 obj/
 TestResults/
-BenchmarkDotNet.Artifacts/
 .vs/
 .idea/
 .vscode/
 
-# Packages
-*.nupkg
-*.snupkg
-!dist/*.nupkg
-!dist/*.snupkg
+# Compiled artifacts
+*.exe
+*.dll
+*.pdb
+*.ilk
 
 # OS Files
 Thumbs.db

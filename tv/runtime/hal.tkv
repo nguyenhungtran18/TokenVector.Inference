@@ -1,5 +1,5 @@
 // TokenVector Module: Runtime — Hardware abstraction layer (lane-abstract kernels)
-// TRIZ group 2 (GPU/NPU): without a GPU language in .tv, separate the WHAT from
+// TRIZ group 2 (GPU/NPU): without a GPU language in .tkv, separate the WHAT from
 // the WHERE — kernels are written lane-abstract (outer blocks x inner lane[L])
 // so a future compiler maps blocks->thread-blocks, lanes->SIMD/warp lanes.
 // Backends register into a dispatch table; CPU lanes are the default target.
@@ -77,7 +77,7 @@ public def hal_softmax_rows(x: NDArray[float32], y: NDArray[float32], rows: int,
         for j in range(cols):
             y[base + j] = y[base + j] * inv
 
-# dispatch: op name -> pure-.tv kernel (signature varies; caller binds args)
+# dispatch: op name -> pure-.tkv kernel (signature varies; caller binds args)
 public class HalDispatch:
     def __init__(self):
         self.kernels: dict[str, object] = {}

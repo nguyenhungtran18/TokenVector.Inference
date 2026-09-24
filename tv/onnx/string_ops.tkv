@@ -1,5 +1,5 @@
 // TokenVector Module: ONNX — string data ops (StringConcat/Length/Equal)
-// Delivered as graph helpers + translator mapping to pure-.tv string tensor
+// Delivered as graph helpers + translator mapping to pure-.tkv string tensor
 // routines (runtime.string_tensor). String initializers ride on the graph's
 // str_values side table (not the numeric arena).
 

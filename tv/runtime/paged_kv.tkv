@@ -1,6 +1,6 @@
 // TokenVector Module: Runtime — Paged KV-cache block manager
 // Fixed-size pages from a shared pool, per-sequence block tables (vLLM-style
-// paging at the .tv level). Sequences address logical token positions; the
+// paging at the .tkv level). Sequences address logical token positions; the
 // manager maps them to physical pages, evicting LRU victims under pressure.
 
 module tv.runtime.paged_kv

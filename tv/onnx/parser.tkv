@@ -1,5 +1,4 @@
-// TokenVector Native Module: ONNX — Model Parser
-// Ported from: ONNX/OnnxModelParser.cs (396 lines)
+// TokenVector Module: ONNX — Model Parser
 
 module tv.onnx.parser
 

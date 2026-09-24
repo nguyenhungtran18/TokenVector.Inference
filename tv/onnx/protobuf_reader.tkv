@@ -1,5 +1,4 @@
-// TokenVector Native Module: ONNX — Fast Protobuf Reader (zero-copy)
-// Ported from: ONNX/FastProtobufReader.cs
+// TokenVector Module: ONNX — Fast Protobuf Reader (zero-copy)
 
 module tv.onnx.protobuf_reader
 

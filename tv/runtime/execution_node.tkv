@@ -1,5 +1,5 @@
 // TokenVector Module: Runtime — Execution Node (all operators)
-// Pure .tv dispatch: elementwise/softmax/attention/shape ops run on zero-copy
+// Pure .tkv dispatch: elementwise/softmax/attention/shape ops run on zero-copy
 // arena views; matmul/conv/norm route through tv.optimization.kernels.
 
 module tv.runtime.execution_node
@@ -258,7 +258,7 @@ public class ExecutionNode:
             self._exec_attention(arena)
         elif op == OperatorType.QuantizedGemm:
             # Quantized operands live in the arena as int8; views (not raw
-            # pointers) match the pure-.tv matmul signatures.
+            # pointers) match the pure-.tkv matmul signatures.
             aq = arena.get_int8_span(self.input_descs[0].offset, self.input_descs[0].element_count)
             wq = arena.get_int8_span(self.input_descs[1].offset, self.input_descs[1].element_count)
             yf = arena.get_float_span(self.output_descs[0].offset, self.output_descs[0].element_count)
@@ -363,7 +363,7 @@ public class ExecutionNode:
             bv = NDArray[float32]([0])
         kernels.fused_layer_norm(xv, gv, bv, yv, self._n(), self._d(), self.epsilon)
 
-    # Y = alpha*op(A)*op(B) + beta*C — pure .tv so alpha/beta stay exact
+    # Y = alpha*op(A)*op(B) + beta*C — pure .tkv so alpha/beta stay exact
     def _exec_gemm(self, arena: ExecutionMemoryArena):
         ad = self.input_descs[0]
         bd = self.input_descs[1]
@@ -1552,5 +1552,5 @@ public enum BinaryOp:
     Div = 3
 
 # NOTE: zero externs — dispatch and all elementwise/shape/attention paths are
-# pure .tv over arena views. Only the arena allocator itself (memory_arena.tv)
+# pure .tkv over arena views. Only the arena allocator itself (memory_arena.tkv)
 # remains a host intrinsic, like libc malloc.

@@ -1,5 +1,4 @@
-// TokenVector Native Module: Quantization — Types (FP8 bit-accurate)
-// Ported from: Quantization/QuantEnums.cs + Quantization/FP8Types.cs
+// TokenVector Module: Quantization — Types (FP8 bit-accurate)
 
 module tv.quantization.types
 

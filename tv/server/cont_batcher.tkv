@@ -1,6 +1,6 @@
 // TokenVector Module: Server — Continuous batcher for LLM decoding
 // Slot-based iteration scheduling (llama.cpp parallel-slots semantics at the
-// .tv level): waiting -> running admission controlled by PagedKVPool capacity,
+// .tkv level): waiting -> running admission controlled by PagedKVPool capacity,
 // each step advances every running sequence by one token (prefill once, then
 // decode), finished/evicted sequences free their pages. One forward per active
 // sequence per step, executed over the DynamicBatcher session pool.

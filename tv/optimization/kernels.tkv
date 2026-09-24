@@ -24,7 +24,7 @@ public enum ActivationFunction:
     Sigmoid = 4
     Tanh = 5
 
-# Pure .tv activation (GELU tanh-approx, stable softplus-style branches inline)
+# Pure .tkv activation (GELU tanh-approx, stable softplus-style branches inline)
 public def apply_activation(x: float32, act: ActivationFunction) -> float32:
     if act == ActivationFunction.ReLU:
         return x if x > 0.0 else 0.0
@@ -45,7 +45,7 @@ def _tanh(x: float32) -> float32:
     e = exp(2.0 * x)
     return (e - 1.0) / (e + 1.0)
 
-# Y = Act(X @ W + Bias) — K-blocked (KB=32) pure .tv; backend vectorizes blocks.
+# Y = Act(X @ W + Bias) — K-blocked (KB=32) pure .tkv; backend vectorizes blocks.
 # Empty bias (len 0) = no bias. trans_b selects W layout [N,K] (row-major) vs [K,N].
 public def fused_matmul_bias_act(x: NDArray[float32], w: NDArray[float32], bias: NDArray[float32],
         y: NDArray[float32], m: int, n: int, k: int, act: ActivationFunction, trans_b: bool = True):
@@ -167,7 +167,7 @@ public def transpose2d_views(src: NDArray[float32], dst: NDArray[float32], rows:
         for c in range(cols):
             dst[c * rows + r] = src[r * cols + c]
 
-# --- Vectorized elementwise kernels (pure .tv, SIMD-blocked) ---
+# --- Vectorized elementwise kernels (pure .tkv, SIMD-blocked) ---
 # Dispatch branches ONCE per call; inner blocks are straight-line vector code.
 
 public def unary_relu(x: NDArray[float32], y: NDArray[float32]):
@@ -255,5 +255,5 @@ public def softmax_rows(x: NDArray[float32], y: NDArray[float32], n_rows: int, d
         for j in range(d):
             y[base + j] = y[base + j] * inv
 
-# NOTE: zero externs — every kernel above is pure .tv. The tv compiler backend
+# NOTE: zero externs — every kernel above is pure .tkv. The tv compiler backend
 # lowers the VEC_W/KB-blocked loops to packed SIMD; no host compute dependency.

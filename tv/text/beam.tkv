@@ -1,7 +1,7 @@
 // TokenVector Module: Text — Constrained beam search + tree speculative hooks
 // TRIZ group 5: beam search over logits with optional grammar mask (tokens
 // outside allowed set get -inf); length-normalized scoring. Tree speculative
-// decoding lives beside the single-chain loop in speculative.tv.
+// decoding lives beside the single-chain loop in speculative.tkv.
 
 module tv.text.beam
 

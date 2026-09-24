@@ -220,7 +220,7 @@ public def quantize_dynamic_int8_rowwise(src: NDArray[float32], dst: NDArray[int
             i = r * cols + c
             dst[i] = max(-127, min(127, int(round(src[i] * inv))))
 
-# Pure .tv quicksort (calibration-time only, never hot path)
+# Pure .tkv quicksort (calibration-time only, never hot path)
 def sort_inplace(a: NDArray[float32]):
     _quick(a, 0, len(a) - 1)
 

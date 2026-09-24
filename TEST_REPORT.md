@@ -1,30 +1,28 @@
 ﻿# TokenVector.Inference Test Suite Report
 
 ## 1. Summary
-- **Total Tests:** 17
-- **Passed:** 17
-- **Failed:** 0
-- **Execution Time:** ~52 ms
-- **Target Framework:** `net8.0`
+- **Suite:** `tv/tests/inference_tests.tkv`
+- **Build:** `tkvc build tv/tests/inference_tests.tkv`
+- **Target language:** TokenVector (`.tkv`)
+- **Status:** record pass/fail from the `tkvc` run on this machine
 
-## 2. Test Execution Details
+## 2. Test Areas (suite modules)
 
-| Test Class | Test Name | Status | Metrics / Assertions |
-| :--- | :--- | :--- | :--- |
-| `FastProtobufReaderTests` | `ReadVarint32_CorrectlyDecodesValues` | PASSED | Decoded 150 from 2-byte varint |
-| `FastProtobufReaderTests` | `ReadVarint64_CorrectlyDecodesLargeValues` | PASSED | Decoded 300 from 2-byte varint |
-| `FastProtobufReaderTests` | `ReadFloat_CorrectlyDecodesIEEE754` | PASSED | Exact single-precision float accuracy |
-| `FastProtobufReaderTests` | `ReadLengthDelimitedString_ReturnsExpectedString` | PASSED | Zero-copy string extraction |
-| `GraphOptimizationTests` | `ConstantFoldingPass_FoldsStaticTranspose` | PASSED | Folds static transpose into initializers |
-| `GraphOptimizationTests` | `OperatorFusionPass_FusesMatMulBiasActIntoFusedLinear` | PASSED | Fuses MatMul + Bias + ReLU -> FusedLinear |
-| `GraphOptimizationTests` | `DeadCodeEliminationPass_PrunesUnreachableNodes` | PASSED | Prunes unreachable subgraphs |
-| `QuantizationTests` | `CalibrateMinMax_Symmetric_CalculatesCorrectScale` | PASSED | Symmetric scale calculation |
-| `QuantizationTests` | `QuantizeAndDequantize_Int8_PreservesValuesWithLowError` | PASSED | Max reconstruction error $\le$ scale |
-| `QuantizationTests` | `FP8_E4M3_ConversionRoundtripAccuracy` | PASSED | E4M3 relative error $< 15\%$ |
-| `QuantizationTests` | `FP8_E5M2_ConversionRoundtripAccuracy` | PASSED | E5M2 relative error $< 25\%$ |
-| `QuantizationTests` | `QuantizedMatMulInt8_MatchesFloatReference` | PASSED | AVX2 integer GEMM matches ground truth |
-| `ExecutionModelTests` | `MLPModel_ExecutionMatchesGroundTruth_MAEBelow1e5` | PASSED | $\text{MAE} < 10^{-5}$ |
-| `ExecutionModelTests` | `ResNetBlock_ExecutionMAEBelow1e5` | PASSED | Fused Conv2D + Residuals + ReLU verified |
-| `ExecutionModelTests` | `LLaMATransformerLayer_ExecutionSucceeds` | PASSED | RMSNorm + MHA + FFN numerical validity |
-| `ZeroGCHotPathTests` | `InferenceHotPath_AllocatesZeroBytesOnManagedHeap` | PASSED | **0 Bytes allocated across 1,000 runs** |
-| `DynamicBatcherTests` | `DynamicBatcher_HandlesConcurrentRequestsCorrectly` | PASSED | 16 concurrent requests batched & resolved |
+| Area | What is asserted |
+| :--- | :--- |
+| Protobuf / ONNX parse | Varint, IEEE-754 float, length-delimited fields, model load |
+| Graph passes | Constant fold, operator fusion, dead-code elimination |
+| Quantization | MinMax/KL scale, INT8 roundtrip, FP8 E4M3/E5M2, INT8 GEMM vs float |
+| Model accuracy | MLP / residual block / transformer layer numerical checks |
+| Hot-path allocation | Arena reuse across repeated `run_single` calls |
+| Serving / batching | Embedded server paths and batcher behavior |
+
+## 3. How to run
+
+```powershell
+# Compiler: D:\TokenVector\3.code\dist\tkvc.exe
+tkvc build tv/tests/inference_tests.tkv --out inference_tests.exe
+.\inference_tests.exe
+```
+
+Paste dated results (counts, duration, commit hash) below when a full run is captured. Do not invent pass counts.

@@ -1,5 +1,5 @@
 // TokenVector Module: Text — Tokenizers (byte-level BPE + WordPiece)
-// Pure .tv merge/encode loops; vocab & merges load through runtime intrinsics.
+// Pure .tkv merge/encode loops; vocab & merges load through runtime intrinsics.
 // Covers the llama.cpp/HF-tokenizers "text in" half of the pipeline.
 
 module tv.text.tokenizer

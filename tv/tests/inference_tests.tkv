@@ -1,5 +1,5 @@
-// TokenVector Test Suite — ported from tests/*.cs (xUnit -> tv test runner)
-// Run: tv test tv/tests/
+// TokenVector Test Suite
+// Run: tkvc build tv/tests/inference_tests.tkv
 
 module tv.tests.inference_tests
 
@@ -43,7 +43,7 @@ import tv.onnx.string_ops
 import tv.format.gguf
 
 public def test_zero_gc_hot_path():
-    # mirrors ZeroGCHotPathTests.cs: 5k runs must allocate 0 bytes
+    # 5k runs must reuse the arena with zero extra heap growth
     s = _graph_64()
     x = NDArray[float32]([1, 64]); fill_const(x, 1.0)
     for i in range(500): s.run_single(x)
@@ -53,7 +53,7 @@ public def test_zero_gc_hot_path():
     s.close()
 
 public def test_graph_optimization():
-    # mirrors GraphOptimizationTests.cs: MatMul+Add+GELU -> single FusedLinear
+    # MatMul+Add+GELU -> single FusedLinear
     g = ExecutionGraph("opt")
     g.inputs.append("X"); g.outputs.append("Z")
     w = NDArray[float32]([32, 16]); b = NDArray[float32]([32])

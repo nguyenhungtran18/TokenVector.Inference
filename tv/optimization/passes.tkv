@@ -1,6 +1,4 @@
-// TokenVector Native Module: Optimization — Graph passes
-// Ported from: Optimization/IGraphPass.cs, ConstantFoldingPass.cs,
-//              OperatorFusionPass.cs, DeadCodeEliminationPass.cs
+// TokenVector Module: Optimization — Graph passes
 
 module tv.optimization.passes
 

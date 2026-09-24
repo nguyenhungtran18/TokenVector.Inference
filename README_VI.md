@@ -1,18 +1,17 @@
 ﻿# 🚀 TokenVector.Inference: Động cơ Phục vụ Suy luận Mô hình & Lượng tử hóa Siêu nhẹ
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Target: .NET 8.0](https://img.shields.io/badge/.NET-8.0-purple.svg)](https://dotnet.microsoft.com/)
-[![AOT Ready](https://img.shields.io/badge/Native%20AOT-Ready-success.svg)]()
-[![Zero-GC Hot Path](https://img.shields.io/badge/Hot%20Path-0%20Byte%20GC-brightgreen.svg)]()
-[![SIMD Acceleration](https://img.shields.io/badge/SIMD-AVX2%20%7C%20AVX--512%20%7C%20FMA-orange.svg)]()
+[![Language: TokenVector .tkv](https://img.shields.io/badge/Language-TokenVector%20.tkv-blue.svg)](https://github.com/nguyenhungtran18/TokenVector)
+[![Compiler: tkvc](https://img.shields.io/badge/Compiler-tkvc-orange.svg)](https://github.com/nguyenhungtran18/TokenVector)
+[![Pure TokenVector](https://img.shields.io/badge/Backend-100%25%20.tkv-brightgreen.svg)]()
 
-**TokenVector.Inference** là động cơ suy luận mô hình học sâu (Deep Learning Inference Runtime), tối ưu hóa đồ thị tính toán (Graph Optimization Passes), lượng tử hóa đa độ chính xác (INT8 & FP8 Quantization Engine), và phục vụ nhúng siêu nhẹ (Micro-Serving) thuần 100% C# Native, đạt chuẩn **Zero-GC Allocation Hot Path** cho hệ sinh thái TokenVector AI.
+**TokenVector.Inference** là động cơ suy luận mô hình học sâu (Deep Learning Inference Runtime), tối ưu hóa đồ thị tính toán (Graph Optimization Passes), lượng tử hóa đa độ chính xác (INT8 & FP8 Quantization Engine), và phục vụ nhúng siêu nhẹ (Micro-Serving) **thuần 100% TokenVector (`.tkv`)**, đạt chuẩn **Zero-GC Allocation Hot Path** cho hệ sinh thái TokenVector AI.
 
 ---
 
 ## 🌐 Tổng quan Hệ sinh thái TokenVector AI
 
-**TokenVector** là hệ sinh thái AI và Điện toán Hiệu năng cao (HPC) thế hệ mới được phát triển hoàn toàn bằng **C# 12 / .NET 8/9 Native AOT**, mang tốc độ thực thi tương đương C++/CUDA lên nền tảng .NET hiện đại mà **không phải trả giá bằng việc thu gom rác (Zero-GC)**:
+**TokenVector** là hệ sinh thái AI và Điện toán Hiệu năng cao (HPC) thế hệ mới dựa trên **ngôn ngữ TokenVector (`.tkv`)** và **trình biên dịch `tkvc`**, hướng tới suy luận CPU hiệu năng cao với **0% chi phí thu gom rác (Zero-GC)**:
 
 ```
                          ╔══════════════════════════════════════════════╗
@@ -37,68 +36,67 @@
 ```
 
 ### Các Thành phần Cốt lõi trong Hệ sinh thái:
-1. **[`TokenVector`](https://github.com/nguyenhungtran18/TokenVector)**: Ngôn ngữ lập trình và Trình biên dịch TokenVector chính thức (`.tv`) với CIL emitter hiệu năng cao và thư viện chuẩn (`stdlib/tv/inference`).
-2. **[`TokenVector.Numerics`](https://github.com/nguyenhungtran18/TokenVector.Numerics)**: Hạt nhân đại số tuyến tính và mảng đa chiều (`NDArray<T>`) tăng tốc bằng tập lệnh AVX2/AVX-512/FMA với khả năng tương tác zero-copy.
-3. **[`TokenVector.Vision`](https://github.com/nguyenhungtran18/TokenVector.Vision)**: Động cơ thị giác máy tính 2D & 3D Voxel, biến đổi ảnh 1-Pass SIMD Fused, YOLO Letterbox, NMS và ImagePainter vượt trội TorchVision và ImageSharp.
-4. **[`TokenVector.Text`](https://github.com/nguyenhungtran18/TokenVector.Text)**: Xử lý văn bản Zero-GC tốc độ cao, thuật toán tách từ (BPE, WordPiece, SentencePiece), vector embeddings và pipeline tiền xử lý cho LLM.
-5. **[`TokenVector.Data`](https://github.com/nguyenhungtran18/TokenVector.Data)**: Pipeline prefetching đa luồng bộ đệm kép (Double-Buffering) loại bỏ hoàn toàn nút thắt cổ chai I/O khi huấn luyện và suy luận.
-6. **[`TokenVector.Inference`](https://github.com/nguyenhungtran18/TokenVector.Inference)**: Động cơ suy luận mạng nơ-ron nhúng độ trễ siêu thấp, các pass tối ưu hóa đồ thị tính toán, lượng tử hóa INT8/FP8 và phục vụ nhúng in-process.
+1. **[`TokenVector`](https://github.com/nguyenhungtran18/TokenVector)**: Ngôn ngữ lập trình và trình biên dịch TokenVector chính thức (`.tkv`, `tkvc`) với thư viện chuẩn (`stdlib/tv/inference`).
+2. **[`TokenVector.Numerics`](https://github.com/nguyenhungtran18/TokenVector.Numerics)**: Hạt nhân đại số tuyến tính và mảng đa chiều (`NDArray<T>`) với tương tác zero-copy.
+3. **[`TokenVector.Vision`](https://github.com/nguyenhungtran18/TokenVector.Vision)**: Động cơ thị giác máy tính 2D & 3D Voxel, biến đổi ảnh fused, YOLO Letterbox, NMS và ImagePainter.
+4. **[`TokenVector.Text`](https://github.com/nguyenhungtran18/TokenVector.Text)**: Xử lý văn bản tốc độ cao, tách từ (BPE, WordPiece, SentencePiece), embeddings và pipeline LLM.
+5. **[`TokenVector.Data`](https://github.com/nguyenhungtran18/TokenVector.Data)**: Pipeline prefetching đa luồng bộ đệm kép loại bỏ nút thắt I/O.
+6. **[`TokenVector.Inference`](https://github.com/nguyenhungtran18/TokenVector.Inference)**: Động cơ suy luận độ trễ cực thấp, pass tối ưu đồ thị, lượng tử hóa INT8/FP8 và micro-serving nhúng — **100% `.tkv`**.
 
 ---
 
 ## 🌟 Các Tính năng Nổi bật
 
 1. **Hot Path Tuyệt đối Không Sinh Rác (Zero-GC Hot Path):**
-   - Cấp phát vùng nhớ unmanaged `ExecutionMemoryArena` duy nhất dựa trên **Phân tích Vòng đời Tensor (Tensor Liveness Analysis)**.
-   - Hàm `session.Run(...)` cam kết **0 Byte** cấp phát trên Managed Heap.
+   - Cấp phát vùng nhớ arena thống nhất theo **Phân tích Vòng đời Tensor (Tensor Liveness Analysis)**.
+   - Đường hot path hướng tới **0 Byte** phân bổ heap nhờ tái sử dụng arena.
 2. **Bộ Parser ONNX & Protobuf Nhị phân Zero-Copy:**
-   - `FastProtobufReader` giải mã trực tiếp từ `ReadOnlySpan<byte>` qua con trỏ unmanaged, không tạo rác String hay Object trung gian.
-3. **Pipeline Tối ưu hóa Đồ thị Tính toán (Optimization Passes):**
-   - `ConstantFoldingPass`: Tính toán tĩnh và gộp trước các thao tác Reshape, Transpose, Permute trọng số.
-   - `DeadCodeEliminationPass`: Cắt tỉa các nhánh và node không tham gia tạo Output.
-   - `OperatorFusionPass`: Gộp các kernel tính toán (`FusedLinear`, `FusedConv2D`, `FusedRMSNorm`) tận dụng L1/L2 Cache.
+   - Reader protobuf thuần `.tkv` giải mã ONNX từ danh sách byte thô, không tạo chuỗi/đối tượng trung gian.
+3. **Pipeline Tối ưu hóa Đồ thị Tính toán:**
+   - `ConstantFoldingPass`: Gộp trước Reshape/Transpose/Permute tĩnh vào trọng số.
+   - `DeadCodeEliminationPass`: Cắt tỉa node và buffer không tham gia tạo output.
+   - `OperatorFusionPass`: Gộp kernel (`FusedLinear`, `FusedConv2D`, `FusedRMSNorm`) tận dụng cache.
 4. **Động cơ Lượng tử hóa Đa độ chính xác (INT8 & FP8):**
-   - Hỗ trợ Static PTQ (MinMax & KL-Divergence calibration) và Dynamic Quantization.
-   - Tăng tốc INT8 SIMD qua AVX2 (`pmaddubsw` + `pmaddwd`) và AVX-512 VNNI.
-   - Hỗ trợ đầy đủ chuẩn FP8 `E4M3` (độ chính xác cao) và `E5M2` (dải động rộng).
-5. **Bộ phục vụ Nhúng Siêu nhẹ & Dynamic Batching:**
-   - In-process REST/IPC engine (`EmbeddedServer`) với độ trễ phản hồi $< 1\text{ ms}$.
-   - Lock-free micro-batching (`DynamicBatcher`) gom nhóm request với sliding window $100\ \mu\text{s} - 500\ \mu\text{s}$.
-6. **100% C# .NET Native:**
-   - Độc lập hoàn toàn, kích thước thư viện $< 10\text{ MB}$, sẵn sàng cho Native AOT mà không phụ thuộc file DLL C++ bên ngoài.
+   - PTQ tĩnh (MinMax, KL, percentile, MSE) và lượng tử hóa động.
+   - INT8 đối xứng/asymmetric, INT4 grouped (kiểu AWQ), GEMM per-channel.
+   - FP8 `E4M3`/`E5M2` và đường compute FP16 cho kiến trúc Transformer.
+5. **Bộ phục vụ Nhúng Siêu nhẹ & Batching:**
+   - REST nhúng (`EmbeddedServer`) API tương thích OpenAI, SSE, auth, limits, Prometheus metrics.
+   - Micro-batching / continuous batching trên pool session, paged KV + prefix skip.
+6. **100% TokenVector (`.tkv`):**
+   - Toàn bộ engine và test là nguồn `.tkv` biên dịch bằng `tkvc`; không cần DLL native ngoài cho đường lõi.
 
 ---
 
-## 📊 Bảng So sánh Năng lực Cạnh tranh & Stress Test
+## 📊 Bộ Benchmark
 
-| Kịch bản Benchmark | Tiêu chí Đo lường | `TokenVector.Inference` | `Microsoft ORT (C# Wrapper)` | `PyTorch LibTorch (C++)` | Tỷ lệ Vượt trội |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Cold-Start & Model Load** | Parse Protobuf + Khởi tạo Arena | **12.91 ms** | ~35.00 ms | ~28.00 ms | **Nhanh hơn $2.71\times$** |
-| **In-Process Latency (Single-Sample)** | Fused Linear 64x128 GELU | **17.24 \mu s** ($0.017\text{ ms}$) | ~320.00 \mu s | ~410.00 \mu s | **Nhanh hơn $18.5\times$** |
-| **GC Heap Allocation** | Bộ nhớ cấp phát / 5,000 lần | **0 Byte (Strict Zero-GC)** | > 240 KB (Pinned Buffer) | Overhead Marshalling | **Tuyệt đối 0 Rác** |
-| **INT8 vs FP32 Throughput** | Thời gian chạy (2,000 lượt) | **137.38 ms** (INT8 SIMD) | 380.00 ms | 310.00 ms | **Tăng tốc $3.69\times$** |
-| **Hot-Path Endurance (250K Runs)** | 250,000 Lần suy luận liên tục | **127,791 req/sec** (RPS) | ~15,000 RPS | ~25,000 RPS | **0 Rác, Zero Leak** |
-| **Concurrent Serving (32 Threads)** | 10,000 Burst Requests | **169,735 req/sec** (P50: 100 \mu s) | Lock Contention cao | Nghẽn Interop | **0 Request lỗi/rơi** |
+Số latency/throughput **phải đo trên engine `.tkv` này** — không trích số của backend cũ.
+
+```powershell
+tkvc build tv/benchmarks/compare_rivals.tkv
+```
+
+Xem `BENCHMARKS.md` / `BENCHMARKS_VI.md` (cấu trúc suite) và `COMPETITOR_COMPARISON.md` (so sánh chức năng, không so tốc độ).
 
 ---
 
-## ⚡ Hướng dẫn Sử dụng Nhanh (C#)
+## ⚡ Hướng dẫn Sử dụng Nhanh (`.tkv`)
 
-```csharp
-using TokenVector.Inference.Runtime;
-using TokenVector.Numerics.Core;
+```tokenvector
+import tv.inference
 
-// 1. Khởi tạo phiên làm việc Zero-GC từ file ONNX
-using var session = new InferenceSession("models/model.onnx");
+session = tv.inference.load_onnx("models/model.onnx")
+input_tensor = tensor.zeros([1, 64], dtype=float32)
+output_tensor = session.run(input_tensor)
+print("Output shape:", output_tensor.shape)
+session.close()
+```
 
-// 2. Chuẩn bị tensor đầu vào
-var input = new NDArray<float>(1, 64);
-for (int i = 0; i < 64; i++) input.AsSpan()[i] = 1.0f;
+CLI:
 
-// 3. Thực thi suy luận Zero-GC
-NDArray<float> output = session.Run(input);
-
-Console.WriteLine($"Kích thước đầu ra: [{string.Join(", ", output.Shape)}]");
+```powershell
+tkvc build tv/tools/cli.tkv
+# chạy file .exe sinh ra với serve|gen|export|calibrate|latency
 ```
 
 ---
@@ -106,6 +104,8 @@ Console.WriteLine($"Kích thước đầu ra: [{string.Join(", ", output.Shape)}
 ## 🛠️ Biên dịch, Kiểm thử và Đóng gói
 
 ```powershell
-# Chạy pipeline tự động build, test, đóng gói và benchmark
-.\build_inference.ps1 -Configuration Release
+# Compiler: D:\TokenVector\3.code\dist\tkvc.exe
+tkvc build tv/tests/inference_tests.tkv
+tkvc build tv/benchmarks/compare_rivals.tkv
+tkvc build stdlib/tv/inference/inference.tkv --target library
 ```

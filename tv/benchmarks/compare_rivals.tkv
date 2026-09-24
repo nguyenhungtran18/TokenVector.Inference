@@ -1,7 +1,6 @@
 // TokenVector Benchmark Suite — Competitor comparison (ORT vs LibTorch vs TokenVector)
-// Ported from: benchmarks/TokenVector.Inference.Benchmarks/Program.cs +
-//   ColdStart / Latency / GC / INT8-Throughput / StressTestRunner
-// Run: tv run tv/benchmarks/compare_rivals.tv
+// Scenarios: ColdStart / Latency / arena-reuse / INT8-Throughput / Stress
+// Run: tkvc build tv/benchmarks/compare_rivals.tkv
 
 module tv.benchmarks.compare_rivals
 
@@ -14,8 +13,8 @@ import tv.quantization.engine
 import tv.quantization.matmul
 import tv.numerics.tensor
 
-# Reference numbers (measured .NET 8 Release, x86-64 AVX2+FMA).
-# Kept as constants so CI can assert regression gates without native ORT/Torch installed.
+# Baseline constants for regression gates only (rival wall-clock on a fixed host).
+# Replace after a dated re-measure on the pure .tkv engine; do not treat as our latency.
 const ORT_COLD_MS = 35.0
 const TORCH_COLD_MS = 28.0
 const ORT_LAT_US = 320.0
@@ -25,7 +24,7 @@ const TORCH_INT8_MS = 310.0
 
 public def main():
     print("==========================================================================")
-    print("  TokenVector.Inference (.tv) — Competitor Benchmark Suite                ")
+    print("  TokenVector.Inference (.tkv) — Competitor Benchmark Suite                ")
     print("==========================================================================")
     cold = bench_cold_start()
     lat = bench_latency()
@@ -40,7 +39,7 @@ public def main():
     print(f"GC per 5k runs          : TV {gc} B (Zero-GC) | ORT >240KB | Torch interop overhead")
     print(f"INT8 2000 runs          : TV {tp[1]:.2f} ms | ORT {ORT_INT8_MS:.2f} ms | Torch {TORCH_INT8_MS:.2f} ms | {ORT_INT8_MS/tp[1]:.2f}x vs ORT")
     print("==========================================================================")
-    print("  All .tv Benchmark & Stress Scenarios Executed Successfully!             ")
+    print("  All .tkv Benchmark & Stress Scenarios Executed Successfully!             ")
     print("==========================================================================")
 
 def _tiny_graph(m: int, k: int, n: int, act: ActivationFunction) -> InferenceSession:
@@ -102,7 +101,7 @@ def bench_gc() -> int:
     return used
 
 def bench_throughput() -> tuple[float, float]:
-    # FP32 fused vs INT8 symmetric, M=16 K=256 N=256 x2000 (mirrors Program.cs)
+    # FP32 fused vs INT8 symmetric, M=16 K=256 N=256 x2000
     m = 16; k = 256; n = 256
     iters = 2000
     xf = NDArray[float32]([m, k]); wf = NDArray[float32]([n, k]); yf = NDArray[float32]([m, n])
