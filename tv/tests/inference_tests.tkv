@@ -138,7 +138,51 @@ class StubTok:
         return [1, 2]
 
     def decode(self, ids: 'list[i64]') -> 'str':
+        # (2026-09-26) Stub nay tra HANG SO "hi" bat ke duoc bao nhieu token.
+        # Dung cho test 1 (`generate_loop_text`), goi decode() MOT LAN tren
+        # danh sach token vua sinh. Xem `GrammarStubTok` ben duoi ly do tach
+        # rieng fixture cho test 10.
         return "hi"
+
+    def vocab_size(self) -> 'i64':
+        return 4
+
+
+# Stub rieng cho grammar (2026-09-26) - ly do tach fixture.
+#
+# StubTok tra HANG SO "hi", phu hop voi test 1 (`generate_loop_text`) goi
+# decode() MOT LAN tren danh sach token vua sinh (thuc te [3,3,2]).
+# Nhung test 10 (`allowed_token_ids`) duyet TUNG token i va hoi
+# `is_live(g, current + decode([i]))` - noi token PHAI bieu dien KY TU thuc
+# de grammar boi cac con nao con song. Voi grammar `root ::= "hi"` va
+# current = "h":
+#
+#   decode([1]) = "i"  ->  "h" + "i" = "hi"   con song   (can 1 in ids)
+#   decode([2]) = "x"  ->  "h" + "x" = "hx"  chet      (can 2 not in ids)
+#   decode([3]) = "h"  ->  "h" + "h" = "hh"  chet
+#   decode([0]) = ""   ->  "h" van song (OK, test khong kiem tra token 0)
+#
+# MOT stub hang so khong lam duoc ca hai yeu cau: neu decode([1]) == "i" de
+# test 10 xanh, thi danh sach [3,3,2] cua test 1 se giai thanh "hhx" chu
+# khong phai "hi". Da thu nhieu bien the (tra theo token, giu duong lui
+# khi danh sach rong, gan chu cai dau...) va khong bien nao thoa duoc ca
+# hai, nen tach rieng hai fixture. Cac test con lai (3, 7) giu StubTok.
+class GrammarStubTok:
+    _ok: 'i64'
+
+    def encode(self, text: 'str') -> 'list[i64]':
+        return [3, 1]
+
+    def decode(self, ids: 'list[i64]') -> 'str':
+        out = ""
+        for _t in ids:
+            if _t == 1:
+                out = out + "i"
+            elif _t == 2:
+                out = out + "x"
+            elif _t == 3:
+                out = out + "h"
+        return out
 
     def vocab_size(self) -> 'i64':
         return 4
@@ -446,7 +490,7 @@ def test_grammar_prefix_mask() -> 'i32':
     assert is_live(g, "hi") == 1
     assert is_live(g, "hx") == 0
     assert is_live(g, "hix") == 0
-    ids = allowed_token_ids(g, StubTok(1), 3, "h")
+    ids = allowed_token_ids(g, GrammarStubTok(1), 3, "h")
     assert 1 in ids and 2 not in ids
     return 0
 
