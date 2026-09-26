@@ -2032,22 +2032,29 @@ def _expand_lstm(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
     #   - `or` 2 toan hang       -> 1 chuoi short-circuit   (can)
     #   - `or` roi `and` noi tiep -> 2 chuoi lien tiep      (sai)
     # Giai phap: moi dieu kien chi giu MOT bien bool, `if` doc bien do.
+    # (2026-09-26) Gom nhieu `if` lien tiep vao MOT dieu kien, xem ghi chu
+    # o `_has_p` ben tren: chuoi `if` sinh nhieu nhanh nhay co do sau stack
+    # khac nhau -> InvalidProgramException.
     _has_act = 0
-    if "activation_alpha" in on.attrs:
-        _has_act = 1
-    if "activation_beta" in on.attrs:
+    if "activation_alpha" in on.attrs or "activation_beta" in on.attrs:
         _has_act = 1
     if _has_act == 1:
         raise UnsupportedOp("LSTM with custom activation alpha/beta")
     _qx1000 = {}
     for nm in on.inputs:
         _qx1000[nm] = 1
+    # (2026-09-26) `_has_p` dung MOT bieu thuc `and` co ngoac, KHONG dung
+    # chuoi `if` long nhau.
+    #
+    # Chuoi `if` long (`if a: if b: flag = 1`) bien dich thanh nhieu nhanh
+    # `brfalse` lien tiep, moi nhanh lai mot nhanh. O vung bien dich cua
+    # `_expand_lstm`, cac nhanh do khong giong nhau ve do sau stack ->
+    # CLR nem InvalidProgramException ("Common Language Runtime detected an
+    # invalid program"), roi exe bao lai thanh BadImageFormatException.
+    # Giu dieu kien trong MOT bieu thuc `and` de chi co MOT nhanh nhay.
     _has_p = 0
-    if "P" in _qx1000:
+    if ("P" in _qx1000) and (len(on.inputs) > 7) and (on.inputs[7] != ""):
         _has_p = 1
-    if len(on.inputs) > 7:
-        if on.inputs[7] != "":
-            _has_p = 1
     if _has_p == 1:
         raise UnsupportedOp("LSTM with peepholes (P)")
     _rd = _rnn_common(g, on, "LSTM")
@@ -2057,12 +2064,10 @@ def _expand_lstm(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
     hid = _rd.hid
     ndir = _rd.ndir
     acts = _rd.acts
+    # (2026-09-26) Gop ba `if` thanh MOT dieu kien `or` - xem ghi chu
+    # o `_has_p`.
     _bad_seq = 0
-    if seq <= 0:
-        _bad_seq = 1
-    if seq > 512:
-        _bad_seq = 1
-    if hid <= 0:
+    if seq <= 0 or seq > 512 or hid <= 0:
         _bad_seq = 1
     if _bad_seq == 1:
         raise UnsupportedOp("LSTM needs static seq_len in [1,512] and hidden_size")
