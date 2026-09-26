@@ -2014,12 +2014,41 @@ def _rev_indices(g: 'ExecutionGraph', name: 'str', seq: 'i64') -> 'str':
     return name
 
 def _expand_lstm(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
-    if "activation_alpha" in on.attrs or "activation_beta" in on.attrs:
+    # (2026-09-26) TACH MOI `or`/`and` nhieu toan hang ra bien trung gian.
+    #
+    # Compiler bien dich ngan short-circuit `a or b` thanh:
+    #
+    #     <a> ; dup ; brtrue END ; pop ; <b> ; END:
+    #
+    # Do `pop` chi rut MOT gia tri, mau nay chi giu dung MOT gia tri khi
+    # nhanh. Khi hai bien thuc short-circuit NOI TIEP nhau (`a or b and c`),
+    # compiler sinh hai chuoi `dup/brtrue/pop` lien tiep, chung ta
+    # `_expand_lstm_sc2_end` roi `_expand_lstm_sc6_end` - va giua cac label
+    # do con mot gia tri THUA tren stack. Day la ly do CLR nem
+    # BadImageFormatException ("An attempt was made to load a program with an
+    # incorrect format") khi nap `_expand_lstm`.
+    #
+    # Da thu tach rieng tung nhanh `or` va xac nhan phan nay dung:
+    #   - `or` 2 toan hang       -> 1 chuoi short-circuit   (can)
+    #   - `or` roi `and` noi tiep -> 2 chuoi lien tiep      (sai)
+    # Giai phap: moi dieu kien chi giu MOT bien bool, `if` doc bien do.
+    _has_act = 0
+    if "activation_alpha" in on.attrs:
+        _has_act = 1
+    if "activation_beta" in on.attrs:
+        _has_act = 1
+    if _has_act == 1:
         raise UnsupportedOp("LSTM with custom activation alpha/beta")
     _qx1000 = {}
     for nm in on.inputs:
         _qx1000[nm] = 1
-    if "P" in _qx1000 and len(on.inputs) > 7 and (on.inputs[7] != ""):
+    _has_p = 0
+    if "P" in _qx1000:
+        _has_p = 1
+    if len(on.inputs) > 7:
+        if on.inputs[7] != "":
+            _has_p = 1
+    if _has_p == 1:
         raise UnsupportedOp("LSTM with peepholes (P)")
     _rd = _rnn_common(g, on, "LSTM")
     seq = _rd.seq
@@ -2028,7 +2057,14 @@ def _expand_lstm(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
     hid = _rd.hid
     ndir = _rd.ndir
     acts = _rd.acts
-    if seq <= 0 or seq > 512 or hid <= 0:
+    _bad_seq = 0
+    if seq <= 0:
+        _bad_seq = 1
+    if seq > 512:
+        _bad_seq = 1
+    if hid <= 0:
+        _bad_seq = 1
+    if _bad_seq == 1:
         raise UnsupportedOp("LSTM needs static seq_len in [1,512] and hidden_size")
     if "layout" in on.attrs:
         _ah1813_19 = on.attrs["layout"]
