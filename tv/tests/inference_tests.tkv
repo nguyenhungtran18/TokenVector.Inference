@@ -216,7 +216,14 @@ def _t_init_vec(g: 'ExecutionGraph', name: 'str', vals: 'list[f32]') -> 'i32':
     # cho kieu List<float32> -> runtime doc sai offset ->
     # ArgumentOutOfRangeException. TokenVector KHONG kiem tra kieu khi gan
     # vao dict (chi kiem tra khi goi ham), nen phai giu dung kieu o day.
-    v = _nd_f32(len(vals))
+    # (2026-09-26) `len()` tra int32, nhung `_nd_f32`, `element_count`,
+    # `byte_size` va shape deu can i64. Compiler KHONG tu mo rong i32 -> i64
+    # o cho goi ham/gan field (ILSpy: "Expected I8, but got I4" o 4 cho),
+    # nen phai ep TUONG MINH mot lan bang `int64(...)` roi dung `n` o moi
+    # vi tri can i64. Vong lap giu `range(len(vals))` vi chi so `i` can i32
+    # cho get_Item/Set_Item.
+    n = int64(len(vals))
+    v = _nd_f32(n)
     for i in range(len(vals)):
         v[i] = vals[i]
     g.initializers[name] = v
@@ -226,11 +233,11 @@ def _t_init_vec(g: 'ExecutionGraph', name: 'str', vals: 'list[f32]') -> 'i32':
     # get_or_create_tensor KHONG tu cap nhat khi shape da co ([1] khong
     # rong) -> byte_size van la 4 byte -> initialize_weights copy 8 byte
     # vao slot 4 byte -> ArgumentOutOfRangeException. Sua o day.
-    d = g.get_or_create_tensor(name, [len(vals)])
-    if len(d.shape) != 1 or d.shape[0] != len(vals):
-        d.shape = [len(vals)]
-        d.element_count = len(vals)
-        d.byte_size = len(vals) * 4
+    d = g.get_or_create_tensor(name, [n])
+    if len(d.shape) != 1 or d.shape[0] != n:
+        d.shape = [n]
+        d.element_count = n
+        d.byte_size = n * 4
     return 0
 
 def _run(g: 'ExecutionGraph', names: 'list[str]', vals: 'list[list[f32]]', out_name: 'str') -> 'list[f32]':
