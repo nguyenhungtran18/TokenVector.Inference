@@ -164,6 +164,12 @@ def _td_i64_list(dims: 'list[i64]') -> 'list[i64]':
 def _td_f32_repeat(v: 'f32', n: 'i64') -> 'list[f32]':
     # (2026-09-26) Thay the cho `[v] * n` - nhan lap list tren LITERAL.
     #
+    # LUU Y KHI GOI: truyen `bat * hid` INLINE cung toan hang voi ham nay se
+    # lam ngung canh bien dich cua ca bieu thuc tro thanh f32 (vi tham so
+    # `v` la float). Compiler chon `mul.ovf` - NHAN SO NGUYEN - roi phat no
+    # tren hai toan hang float32, tao IL khong hop le. Hay tinh `bat * hid`
+    # vao mot bien i64 truoc roi truyen bien do.
+    #
     # Compiler CHUA xu ly nhan lap tren literal. O dang gan thu
     # `r = [0.0] * n` no bao loi ro rang, nhung khi nam trong danh sach tham so
     # co ngu canh `list[f32]` thi loi bi bo qua va IL sai duoc sinh ra:
@@ -2060,12 +2066,15 @@ def _expand_lstm(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
         else:
             _c86 = ""
         c_prev = _c86
+        # Tinh `bat * hid` MOT LAN truoc moi nhanh: bien dung o ca hai nhanh
+        # `if` nen phai gan truoc khi vao chung, khong gan ben trong nhanh.
+        _nbh = bat * hid
         if h_prev == "":
             h_prev = pre + "h0"
-            _add_float_init(g, h_prev, [bat, hid], _td_f32_repeat(0.0, bat * hid))
+            _add_float_init(g, h_prev, [bat, hid], _td_f32_repeat(0.0, _nbh))
         if c_prev == "":
             c_prev = pre + "c0"
-            _add_float_init(g, c_prev, [bat, hid], _td_f32_repeat(0.0, bat * hid))
+            _add_float_init(g, c_prev, [bat, hid], _td_f32_repeat(0.0, _nbh))
         if h_prev in g.initializers:
             _th0 = g.tensors[h_prev]
             if len(_th0.shape) == 3:
@@ -2243,7 +2252,8 @@ def _expand_gru(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
         h_prev = _c91
         if h_prev == "":
             h_prev = pre + "h0"
-            _add_float_init(g, h_prev, [bat, hid], _td_f32_repeat(0.0, bat * hid))
+            _nbh2 = bat * hid
+            _add_float_init(g, h_prev, [bat, hid], _td_f32_repeat(0.0, _nbh2))
         if h_prev in g.initializers:
             _th2 = g.tensors[h_prev]
             if len(_th2.shape) == 3:
@@ -2253,7 +2263,10 @@ def _expand_gru(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
                 _add_float_init(g, hn, hs[1:], hf)
                 h_prev = hn
         hs = []
-        _add_float_init(g, pre + "one", [bat, hid], _td_f32_repeat(1.0, bat * hid))
+        # (2026-09-26) `bat * hid` tinh truoc: viet inline sau literal 1.0
+        # se bien dich `mul.ovf` (nhan so nguyen) tren float32 -> IL sai.
+        _nbh2 = bat * hid
+        _add_float_init(g, pre + "one", [bat, hid], _td_f32_repeat(1.0, _nbh2))
         for t in range(seq):
             tag = pre + "t" + str(t) + "_"
             _xo = _rnn_xtract(g, on, t, seq, bat, inp, layout, tag)
@@ -2346,7 +2359,8 @@ def _expand_rnn(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
         h_prev = _c94
         if h_prev == "":
             h_prev = pre + "h0"
-            _add_float_init(g, h_prev, [bat, hid], _td_f32_repeat(0.0, bat * hid))
+            _nbh3 = bat * hid
+            _add_float_init(g, h_prev, [bat, hid], _td_f32_repeat(0.0, _nbh3))
         if h_prev in g.initializers:
             _th3 = g.tensors[h_prev]
             if len(_th3.shape) == 3:
