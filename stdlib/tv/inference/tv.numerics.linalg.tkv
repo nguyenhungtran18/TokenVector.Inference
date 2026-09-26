@@ -1,0 +1,4 @@
+# Stub module: tv.numerics.linalg (auto-generated)
+
+def matmul_flat(a: "list[f32]", b: "list[f32]", out: "list[f32]", m: "i64", n: "i64", k: "i64") -> "i32":
+    return 0

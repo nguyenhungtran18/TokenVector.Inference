@@ -1,0 +1,123 @@
+# TokenVector Module: Runtime — Dynamic shapes (symbolic dims)
+# specialize_session freezes one symbolic input to a concrete shape and
+# re-runs shape inference; run_with_shape is the end-to-end helper used when
+# the caller only knows the concrete extents at request time.
+
+import tv.runtime.session
+import tv.numerics.tensor
+
+
+class SymbolicShape:
+    _ok: 'i64'
+    rank: 'i64'
+    dims: 'list[i64]'
+    params: 'list[str]'
+    def __init__(self, rank: 'i64'):
+        self.rank = rank
+
+
+class ShapeBindings:
+    _ok: 'i64'
+    names: 'list[str]'
+    values: 'list[i64]'
+    def __init__(self):
+        self.names = []
+        self.names.append("")
+        self.names.pop()
+        self.values = []
+        self.values.append(0)
+        self.values.pop()
+
+    def bind(self, name: 'str', value: 'i64') -> 'i32':
+        for i in range(len(self.names)):
+            if self.names[i] == name:
+                self.values[i] = value
+                return 0
+        self.names.append(name)
+        self.values.append(value)
+        return 0
+
+    def lookup(self, name: 'str', default: 'i64') -> 'i64':
+        for i in range(len(self.names)):
+            if self.names[i] == name:
+                return self.values[i]
+        return default
+
+
+def _concrete_total(concrete: 'list[i64]') -> 'i64':
+    total = 1
+    for d in concrete:
+        total = total * d
+    return total
+
+
+def _apply_concrete_shape(desc: 'TensorDesc', concrete: 'list[i64]') -> 'i32':
+    _sh = desc.shape
+    _n = len(_sh)
+    if _n > len(concrete):
+        _n = len(concrete)
+    for i in range(_n):
+        _sh[i] = concrete[i]
+    desc.element_count = _concrete_total(concrete)
+    return 0
+
+
+def specialize_session(sess: 'InferenceSession', input_name: 'str', concrete: 'list[i64]') -> 'i32':
+    _gr = sess.graph
+    _tensors = _gr.tensors
+    if input_name not in _tensors:
+        return 0
+    _desc = _tensors[input_name]
+    _apply_concrete_shape(_desc, concrete)
+    _dp = _gr.dim_params
+    if input_name in _dp:
+        _dp.pop(input_name, [])
+    return 0
+
+
+def _needs_specialize(desc: 'TensorDesc', concrete: 'list[i64]') -> 'i32':
+    if len(desc.shape) != len(concrete):
+        return 1
+    for i in range(len(concrete)):
+        if desc.shape[i] != concrete[i]:
+            return 1
+    return 0
+
+
+def run_with_shape(sess: 'InferenceSession', input_name: 'str', concrete: 'list[i64]', data: 'list[f32]') -> 'list[f32]':
+    total = 1
+    for d in concrete:
+        total = total * d
+    if total != len(data):
+        _gr = sess.graph
+        _tensors = _gr.tensors
+        if input_name in _tensors:
+            desc = _tensors[input_name]
+            need = _needs_specialize(desc, concrete)
+            if need:
+                specialize_session(sess, input_name, concrete)
+    _gr2 = sess.graph
+    _outs = _gr2.outputs
+    if len(_outs) > 0:
+        out_name = _outs[0]
+    else:
+        out_name = "output"
+    return sess.run_single(data, input_name, out_name)
+
+
+def free_dims(g: 'ExecutionGraph') -> 'list[str]':
+    out = []
+    _qx1002 = []
+    for _qx1006 in g.outputs:
+        _qx1002.append(_qx1006)
+    _qx1003 = []
+    for _qx1007 in g.inputs:
+        _qx1003.append(_qx1007)
+    names = _qx1003 + _qx1002
+    for nm in names:
+        if nm not in g.dim_params:
+            continue
+        for p in g.dim_params[nm]:
+            if p != "" and p not in out:
+                out.append(p)
+    return out

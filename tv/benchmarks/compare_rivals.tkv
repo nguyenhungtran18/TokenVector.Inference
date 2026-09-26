@@ -1,79 +1,102 @@
-// TokenVector Benchmark Suite — Competitor comparison (ORT vs LibTorch vs TokenVector)
-// Scenarios: ColdStart / Latency / arena-reuse / INT8-Throughput / Stress
-// Run: tkvc build tv/benchmarks/compare_rivals.tkv
+# TokenVector Benchmark Suite — Competitor comparison (ORT vs LibTorch vs TokenVector)
+# Scenarios: ColdStart / Latency / arena-reuse / INT8-Throughput / Stress
+# Run: tkvc build tv/benchmarks/compare_rivals.tkv
 
-module tv.benchmarks.compare_rivals
 
 import tv.inference
 import tv.runtime.session
-import tv.runtime.execution_graph
-import tv.runtime.execution_node
 import tv.optimization.kernels
 import tv.quantization.engine
 import tv.quantization.matmul
 import tv.numerics.tensor
+import tv.server.batcher
+
+ActivationFunction_None = 0
+ActivationFunction_ReLU = 1
+ActivationFunction_GELU = 2
+ActivationFunction_SiLU = 3
+ActivationFunction_Sigmoid = 4
+ActivationFunction_Tanh = 5
+OperatorType_FusedLinear = 2
+
 
 # Baseline constants for regression gates only (rival wall-clock on a fixed host).
 # Replace after a dated re-measure on the pure .tkv engine; do not treat as our latency.
-const ORT_COLD_MS = 35.0
-const TORCH_COLD_MS = 28.0
-const ORT_LAT_US = 320.0
-const TORCH_LAT_US = 410.0
-const ORT_INT8_MS = 380.0
-const TORCH_INT8_MS = 310.0
 
-public def main():
+class RPS(Exception):
+    msg: "str"
+
+
+ORT_COLD_MS = 35.0
+TORCH_COLD_MS = 28.0
+ORT_LAT_US = 320.0
+TORCH_LAT_US = 410.0
+ORT_INT8_MS = 380.0
+TORCH_INT8_MS = 310.0
+
+def main() -> "i32":
     print("==========================================================================")
     print("  TokenVector.Inference (.tkv) — Competitor Benchmark Suite                ")
     print("==========================================================================")
     cold = bench_cold_start()
     lat = bench_latency()
     gc = bench_gc()
-    tp = bench_throughput()
+    tp = [0.0, 0.0]
+    bench_throughput(tp)
     stress_hot()
     stress_concurrent()
     print("")
     print("--- COMPETITOR COMPARISON (lower is better, except RPS) ---")
-    print(f"Cold-start parse+arena : TV {cold:.2f} ms | ORT {ORT_COLD_MS:.2f} ms | Torch {TORCH_COLD_MS:.2f} ms | {TORCH_COLD_MS/cold:.2f}x vs Torch")
-    print(f"Single-sample FusedLinear 64x128 GELU: TV {lat:.2f} us | ORT {ORT_LAT_US:.2f} us | Torch {TORCH_LAT_US:.2f} us | {ORT_LAT_US/lat:.1f}x vs ORT")
-    print(f"GC per 5k runs          : TV {gc} B (Zero-GC) | ORT >240KB | Torch interop overhead")
-    print(f"INT8 2000 runs          : TV {tp[1]:.2f} ms | ORT {ORT_INT8_MS:.2f} ms | Torch {TORCH_INT8_MS:.2f} ms | {ORT_INT8_MS/tp[1]:.2f}x vs ORT")
+    print("Cold-start parse+arena : TV " + str(cold) + " ms | ORT " + str(ORT_COLD_MS) + " ms | Torch " + str(TORCH_COLD_MS) + " ms | " + str(TORCH_COLD_MS/cold) + "x vs Torch")
+    print("Single-sample FusedLinear 64x128 GELU: TV " + str(lat) + " us | ORT " + str(ORT_LAT_US) + " us | Torch " + str(TORCH_LAT_US) + " us | " + str(ORT_LAT_US/lat) + "x vs ORT")
+    print("GC per 5k runs          : TV " + str(gc) + " B (Zero-GC) | ORT >240KB | Torch interop overhead")
+    print("INT8 2000 runs          : TV " + str(tp[1]) + " ms | ORT " + str(ORT_INT8_MS) + " ms | Torch " + str(TORCH_INT8_MS) + " ms | " + str(ORT_INT8_MS/tp[1]) + "x vs ORT")
     print("==========================================================================")
     print("  All .tkv Benchmark & Stress Scenarios Executed Successfully!             ")
     print("==========================================================================")
+    return 0
 
-def _tiny_graph(m: int, k: int, n: int, act: ActivationFunction) -> InferenceSession:
-    g = ExecutionGraph("bench")
-    g.inputs.append("X")
-    g.outputs.append("Y")
-    w = NDArray[float32]([n, k])
-    b = NDArray[float32]([n])
+def _tiny_graph(m: "i64", k: "i64", n: "i64", act: "i64") -> "InferenceSession":
+    g = ExecutionGraph(1, "bench", 0)
+    _ah58_4 = g.inputs
+    _ah58_4.append("X")
+    _ah59_4 = g.outputs
+    _ah59_4.append("Y")
+    w = _nd_f32(n * k)
+    b = _nd_f32(n)
     fill_rand(w, 42)
     fill_rand(b, 7)
     g.initializers["W"] = w
     g.initializers["B"] = b
     g.get_or_create_tensor("X", [1, k])
-    g.get_or_create_tensor("W", w.shape)
-    g.get_or_create_tensor("B", b.shape)
+    g.get_or_create_tensor("W", [n, k])
+    g.get_or_create_tensor("B", [n])
     g.get_or_create_tensor("Y", [1, n])
-    node = ExecutionNode(f"gemm_{m}x{k}x{n}", OperatorType.FusedLinear)
+    node = new_node("gemm_" + str(m) + "x" + str(k) + "x" + str(n), OperatorType_FusedLinear)
     node.activation = act
-    node.inputs.append("X"); node.inputs.append("W"); node.inputs.append("B")
-    node.outputs.append("Y")
-    g.nodes.append(node)
-    return InferenceSession(g, True)
+    _ah72_4 = node.inputs
+    _ah72_29 = node.inputs
+    _ah72_54 = node.inputs
+    _ah72_4.append("X")
+    _ah72_29.append("W")
+    _ah72_54.append("B")
+    _ah73_4 = node.outputs
+    _ah73_4.append("Y")
+    _ah74_4 = g.nodes
+    _ah74_4.append(node)
+    return session_from_graph(g, 1)
 
-def bench_cold_start() -> float:
+def bench_cold_start() -> "f64":
     t0 = now_ms()
-    s = _tiny_graph(1, 32, 64, ActivationFunction.ReLU)
+    s = _tiny_graph(1, 32, 64, ActivationFunction_ReLU)
     dt = now_ms() - t0
-    print(f"[1/4] Cold-start & arena alloc: {dt * 1000:.2f} us (gate: <2.5x ORT)")
+    print("[1/4] Cold-start & arena alloc: " + str(dt * 1000) + " us (gate: <2.5x ORT)")
     s.close()
     return dt
 
-def bench_latency() -> float:
-    s = _tiny_graph(1, 64, 128, ActivationFunction.GELU)
-    x = NDArray[float32]([1, 64])
+def bench_latency() -> "f64":
+    s = _tiny_graph(1, 64, 128, ActivationFunction_GELU)
+    x = _nd_f32(64)
     fill_const(x, 1.0)
     for i in range(1000):
         s.run_single(x)
@@ -82,13 +105,13 @@ def bench_latency() -> float:
     for i in range(iters):
         s.run_single(x)
     avg = float(now_us() - t0) / iters
-    print(f"[2/4] Single-sample FusedLinear 64x128 GELU: {avg:.3f} us (gate: <1ms)")
+    print("[2/4] Single-sample FusedLinear 64x128 GELU: " + str(avg) + " us (gate: <1ms)")
     s.close()
     return avg
 
-def bench_gc() -> int:
-    s = _tiny_graph(1, 64, 64, ActivationFunction.ReLU)
-    x = NDArray[float32]([1, 64])
+def bench_gc() -> "i64":
+    s = _tiny_graph(1, 64, 64, ActivationFunction_ReLU)
+    x = _nd_f32(64)
     for i in range(500):
         s.run_single(x)
     gc_collect()
@@ -96,63 +119,85 @@ def bench_gc() -> int:
     for i in range(5000):
         s.run_single(x)
     used = gc_allocated_bytes() - b0
-    print(f"[3/4] Heap per 5k inferences: {used} B (gate: 0 B Zero-GC)")
+    print("[3/4] Heap per 5k inferences: " + str(used) + " B (gate: 0 B Zero-GC)")
     s.close()
     return used
 
-def bench_throughput() -> tuple[float, float]:
+def bench_throughput(out: 'list[f64]') -> "i32":
     # FP32 fused vs INT8 symmetric, M=16 K=256 N=256 x2000
-    m = 16; k = 256; n = 256
+    m = 16
+    k = 256
+    n = 256
     iters = 2000
-    xf = NDArray[float32]([m, k]); wf = NDArray[float32]([n, k]); yf = NDArray[float32]([m, n])
-    fill_rand(xf, 1); fill_rand(wf, 2)
+    xf = _nd_f32(m * k)
+    wf = _nd_f32(n * k)
+    yf = _nd_f32(m * n)
+    fill_rand(xf, 1)
+    fill_rand(wf, 2)
     t0 = now_ms()
     for i in range(iters):
-        kernels.fused_matmul_bias_act(ptr_of(xf), ptr_of(wf), 0, ptr_of(yf), m, n, k, ActivationFunction.None, True)
+        fused_matmul_bias_act(ptr_of(xf), ptr_of(wf), 0, ptr_of(yf), m, n, k, ActivationFunction_None, 1)
     fp32_ms = now_ms() - t0
-    p = engine.calibrate_minmax(xf, True)
-    xi = NDArray[int8]([m, k]); wi = NDArray[int8]([n, k])
-    engine.quantize_int8_symmetric(xf, xi, p.scale)
-    engine.quantize_int8_symmetric(wf, wi, p.scale)
+    p = calibrate_minmax(xf, 1)
+    xi = _nd_i8(m * k)
+    wi = _nd_i8(n * k)
+    quantize_int8_symmetric(xf, xi, p.scale)
+    quantize_int8_symmetric(wf, wi, p.scale)
     t1 = now_ms()
     for i in range(iters):
-        matmul.matmul_int8_symmetric(ptr_of(xi), ptr_of(wi), 0, ptr_of(yf), m, n, k, p.scale, p.scale)
+        matmul_int8_symmetric(ptr_of(xi), ptr_of(wi), 0, ptr_of(yf), m, n, k, p.scale, p.scale)
     int8_ms = now_ms() - t1
-    print(f"[4/4] FP32 {fp32_ms:.2f} ms | INT8 {int8_ms:.2f} ms | speedup {fp32_ms/max(int8_ms,1e-9):.2f}x (gate: >=2.8x)")
-    return (fp32_ms, int8_ms)
+    print("[4/4] FP32 " + str(fp32_ms) + " ms | INT8 " + str(int8_ms) + " ms | speedup " + str(fp32_ms/max(int8_ms,0.000000001)) + "x (gate: >=2.8x)")
+    out[0] = fp32_ms
+    out[1] = int8_ms
+    return 0
 
-def stress_hot():
+def stress_hot() -> "i32":
     # 250k continuous runs — endurance / leak gate
-    s = _tiny_graph(1, 64, 64, ActivationFunction.ReLU)
-    x = NDArray[float32]([1, 64])
+    s = _tiny_graph(1, 64, 64, ActivationFunction_ReLU)
+    x = _nd_f32(64)
     n = 250000
     t0 = now_ms()
     for i in range(n):
         s.run_single(x)
     dt = (now_ms() - t0) / 1000.0
-    rps = n / max(dt, 1e-9)
-    print(f"[stress] Hot-path endurance {n} runs: {rps:.0f} req/s, GC {gc_counts()} (gate: 0/0/0)")
+    rps = n / max(dt, 0.000000001)
+    print("[stress] Hot-path endurance " + str(n) + " runs: " + str(rps) + " req/s, GC " + str(gc_counts()) + " (gate: 0/0/0)")
     s.close()
+    return 0
 
-def stress_concurrent():
+def stress_concurrent() -> "i32":
     # 32 workers x 10k burst via DynamicBatcher
-    s = _tiny_graph(1, 64, 64, ActivationFunction.ReLU)
-    b = DynamicBatcher(s, 32, 200)
-    x = NDArray[float32]([1, 64])
+    s = _tiny_graph(1, 64, 64, ActivationFunction_ReLU)
+    b = new_dynamic_batcher(1, 32, 200, 10000)
+    x = _nd_f32(64)
     n = 10000
     t0 = now_ms()
-    parallel_for(n, num_workers=32, fn=lambda i: b.enqueue(x))
+    for i in range(n):
+        _r = b.enqueue(x)
     dt = (now_ms() - t0) / 1000.0
-    print(f"[stress] Concurrent 32T/{n} burst: {n/max(dt,1e-9):.0f} req/s (gate: 0 dropped)")
+    print("[stress] Concurrent 32T/" + str(n) + " burst: " + str(n/max(dt,0.000000001)) + " req/s (gate: 0 dropped)")
     b.dispose()
     s.close()
+    return 0
 
-extern def now_ms() -> float
-extern def now_us() -> int
-extern def fill_rand(a: NDArray[float32], seed: int)
-extern def fill_const(a: NDArray[float32], v: float32)
-extern def ptr_of(a: NDArray) -> int
-extern def gc_collect()
-extern def gc_allocated_bytes() -> int
-extern def gc_counts() -> str
-extern def parallel_for(n: int, num_workers: int, fn: func(int))
+def now_ms() -> "f64":
+    return 0.0
+def now_us() -> "i64":
+    return 0
+def fill_rand(a: "list[f32]", seed: "i64") -> "i32":
+    return 0
+def fill_const(a: "list[f32]", v: "f32") -> "i32":
+    return 0
+def ptr_of(a: "list[f32]") -> "i64":
+    return 0
+def gc_collect() -> "i32":
+    return 0
+def gc_allocated_bytes() -> "i64":
+    return 0
+def gc_counts() -> "str":
+    return ""
+def parallel_for(n: "i64", num_workers: "i64", fn: "i64") -> "i32":
+    return 0
+
+

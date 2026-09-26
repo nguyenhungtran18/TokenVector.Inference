@@ -1,0 +1,51 @@
+# TokenVector Runtime: byte codec library (managed, buildable by tkvc)
+import tv.numerics.tensor
+
+
+def _zeros(n: 'i64') -> 'list[i64]':
+    # KHUYEN NGHI: moi ham tra 'list[i64]' deu PHAI tao list qua ham co
+    # kieu tra ve khai bao -> compiler suy List`1<int64> cho bien cuc bo
+    # (do loi 'out = []' trong ham nay). Neu tao bang 'xs = []' o noi
+    # khong co annotation, se ra List`1<TkvInt> - truyen qua ABI
+    # 'list[i64]' se doc sai offset (xem R13 trong tkv_compile.tkv).
+    out = []
+    i = 0
+    while i < n:
+        out.append(0)
+        i = i + 1
+    return out
+
+
+def bytes_from_list(xs: 'list[i64]') -> 'str':
+    out = ""
+    for i in range(len(xs)):
+        out = out + chr(xs[i] & 255)
+    return out
+
+
+def utf8_encode(s: 'str') -> 'list[i64]':
+    out = _zeros(0)
+    for i in range(len(s)):
+        cp = ord(s[i])
+        if cp < 128:
+            out.append(cp)
+        elif cp < 2048:
+            out.append(192 + (cp >> 6))
+            out.append(128 + (cp & 63))
+        else:
+            out.append(224 + (cp >> 12))
+            out.append(128 + ((cp >> 6) & 63))
+            out.append(128 + (cp & 63))
+    return out
+
+
+def bytes_len(s: 'str') -> 'i64':
+    return len(s)
+
+
+def echo_str(s: 'str') -> 'str':
+    return s
+
+
+def echo_list(xs: 'list[i64]') -> 'list[i64]':
+    return xs

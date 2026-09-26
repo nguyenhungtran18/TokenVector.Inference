@@ -1,17 +1,7 @@
-// TokenVector Standard Library: Inference & Model Serving Module
-// Namespace: tv.inference
-// Pure TokenVector implementation.
-// Covers: Runtime + ONNX + Optimization + Quantization + Server.
-
-module tv.inference
-
 import tv.numerics.tensor
 import tv.numerics.linalg
 import tv.runtime.session
-import tv.runtime.execution_graph
-import tv.runtime.execution_node
 import tv.runtime.kv_cache
-import tv.optimization.passes
 import tv.optimization.kernels
 import tv.quantization.engine
 import tv.quantization.types
@@ -28,116 +18,140 @@ import tv.onnx.string_ops
 import tv.runtime.string_tensor
 import tv.runtime.prefix_skip
 import tv.runtime.hal
-import tv.training.lora
+import tv.training.autograd
 import tv.text.beam
 import tv.text.tree_speculative
 import tv.vision.vit
 import tv.format.gguf
 
-public class ModelSession:
-    def __init__(self, model_path: str):
-        self.session = InferenceSession.from_onnx_file(model_path)
-        self.batcher: DynamicBatcher = None
-        self.server: EmbeddedServer = None
+class ModelSession:
+    _ok: 'i64'
+    session: 'InferenceSession'
+    batcher: 'DynamicBatcher'
+    server: 'EmbeddedServer'
 
-    public static def from_graph(graph: ExecutionGraph) -> ModelSession:
-        s = ModelSession.__alloc()
-        s.session = InferenceSession(graph, True)
-        s.batcher = None
-        s.server = None
-        return s
+    def __init__(self, model_path: 'str'):
+        m = parse_file(model_path)
+        g = translate(m)
+        sess = session_from_graph(g, 1)
+        self.session = sess
+        self.batcher = new_dynamic_batcher(1, 32, 200, 10000)
+        self.server = new_embedded_server(sess, 8080, default_server_options())
 
-    def run(self, input_tensor: NDArray[float32]) -> NDArray[float32]:
-        return self.session.run_single(input_tensor)
+    def run(self, input_tensor: 'list[f32]') -> 'list[f32]':
+        _ah36_15 = self.session
+        return _ah36_15.run_single(input_tensor)
 
-    def run_named(self, names: list[str], tensors: list[NDArray[float32]], out_names: list[str]) -> dict[str, NDArray[float32]]:
-        inputs: list[NamedTensor] = []
+    def run_named(self, names: 'list[str]', tensors: 'list[list[f32]]', out_names: 'list[str]') -> 'dict[str,list[f32]]':
+        inputs = []
+        inputs.append(named_tensor("", _nd_f32(1)))
+        inputs.pop(0)
         for i in range(len(names)):
-            inputs.append(NamedTensor(names[i], tensors[i]))
-        outs: list[NamedTensor] = []
+            inputs.append(named_tensor(names[i], tensors[i]))
+        outs = []
+        outs.append(named_tensor("", _nd_f32(1)))
+        outs.pop(0)
         for o in out_names:
-            desc = self.session.graph.tensors[o]
-            shape = desc.shape if len(desc.shape) > 0 else [desc.element_count]
-            outs.append(NamedTensor(o, NDArray[float32](shape)))
-        self.session.run(inputs, outs)
-        res: dict[str, NDArray[float32]] = {}
-        for o in outs:
-            res[o.name] = o.data
+            session = self.session
+            _ah44_19 = session.graph
+            tdict = _ah44_19.tensors
+            desc = tdict[o]
+            _shp = desc.shape
+            _ec = desc.element_count
+            if len(_shp) > 0:
+                _c1 = _shp
+            else:
+                _c1 = [_ec]
+            shape = _c1
+            outs.append(named_tensor(o, _nd_f32(calc_element_count(shape))))
+        _ah51_8 = self.session
+        _ah51_8.run(inputs, outs)
+        res = {}
+        for oo in outs:
+            res[oo.name] = oo.data
         return res
 
-    def serve(self, port: int = 8080, options: ServerOptions = None) -> EmbeddedServer:
-        self.server = EmbeddedServer(self.session, port, options)
+    def serve(self, port: 'i64'=8080) -> 'EmbeddedServer':
+        options = default_server_options()
+        self.server = new_embedded_server(self.session, port, options)
         return self.server
 
-    # Text in -> text out (requires a tokenizer object with encode/decode/vocab_size)
-    def generate(self, tokenizer, prompt: str, max_new_tokens: int = 128, temperature: float32 = 0.0) -> GenResult:
-        cfg = GenConfig()
-        cfg.max_new_tokens = max_new_tokens
-        cfg.params.temperature = temperature
+    def generate(self, tokenizer: 'Tokenizer', prompt: 'str', max_new_tokens: 'i64'=128, temperature: 'f32'=0.0) -> 'GenResult':
+        cfg = GenConfig(1, max_new_tokens, -1, "chatml", default_sample_params())
+        params = cfg.params
+        params.temperature = temperature
         return generate_text(self.session, tokenizer, prompt, cfg)
 
-    def chat(self, tokenizer, messages: list[ChatMessage], max_new_tokens: int = 128, temperature: float32 = 0.0) -> GenResult:
-        cfg = GenConfig()
-        cfg.max_new_tokens = max_new_tokens
-        cfg.params.temperature = temperature
+    def chat(self, tokenizer: 'Tokenizer', messages: 'list[ChatMessage]', max_new_tokens: 'i64'=128, temperature: 'f32'=0.0) -> 'GenResult':
+        cfg = GenConfig(1, max_new_tokens, -1, "chatml", default_sample_params())
+        params = cfg.params
+        params.temperature = temperature
         return chat_generate(self.session, tokenizer, messages, cfg)
 
-    def enable_batching(self, max_batch: int = 32, timeout_us: int = 200, workers: int = 4, max_queue: int = 10000) -> DynamicBatcher:
-        self.batcher = DynamicBatcher(self.session, max_batch, timeout_us, workers, max_queue)
+    def enable_batching(self, max_batch: 'i64'=32, timeout_us: 'i64'=200, workers: 'i64'=4, max_queue: 'i64'=10000) -> 'DynamicBatcher':
+        self.batcher = new_dynamic_batcher(1, max_batch, timeout_us, max_queue)
         return self.batcher
 
-    def make_kv_cache(self, max_seq: int, hidden_dim: int) -> AttentionKvCache:
-        return AttentionKvCache(max_seq, hidden_dim)
+    def make_kv_cache(self, max_seq: 'i64', hidden_dim: 'i64') -> 'AttentionKvCache':
+        return create_kv_cache(max_seq, hidden_dim)
 
-    def quantize_int8(self, data: NDArray[float32], scale: float32) -> NDArray[int8]:
-        out = NDArray[int8](data.shape)
-        engine.quantize_int8_symmetric(data, out, scale)
+    def quantize_int8(self, data: 'list[f32]', scale: 'f32') -> 'list[i32]':
+        out = _nd_i8(len(data))
+        quantize_int8_symmetric(data, out, scale)
         return out
 
-    def quantize_int8_per_channel(self, data: NDArray[float32], rows: int, cols: int) -> tuple[NDArray[int8], list[float32]]:
-        params = engine.calibrate_per_channel_minmax(data, rows, cols, True)
-        scales = [params[r].scale for r in range(rows)]
-        out = NDArray[int8]([rows * cols])
-        engine.quantize_int8_per_channel(data, out, rows, cols, scales)
-        return (out, scales)
+    def quantize_int8_per_channel(self, data: 'list[f32]', rows: 'i64', cols: 'i64', out: 'list[i32]', scales: 'list[f32]') -> 'i32':
+        params = calibrate_per_channel_minmax(data, rows, cols, 1)
+        for r in range(rows):
+            _ah89_27 = params[r]
+            scales.append(_ah89_27.scale)
+        quantize_int8_per_channel(data, out, rows, cols, scales)
+        return 0
 
-    def calibrate(self, data: NDArray[float32], method: str = "minmax", symmetric: bool = True) -> QuantParams:
+    def calibrate(self, data: 'list[f32]', method: 'str'="minmax", symmetric: 'i32'=1) -> 'QuantParams':
         if method == "kl":
-            return engine.calibrate_kl(data)
+            return calibrate_kl(data)
         if method == "percentile":
-            return engine.calibrate_percentile(data, 99.99, symmetric)
+            return calibrate_percentile(data, 99.99, symmetric)
         if method == "mse":
-            return engine.calibrate_mse(data)
-        return engine.calibrate_minmax(data, symmetric)
+            return calibrate_mse(data)
+        return calibrate_minmax(data, symmetric)
 
-    def close(self):
-        if self.server is not None:
-            self.server.dispose()
-            self.server = None
-        if self.batcher is not None:
-            self.batcher.dispose()
-            self.batcher = None
-        if self.session is not None:
-            self.session.close()
-            self.session = None
+    def close(self) -> 'i32':
+        _sv = self.server
+        _sv.dispose()
+        _bt = self.batcher
+        _bt.dispose()
+        _ss = self.session
+        _ss.close()
+        return 0
 
-public def load_onnx(model_path: str) -> ModelSession:
-    # High-level API (matches TOKENVECTOR_SYNTAX_SPEC.md)
-    return ModelSession(model_path)
+def _model_session_new(sess: 'InferenceSession') -> 'ModelSession':
+    b = new_dynamic_batcher(1, 32, 200, 10000)
+    sv = new_embedded_server(sess, 8080, default_server_options())
+    return ModelSession(1, sess, b, sv)
 
-public def load_onnx_bytes(buf: bytes) -> ModelSession:
-    model = parser.parse_bytes(buf)
-    return ModelSession.from_graph(translator.translate(model))
+def load_onnx(model_path: 'str') -> 'ModelSession':
+    m = parse_file(model_path)
+    g = translate(m)
+    return _model_session_new(session_from_graph(g, 1))
 
-// --- TRIZ surface re-exports (module members stay under their own namespaces) ---
-public def make_lora(in_features: int, out_features: int, rank: int, alpha: float32, m: int = 1) -> LoRALinear:
-    w = NDArray[float32]([out_features * in_features])
-    b = NDArray[float32]([out_features])
+def load_onnx_bytes(buf: 'str') -> 'ModelSession':
+    model = parse_bytes(buf)
+    return from_graph(translate(model))
+
+def make_lora(in_features: 'i64', out_features: 'i64', rank: 'i64', alpha: 'f32', m: 'i64'=1) -> 'LoRALinear':
+    w = _nd_f32(out_features * in_features)
+    b = _nd_f32(out_features)
     for i in range(len(w)):
         w[i] = 0.0
     for i in range(len(b)):
         b[i] = 0.0
     return LoRALinear(w, b, m, out_features, in_features, rank, alpha)
 
-public def load_gguf(path: str, allow_unverified: bool = False):
-    return GGUFReader(path, allow_unverified)
+def load_gguf(path: 'str', allow_unverified: 'i32'=0) -> 'i32':
+    return GGUFReader(1, "", 0, allow_unverified, 0)
+
+def from_graph(graph: 'ExecutionGraph') -> 'ModelSession':
+    return _model_session_new(session_from_graph(graph, 1))
+

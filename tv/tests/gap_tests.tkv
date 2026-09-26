@@ -1,0 +1,109 @@
+import tv.runtime.simt
+import tv.runtime.backend
+import tv.runtime.dynamic_shapes
+import tv.vision.vit_weights
+def _clip_grads_for_test(arrays: 'list[list[f32]]', max_norm: 'f32') -> 'f32':
+    total = 0.0
+    for a in arrays:
+        for i in range(len(a)):
+            total = total + a[i] * a[i]
+    nrm = sqrt(total)
+    if nrm <= max_norm or nrm == 0.0:
+        return nrm
+    scale = max_norm / nrm
+    for a in arrays:
+        for i in range(len(a)):
+            a[i] = a[i] * scale
+    return nrm
+
+
+def test_simt_matmul() -> 'i32':
+    a = _nd_f32(4)
+    b = _nd_f32(4)
+    y = _nd_f32(4)
+    a[0] = 1.0
+    a[1] = 2.0
+    a[2] = 3.0
+    a[3] = 4.0
+    b[0] = 1.0
+    b[1] = 0.0
+    b[2] = 0.0
+    b[3] = 1.0
+    simt_matmul(a, b, y, 2, 2, 2, 2, 2)
+    assert y[0] == 1.0
+    assert y[1] == 2.0
+    assert y[2] == 3.0
+    assert y[3] == 4.0
+    return 0
+
+
+def test_dynamic_shape_specialization() -> 'i32':
+    g = ExecutionGraph(1, "dynamic_test", 0)
+    g.inputs.append("x")
+    g.outputs.append("x")
+    g.get_or_create_tensor("x", [1, 1])
+    s = InferenceSession(1, default_cpu(), g, arena_create(64), 0)
+    concrete = [1, 3]
+    specialize_session(s, "x", concrete)
+    d = g.tensors["x"]
+    assert d.shape[0] == 1
+    assert d.shape[1] == 3
+    assert d.element_count == 3
+    s.close()
+    return 0
+
+
+def test_vit_weight_remap() -> 'i32':
+    assert _remap_layer_key("patch_embed.proj.weight") == "patch_w"
+    assert _remap_layer_key("blocks.0.attn.qkv.bias") == "L0_qkv_b"
+    assert _remap_layer_key("norm.weight") == "lnf_g"
+    return 0
+
+
+def test_backend_dispatch() -> 'i32':
+    d = simulation_backend(2, 2)
+    assert backend_status(d) == "simulated"
+    cuda = backend_for_kind(2)
+    assert backend_status(cuda) != "available"
+    npu = backend_for_kind(3)
+    assert backend_status(npu) != "available"
+    a = _nd_f32(4)
+    b = _nd_f32(4)
+    y = _nd_f32(4)
+    a[0] = 1.0
+    a[1] = 2.0
+    a[2] = 3.0
+    a[3] = 4.0
+    b[0] = 1.0
+    b[1] = 0.0
+    b[2] = 0.0
+    b[3] = 1.0
+    d.matmul(a, b, y, 2, 2, 2)
+    assert y[0] == 1.0
+    assert y[1] == 2.0
+    assert y[2] == 3.0
+    assert y[3] == 4.0
+    return 0
+
+
+def test_pretrain_gradient_clipping() -> 'i32':
+    a = _nd_f32(2)
+    a[0] = 3.0
+    a[1] = 4.0
+    arrays = []
+    arrays.append(a)
+    nrm = _clip_grads_for_test(arrays, 2.5)
+    assert nrm == 5.0
+    assert a[0] == 1.5
+    assert a[1] == 2.0
+    return 0
+
+
+def main() -> 'i32':
+    test_simt_matmul()
+    test_dynamic_shape_specialization()
+    test_vit_weight_remap()
+    test_backend_dispatch()
+    test_pretrain_gradient_clipping()
+    print("gap tests: PASS")
+    return 0

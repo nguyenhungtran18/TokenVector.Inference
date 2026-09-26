@@ -1,0 +1,199 @@
+import tv.runtime.hal
+import tv.runtime.session
+import tv.numerics.tensor
+
+# enum -> module constants (device, synced with runtime bundle)
+DeviceKind_CPU = 0
+DeviceKind_CUDA = 1
+DeviceKind_ROCM = 2
+DeviceKind_METAL = 3
+DeviceKind_VULKAN = 4
+DeviceKind_NPU = 5
+
+class SimtCaps:
+    _ok: 'i64'
+    blocks: 'i64'
+    lanes: 'i64'
+    threads: 'i64'
+    kind: 'i64'
+
+    def __init__(self, blocks: 'i64', lanes: 'i64', threads: 'i64'):
+        self.blocks = blocks
+        self.lanes = lanes
+        self.threads = threads
+        self.kind = DeviceKind_CPU
+
+def default_simt_caps() -> 'SimtCaps':
+    return SimtCaps(1, 32, 8, 256, 0)
+
+def simt_matmul(a: 'list[f32]', b: 'list[f32]', y: 'list[f32]', m: 'i64', n: 'i64', k: 'i64', lanes: 'i64'=8, t: 'i64'=8, workers: 'i64'=0) -> 'i32':
+    if workers <= 0:
+        workers = (m + t - 1) // t
+        if workers < 1:
+            workers = 1
+    tile = 0
+    while tile * t < m:
+        _simt_tile_row(a, b, y, m, n, k, lanes, t, tile)
+        tile = tile + 1
+    return 0
+
+def _simt_tile_row(a: 'list[f32]', b: 'list[f32]', y: 'list[f32]', m: 'i64', n: 'i64', k: 'i64', lanes: 'i64', t: 'i64', tile: 'i64') -> 'i32':
+    i0 = tile * t
+    i1 = i0 + t
+    if i1 > m:
+        i1 = m
+    j0 = 0
+    while j0 < n:
+        j1 = j0 + t
+        if j1 > n:
+            j1 = n
+        ii = i0
+        while ii < i1:
+            jj = j0
+            while jj < j1:
+                acc = 0.0
+                kk = 0
+                kk2 = k
+                while kk + lanes <= kk2:
+                    l = 0
+                    while l < lanes:
+                        acc = acc + a[ii * k + kk + l] * b[(kk + l) * n + jj]
+                        l = l + 1
+                    kk = kk + lanes
+                while kk < k:
+                    acc = acc + a[ii * k + kk] * b[kk * n + jj]
+                    kk = kk + 1
+                y[ii * n + jj] = acc
+                jj = jj + 1
+            ii = ii + 1
+        j0 = j0 + t
+    return 0
+
+def simt_relu(x: 'list[f32]', y: 'list[f32]') -> 'i32':
+    i = 0
+    n = len(x)
+    while i < n:
+        v = x[i]
+        if v > 0.0:
+            _c1 = v
+        else:
+            _c1 = 0.0
+        y[i] = _c1
+        i = i + 1
+    return 0
+
+def simt_softmax_rows(x: 'list[f32]', y: 'list[f32]', rows: 'i64', cols: 'i64') -> 'i32':
+    r = 0
+    while r < rows:
+        base = r * cols
+        mx = x[base]
+        j = 1
+        while j < cols:
+            if x[base + j] > mx:
+                mx = x[base + j]
+            j = j + 1
+        s = 0.0
+        j = 0
+        while j < cols:
+            e = exp(x[base + j] - mx)
+            y[base + j] = e
+            s = s + e
+            j = j + 1
+        inv = 1.0 / s
+        j = 0
+        while j < cols:
+            y[base + j] = y[base + j] * inv
+            j = j + 1
+        r = r + 1
+    return 0
+
+def probe_opencl() -> 'i64':
+    return ctypes_cdll("OpenCL.dll")
+
+def probe_cuda() -> 'i64':
+    return ctypes_cdll("nvcuda.dll")
+
+def probe_npu() -> 'i64':
+    h = ctypes_cdll("OpenVINOExecutionProvider.dll")
+    if h == 0:
+        h = ctypes_cdll("QnnHtp.dll")
+    if h == 0:
+        h = ctypes_cdll("npu_il.dll")
+    return h
+
+class FfiAccelerator:
+    _ok: 'i64'
+    _kind: 'i64'
+    _dll: 'str'
+    _handle: 'i64'
+
+    def __init__(self, kind: 'i64', dll: 'str', handle: 'i64'):
+        self._kind = kind
+        self._dll = dll
+        self._handle = handle
+
+    def name(self) -> 'str':
+        if self._kind == DeviceKind_CUDA:
+            return "TokenVectorCUDA-FFI"
+        if self._kind == DeviceKind_NPU:
+            return "TokenVectorNPU-FFI"
+        if self._kind == DeviceKind_VULKAN:
+            return "TokenVectorVulkan-FFI"
+        return "TokenVectorROCm-FFI"
+
+    def kind(self) -> 'i64':
+        return self._kind
+
+    def available(self) -> 'i32':
+        if self._handle != 0:
+            return 1
+        return 0
+
+    def unavailable_reason(self) -> 'str':
+        if self._handle != 0:
+            return ""
+        return "native library not loadable (driver/runtime missing)"
+
+def try_accelerator(kind: 'i64') -> 'FfiAccelerator':
+    if kind == DeviceKind_CUDA:
+        return FfiAccelerator(1, kind, "nvcuda.dll", probe_cuda())
+    if kind == DeviceKind_NPU:
+        return FfiAccelerator(1, kind, "QnnHtp.dll/OpenVINO", probe_npu())
+    if kind == DeviceKind_VULKAN:
+        return FfiAccelerator(1, kind, "vulkan-1.dll", ctypes_cdll("vulkan-1.dll"))
+    if kind == DeviceKind_ROCM:
+        return FfiAccelerator(1, kind, "amdhip64.dll", ctypes_cdll("amdhip64.dll"))
+    return FfiAccelerator(1, kind, "", 0)
+
+def bind_simt(dispatch: 'HalDispatch', caps: 'SimtCaps') -> 'i32':
+    if caps is None:
+        caps = default_simt_caps()
+    dispatch.backend = "simt"
+    return 0
+
+class SimtCpuProvider:
+    _ok: 'i64'
+
+    def name(self) -> 'str':
+        return "TokenVectorSIMT-CPU"
+
+    def kind(self) -> 'i64':
+        return DeviceKind_CPU
+
+    def available(self) -> 'i32':
+        return 1
+
+    def unavailable_reason(self) -> 'str':
+        return ""
+
+def discover_provider(prefer: 'i64') -> 'SimtCpuProvider':
+    p = try_accelerator(prefer)
+    if p.available() != 0:
+        return SimtCpuProvider(1)
+    return SimtCpuProvider(1)
+
+def parallel_for(n: 'i64', workers: 'i64', fn: 'i64') -> 'i32':
+    i = 0
+    while i < n:
+        i = i + 1
+    return 0

@@ -20,3 +20,14 @@ $RECYCLE.BIN/
 .DS_Store
 *.tmp
 *~
+
+# Generated dotted import copies emitted next to a root-level build target
+# (e.g. tv.runtime.session.tkv). These are STALE duplicates of the canonical
+# sources under tv/ and stdlib/ - several had already drifted. Never edit or
+# commit them; sync the canonical file instead.
+/tv.*.tkv
+
+# Distribution output: a full duplicate of the source tree plus a bundled
+# compiler .exe (which *.exe already excludes, so committing it would produce
+# an incomplete package). Kept as a local directory, not in git.
+/release/

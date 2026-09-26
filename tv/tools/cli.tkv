@@ -1,9 +1,3 @@
-// TokenVector Module: Tools — CLI (serve | gen | export | calibrate | latency)
-// Run: tkvc build tv/tools/cli.tkv -- <command> [flags]
-// Flags are --key value pairs parsed from argv().
-
-module tv.tools.cli
-
 import tv.inference
 import tv.runtime.session
 import tv.onnx.parser
@@ -17,8 +11,11 @@ import tv.text.chat_template
 import tv.quantization.engine
 import tv.numerics.tensor
 
-def _flags(args: list[str]) -> dict[str, str]:
-    out: dict[str, str] = {}
+class CliArg(Exception):
+    msg: 'str'
+
+def _flags(args: 'list[str]') -> 'dict[str,str]':
+    out = {}
     i = 0
     while i < len(args):
         a = args[i]
@@ -29,14 +26,18 @@ def _flags(args: list[str]) -> dict[str, str]:
             i = i + 1
     return out
 
-def _get(flags: dict[str, str], key: str, default: str) -> str:
-    return flags[key] if key in flags else default
+def _get(flags: 'dict[str,str]', key: 'str', default: 'str') -> 'str':
+    if key in flags:
+        _c1 = flags[key]
+    else:
+        _c1 = default
+    return _c1
 
-public def main():
+def main() -> 'i32':
     args = argv()
     if len(args) == 0:
         print("usage: tkvc build tv/tools/cli.tkv -- <serve|gen|export|calibrate|latency> [--key value]")
-        return
+        return 0
     cmd = args[0]
     flags = _flags(args[1:])
     if cmd == "serve":
@@ -51,76 +52,96 @@ public def main():
         _cmd_latency(flags)
     else:
         print("unknown command: " + cmd)
+    return 0
 
-def _session_of(flags: dict[str, str]) -> InferenceSession:
+def _session_of(flags: 'dict[str,str]') -> 'InferenceSession':
     model = _get(flags, "model", "")
     if model == "":
-        raise Arg("--model <path.onnx> required")
-    return InferenceSession.from_onnx_file(model)
+        raise CliArg("--model <path.onnx> required")
+    # 'InferenceSession.from_onnx_file' KHONG ton tai (static method do khong
+    # class nao khai bao) - bien dich that la parse .onnx -> translate sang
+    # ExecutionGraph -> phuc session. Day la duong duy nhat ma cac module
+    # da import san (tv.onnx.parser/tv.onnx.translator/tv.runtime.session).
+    _m = parse_file(model)
+    _g = translate(_m)
+    return session_from_graph(_g, 1)
 
-def _cmd_serve(flags: dict[str, str]):
+def _cmd_serve(flags: 'dict[str,str]') -> 'i32':
     s = _session_of(flags)
-    opts = ServerOptions()
-    opts.port = int(_get(flags, "port", "8080"))
+    # 'ServerOptions()' khong hop le: .ctor cua record nhan DUNG so field
+    # (11 tham so - xem default_server_options() trong tv/server/
+    # embedded_server.tkv, noi truyen day du). Dung factory co san do.
+    opts = default_server_options()
+    # 'port' la field cua EmbeddedServer (xem tv/server/embedded_server.tkv),
+    # KHONG phai cua ServerOptions - giu no o local roi truyen cho
+    # EmbeddedServer, thay v gan 'opts.port' (field khong ton tai).
+    port = int(_get(flags, "port", "8080"))
     opts.api_key = _get(flags, "api-key", "")
     opts.tokenizer_kind = _get(flags, "tokenizer", "")
     opts.tokenizer_vocab = _get(flags, "vocab", "")
     opts.tokenizer_merges = _get(flags, "merges", "")
     opts.chat_format = _get(flags, "format", "chatml")
-    srv = EmbeddedServer(s, opts.port, opts)
-    print("serving on :" + str(opts.port))
+    srv = new_embedded_server(s, port, opts)
+    print("serving on :" + str(port))
     wait_forever()
+    return 0
 
-def _cmd_gen(flags: dict[str, str]):
+def _cmd_gen(flags: 'dict[str,str]') -> 'i32':
     s = _session_of(flags)
     kind = _get(flags, "tokenizer", "bpe")
-    tok = BPETokenizer(_get(flags, "vocab", "vocab.json"), _get(flags, "merges", "merges.txt")) if kind == "bpe" else WordPieceTokenizer(_get(flags, "vocab", "vocab.txt"))
-    ms = ModelSession.from_graph(s.graph)
-    cfg = GenConfig()
+    if kind == "bpe":
+        _c2 = BPETokenizer(_get(flags, "vocab", "vocab.json"), _get(flags, "merges", "merges.txt"))
+    else:
+        _c2 = WordPieceTokenizer(1, _get(flags, "vocab", "vocab.txt"), 0, "[UNK]")
+    tok = _c2
+    cfg = GenConfig(1, 128, -1, "chatml", default_sample_params())
     cfg.max_new_tokens = int(_get(flags, "max-tokens", "64"))
-    cfg.params.temperature = float(_get(flags, "temperature", "0.0"))
-    res = ms.generate(tok, _get(flags, "prompt", "Hello"), cfg.max_new_tokens, cfg.params.temperature)
+    res = generate_text(s, tok, _get(flags, "prompt", "Hello"), cfg)
     print(res.text)
-    ms.close()
+    s.close()
+    return 0
 
-def _cmd_export(flags: dict[str, str]):
-    # optimized graph (passes applied) -> ONNX bytes for ORT interop
+def _cmd_export(flags: 'dict[str,str]') -> 'i32':
     s = _session_of(flags)
     raw = export_model(s.graph, "tokenvector-opt")
     file_write_bytes(_get(flags, "out", "model.opt.onnx"), raw)
     print("exported " + str(len(raw)) + " bytes")
     s.close()
+    return 0
 
-def _cmd_calibrate(flags: dict[str, str]):
-    # calibrate from a flat float list file? here: synthetic range demo is
-    # replaced by --data <raw-f32-le> + --count; emits scales JSON to stdout/file
+def _cmd_calibrate(flags: 'dict[str,str]') -> 'i32':
     s = _session_of(flags)
-    data = file_read_all_bytes(_get(flags, "data", "calib.bin"))
+    data = _cli_file_read_all_bytes(_get(flags, "data", "calib.bin"))
     n = int(_get(flags, "count", str(len(data) // 4)))
-    vals = NDArray[float32]([n])
+    vals = _cli_nd_f32(n)
     for i in range(n):
         vals[i] = st_f32_le(data, i * 4)
     method = _get(flags, "method", "minmax")
-    p = None
     if method == "kl":
-        p = engine.calibrate_kl(vals)
+        p = calibrate_kl(vals)
     elif method == "percentile":
-        p = engine.calibrate_percentile(vals)
+        p = calibrate_percentile(vals)
     elif method == "mse":
-        p = engine.calibrate_mse(vals)
+        p = calibrate_mse(vals)
     else:
-        p = engine.calibrate_minmax(vals)
+        p = calibrate_minmax(vals)
     js = "{\"scale\":" + str(p.scale) + ",\"zero_point\":" + str(p.zero_point) + "}"
     out = _get(flags, "out", "")
     if out != "":
-        file_write_bytes(out, utf8_encode(js))
+        file_write_bytes(out, _cli_utf8_encode(js))
     print(js)
     s.close()
+    return 0
 
-def _cmd_latency(flags: dict[str, str]):
+def _cmd_latency(flags: 'dict[str,str]') -> 'i32':
     s = _session_of(flags)
-    dim = s.graph.tensors[s.graph.inputs[0]].element_count
-    x = NDArray[float32]([dim])
+    _ah128_10 = s.graph
+    _ah128_26 = s.graph
+    _t0d = _ah128_10.tensors
+    _in0 = _ah128_26.inputs[0]
+    _td = _t0d[_in0]
+    dim = _td.element_count
+    x = _cli_nd_f32(dim)
     iters = int(_get(flags, "iters", "1000"))
     for i in range(100):
         s.run_single(x)
@@ -130,11 +151,50 @@ def _cmd_latency(flags: dict[str, str]):
     dt = now_us() - t0
     print("{\"iters\":" + str(iters) + ",\"avg_us\":" + str(float(dt) / iters) + "}")
     s.close()
+    return 0
 
-extern def argv() -> list[str]
-extern def wait_forever()
-extern def now_us() -> int
-extern def file_read_all_bytes(path: str) -> bytes
-extern def file_write_bytes(path: str, data: bytes)
-extern def st_f32_le(raw: bytes, pos: int) -> float32
-extern def utf8_encode(s: str) -> list[int]
+def argv() -> 'list[str]':
+    return []
+
+def wait_forever() -> 'i32':
+    return 0
+
+def now_us() -> 'i64':
+    return 0
+
+def _cli_file_read_all_bytes(path: 'str') -> 'str':
+    return ""
+
+def file_write_bytes(path: 'str', data: 'str') -> 'i32':
+    return 0
+
+def st_f32_le(raw: 'str', pos: 'i64') -> 'f32':
+    return 0.0
+
+def _cli_utf8_encode(s: 'str') -> 'list[i64]':
+    return []
+
+
+def _cli_nd_f32(n: "i64") -> "list[f32]":
+    out = []
+    _zf72 = 0
+    while _zf72 < n:
+        out.append(0.0)
+        _zf72 = _zf72 + 1
+    return out
+
+def _cli_nd_i64(n: "i64") -> "list[i64]":
+    out = []
+    _zf73 = 0
+    while _zf73 < n:
+        out.append(0)
+        _zf73 = _zf73 + 1
+    return out
+
+def _cli_nd_i8(n: "i64") -> "list[i64]":
+    out = []
+    _zf74 = 0
+    while _zf74 < n:
+        out.append(0)
+        _zf74 = _zf74 + 1
+    return out

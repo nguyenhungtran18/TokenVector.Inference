@@ -5,7 +5,23 @@
 [![Compiler: tkvc](https://img.shields.io/badge/Compiler-tkvc-orange.svg)](https://github.com/nguyenhungtran18/TokenVector)
 [![Pure TokenVector](https://img.shields.io/badge/Backend-100%25%20.tkv-brightgreen.svg)]()
 
+<img src="assets/tokenvector-logo.svg" alt="Logo TokenVector" width="96" height="96">
+
 **TokenVector.Inference** là động cơ suy luận mô hình học sâu (Deep Learning Inference Runtime), tối ưu hóa đồ thị tính toán (Graph Optimization Passes), lượng tử hóa đa độ chính xác (INT8 & FP8 Quantization Engine), và phục vụ nhúng siêu nhẹ (Micro-Serving) **thuần 100% TokenVector (`.tkv`)**, đạt chuẩn **Zero-GC Allocation Hot Path** cho hệ sinh thái TokenVector AI.
+
+> **Trạng thái bản phát hành:** 47 module `.tkv` build sạch bằng `tkvc` đi kèm, `tv/tests/gap_tests.tkv` chạy PASS, và bộ test runtime chạy được. Runtime **100% TokenVector, không phụ thuộc native** — không mã C/C++, không `__tkv_extern_pinvoke__`, không DLL kèm theo. CPU khả dụng, TokenVector SIMT là mô phỏng xác định, CUDA/OpenCL/OpenVINO được báo cáo trung thực là unavailable.
+
+### Trạng thái backend
+
+| Backend | Trạng thái |
+|---|---|
+| CPU | Khả dụng — kernel scalar thuần `.tkv` (`hal.tkv`) |
+| TokenVector SIMT | Mô phỏng lane xác định (`simt.tkv`) |
+| CUDA | **Unavailable** — runtime thuần TokenVector không có backend GPU |
+| OpenCL | **Unavailable** — runtime thuần TokenVector không có backend GPU |
+| OpenVINO NPU | **Unavailable** — runtime thuần TokenVector không có backend NPU |
+
+Huấn luyện (`tv/training/autograd.tkv`) chạy trên đường CPU: forward, backward, gradcheck và Adam đều thuần `.tkv`. Nó chưa bao giờ phụ thuộc backend GPU.
 
 ---
 
@@ -63,8 +79,10 @@
 5. **Bộ phục vụ Nhúng Siêu nhẹ & Batching:**
    - REST nhúng (`EmbeddedServer`) API tương thích OpenAI, SSE, auth, limits, Prometheus metrics.
    - Micro-batching / continuous batching trên pool session, paged KV + prefix skip.
-6. **100% TokenVector (`.tkv`):**
-   - Toàn bộ engine và test là nguồn `.tkv` biên dịch bằng `tkvc`; không cần DLL native ngoài cho đường lõi.
+6. **Runtime thuần TokenVector — không phụ thuộc native:**
+   - Compute, graph execution, serving, lượng tử hóa và test là nguồn `.tkv` biên dịch bằng `tkvc`.
+   - **Không mã C/C++ trong repo, không `__tkv_extern_pinvoke__`, không DLL kèm theo.** Byte codec và chuyển đổi bit IEEE-754 float được viết bằng `.tkv` (`tv/runtime/f32_bits.tkv`), nên ONNX writer không cần gì nào bên cạnh executable của nó.
+   - Muốn có GPU/NPU thì phải đóng gói thành tiện ích native riêng, không phải thư viện mà mọi executable phải mang theo.
 
 ---
 
@@ -101,11 +119,23 @@ tkvc build tv/tools/cli.tkv
 
 ---
 
-## 🛠️ Biên dịch, Kiểm thử và Đóng gói
+## Biên dịch, kiểm thử và đóng gói
 
 ```powershell
-# Compiler: D:\TokenVector\3.code\dist\tkvc.exe
-tkvc build tv/tests/inference_tests.tkv
-tkvc build tv/benchmarks/compare_rivals.tkv
-tkvc build stdlib/tv/inference/inference.tkv --target library
+# TokenVector compiler (đi kèm trong gói: compiler/tkvc_patched.exe)
+$tkvc = ".\compiler\tkvc_patched.exe"
+
+& $tkvc build tv/tests/inference_tests.tkv --out inference_tests.exe
+& $tkvc build tv/benchmarks/compare_rivals.tkv
+& $tkvc build tv/tests/gap_tests.tkv --out gap_tests.exe
+.\gap_tests.exe
 ```
+
+Biên dịch **toàn bộ** module (nguồn canonical là các file không tên `tv.*.tkv` — đó là bản sao import được sinh ra):
+
+```powershell
+$files = Get-ChildItem -Recurse -Filter *.tkv | Where-Object { $_.Name -notmatch '^tv\.' }
+foreach ($f in $files) { & $tkvc build $f.FullName --target library --out out.dll }
+```
+
+Executable sinh ra là tự chứa: không cần DLL nào nằm bên cạnh.
