@@ -161,6 +161,31 @@ def _td_i64_list(dims: 'list[i64]') -> 'list[i64]':
         out.append(d)
     return out
 
+def _td_f32_repeat(v: 'f32', n: 'i64') -> 'list[f32]':
+    # (2026-09-26) Thay the cho `[v] * n` - nhan lap list tren LITERAL.
+    #
+    # Compiler CHUA xu ly nhan lap tren literal. O dang gan thu
+    # `r = [0.0] * n` no bao loi ro rang, nhung khi nam trong danh sach tham so
+    # co ngu canh `list[f32]` thi loi bi bo qua va IL sai duoc sinh ra:
+    #
+    #     newobj List`1<float32>::.ctor()
+    #     dup
+    #     ldc.r4 0.0
+    #     callvirt List`1<float32>::Add(!0)   <- list [0.0] da dung
+    #     <bieu thuc dem>                       <- con them day du vao stack
+    #     conv.r4 / conv.r4
+    #     mul.ovf                              <- opcode NHAN SO NGUYEN
+    #     mul.ovf                              <- phat HAI LAN
+    #
+    # -> CLR nem BadImageFormatException khi nap method (`_expand_lstm`,
+    # `_expand_gru`, `_expand_rnn` deu dung mau nay cho bias/initial state).
+    #
+    # Ham nay tao `list[f32]` ro bang cach gan truc tiep, dung kieu.
+    out = _nd_f32(n)
+    for i in range(n):
+        out[i] = v
+    return out
+
 def translate(model: 'OnnxModel') -> 'ExecutionGraph':
     gp = model.graph
     if gp.name != "":
@@ -1941,12 +1966,37 @@ def _dir_weights(g: 'ExecutionGraph', on: 'OnnxNode', d: 'i64', rows_per_gate: '
             _add_float_init(g, bn2, bs2[1:], bf2)
             rbn.append(bn2)
     else:
+        # (2026-09-26) KHONG dung `[0.0] * hid` o day.
+        #
+        # Nhan lặp list tren mot LITERAL chua duoc compiler xu ly: khi nam
+        # trong danh sach tham so co ngu canh `list[f32]` thi khong co loi bien
+        # dich nao bat, nhung IL sinh ra sai:
+        #
+        #     newobj List`1<float32>::.ctor()
+        #     dup
+        #     ldc.r4 0.0
+        #     callvirt List`1<float32>::Add(!0)   <- list [0.0] da dung
+        #     ldloc.s 6
+        #     conv.r4
+        #     ldloc.s 8
+        #     conv.r4
+        #     mul.ovf        <- opcode NHAN SO NGUYEN tren float32
+        #     mul.ovf        <- va bi phat HAI LAN
+        #
+        # -> CLR nem BadImageFormatException, khong nap duoc method
+        # `_expand_lstm`. O dang gan thu `r = [0.0] * n` compiler con bao loi
+        # ro rang ("list-literal chua hang so thuc ... ngu canh doi kieu phan
+        # tu nguyen 'int'"), nhung trong danh sach tham so thi ngu canh la
+        # `list[f32]` nen loi bi bo qua.
+        #
+        # `_nd_f32(hid)` tao san list[f32] gom `hid` phan tu 0.0 - cung y nghia
+        # va dung kieu.
         for gg in range(gates):
             wn = prefix + "_WB" + str(gg) + ""
-            _add_float_init(g, wn, [hid], [0.0] * hid)
+            _add_float_init(g, wn, [hid], _nd_f32(hid))
             wbn.append(wn)
             wn2 = prefix + "_RB" + str(gg) + ""
-            _add_float_init(g, wn2, [hid], [0.0] * hid)
+            _add_float_init(g, wn2, [hid], _nd_f32(hid))
             rbn.append(wn2)
     return 0
 
@@ -2012,10 +2062,10 @@ def _expand_lstm(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
         c_prev = _c86
         if h_prev == "":
             h_prev = pre + "h0"
-            _add_float_init(g, h_prev, [bat, hid], [0.0] * (bat * hid))
+            _add_float_init(g, h_prev, [bat, hid], _td_f32_repeat(0.0, bat * hid))
         if c_prev == "":
             c_prev = pre + "c0"
-            _add_float_init(g, c_prev, [bat, hid], [0.0] * (bat * hid))
+            _add_float_init(g, c_prev, [bat, hid], _td_f32_repeat(0.0, bat * hid))
         if h_prev in g.initializers:
             _th0 = g.tensors[h_prev]
             if len(_th0.shape) == 3:
@@ -2075,13 +2125,18 @@ def _expand_lstm(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
             cs.append(c_new)
         dir_hiddens.append(hs)
         dir_cells.append(cs)
+    # (2026-09-26) `seq` la int64 nen `dir_hiddens[d][seq - 1]` sinh
+    # `ldloc(seq:int64); ldc.i4 1; sub.ovf` - tron do rong, CLR nem
+    # BadImageFormatException khi JIT. Ep index ve i32 TRUOC vong lap de
+    # `sub.ovf` nhan hai i32 va `get_Item(int32)` khop.
     _qx1039 = []
+    _si = int(seq) - 1
     for d in range(len(dirs)):
-        _qx1039.append(dir_hiddens[d][seq - 1])
+        _qx1039.append(dir_hiddens[d][_si])
     lasts_h = _qx1039
     _qx1040 = []
     for d in range(len(dirs)):
-        _qx1040.append(dir_cells[d][seq - 1])
+        _qx1040.append(dir_cells[d][_si])
     lasts_c = _qx1040
     for d in range(len(dirs)):
         for t in range(seq):
@@ -2188,7 +2243,7 @@ def _expand_gru(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
         h_prev = _c91
         if h_prev == "":
             h_prev = pre + "h0"
-            _add_float_init(g, h_prev, [bat, hid], [0.0] * (bat * hid))
+            _add_float_init(g, h_prev, [bat, hid], _td_f32_repeat(0.0, bat * hid))
         if h_prev in g.initializers:
             _th2 = g.tensors[h_prev]
             if len(_th2.shape) == 3:
@@ -2198,7 +2253,7 @@ def _expand_gru(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
                 _add_float_init(g, hn, hs[1:], hf)
                 h_prev = hn
         hs = []
-        _add_float_init(g, pre + "one", [bat, hid], [1.0] * (bat * hid))
+        _add_float_init(g, pre + "one", [bat, hid], _td_f32_repeat(1.0, bat * hid))
         for t in range(seq):
             tag = pre + "t" + str(t) + "_"
             _xo = _rnn_xtract(g, on, t, seq, bat, inp, layout, tag)
@@ -2291,7 +2346,7 @@ def _expand_rnn(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
         h_prev = _c94
         if h_prev == "":
             h_prev = pre + "h0"
-            _add_float_init(g, h_prev, [bat, hid], [0.0] * (bat * hid))
+            _add_float_init(g, h_prev, [bat, hid], _td_f32_repeat(0.0, bat * hid))
         if h_prev in g.initializers:
             _th3 = g.tensors[h_prev]
             if len(_th3.shape) == 3:
