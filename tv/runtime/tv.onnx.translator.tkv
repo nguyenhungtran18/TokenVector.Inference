@@ -2136,10 +2136,7 @@ def _expand_lstm(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
         cs = []
         for t in range(seq):
             tag = pre + "t" + str(t) + "_"
-            if d == 0:
-                _c87 = t
-            else:
-                _c87 = t
+            _c87 = t
             _xo = _rnn_xtract(g, on, _c87, seq, bat, inp, layout, tag)
             s1 = _xo.s1
             e1 = _xo.e1
