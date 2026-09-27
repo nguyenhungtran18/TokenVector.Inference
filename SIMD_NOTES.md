@@ -145,6 +145,12 @@ Vector type `f32x8` + intrinsic `f32x8_load` / `f32x8_mul` / `f32x8_store`,
    **`argv()` là stub trả `[]`** nên không truyền được flag.
 5. **Đừng tin số liệu benchmark hiện tại.** Phần lớn là 0 do stub; phần `[stress]`
    in `req/s = 2e15` là hệ quả của việc chia cho 0.
+6. **`__init__` của record bị bỏ qua lúc biên dịch.** Mọi phần khởi tạo phải nằm
+   trong factory và gán tay. Điều này ảnh hưởng trực tiếp tới Giai đoạn 1: nếu thêm
+   buffer liên tục và hi vọng `__init__` của `ExecutionMemoryArena` tự cấp phát,
+   nó sẽ không chạy. Phải sửa `arena_create` và mọi call-site.
+7. **Hằng số cấp module không import được giữa module** — mọi hằng dùng cho SIMD
+   (vector width, tail mask) phải khai báo lại ở từng file.
 
 ## 8. Câu hỏi còn mở
 
@@ -154,4 +160,7 @@ Vector type `f32x8` + intrinsic `f32x8_load` / `f32x8_mul` / `f32x8_store`,
   Cần đọc `il_features_library/bytes_type.tkv` + `compiler/il_features/bytearray_type.py`.
 - Benchmark target là .NET 8 nào? Tính năng `Vector128/Vector256` của
   `System.Runtime.Intrinsics` có được bật mặc định không.
-- Có `parallel_for` / thread thật trong runtime không, hay hiện cũng chỉ là stub?
+- `spawn()` dùng ở `tv/server/batcher.tkv` là builtin gì và có tạo thread thật
+  không? Hiện nó **không** chạy worker ⇒ `DynamicBatcher` chạy inline. Nếu muốn
+  chạy song song thật (multi-core ⇒ tăng throughput), đây là câu hỏi cần trả lời
+  trước, và nó cũng quyết định liệu có thể chia vòng khối VEC_W ra nhiều core.

@@ -77,6 +77,10 @@ if (-not $SkipBenchmarks) {
     Write-Host "  Gio han: $BenchmarkTimeoutSeconds giay (pure .tkv khong SIMD, cham hon C# nhieu lan)." -ForegroundColor DarkGray
     $benchExe = Join-Path $WorkDir "compare_rivals.exe"
     $p = Start-Process -FilePath $benchExe -NoNewWindow -PassThru
+    # Cache handle: khong co $p.Handle thi .NET khong giu lai handle cua
+    # process da ket thuc va $p.ExitCode tra ve rong (bi bao "benchmark that bai"
+    # du process chay thanh cong).
+    $null = $p.Handle
     if (-not $p.WaitForExit($BenchmarkTimeoutSeconds * 1000)) {
         try { $p.Kill() } catch { }
         Write-Host "LOI: benchmark vuot gio han $BenchmarkTimeoutSeconds giay (da dung)." -ForegroundColor Red

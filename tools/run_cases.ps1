@@ -87,7 +87,7 @@ if (-not (Test-Path -LiteralPath $gapExe)) {
 }
 $gapOut = (& $gapExe 2>&1 | Out-String)
 if ($gapOut -match "gap tests: PASS") {
-    Write-Host "gap tests: PASS (12/12)"
+    Write-Host "gap tests: PASS (16/16)"
 } else {
     Write-Host "gap tests: FAIL"
     Write-Host ($gapOut -replace "\s+", " ").Trim()

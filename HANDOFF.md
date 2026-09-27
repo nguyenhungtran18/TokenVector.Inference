@@ -76,11 +76,25 @@ while _si < len(scratch) - 1:      # i32 < TkvInt  => lap vo han
 
 Fix: `n_scratch = int(len(scratch))` + `for` loop thay `while`. Đây là fix phòng ngừa (cùng họ bug TkvInt đã gặp nhiều lần trong repo), không phải nguyên nhân chính của (a).
 
-### 3.4 Sửa benchmark
+### 3.4 Sửa batcher + benchmark
 
+- **`DynamicBatcher.enqueue` treo vô hạn.** `while not req.done: _bch_spin_yield()` mà `spawn(self._worker)` không tạo worker (runtime single-thread) và `_bch_spin_yield()` là stub `return 0` ⇒ CPU 100% mãi. Fix: giới hạn `_BCH_SPIN_LIMIT = 200000` lần quay, hết hạn thì chạy `_run_one` inline tại thread gọi. Cố tình giới hạn theo **số lần quay** chứ không theo đồng hồ, vì `_bch_now_us()` cũng là stub.
+- **Thêm `new_dynamic_batcher_with_session()`.** `new_dynamic_batcher(1, ...)` đặt `1` vào field đầu nên `pool` rỗng ⇒ mọi request đều `req.error`. Factory mới gọi `pool.append(session)` y hệt `new_embedded_server`.
 - Giảm số vòng: latency `10000→500`, GC `5000→500`, throughput `2000→200`, stress `250000→2000`, concurrent `10000→500`.
 - `bench_throughput` truyền `ptr_of(xf)` (stub trả `0`) vào `fused_matmul_bias_act` → `NullReferenceException`. Fix: truyền thẳng `list` (`xf, wf, [], yf`).
+- `stress_concurrent` đếm `ok`/`err` để lộ lỗi thay vì chỉ in req/s. Sau fix: `ok=500 err=0`.
 - In cảnh báo `QUICK-RUN SCALE` để không ai đọc nhầm số liệu quick-run so với baseline C# SIMD.
+
+### 3.5 Test hồi quy cho 3 lỗi treo (thêm vào `gap_tests.tkv`, 12→16)
+
+| Test | Chặn lỗi |
+|---|---|
+| `test_optimized_session_terminates` | DCE quay vô hạn — test cũ chỉ gọi `session_from_graph(g, 0)` nên không bao giờ bật pass nào |
+| `test_scratch_liveness_terminates` | Liveness sort với `scratch` khác rỗng; graph có `Y = gemm(X)` + `T0 = relu(X)` rồi `Z = Y + T0` để cả hai còn sống sau DCE |
+| `test_batcher_enqueue_returns` | `enqueue` treo; test sẽ treo (không fail) nếu bug quay lại — `run_cases.ps1` chạy mỗi case ở process riêng nên vẫn bắt được |
+| `test_batcher_queue_full_raises` | `ServerBusy` khi queue đầy + `queue_depth()` về 0 sau khi rảnh |
+
+Lưu ý khi viết test: đừng tạo node ghi đè một tensor đã được đọc trong cùng graph (ghi `Y = Add(Y, T0)`) — `run_single` ném `ArgumentOutOfRangeException` ở `_exec_unary`. Dùng tensor output riêng.
 
 ## 4. Bẫy tkvc đã gặp (quan trọng)
 
@@ -94,15 +108,17 @@ Fix: `n_scratch = int(len(scratch))` + `for` loop thay `while`. Đây là fix ph
 3. **Chuỗi literal chỉ nhận dấu nháy kép.** `'abc'` trong biểu thức → lỗi tokenizer (dấu nháy đơn chỉ hợp lệ trong annotation kiểu).
 4. **`print(..., flush=1)` không hỗ trợ** → `il_codegen: AST node khong ro: ('kwarg', 'flush', ...)`.
 5. **`argv()` là stub trả `[]`** trong canonical source ⇒ không đọc được CLI flag; benchmark không scale được qua tham số.
+6. **`__init__` CỦA RECORD BỊ BỎ QUA KHI BIÊN DỊCH.** Thân `__init__` không chạy; record được dựng từ field theo thứ tự, mỗi tham số positional tương ứng **một field không phải container**, theo đúng thứ tự field. Vì vậy mọi "khởi tạo" phải làm bên ngoài bằng factory + gán tay. Đã thấy ở `new_embedded_server` (`tv/server/embedded_server.tkv:439-441`): tạo batcher rồi `pool.append(session)`. Đây cũng là lý do `new_dynamic_batcher(1, ...)` có `pool` rỗng.
+7. **Hằng số cấp module KHÔNG import được giữa các module** (chỉ hàm/record mới import được). Phải khai báo lại hằng ở file dùng — xem `inference_tests.tkv:42` và `gap_tests.tkv` đã làm y hệt.
 
 ## 5. Việc CÒN LẠI (chưa làm)
 
-1. **`stress_concurrent` vẫn treo** trong `tv/benchmarks/compare_rivals.tkv:169`. Triệu chứng: `stress_hot` in xong, không bao giờ tới dòng `Concurrent 32T/500 burst`. Nghi ngờ `BatcherQueue.enqueue` **block khi queue đầy** (capacity 500, enqueue đúng 500). Cần kiểm tra `tv/server/batcher.tkv` xem `enqueue` có chờ/throttle không, và thêm test cho đường đầy-queue.
-2. **Timing helpers là stub trả 0** nên benchmark in `0.0 us`, `0 B`, `0.0x`, `req/s = 2e15`. Các hàm đang là stub trong chính file benchmark: `now_ms`, `now_us`, `gc_allocated_bytes`, `gc_counts`, `fill_rand`, `fill_const`, `ptr_of`, `parallel_for`. Cần nối vào stdlib thật (hoặc xác nhận patched compiler có tự thay) nếu muốn số liệu có ý nghĩa.
-3. **`native_arena_alloc` vẫn là stub `return 0`** (`tv/runtime/session.tkv:228`) — arena thực tế là `dict[i64, list[f32]]` (list-boxed). Đây là chặn chính cho SIMD/zero-GC thật.
-4. **Chưa có SIMD** (đã khảo sát): compiler không có vector type/intrinsic, `il_codegen.py` không vectorize, và `list[f32]` chặn JIT auto-vectorization. Đường khả thi giữ 100% tkv: đổi arena sang buffer liên tục (`bytearray`). **Phân tích chi tiết, so sánh 3 hướng đi và lộ trình nằm ở `SIMD_NOTES.md`.**
-5. **Test chưa mirror hết C# cũ**: `ZeroGCHotPathTests`, `StressTests`, `ExecutionModelTests` (MLP/ResNet/LLaMA-layer/50 tầng), `GraphOptimizationTests` (fusion/DCE/const-fold theo cặp), `DynamicBatcherTests` phần async/concurrency. Hiện mới mirror protobuf/quant/batcher-queue + một số case đơn lẻ. **Không nên xem là tương đương hoàn toàn cho tới khi bổ sung.**
-6. **Cần review 2 fix vô hạn lặp ở mục 3.3** — nên thêm test hồi quy: (i) `session_from_graph(g, 1)` phải trả về; (ii) graph có ≥1 tensor scratch phải qua được liveness.
+1. **Timing helpers là stub trả 0** nên benchmark in `0.0 us`, `0 B`, `0.0x`, `req/s = 5e14` (chia cho 0). Các hàm đang là stub trong chính file benchmark: `now_ms`, `now_us`, `gc_allocated_bytes`, `gc_counts`, `fill_rand`, `fill_const`, `ptr_of`, `parallel_for`. Phải nối vào stdlib thật thì mới chứng minh được cải tiến hiệu năng. **Đây là ưu tiên cao nhất** vì nó chặn mọi phép đo.
+2. **`native_arena_alloc` vẫn là stub `return 0`** (`tv/runtime/session.tkv:228`) — arena thực tế là `dict[i64, list[f32]]` (list-boxed). Đây là chặn chính cho SIMD/zero-GC thật.
+3. **Chưa có SIMD** — phân tích, so sánh 3 hướng và lộ trình nằm ở `SIMD_NOTES.md`. Tiền đề là mục 2 ở trên.
+4. **Test chưa mirror hết C# cũ**: `ZeroGCHotPathTests`, `StressTests`, `ExecutionModelTests` (MLP/ResNet/LLaMA-layer/50 tầng), `GraphOptimizationTests` (fusion/DCE/const-fold theo cặp), `DynamicBatcherTests` phần async/concurrency. Hiện mới mirror protobuf/quant/batcher-queue + 4 test hồi quy lỗi treo. **Không nên xem là tương đương hoàn toàn cho tới khi bổ sung.**
+5. **`BatcherQueue`/`DynamicBatcher` chưa thật sự đa luồng.** `spawn(self._worker)` không tạo worker (runtime single-thread), nên `enqueue` chạy inline ⇒ không có micro-batching thật, batch luôn bằng 1. Cần worker thật (xem câu hỏi mở ở `SIMD_NOTES.md` mục 8).
+6. **Chưa có test cho `raw_data` decode** của `tv/onnx/models.tkv` — phần code này từng bị bỏ sót vì flat copy lệch bản (xem mục 6), và hiện vẫn chưa có case nào chạm tới nó.
 
 ## 6. Trạng thái git
 

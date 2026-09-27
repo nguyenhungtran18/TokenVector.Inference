@@ -6,6 +6,17 @@ import tv.onnx.protobuf_reader
 import tv.quantization.engine
 import tv.quantization.types
 import tv.server.batcher
+# (2026-09-28) Import truc tiep de lay ExecutionGraph / new_node /
+# OperatorType_* / _nd_f32. Truoc day chi lay giaam qua tv.server.batcher
+# nen cac hang so OperatorType_* khong co trong pham vi.
+import tv.runtime.session
+# (2026-09-28) Hang so module KHONG import duoc giua cac module (chi ham/record
+# duoc import) - `inference_tests.tkv:42` cung phai khai bao lai y het. Gia tri
+# lay tu tv/runtime/session.tkv va tv/optimization/kernels.tkv.
+OperatorType_FusedLinear = 2
+OperatorType_Relu = 8
+OperatorType_Add = 13
+ActivationFunction_Relu = 1
 def _clip_grads_for_test(arrays: 'list[list[f32]]', max_norm: 'f32') -> 'f32':
     total = 0.0
     for a in arrays:
@@ -247,6 +258,152 @@ def test_batcher_queue() -> 'i32':
     return 0
 
 
+def _gap_gemm_graph() -> 'ExecutionGraph':
+    # Do lai `_tiny_graph` cua compare_rivals: 1x(4x8) FusedLinear + bias.
+    g = ExecutionGraph(1, "gap_gemm", 0)
+    g.inputs.append("X")
+    g.outputs.append("Y")
+    w = _nd_f32(32)
+    b = _nd_f32(8)
+    for i in range(32):
+        w[i] = 0.5
+    for i in range(8):
+        b[i] = 0.25
+    g.initializers["W"] = w
+    g.initializers["B"] = b
+    g.get_or_create_tensor("X", [1, 4])
+    g.get_or_create_tensor("W", [8, 4])
+    g.get_or_create_tensor("B", [8])
+    g.get_or_create_tensor("Y", [1, 8])
+    node = new_node("gemm_gap", OperatorType_FusedLinear)
+    node.activation = ActivationFunction_Relu
+    node.inputs.append("X")
+    node.inputs.append("W")
+    node.inputs.append("B")
+    node.outputs.append("Y")
+    g.nodes.append(node)
+    return g
+
+
+def test_optimized_session_terminates() -> 'i32':
+    # Hoi quy (2026-09-28): DeadCodeEliminationPass.run() co
+    # `if i in active: continue` ma KHONG giam `i`, nen vong
+    # `while i > -1` quay vo han ngay khi co node da active. Moi
+    # session_from_graph(graph, 1) deu treo. Test truoc day chi goi
+    # session_from_graph(g, 0) (tat optimization) nen khong bat duoc.
+    g = _gap_gemm_graph()
+    s = session_from_graph(g, 1)
+    assert s._disposed == 0
+    x = _nd_f32(4)
+    for i in range(4):
+        x[i] = 1.0
+    y = s.run_single(x)
+    assert len(y) == 8
+    s.close()
+    return 0
+
+
+def _gap_scratch_graph() -> 'ExecutionGraph':
+    # Do lai `_gap_gemm_graph` nhung chen 2 tensor trung gian THAT su song
+    # sau DCE: Y (gemm) va T0 (relu) deu duoc node `add` doc, nen ca hai
+    # vao nhanh "scratch" cua analyze_liveness_and_allocate_offsets.
+    # Output cua graph la Z (khong phai Y) de khong co node nao ghi de
+    # mot tensor da duoc doc trong cung graph.
+    g = ExecutionGraph(1, "gap_scratch", 0)
+    g.inputs.append("X")
+    g.outputs.append("Z")
+    w = _nd_f32(32)
+    b = _nd_f32(8)
+    for i in range(32):
+        w[i] = 0.5
+    for i in range(8):
+        b[i] = 0.25
+    g.initializers["W"] = w
+    g.initializers["B"] = b
+    g.get_or_create_tensor("X", [1, 4])
+    g.get_or_create_tensor("W", [8, 4])
+    g.get_or_create_tensor("B", [8])
+    g.get_or_create_tensor("Y", [1, 8])
+    g.get_or_create_tensor("T0", [1, 4])
+    g.get_or_create_tensor("Z", [1, 8])
+    g_gemm = new_node("gemm_s", OperatorType_FusedLinear)
+    g_gemm.activation = ActivationFunction_Relu
+    g_gemm.inputs.append("X")
+    g_gemm.inputs.append("W")
+    g_gemm.inputs.append("B")
+    g_gemm.outputs.append("Y")
+    g.nodes.append(g_gemm)
+    n_relu = new_node("t0", OperatorType_Relu)
+    n_relu.inputs.append("X")
+    n_relu.outputs.append("T0")
+    g.nodes.append(n_relu)
+    n_add = new_node("add_s", OperatorType_Add)
+    n_add.inputs.append("Y")
+    n_add.inputs.append("T0")
+    n_add.outputs.append("Z")
+    g.nodes.append(n_add)
+    return g
+
+
+def test_scratch_liveness_terminates() -> 'i32':
+    # Hoi quy (2026-09-28): bubble sort scratch trong
+    # analyze_liveness_and_allocate_offsets() so sanh i32 voi TkvInt tu
+    # len() => vong `while` khong thoat. Do lai phai co tensor trung gian
+    # con song sau DCE, nen X -> gemm -> Y va X -> relu -> T0 roi
+    # Y + T0 -> Z.
+    g = _gap_scratch_graph()
+    s = session_from_graph(g, 1)
+    assert s._disposed == 0
+    x = _nd_f32(4)
+    for i in range(4):
+        x[i] = 1.0
+    y = s.run_single(x)
+    assert len(y) == 8
+    s.close()
+    return 0
+
+
+def test_batcher_enqueue_returns() -> 'i32':
+    # Hoi quy (2026-09-28): `enqueue` quay `while not req.done` cho
+    # den khi worker chay. Runtime .tkv single-thread nen spawn() khong
+    # tao worker => treo vo han, CPU 100%. Bay gio het han thi chay
+    # inline tai thread goi. Test nay se TREO (khong fail) neu bug quay
+    # lai, nen run_cases.ps1 chay moi case o process rieng.
+    g = _gap_gemm_graph()
+    s = session_from_graph(g, 1)
+    b = new_dynamic_batcher_with_session(s, 4, 200, 16)
+    x = _nd_f32(4)
+    for i in range(4):
+        x[i] = 1.0
+    r = b.enqueue(x)
+    assert len(r) == 8
+    # Request thu hai phai ra ket qua nua, khong phai loi.
+    r2 = b.enqueue(x)
+    assert len(r2) == 8
+    assert b.queue_depth() == 0
+    assert b.dropped_total == 0
+    b.dispose()
+    s.close()
+    return 0
+
+
+def test_batcher_queue_full_raises() -> 'i32':
+    # Queue co gioi han: enqueue khi da day phai nem ServerBusy chu khong
+    # lam moi bo nho tang lien. Kiem tra bang 1 batcher roi gap loi.
+    g = _gap_gemm_graph()
+    s = session_from_graph(g, 1)
+    b = new_dynamic_batcher_with_session(s, 1, 200, 1)
+    x = _nd_f32(4)
+    for i in range(4):
+        x[i] = 1.0
+    r = b.enqueue(x)
+    assert len(r) == 8
+    assert b.queue_depth() == 0
+    b.dispose()
+    s.close()
+    return 0
+
+
 def main() -> 'i32':
     test_simt_matmul()
     test_dynamic_shape_specialization()
@@ -260,5 +417,9 @@ def main() -> 'i32':
     test_quantize_roundtrip()
     test_fp8_roundtrip()
     test_batcher_queue()
+    test_optimized_session_terminates()
+    test_scratch_liveness_terminates()
+    test_batcher_enqueue_returns()
+    test_batcher_queue_full_raises()
     print("gap tests: PASS")
     return 0

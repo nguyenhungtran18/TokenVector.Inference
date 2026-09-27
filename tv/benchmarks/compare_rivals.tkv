@@ -53,8 +53,8 @@ def main() -> "i32":
     print("  hiem nang voi baseline C# SIMD. Dung -SkipBenchmarks de bo qua.")
     print("Cold-start parse+arena : TV " + str(cold) + " ms | ORT " + str(ORT_COLD_MS) + " ms | Torch " + str(TORCH_COLD_MS) + " ms | " + str(TORCH_COLD_MS/cold) + "x vs Torch")
     print("Single-sample FusedLinear 64x128 GELU: TV " + str(lat) + " us | ORT " + str(ORT_LAT_US) + " us | Torch " + str(TORCH_LAT_US) + " us | " + str(ORT_LAT_US/lat) + "x vs ORT")
-    print("GC per 5k runs          : TV " + str(gc) + " B (Zero-GC) | ORT >240KB | Torch interop overhead")
-    print("INT8 2000 runs          : TV " + str(tp[1]) + " ms | ORT " + str(ORT_INT8_MS) + " ms | Torch " + str(TORCH_INT8_MS) + " ms | " + str(ORT_INT8_MS/tp[1]) + "x vs ORT")
+    print("GC per 500 runs          : TV " + str(gc) + " B (Zero-GC) | ORT >240KB | Torch interop overhead")
+    print("INT8 200 runs            : TV " + str(tp[1]) + " ms | ORT " + str(ORT_INT8_MS) + " ms | Torch " + str(TORCH_INT8_MS) + " ms | " + str(ORT_INT8_MS/tp[1]) + "x vs ORT")
     print("==========================================================================")
     print("  All .tkv Benchmark & Stress Scenarios Executed Successfully!             ")
     print("==========================================================================")
@@ -173,14 +173,23 @@ def stress_hot() -> "i32":
 def stress_concurrent() -> "i32":
     # 32 workers x 500 burst via DynamicBatcher
     s = _tiny_graph(1, 64, 64, ActivationFunction_ReLU)
-    b = new_dynamic_batcher(1, 32, 200, 500)
+    # (2026-09-28) Phai truyen SESSION that: `new_dynamic_batcher(1, ...)`
+    # dat con so 1 vao truong `session` nen moi request deu error.
+    b = new_dynamic_batcher_with_session(s, 32, 200, 500)
     x = _nd_f32(64)
+    fill_const(x, 1.0)
     n = 500
+    ok = 0
+    err = 0
     t0 = now_ms()
     for i in range(n):
         _r = b.enqueue(x)
+        if len(_r) == 64:
+            ok = ok + 1
+        else:
+            err = err + 1
     dt = (now_ms() - t0) / 1000.0
-    print("[stress] Concurrent 32T/" + str(n) + " burst: " + str(n/max(dt,0.000000001)) + " req/s (gate: 0 dropped)")
+    print("[stress] Concurrent 32T/" + str(n) + " burst: " + str(n/max(dt,0.000000001)) + " req/s, ok=" + str(ok) + " err=" + str(err) + " (gate: 0 dropped)")
     b.dispose()
     s.close()
     return 0
