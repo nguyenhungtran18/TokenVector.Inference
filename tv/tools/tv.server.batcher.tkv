@@ -6,6 +6,22 @@
 import tv.runtime.session
 import tv.numerics.tensor
 
+# (2026-09-28) So lan quay toi da cho `enqueue` cho.
+#
+# `spawn(self._worker)` khong tao ra worker that (runtime .tkv hien tai chay
+# single-thread), nen request duoc ghi vao queue roi khong bao gio duoc
+# danh dau `done`. `_bch_spin_yield()` la stub return 0 => vong quay khong
+# bao gio ket thuc va CPU chay 100%. Do do `stress_concurrent` trong
+# compare_rivals.tkv treo vo han.
+#
+# Khi het han: chay chinh tai thread goi (inline fallback) de van tra ve
+# ket qua. Neu worker that co chay, no xu ly req truoc khi het han nen
+# duong "co worker" giu nguyen hanh vi micro-batching.
+#
+# Gioi han so LAN QUAY chu khong phai theo dong ho: `_bch_now_us()` cung la
+# stub return 0, nen han thoi gian se luon ban.
+_BCH_SPIN_LIMIT = 200000
+
 
 def _bch_now_us() -> "i64":
     return 0
@@ -106,7 +122,15 @@ class DynamicBatcher:
         self.queued = self.queued + 1
         _ah63_8 = self.queue
         _ah63_8.write(req)
+        _spins = 0
         while not req.done and not req.cancelled:
+            _spins = _spins + 1
+            if _spins >= _BCH_SPIN_LIMIT:
+                # Khong worker nao chay request -> tu chay tai day thay vi treo.
+                if len(self.pool) > 0:
+                    _sess_inline = self.pool[0]
+                    _run_one(req, _sess_inline)
+                break
             _bch_spin_yield()
         self.queued = self.queued - 1
         if req.cancelled:
@@ -198,3 +222,19 @@ def new_dynamic_batcher(ok: "i64", max_batch: "i64", timeout_us: "i64",
                         max_queue: "i64") -> "DynamicBatcher":
     _q = BatcherQueue(1)
     return DynamicBatcher(ok, max_batch, timeout_us, max_queue, _q, 0, 0, 0)
+
+
+# (2026-09-28) Factory co session that.
+#
+# `new_dynamic_batcher(ok, ...)` truyen tham so dau cho truong `_ok`, nen
+# `pool` rong va moi request deu error khi chay.
+#
+# LUU Y: `__init__` BI BO QUA khi bien dich, nen phai gan pool TAY nhu
+# `new_embedded_server` lam (dong 440): goi `pool.append(session)`. Dung
+# 8 tham so positional giong het `new_dynamic_batcher` de khong lech ABI.
+def new_dynamic_batcher_with_session(session: "InferenceSession", max_batch: "i64",
+                                     timeout_us: "i64", max_queue: "i64") -> "DynamicBatcher":
+    _db = DynamicBatcher(1, max_batch, timeout_us, max_queue, BatcherQueue(1), 0, 0, 0)
+    _pl = _db.pool
+    _pl.append(session)
+    return _db
