@@ -172,12 +172,51 @@ class OnnxModel:
         self.doc_string = ""
         self.graph = onnx_graph_new()
 
+def _mo_u32_le(buf: "str", pos: "i64") -> "i64":
+    return _mo_u32_impl(ord(buf[pos]), ord(buf[pos + 1]), ord(buf[pos + 2]), ord(buf[pos + 3]))
+
+def _mo_u32_impl(b0: "i64", b1: "i64", b2: "i64", b3: "i64") -> "i64":
+    return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+
+def _mo_f32_from_bits(b: "i64") -> "f32":
+    # Nhu protobuf_reader (float() tuong minh de hep f64 -> f32).
+    s = b & 2147483648
+    ex = (b >> 23) & 255
+    mant = b & 8388607
+    if ex == 0:
+        v = float(mant) * pow(2.0, 0.0 - 149.0)
+    elif ex == 255:
+        v = pow(2.0, 128.0) * 2.0
+    else:
+        v = (1.0 + float(mant) / 8388608.0) * pow(2.0, float(ex - 127))
+    if s != 0:
+        v = 0.0 - v
+    return float(v)
+
 def native_floats_from_raw(raw: "str") -> "list[f32]":
-    return []
+    # (2026-09-27) Code lai cho dung: giai ma raw_data LE thuan tkv
+    # (truoc la stub tra []). Moi nhom 4 byte -> 1 float32.
+    out = _mo_nd_f32(len(raw) // 4)
+    n = len(raw) // 4
+    for i in range(n):
+        out[i] = _mo_f32_from_bits(_mo_u32_le(raw, i * 4))
+    return out
+
 def native_ints_from_raw(raw: "str") -> "list[i64]":
-    return []
+    # (2026-09-27) Code lai cho dung: raw_data LE (int32 co dau) thuan tkv.
+    out = _mo_nd_i64(len(raw) // 4)
+    n = len(raw) // 4
+    for i in range(n):
+        u = _mo_u32_le(raw, i * 4)
+        if u > 2147483647:
+            out[i] = u - 4294967296
+        else:
+            out[i] = u
+    return out
+
 def raw_bytes_to_str(raw: "str") -> "str":
-    return ""
+    # (2026-09-27) Code lai cho dung: giu nguyen byte (ASCII tuong thich).
+    return raw
 
 
 def _mo_nd_f32(n: "i64") -> "list[f32]":

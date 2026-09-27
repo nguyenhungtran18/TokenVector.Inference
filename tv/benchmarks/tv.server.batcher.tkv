@@ -49,7 +49,9 @@ class BatcherQueue:
         return 0
     def try_read(self) -> "BatchRequest":
         if len(self.items) == 0:
-            _empty = BatchRequest([], 1, 1, "")
+            # (2026-09-27) Code lai cho dung: sentinel done=1/cancelled=1
+            # (worker bo qua), input rong mac dinh.
+            _empty = BatchRequest(1, 1, 1, "")
             return _empty
         head = self.items[0]
         rest = []
@@ -95,7 +97,12 @@ class DynamicBatcher:
         if self.queued >= self.max_queue:
             self.dropped_total = self.dropped_total + 1
             raise ServerBusy("batcher queue full. Retry later.")
-        req = BatchRequest(inp, 0, 0, "")
+        req = BatchRequest(1, 0, 0, "")
+        # (2026-09-27) Code lai cho dung: .ctor record chi nhan field KHONG
+        # container theo thu tu (_ok, done, cancelled, error); field container
+        # (input, result) tu khoi tao rong, phai gan EXPLICIT (mau _mk_node).
+        # Cu: BatchRequest(inp, 0, 0, "") dat inp vao _ok, input mai rong.
+        req.input = inp
         self.queued = self.queued + 1
         _ah63_8 = self.queue
         _ah63_8.write(req)

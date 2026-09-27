@@ -191,21 +191,25 @@ def _qt_fp8_encode(x: "f32", bias: "i64", w: "i64", emax_field: "i64", has_inf: 
     return (sign << 7) | (e8 << w) | (r - base)
 
 def _qt_fp8_decode(v: "i64", bias: "i64", w: "i64", emax_field: "i64", has_inf: "i64") -> "f32":
+    # (2026-09-27) Code lai cho dung: mask exponent theo tham so.
+    # Cu cung mask 5-bit (31) cho ca e4m3 (4-bit): 0xB8 (-1.0) co e8 doc
+    # thanh 23 thay vi 7 -> giai ma ra -65536.0. e4m3 (emax 15) mask 15.
     sign = (v >> 7) & 1
-    e8 = (v >> w) & 31
+    _ebits = 5
+    if emax_field == 15:
+        _ebits = 4
+    _emask = (1 << _ebits) - 1
+    e8 = (v >> w) & _emask
     m8 = v & ((1 << w) - 1)
     base = 1 << w
-    if e8 == emax_field and has_inf == 0:
-        # e4m3: chi `exp=15, man=7` moi la NaN. `exp=15, man=0..6` van la so
-        # binh thuong binh thuong (gia toi da 448 = 0x7E). Truoc day ham nay
-        # ha `e8` xuong 14 cho moi truong hop exp=15, lam 0x7E giai thanh 224
-        # (= 1.75 * 2^7 thay vi 1.75 * 2^8) — sai mot nhan muoi.
-        if m8 == 7:
-            return float(f32_bits_to_f64((sign << 31) | 2139095040 | 4194304))
-    if e8 == 31:
-        if m8 != 0:
-            return float(f32_bits_to_f64((sign << 31) | 2139095040 | 4194304))
-        return float(f32_bits_to_f64((sign << 31) | 2139095040))
+    if e8 == emax_field:
+        if has_inf == 0:
+            if m8 == 7:
+                return float(f32_bits_to_f64((sign << 31) | 2139095040 | 4194304))
+        else:
+            if m8 != 0:
+                return float(f32_bits_to_f64((sign << 31) | 2139095040 | 4194304))
+            return float(f32_bits_to_f64((sign << 31) | 2139095040))
     if e8 == 0:
         if m8 == 0:
             return float(f32_bits_to_f64(sign << 31))

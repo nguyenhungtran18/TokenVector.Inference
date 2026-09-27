@@ -19,7 +19,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $src = Join-Path $root "tv\tests\inference_tests.tkv"
 $exe = Join-Path $WorkDir "inference_cases.exe"
 
-Write-Host "[1/2] Bien dich $src ..."
+Write-Host "[1/3] Bien dich $src ..."
 & $Compiler build $src --out $exe | Out-Null
 if (-not (Test-Path -LiteralPath $exe)) {
     Write-Host "LOI: bien dich that bai."
@@ -38,7 +38,7 @@ $names = @(
     "vit_graph_builds", "gguf_k_quant_gate"
 )
 
-Write-Host "[2/2] Chay $($names.Count) case ..."
+Write-Host "[2/3] Chay $($names.Count) case ..."
 $rows = @()
 for ($i = 1; $i -le $names.Count; $i++) {
     $out = (& $exe $i 2>&1 | Out-String)
@@ -73,3 +73,23 @@ Write-Host "TOTAL: pass=$p fail=$f crash=$c"
 Write-Host "Chi tiet loi:"
 $rows | Where-Object { $_.Status -ne "PASS" } |
     ForEach-Object { "  {0}. {1}`n     {2}" -f $_.Idx, $_.Name, $_.Detail }
+
+# [3/3] gap_tests: mirror xUnit (protobuf, calibrate, quantize, fp8, batcher).
+# Chay rieng 1 process (giong main suite) de crash khong lan.
+$gapSrc = Join-Path $root "tv\tests\gap_tests.tkv"
+$gapExe = Join-Path $WorkDir "gap_cases.exe"
+Write-Host ""
+Write-Host "[3/3] Bien dich + chay gap_tests ..."
+& $Compiler build $gapSrc --out $gapExe | Out-Null
+if (-not (Test-Path -LiteralPath $gapExe)) {
+    Write-Host "LOI: bien dich gap_tests that bai."
+    exit 1
+}
+$gapOut = (& $gapExe 2>&1 | Out-String)
+if ($gapOut -match "gap tests: PASS") {
+    Write-Host "gap tests: PASS (12/12)"
+} else {
+    Write-Host "gap tests: FAIL"
+    Write-Host ($gapOut -replace "\s+", " ").Trim()
+    exit 1
+}

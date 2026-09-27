@@ -686,7 +686,10 @@ def infer_shapes(g: 'ExecutionGraph') -> 'i32':
                     _qx1002.append(_qx1045)
                 _c14 = _qx1002
             else:
-                _c14 = []
+                # (2026-09-27) Code lai cho dung: `[]` tran la List<TkvInt>,
+                # append vao in_shapes (list[list[i64]]) gay ArrayTypeMismatch
+                # khi doc. Dung _nd_i64(0) de co list[i64] rong dung kieu.
+                _c14 = _nd_i64(0)
             in_shapes.append(_c14)
         out_shapes = _infer_node_shapes(node, in_shapes, g)
         for k in range(min(len(node.outputs), len(out_shapes))):
@@ -708,7 +711,9 @@ def _infer_node_shapes(node: 'ExecutionNode', ins: 'list[list[i64]]', g: 'Execut
             _qx1003.append(_qx1046)
         _c15 = [_qx1003]
     else:
-        _c15 = [[]]
+        # (2026-09-27) Code lai cho dung: `[[]]` la List<List<TkvInt>>,
+        # khong phai list[list[i64]] -> ArrayTypeMismatch khi doc phan tu.
+        _c15 = [_nd_i64(0)]
     same1 = _c15
     _shr = _infer_shapes_a(node, ins, g, op, same1)
     if len(_shr) > 0:
@@ -719,7 +724,7 @@ def _infer_node_shapes(node: 'ExecutionNode', ins: 'list[list[i64]]', g: 'Execut
     _shr = _infer_shapes_c(node, ins, g, op, same1)
     if len(_shr) > 0:
         return _shr
-    return [[]]
+    return [_nd_i64(0)]
 
 def _is_op_simple(op: 'i64') -> 'i32':
     return op == OperatorType_Relu or op == OperatorType_Gelu or op == OperatorType_Silu or op == OperatorType_Sigmoid or op == OperatorType_Tanh or op == OperatorType_LeakyRelu or op == OperatorType_Elu or op == OperatorType_Softplus or op == OperatorType_Sqrt or op == OperatorType_Exp or op == OperatorType_Log or op == OperatorType_Neg or op == OperatorType_Reciprocal or op == OperatorType_Abs or op == OperatorType_Clip or op == OperatorType_Cast or op == OperatorType_Dropout or op == OperatorType_Softmax or op == OperatorType_RMSNorm or op == OperatorType_LayerNorm or op == OperatorType_BatchNormalization or op == OperatorType_Attention or op == OperatorType_Identity
@@ -753,7 +758,7 @@ def _infer_shapes_a(node: 'ExecutionNode', ins: 'list[list[i64]]', g: 'Execution
                 else:
                     out = _broadcast(out, s)
         if found == 0:
-            return [[]]
+            return [_nd_i64(0)]
         return [out]
     if op == OperatorType_FusedLinear or op == OperatorType_MatMul or op == OperatorType_Gemm or (op == OperatorType_QuantizedGemm):
         _lh6 = ins[1]
@@ -769,7 +774,7 @@ def _infer_shapes_a(node: 'ExecutionNode', ins: 'list[list[i64]]', g: 'Execution
         if len(ins) > 0 and len(_lh7) > 0:
             _lh8 = ins[0]
             return [[ins[0][0], ins[0][len(_lh8) - 1]]]
-        return [[]]
+        return [_nd_i64(0)]
     _lh9 = ins[0]
     if op == OperatorType_Transpose and len(ins) > 0 and (len(_lh9) == 2):
         return [[ins[0][1], ins[0][0]]]
@@ -1110,12 +1115,12 @@ def _infer_shapes_c(node: 'ExecutionNode', ins: 'list[list[i64]]', g: 'Execution
             if n < 0:
                 n = 0
             return [[n]]
-        return [[]]
+        return [_nd_i64(0)]
     if op == OperatorType_ConstantOfShape and len(node.inputs) > 0:
         dims = _init_ints(g, node.inputs[0])
         if len(dims) > 0:
             return [dims]
-        return [[]]
+        return [_nd_i64(0)]
     _lh34 = ins[0]
     if op == OperatorType_Resize and len(ins) > 0 and (len(_lh34) == 4):
         if len(node.inputs) > 3:
@@ -1182,11 +1187,18 @@ def _infer_shapes_c(node: 'ExecutionNode', ins: 'list[list[i64]]', g: 'Execution
             _qx1029.append(len(s))
         rank = max(_qx1029)
         ax = _norm(node.axis, rank)
-        out = []
-        _zf15 = 0
-        while _zf15 < rank:
-            out.append(0)
-            _zf15 = _zf15 + 1
+        # (2026-09-27) Code lai cho dung: gieo `out` tu slice cua shape DAI
+        # nhat (list[i64] dung kieu) thay vi `[]` + append 0 (suy thanh
+        # List<TkvInt> -> ArrayTypeMismatch khi gan vao TensorDesc.shape).
+        # Gan 0 truc tiep vao o long (mau dung nhu test: `_xdims[0] = 2`).
+        _first = ins[0]
+        _bl = _first[:]
+        for s in ins:
+            if len(s) > len(_bl):
+                _bl = s[:]
+        out = _bl
+        for i in range(len(out)):
+            out[i] = 0
         for s in ins:
             for i in range(min(len(s), rank)):
                 if i == ax:
@@ -1206,7 +1218,7 @@ def _infer_shapes_c(node: 'ExecutionNode', ins: 'list[list[i64]]', g: 'Execution
         return [_qx1018]
     return []
 
-    return [[]]
+    return [_nd_i64(0)]
 
 def _einsum_out_shape(eq: 'str', in_shapes: 'list[list[i64]]') -> 'list[i64]':
     arrow = eq.find("->")
@@ -1829,37 +1841,35 @@ def _rnn_common(g: 'ExecutionGraph', on: 'OnnxNode', kind: 'str') -> 'RnnDims':
     if "hidden_size" in on.attrs:
         _ah = on.attrs["hidden_size"]
         hid = int(_ah.i)
-    acts = []
+    # (2026-09-27) Code lai cho dung: `acts` phai LUON la list[str].
+    # Cu: `acts = []` (suy thanh List<int) roi gan list[str] -> IL sai kieu
+    # (PEVerify: String vs Int32) -> BadImageFormat khi nap. Moi: khoi tao
+    # bang literal str, copy bang slice (giu dung kieu List<string>).
+    acts = ["Tanh"]
+    _got_acts = 0
     if "activations" in on.attrs:
+        _got_acts = 1
+    if _got_acts == 1:
         if "activation_strings" in on.attrs:
             _a78 = on.attrs["activation_strings"]
-            _c78 = _a78.strings
+            acts = _a78.strings[:]
         else:
             _as = on.attrs["activations"]
-            _c78 = _as.strings
-        _qx1027 = []
-        for _qx1070 in _c78:
-            _qx1027.append(_qx1070)
-        acts = _qx1027
-    if len(acts) == 0:
+            acts = _as.strings[:]
+    if _got_acts == 0:
         if kind == "GRU":
-            _c79 = ["Sigmoid", "Sigmoid", "Tanh"]
-        else:
-            _c79 = ["Tanh"]
+            acts = ["Sigmoid", "Sigmoid", "Tanh"]
         if kind == "LSTM":
-            _c80 = ["Sigmoid", "Tanh", "Tanh"]
-        else:
-            _c80 = _c79
-        acts = _c80
+            acts = ["Sigmoid", "Tanh", "Tanh"]
     inp0 = on.inputs[0]
+    # (2026-09-27) Code lai cho dung: `_c81` phai luon la list[i64].
+    # `[]` tran suy thanh List<TkvInt> -> truyen vao slice/generic sai kieu.
+    # Dung _nd_i64(0) de co List<long> rong dung kieu.
+    _c81 = _nd_i64(0)
     if inp0 in g.tensors:
         _t81 = g.tensors[inp0]
         if len(_t81.shape) == 3:
             _c81 = _t81.shape
-        else:
-            _c81 = []
-    else:
-        _c81 = []
     sh = _c81[:]
     layout = 0
     if "layout" in on.attrs:
@@ -1937,10 +1947,12 @@ def _gate_mm(out: 'list[OnnxNode]', g: 'ExecutionGraph', tag: 'str', a2d: 'str',
     return 0
 
 def _dir_weights(g: 'ExecutionGraph', on: 'OnnxNode', d: 'i64', rows_per_gate: 'i64', gates: 'i64', in_dim: 'i64', hid: 'i64', prefix: 'str', wnames: 'list[str]', rnames: 'list[str]', wbn: 'list[str]', rbn: 'list[str]') -> 'i32':
+    # (2026-09-27) Code lai cho dung: KHONG gan lai `wnames = []` o day.
+    # List la reference type; gan lai se cat lien ket voi list cua caller
+    # (wn/rn o _lstm_dir) khien caller mai thay list rong -> wn[gg] OOB.
+    # Caller truyen list rong san, chi can append.
     w = g.initializers[on.inputs[1]]
     r = g.initializers[on.inputs[2]]
-    wnames = []
-    rnames = []
     for gg in range(gates):
         _sa1 = g.tensors[on.inputs[1]]
         wf = _subarray_flat(w, _sa1.shape, [d, gg * hid, 0], [1, hid, in_dim])
@@ -1954,9 +1966,19 @@ def _dir_weights(g: 'ExecutionGraph', on: 'OnnxNode', d: 'i64', rows_per_gate: '
         rn = prefix + "_R" + str(gg) + ""
         _add_float_init(g, rn, rs[1:], rf)
         rnames.append(rn)
-    wbn = []
-    rbn = []
-    if len(on.inputs) > 3 and on.inputs[3] != "":
+    # (2026-09-27) Code lai cho dung: tranh `and` short-circuit; khong gan
+    # lai wbn/rbn (ly do nhu tren).
+    _bok1 = 0
+    if len(on.inputs) > 3:
+        _bok1 = 1
+    _bnm = ""
+    if _bok1 == 1:
+        _bnm = on.inputs[3]
+    _bok2 = 0
+    if _bnm != "":
+        _bok2 = 1
+    _bok = _bok1 + _bok2
+    if _bok == 2:
         b = g.initializers[on.inputs[3]]
         for gg in range(gates):
             _sa3 = g.tensors[on.inputs[3]]
@@ -2013,50 +2035,84 @@ def _rev_indices(g: 'ExecutionGraph', name: 'str', seq: 'i64') -> 'str':
     _add_int_init(g, name, _qx1037)
     return name
 
-def _expand_lstm(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
-    # (2026-09-26) TACH MOI `or`/`and` nhieu toan hang ra bien trung gian.
-    #
-    # Compiler bien dich ngan short-circuit `a or b` thanh:
-    #
-    #     <a> ; dup ; brtrue END ; pop ; <b> ; END:
-    #
-    # Do `pop` chi rut MOT gia tri, mau nay chi giu dung MOT gia tri khi
-    # nhanh. Khi hai bien thuc short-circuit NOI TIEP nhau (`a or b and c`),
-    # compiler sinh hai chuoi `dup/brtrue/pop` lien tiep, chung ta
-    # `_expand_lstm_sc2_end` roi `_expand_lstm_sc6_end` - va giua cac label
-    # do con mot gia tri THUA tren stack. Day la ly do CLR nem
-    # BadImageFormatException ("An attempt was made to load a program with an
-    # incorrect format") khi nap `_expand_lstm`.
-    #
-    # Da thu tach rieng tung nhanh `or` va xac nhan phan nay dung:
-    #   - `or` 2 toan hang       -> 1 chuoi short-circuit   (can)
-    #   - `or` roi `and` noi tiep -> 2 chuoi lien tiep      (sai)
-    # Giai phap: moi dieu kien chi giu MOT bien bool, `if` doc bien do.
-    # (2026-09-26) Gom nhieu `if` lien tiep vao MOT dieu kien, xem ghi chu
-    # o `_has_p` ben tren: chuoi `if` sinh nhieu nhanh nhay co do sau stack
-    # khac nhau -> InvalidProgramException.
+def _lstm_check_attrs(on: 'OnnxNode') -> 'i32':
+    # (2026-09-27) Code lai cho dung: tach khoi _expand_lstm (qua lon).
+    # Moi method nho, 1 kieu bien, khong or/and noi tiep, khong long if.
     _has_act = 0
-    if "activation_alpha" in on.attrs or "activation_beta" in on.attrs:
+    if "activation_alpha" in on.attrs:
+        _has_act = 1
+    if "activation_beta" in on.attrs:
         _has_act = 1
     if _has_act == 1:
         raise UnsupportedOp("LSTM with custom activation alpha/beta")
-    _qx1000 = {}
+    _known = {}
     for nm in on.inputs:
-        _qx1000[nm] = 1
-    # (2026-09-26) `_has_p` dung MOT bieu thuc `and` co ngoac, KHONG dung
-    # chuoi `if` long nhau.
-    #
-    # Chuoi `if` long (`if a: if b: flag = 1`) bien dich thanh nhieu nhanh
-    # `brfalse` lien tiep, moi nhanh lai mot nhanh. O vung bien dich cua
-    # `_expand_lstm`, cac nhanh do khong giong nhau ve do sau stack ->
-    # CLR nem InvalidProgramException ("Common Language Runtime detected an
-    # invalid program"), roi exe bao lai thanh BadImageFormatException.
-    # Giu dieu kien trong MOT bieu thuc `and` de chi co MOT nhanh nhay.
-    _has_p = 0
-    if ("P" in _qx1000) and (len(on.inputs) > 7) and (on.inputs[7] != ""):
-        _has_p = 1
-    if _has_p == 1:
+        _known[nm] = 1
+    _p1 = 0
+    if "P" in _known:
+        _p1 = 1
+    _p2 = 0
+    if len(on.inputs) > 7:
+        _p2 = 1
+    _inp7 = ""
+    if _p2 == 1:
+        _inp7 = on.inputs[7]
+    _p3 = 0
+    if _inp7 != "":
+        _p3 = 1
+    _p_sum = _p1 + _p2 + _p3
+    if _p_sum == 3:
         raise UnsupportedOp("LSTM with peepholes (P)")
+    return 0
+
+def _lstm_check_seq(seq: 'i64', hid: 'i64') -> 'i32':
+    _bs1 = 0
+    if seq <= 0:
+        _bs1 = 1
+    _bs2 = 0
+    if seq > 512:
+        _bs2 = 1
+    _bs3 = 0
+    if hid <= 0:
+        _bs3 = 1
+    _bs_sum = _bs1 + _bs2 + _bs3
+    if _bs_sum > 0:
+        raise UnsupportedOp("LSTM needs static seq_len in [1,512] and hidden_size")
+    return 0
+
+def _lstm_gates(out: 'list[OnnxNode]', g: 'ExecutionGraph', tag: 'str', xt: 'str', wn: 'list[str]', rn: 'list[str]', wbn: 'list[str]', rbn: 'list[str]', acts: 'list[str]', h_prev: 'str', c_prev: 'str') -> 'i32':
+    # Mot buoc thoi gian LSTM: 4 cong + kich hoat + cap nhat cell/hidden.
+    # (2026-09-27) Code lai cho dung: ten tensor moi (tag+"h"/tag+"c") la
+    # ham xac dinh cua tag nen caller tu suy ra, khong can list thu gom
+    # (tranh list long nhau suy kieu sai -> ArrayTypeMismatch).
+    outs = []
+    for gg in range(4):
+        _gate_mm(out, g, tag + "g" + str(gg) + "", xt, wn[gg], h_prev, rn[gg], wbn[gg], rbn[gg], tag + "z" + str(gg) + "")
+        outs.append(tag + "z" + str(gg) + "")
+    i_a = tag + "i"
+    o_a = tag + "o"
+    f_a = tag + ""
+    g_a = tag + "g"
+    out.append(_mk_node(tag + "ai", acts[0], [outs[0]], [i_a]))
+    out.append(_mk_node(tag + "ao", acts[0], [outs[1]], [o_a]))
+    out.append(_mk_node(tag + "a", acts[0], [outs[2]], [f_a]))
+    out.append(_mk_node(tag + "ag", acts[1], [outs[3]], [g_a]))
+    fc = tag + "fc"
+    ig = tag + "ig"
+    c_new = tag + "c"
+    out.append(_mk_node(tag + "m1", "Mul", [f_a, c_prev], [fc]))
+    out.append(_mk_node(tag + "m2", "Mul", [i_a, g_a], [ig]))
+    out.append(_mk_node(tag + "a1", "Add", [fc, ig], [c_new]))
+    tc = tag + "tc"
+    h_new = tag + "h"
+    out.append(_mk_node(tag + "ah", acts[2], [c_new], [tc]))
+    out.append(_mk_node(tag + "m3", "Mul", [o_a, tc], [h_new]))
+    return 0
+
+def _expand_lstm(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
+    # (2026-09-27) Code lai cho dung: than method chi dieu phoi cac helper
+    # nho. Logic kiem tra da chuyen vao _lstm_check_attrs/_lstm_check_seq.
+    _lstm_check_attrs(on)
     _rd = _rnn_common(g, on, "LSTM")
     seq = _rd.seq
     bat = _rd.bat
@@ -2064,13 +2120,7 @@ def _expand_lstm(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
     hid = _rd.hid
     ndir = _rd.ndir
     acts = _rd.acts
-    # (2026-09-26) Gop ba `if` thanh MOT dieu kien `or` - xem ghi chu
-    # o `_has_p`.
-    _bad_seq = 0
-    if seq <= 0 or seq > 512 or hid <= 0:
-        _bad_seq = 1
-    if _bad_seq == 1:
-        raise UnsupportedOp("LSTM needs static seq_len in [1,512] and hidden_size")
+    _lstm_check_seq(seq, hid)
     if "layout" in on.attrs:
         _ah1813_19 = on.attrs["layout"]
         _c84 = int(_ah1813_19.i)
@@ -2081,136 +2131,173 @@ def _expand_lstm(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
     if ndir == 2:
         dirs = [0, 1]
     out = []
-    dir_hiddens = []
-    dir_cells = []
+    # (2026-09-27) Code lai cho dung: KHONG dung list long nhau
+    # (dir_hiddens/dir_cells kieu list[list[str]] bi suy kieu sai thanh
+    # List<TkvInt> -> ArrayTypeMismatch khi append). Thay vao do thu gom
+    # lasts_h/lasts_c phang (list[str]); ten tensor suy ra xac dinh tu tag.
+    lasts_h = []
+    lasts_c = []
     for d in dirs:
-        pre = on.name + "_d" + str(d) + "_"
-        wn = []
-        rn = []
-        wbn = []
-        rbn = []
-        _dir_weights(g, on, d, hid, 4, inp, hid, pre + "w", wn, rn, wbn, rbn)
-        xseq = on.inputs[0]
-        if d == 1:
-            rev = pre + "rev_idx"
-            _rev_indices(g, rev, seq)
-            rx = pre + "rx"
-            out.append(_mk_node(pre + "rev", "Gather", [xseq, rev], [rx]))
-            xseq = rx
-        if len(on.inputs) > 5 and on.inputs[5] != "":
-            _c85 = on.inputs[5]
-        else:
-            _c85 = ""
-        h_prev = _c85
-        if len(on.inputs) > 6 and on.inputs[6] != "":
-            _c86 = on.inputs[6]
-        else:
-            _c86 = ""
-        c_prev = _c86
-        # Tinh `bat * hid` MOT LAN truoc moi nhanh: bien dung o ca hai nhanh
-        # `if` nen phai gan truoc khi vao chung, khong gan ben trong nhanh.
-        _nbh = bat * hid
-        if h_prev == "":
-            h_prev = pre + "h0"
-            _add_float_init(g, h_prev, [bat, hid], _td_f32_repeat(0.0, _nbh))
-        if c_prev == "":
-            c_prev = pre + "c0"
-            _add_float_init(g, c_prev, [bat, hid], _td_f32_repeat(0.0, _nbh))
-        if h_prev in g.initializers:
-            _th0 = g.tensors[h_prev]
-            if len(_th0.shape) == 3:
-                hf = _subarray_flat(g.initializers[h_prev], _th0.shape, [d, 0, 0], [1, bat, hid])
-                hs = _subarray_shape(g.initializers[h_prev], _th0.shape, [d, 0, 0], [1, bat, hid])
-                hn = pre + "hd"
-                _add_float_init(g, hn, hs[1:], hf)
-                h_prev = hn
-        if c_prev in g.initializers:
-            _tc1 = g.tensors[c_prev]
-            if len(_tc1.shape) == 3:
-                cf = _subarray_flat(g.initializers[c_prev], _tc1.shape, [d, 0, 0], [1, bat, hid])
-                cs = _subarray_shape(g.initializers[c_prev], _tc1.shape, [d, 0, 0], [1, bat, hid])
-                cn = pre + "cd"
-                _add_float_init(g, cn, cs[1:], cf)
-                c_prev = cn
-        hs = []
-        cs = []
-        for t in range(seq):
-            tag = pre + "t" + str(t) + "_"
-            _c87 = t
-            _xo = _rnn_xtract(g, on, _c87, seq, bat, inp, layout, tag)
-            s1 = _xo.s1
-            e1 = _xo.e1
-            mid = _xo.mid
-            sh = _xo.sh
-            xt = tag + "x"
-            _emit_step_slice(out, g, tag, xseq, mid, sh, s1, e1, xt)
-            outs = []
-            for gg in range(4):
-                _gate_mm(out, g, tag + "g" + str(gg) + "", xt, wn[gg], h_prev, rn[gg], wbn[gg], rbn[gg], tag + "z" + str(gg) + "")
-                outs.append(tag + "z" + str(gg) + "")
-            i_a = tag + "i"
-            o_a = tag + "o"
-            f_a = tag + ""
-            g_a = tag + "g"
-            out.append(_mk_node(tag + "ai", acts[0], [outs[0]], [i_a]))
-            out.append(_mk_node(tag + "ao", acts[0], [outs[1]], [o_a]))
-            out.append(_mk_node(tag + "a", acts[0], [outs[2]], [f_a]))
-            out.append(_mk_node(tag + "ag", acts[1], [outs[3]], [g_a]))
-            fc = tag + "fc"
-            ig = tag + "ig"
-            c_new = tag + "c"
-            out.append(_mk_node(tag + "m1", "Mul", [f_a, c_prev], [fc]))
-            out.append(_mk_node(tag + "m2", "Mul", [i_a, g_a], [ig]))
-            out.append(_mk_node(tag + "a1", "Add", [fc, ig], [c_new]))
-            tc = tag + "tc"
-            h_new = tag + "h"
-            out.append(_mk_node(tag + "ah", acts[2], [c_new], [tc]))
-            out.append(_mk_node(tag + "m3", "Mul", [o_a, tc], [h_new]))
-            h_prev = h_new
-            c_prev = c_new
-            hs.append(h_new)
-            cs.append(c_new)
-        dir_hiddens.append(hs)
-        dir_cells.append(cs)
-    # (2026-09-26) `seq` la int64 nen `dir_hiddens[d][seq - 1]` sinh
-    # `ldloc(seq:int64); ldc.i4 1; sub.ovf` - tron do rong, CLR nem
-    # BadImageFormatException khi JIT. Ep index ve i32 TRUOC vong lap de
-    # `sub.ovf` nhan hai i32 va `get_Item(int32)` khop.
-    _qx1039 = []
-    _si = int(seq) - 1
-    for d in range(len(dirs)):
-        _qx1039.append(dir_hiddens[d][_si])
-    lasts_h = _qx1039
-    _qx1040 = []
-    for d in range(len(dirs)):
-        _qx1040.append(dir_cells[d][_si])
-    lasts_c = _qx1040
+        _lstm_dir(g, on, d, seq, bat, inp, hid, acts, layout, out)
+        _ltag = on.name + "_d" + str(d) + "_t" + str(int(seq) - 1) + "_"
+        lasts_h.append(_ltag + "h")
+        lasts_c.append(_ltag + "c")
+    _lstm_finish(g, out, on, lasts_h, lasts_c, dirs, seq, bat, hid)
+    return out
+
+def _lstm_dir(g: 'ExecutionGraph', on: 'OnnxNode', d: 'i64', seq: 'i64', bat: 'i64', inp: 'i64', hid: 'i64', acts: 'list[str]', layout: 'i64', out: 'list[OnnxNode]') -> 'i32':
+    # (2026-09-27) Code lai cho dung: mot huong LSTM (weights, init state,
+    # unroll timesteps). Tach khoi _expand_lstm de method nho, IL dung.
+    pre = on.name + "_d" + str(d) + "_"
+    wn = []
+    rn = []
+    wbn = []
+    rbn = []
+    _dir_weights(g, on, d, hid, 4, inp, hid, pre + "w", wn, rn, wbn, rbn)
+    xseq = on.inputs[0]
+    if d == 1:
+        rev = pre + "rev_idx"
+        _rev_indices(g, rev, seq)
+        rx = pre + "rx"
+        out.append(_mk_node(pre + "rev", "Gather", [xseq, rev], [rx]))
+        xseq = rx
+    _in5_ok = 0
+    if len(on.inputs) > 5:
+        _in5_ok = 1
+    _in5_name = ""
+    if _in5_ok == 1:
+        _in5_name = on.inputs[5]
+    _in5_ne = 0
+    if _in5_name != "":
+        _in5_ne = 1
+    _in5_go = _in5_ok + _in5_ne
+    if _in5_go == 2:
+        _c85 = on.inputs[5]
+    else:
+        _c85 = ""
+    h_prev = _c85
+    _in6_ok = 0
+    if len(on.inputs) > 6:
+        _in6_ok = 1
+    _in6_name = ""
+    if _in6_ok == 1:
+        _in6_name = on.inputs[6]
+    _in6_ne = 0
+    if _in6_name != "":
+        _in6_ne = 1
+    _in6_go = _in6_ok + _in6_ne
+    if _in6_go == 2:
+        _c86 = on.inputs[6]
+    else:
+        _c86 = ""
+    c_prev = _c86
+    _nbh = bat * hid
+    if h_prev == "":
+        h_prev = pre + "h0"
+        _add_float_init(g, h_prev, [bat, hid], _td_f32_repeat(0.0, _nbh))
+    if c_prev == "":
+        c_prev = pre + "c0"
+        _add_float_init(g, c_prev, [bat, hid], _td_f32_repeat(0.0, _nbh))
+    if h_prev in g.initializers:
+        _th0 = g.tensors[h_prev]
+        if len(_th0.shape) == 3:
+            hf = _subarray_flat(g.initializers[h_prev], _th0.shape, [d, 0, 0], [1, bat, hid])
+            hs_shape = _subarray_shape(g.initializers[h_prev], _th0.shape, [d, 0, 0], [1, bat, hid])
+            hn = pre + "hd"
+            _add_float_init(g, hn, hs_shape[1:], hf)
+            h_prev = hn
+    if c_prev in g.initializers:
+        _tc1 = g.tensors[c_prev]
+        if len(_tc1.shape) == 3:
+            cf = _subarray_flat(g.initializers[c_prev], _tc1.shape, [d, 0, 0], [1, bat, hid])
+            cs_shape = _subarray_shape(g.initializers[c_prev], _tc1.shape, [d, 0, 0], [1, bat, hid])
+            cn = pre + "cd"
+            _add_float_init(g, cn, cs_shape[1:], cf)
+            c_prev = cn
+    for t in range(seq):
+        tag = pre + "t" + str(t) + "_"
+        _c87 = t
+        _xo = _rnn_xtract(g, on, _c87, seq, bat, inp, layout, tag)
+        s1 = _xo.s1
+        e1 = _xo.e1
+        mid = _xo.mid
+        sh = _xo.sh
+        xt = tag + "x"
+        _emit_step_slice(out, g, tag, xseq, mid, sh, s1, e1, xt)
+        _lstm_gates(out, g, tag, xt, wn, rn, wbn, rbn, acts, h_prev, c_prev)
+        h_prev = tag + "h"
+        c_prev = tag + "c"
+    return 0
+
+def _lstm_finish(g: 'ExecutionGraph', out: 'list[OnnxNode]', on: 'OnnxNode', lasts_h: 'list[str]', lasts_c: 'list[str]', dirs: 'list[i64]', seq: 'i64', bat: 'i64', hid: 'i64') -> 'i32':
+    # (2026-09-27) Code lai cho dung: ghep Y/YH/YC tu cac huong.
+    # Tach khoi _expand_lstm de method nho, IL dung. Ten tensor suy ra xac
+    # dinh tu (on.name, d, t) nen khong can list long nhau.
     for d in range(len(dirs)):
         for t in range(seq):
             r4 = on.name + "_r4_" + str(d) + "_" + str(t) + ""
             _add_int_init(g, on.name + "_rsh_" + str(d) + "_" + str(t) + "", [1, 1, bat, hid])
-            out.append(_mk_node(on.name + "_rs_" + str(d) + "_" + str(t) + "", "Reshape", [dir_hiddens[d][t], on.name + "_rsh_" + str(d) + "_" + str(t) + ""], [r4]))
-            _dh = dir_hiddens[d]
-            _dh[t] = r4
-    if len(on.outputs) > 1 and on.outputs[1] != "":
+            _ht = on.name + "_d" + str(d) + "_t" + str(t) + "_h"
+            out.append(_mk_node(on.name + "_rs_" + str(d) + "_" + str(t) + "", "Reshape", [_ht, on.name + "_rsh_" + str(d) + "_" + str(t) + ""], [r4]))
+    # (2026-09-27) Tranh `and` trong method lon.
+    _o1_ok = 0
+    if len(on.outputs) > 1:
+        _o1_ok = 1
+    _o1_name = ""
+    if _o1_ok == 1:
+        _o1_name = on.outputs[1]
+    _o1_ne = 0
+    if _o1_name != "":
+        _o1_ne = 1
+    _o1_go = _o1_ok + _o1_ne
+    if _o1_go == 2:
         _assemble_last(g, out, on, lasts_h, bat, hid, on.outputs[1])
-    if len(on.outputs) > 2 and on.outputs[2] != "":
+    _o2_ok = 0
+    if len(on.outputs) > 2:
+        _o2_ok = 1
+    _o2_name = ""
+    if _o2_ok == 1:
+        _o2_name = on.outputs[2]
+    _o2_ne = 0
+    if _o2_name != "":
+        _o2_ne = 1
+    _o2_go = _o2_ok + _o2_ne
+    if _o2_go == 2:
         _assemble_last(g, out, on, lasts_c, bat, hid, on.outputs[2])
-    if len(on.outputs) > 0 and on.outputs[0] != "":
+    _o0_ok = 0
+    if len(on.outputs) > 0:
+        _o0_ok = 1
+    _o0_name = ""
+    if _o0_ok == 1:
+        _o0_name = on.outputs[0]
+    _o0_ne = 0
+    if _o0_name != "":
+        _o0_ne = 1
+    _o0_go = _o0_ok + _o0_ne
+    if _o0_go == 2:
         per_dir = []
         for d in range(len(dirs)):
             cd = on.name + "_cd" + str(d) + ""
-            out.append(_concat_axis(on.name + "_cc" + str(d) + "", dir_hiddens[d], cd, 0))
+            # (2026-09-27) Code lai cho dung: ten r4 suy ra xac dinh, khong
+            # doc tu list long nhau (suy kieu sai).
+            _cd_rs = []
+            for t in range(seq):
+                _cd_rs.append(on.name + "_r4_" + str(d) + "_" + str(t) + "")
+            out.append(_concat_axis(on.name + "_cc" + str(d) + "", _cd_rs, cd, 0))
             per_dir.append(cd)
         if len(per_dir) > 1:
             out.append(_concat_axis(on.name + "_y", per_dir, on.outputs[0], 1))
         else:
             out.append(_mk_node(on.name + "_y1", "Identity", per_dir, [on.outputs[0]]))
-    return out
+    return 0
 
-def _assemble_seq(g: 'ExecutionGraph', out: 'list[OnnxNode]', on: 'OnnxNode', per_dir_hs: 'list[list[str]]', seq: 'i64', bat: 'i64', hid: 'i64', y_name: 'str') -> 'i32':
+def _assemble_seq(g: 'ExecutionGraph', out: 'list[OnnxNode]', on: 'OnnxNode', per_dir_hs: 'list[list[str]]', seq: 'i64', bat: 'i64', hid: 'i64', y_name: 'str', ndir: 'i64') -> 'i32':
+    # (2026-09-27) Code lai cho dung: KHONG dung len() tren list long nhau.
+    # Compiler phat List<string>::get_Count() cho per_dir_hs (list[list[str]])
+    # -> IL sai kieu -> BadImageFormat. Nhan ndir tu caller (len tren list
+    # phang, dung) thay vi tu do dem.
     per_dir = []
-    for d in range(len(per_dir_hs)):
+    for d in range(ndir):
         for t in range(seq):
             r4 = on.name + "_r4_" + str(d) + "_" + str(t) + ""
             _add_int_init(g, on.name + "_rsh_" + str(d) + "_" + str(t) + "", [1, 1, bat, hid])
@@ -2247,7 +2334,17 @@ def _expand_gru(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
     hid = _rd.hid
     ndir = _rd.ndir
     acts = _rd.acts
-    if seq <= 0 or seq > 512 or hid <= 0:
+    _g_bs1 = 0
+    if seq <= 0:
+        _g_bs1 = 1
+    _g_bs2 = 0
+    if seq > 512:
+        _g_bs2 = 1
+    _g_bs3 = 0
+    if hid <= 0:
+        _g_bs3 = 1
+    _g_bs = _g_bs1 + _g_bs2 + _g_bs3
+    if _g_bs > 0:
         raise UnsupportedOp("GRU needs static seq_len in [1,512] and hidden_size")
     if "layout" in on.attrs:
         _ah1979_19 = on.attrs["layout"]
@@ -2283,7 +2380,18 @@ def _expand_gru(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
             rx = pre + "rx"
             out.append(_mk_node(pre + "rev", "Gather", [xseq, rev], [rx]))
             xseq = rx
-        if len(on.inputs) > 5 and on.inputs[5] != "":
+        # (2026-09-27) Code lai cho dung: tranh `and` short-circuit.
+        _in5_ok2 = 0
+        if len(on.inputs) > 5:
+            _in5_ok2 = 1
+        _in5_nm2 = ""
+        if _in5_ok2 == 1:
+            _in5_nm2 = on.inputs[5]
+        _in5_ne2 = 0
+        if _in5_nm2 != "":
+            _in5_ne2 = 1
+        _in5_go2 = _in5_ok2 + _in5_ne2
+        if _in5_go2 == 2:
             _c91 = on.inputs[5]
         else:
             _c91 = ""
@@ -2296,11 +2404,13 @@ def _expand_gru(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
             _th2 = g.tensors[h_prev]
             if len(_th2.shape) == 3:
                 hf = _subarray_flat(g.initializers[h_prev], _th2.shape, [d, 0, 0], [1, bat, hid])
-                hs = _subarray_shape(g.initializers[h_prev], _th2.shape, [d, 0, 0], [1, bat, hid])
+                hs_shape2 = _subarray_shape(g.initializers[h_prev], _th2.shape, [d, 0, 0], [1, bat, hid])
                 hn = pre + "hd"
-                _add_float_init(g, hn, hs[1:], hf)
+                _add_float_init(g, hn, hs_shape2[1:], hf)
                 h_prev = hn
-        hs = []
+        # (2026-09-27) Code lai cho dung: tach bien shape list[i64]
+        # khoi bien name list[str].
+        hs_gru = []
         # (2026-09-26) `bat * hid` tinh truoc: viet inline sau literal 1.0
         # se bien dich `mul.ovf` (nhan so nguyen) tren float32 -> IL sai.
         _nbh2 = bat * hid
@@ -2343,12 +2453,33 @@ def _expand_gru(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
             out.append(_mk_node(tag + "m2", "Mul", [zc, tag + "hc"], [tag + "nh"]))
             out.append(_mk_node(tag + "a2", "Add", [om, tag + "nh"], [h_new]))
             h_prev = h_new
-            hs.append(h_new)
-        dir_hs.append(hs)
+            hs_gru.append(h_new)
+        dir_hs.append(hs_gru)
         dir_last.append(h_prev)
-    if len(on.outputs) > 0 and on.outputs[0] != "":
-        _assemble_seq(g, out, on, dir_hs, seq, bat, hid, on.outputs[0])
-    if len(on.outputs) > 1 and on.outputs[1] != "":
+    # (2026-09-27) Code lai cho dung: tranh `and` short-circuit.
+    _go0 = 0
+    if len(on.outputs) > 0:
+        _go0 = 1
+    _gn0 = ""
+    if _go0 == 1:
+        _gn0 = on.outputs[0]
+    _ge0 = 0
+    if _gn0 != "":
+        _ge0 = 1
+    _gs0 = _go0 + _ge0
+    if _gs0 == 2:
+        _assemble_seq(g, out, on, dir_hs, seq, bat, hid, on.outputs[0], ndir)
+    _go1 = 0
+    if len(on.outputs) > 1:
+        _go1 = 1
+    _gn1 = ""
+    if _go1 == 1:
+        _gn1 = on.outputs[1]
+    _ge1 = 0
+    if _gn1 != "":
+        _ge1 = 1
+    _gs1 = _go1 + _ge1
+    if _gs1 == 2:
         _assemble_last(g, out, on, dir_last, bat, hid, on.outputs[1])
     return out
 
@@ -2360,7 +2491,17 @@ def _expand_rnn(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
     hid = _rd.hid
     ndir = _rd.ndir
     acts = _rd.acts
-    if seq <= 0 or seq > 512 or hid <= 0:
+    _r_bs1 = 0
+    if seq <= 0:
+        _r_bs1 = 1
+    _r_bs2 = 0
+    if seq > 512:
+        _r_bs2 = 1
+    _r_bs3 = 0
+    if hid <= 0:
+        _r_bs3 = 1
+    _r_bs = _r_bs1 + _r_bs2 + _r_bs3
+    if _r_bs > 0:
         raise UnsupportedOp("RNN needs static seq_len in [1,512] and hidden_size")
     if "layout" in on.attrs:
         _ah2082_19 = on.attrs["layout"]
@@ -2390,7 +2531,18 @@ def _expand_rnn(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
             rx = pre + "rx"
             out.append(_mk_node(pre + "rev", "Gather", [xseq, rev], [rx]))
             xseq = rx
-        if len(on.inputs) > 5 and on.inputs[5] != "":
+        # (2026-09-27) Code lai cho dung: tranh `and` short-circuit.
+        _in5_ok3 = 0
+        if len(on.inputs) > 5:
+            _in5_ok3 = 1
+        _in5_nm3 = ""
+        if _in5_ok3 == 1:
+            _in5_nm3 = on.inputs[5]
+        _in5_ne3 = 0
+        if _in5_nm3 != "":
+            _in5_ne3 = 1
+        _in5_go3 = _in5_ok3 + _in5_ne3
+        if _in5_go3 == 2:
             _c94 = on.inputs[5]
         else:
             _c94 = ""
@@ -2403,11 +2555,13 @@ def _expand_rnn(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
             _th3 = g.tensors[h_prev]
             if len(_th3.shape) == 3:
                 hf = _subarray_flat(g.initializers[h_prev], _th3.shape, [d, 0, 0], [1, bat, hid])
-                hs = _subarray_shape(g.initializers[h_prev], _th3.shape, [d, 0, 0], [1, bat, hid])
+                hs_shape3 = _subarray_shape(g.initializers[h_prev], _th3.shape, [d, 0, 0], [1, bat, hid])
                 hn = pre + "hd"
-                _add_float_init(g, hn, hs[1:], hf)
+                _add_float_init(g, hn, hs_shape3[1:], hf)
                 h_prev = hn
-        hs = []
+        # (2026-09-27) Code lai cho dung: tach bien shape list[i64]
+        # khoi bien name list[str].
+        hs_rnn = []
         for t in range(seq):
             tag = pre + "t" + str(t) + "_"
             _xo = _rnn_xtract(g, on, t, seq, bat, inp, layout, tag)
@@ -2421,12 +2575,33 @@ def _expand_rnn(g: 'ExecutionGraph', on: 'OnnxNode') -> 'list[OnnxNode]':
             h_new = tag + "h"
             out.append(_mk_node(tag + "a", acts[0], [tag + "z"], [h_new]))
             h_prev = h_new
-            hs.append(h_new)
-        dir_hs.append(hs)
+            hs_rnn.append(h_new)
+        dir_hs.append(hs_rnn)
         dir_last.append(h_prev)
-    if len(on.outputs) > 0 and on.outputs[0] != "":
-        _assemble_seq(g, out, on, dir_hs, seq, bat, hid, on.outputs[0])
-    if len(on.outputs) > 1 and on.outputs[1] != "":
+    # (2026-09-27) Code lai cho dung: tranh `and` short-circuit.
+    _ro0 = 0
+    if len(on.outputs) > 0:
+        _ro0 = 1
+    _rn0 = ""
+    if _ro0 == 1:
+        _rn0 = on.outputs[0]
+    _re0 = 0
+    if _rn0 != "":
+        _re0 = 1
+    _rs0 = _ro0 + _re0
+    if _rs0 == 2:
+        _assemble_seq(g, out, on, dir_hs, seq, bat, hid, on.outputs[0], ndir)
+    _ro1 = 0
+    if len(on.outputs) > 1:
+        _ro1 = 1
+    _rn1 = ""
+    if _ro1 == 1:
+        _rn1 = on.outputs[1]
+    _re1 = 0
+    if _rn1 != "":
+        _re1 = 1
+    _rs1 = _ro1 + _re1
+    if _rs1 == 2:
         _assemble_last(g, out, on, dir_last, bat, hid, on.outputs[1])
     return out
 

@@ -1320,110 +1320,130 @@ class ExecutionNode:
         return 0
 
     def _exec_slice(self, arena: 'ExecutionMemoryArena') -> 'i32':
+        # (2026-09-27) Code lai cho dung: toan bo so hoc index bang int32.
+        # Cu dung TkvInt (literal 0, list tran, min()) trong phep nhan/chia
+        # -> compiler phat TkvInt.MulSlow sai -> AccessViolation (giong
+        # _exec_qlinear_conv). Gio: dim ep int(), list index dung _nd_i32,
+        # khong dung min(), khong long if.
         dd = self.input_descs[0]
         x = arena.get_float_span(dd.offset, dd.element_count)
         _ah1188_33 = self.output_descs[0]
         _ah1188_62 = self.output_descs[0]
         y = arena.get_float_span(_ah1188_33.offset, _ah1188_62.element_count)
-        rank = len(dd.shape)
-        starts = _read_ints(arena, self.input_descs, 1)
-        ends = _read_ints(arena, self.input_descs, 2)
-        axes = _read_ints(arena, self.input_descs, 3)
-        steps = _read_ints(arena, self.input_descs, 4)
+        rank = int(len(dd.shape))
+        _starts64 = _read_ints(arena, self.input_descs, 1)
+        _ends64 = _read_ints(arena, self.input_descs, 2)
+        _axes64 = _read_ints(arena, self.input_descs, 3)
+        _steps64 = _read_ints(arena, self.input_descs, 4)
+        starts = _nd_i32(len(_starts64))
+        for _sq in range(len(_starts64)):
+            starts[_sq] = int(_starts64[_sq])
+        ends = _nd_i32(len(_ends64))
+        for _sq in range(len(_ends64)):
+            ends[_sq] = int(_ends64[_sq])
+        axes = _nd_i32(len(_axes64))
+        for _sq in range(len(_axes64)):
+            axes[_sq] = int(_axes64[_sq])
+        steps = _nd_i32(len(_steps64))
+        for _sq in range(len(_steps64)):
+            steps[_sq] = int(_steps64[_sq])
         if len(axes) == 0:
-            _nstart = len(starts)
-            _nax = min(_nstart, rank)
-            _ax0 = []
+            _nstart = int(len(starts))
+            _nax = _nstart
+            if _nax > rank:
+                _nax = rank
+            axes = _nd_i32(_nax)
             _zf0 = 0
             while _zf0 < _nax:
-                _ax0.append(_zf0)
+                axes[_zf0] = _zf0
                 _zf0 = _zf0 + 1
-            axes = _ax0
         if len(steps) == 0:
-            steps = []
+            steps = _nd_i32(len(axes))
             _zf103 = 0
             while _zf103 < len(axes):
-                steps.append(1)
+                steps[_zf103] = 1
                 _zf103 = _zf103 + 1
-        lo = []
-        _zf28 = 0
-        while _zf28 < rank:
-            lo.append(0)
-            _zf28 = _zf28 + 1
-        hi = []
-        st = []
-        _zf104 = 0
-        while _zf104 < rank:
-            st.append(1)
-            _zf104 = _zf104 + 1
-        for i in range(rank):
-            hi.append(dd.shape[i])
+        lo = _nd_i32(rank)
+        hi = _nd_i32(rank)
+        st = _nd_i32(rank)
+        _dsh = dd.shape
+        for _sq in range(rank):
+            _dv = 1
+            if _sq < len(_dsh):
+                _dv = int(_dsh[_sq])
+            hi[_sq] = _dv
+            st[_sq] = 1
         for k in range(len(axes)):
-            if axes[k] >= 0:
-                _c54 = axes[k]
-            else:
-                _c54 = axes[k] + rank
-            a = _c54
+            _ak = axes[k]
+            if _ak < 0:
+                _ak = _ak + rank
+            a = _ak
+            s = 0
             if k < len(starts):
-                _c55 = starts[k]
-            else:
-                _c55 = 0
-            s = _c55
+                s = starts[k]
+            e = hi[a]
             if k < len(ends):
-                _c56 = ends[k]
-            else:
-                _c56 = dd.shape[a]
-            e = _c56
+                e = ends[k]
+            _da = hi[a]
             if s < 0:
-                s = s + dd.shape[a]
+                s = s + _da
             if e < 0:
-                e = e + dd.shape[a]
+                e = e + _da
             if s < 0:
                 s = 0
-            if e > dd.shape[a]:
-                e = dd.shape[a]
+            if e > _da:
+                e = _da
             lo[a] = s
             hi[a] = e
-            if k < len(steps) and steps[k] != 0:
-                _c57 = steps[k]
-            else:
-                _c57 = 1
-            st[a] = _c57
-        out_lens = []
+            _stv = 1
+            if k < len(steps):
+                if steps[k] != 0:
+                    _stv = steps[k]
+            st[a] = _stv
+        out_lens = _nd_i32(rank)
         for a in range(rank):
+            _oln = 0
             if hi[a] > lo[a]:
-                _c58 = (hi[a] - lo[a] + st[a] - 1) // st[a]
-            else:
-                _c58 = 0
-            out_lens.append(_c58)
-        src_st = _strides(dd.shape)
-        coord = []
-        _zf29 = 0
-        while _zf29 < rank:
-            coord.append(0)
-            _zf29 = _zf29 + 1
+                _oln = (hi[a] - lo[a] + st[a] - 1) // st[a]
+            out_lens[a] = _oln
+        _src_st = _nd_i32(rank)
+        _acc = 1
+        _ri = rank - 1
+        while _ri > -1:
+            _src_st[_ri] = _acc
+            _ddv = 1
+            if _ri < len(_dsh):
+                _ddv = int(_dsh[_ri])
+            _acc = _acc * _ddv
+            _ri = _ri + -1
+        src_st = _src_st
+        coord = _nd_i32(rank)
         pos = 0
         total = 1
         for a in range(rank):
             total = total * out_lens[a]
+        nx = len(x)
+        ny = len(y)
         for n in range(total):
             rem = n
             off = 0
             a = rank - 1
             while a > -1:
-                if out_lens[a] > 0:
-                    _c59 = rem % out_lens[a]
-                else:
-                    _c59 = 0
-                c = _c59
-                if out_lens[a] > 0:
-                    _c60 = rem // out_lens[a]
-                else:
-                    _c60 = 0
-                rem = _c60
+                _ola = out_lens[a]
+                c = 0
+                if _ola > 0:
+                    c = rem % _ola
+                _nrem = 0
+                if _ola > 0:
+                    _nrem = rem // _ola
+                rem = _nrem
                 off = off + (lo[a] + c * st[a]) * src_st[a]
                 a = a + -1
-            y[pos] = x[off]
+            if off >= 0:
+                if off < nx:
+                    if pos >= 0:
+                        if pos < ny:
+                            y[pos] = x[off]
             pos = pos + 1
         return 0
 
@@ -1863,7 +1883,13 @@ class ExecutionNode:
                 _c93 = 0.000000000001
             s = _c93
             for i in range(len(x)):
-                y[i] = max(-128, min(127, int(round(x[i] / s)) + zp))
+                # (2026-09-27) Code lai cho dung: if-clamp thay min/max.
+                _qv = int(round(x[i] / s)) + zp
+                if _qv < -128:
+                    _qv = -128
+                if _qv > 127:
+                    _qv = 127
+                y[i] = _qv
         else:
             rank = len(dd.shape)
             if self.qlinear_axis >= 0:
@@ -1886,7 +1912,13 @@ class ExecutionNode:
                         _c95 = 0.000000000001
                     s = _c95
                     for t in range(inner):
-                        y[(o * dim + j) * inner + t] = max(-128, min(127, int(round(x[(o * dim + j) * inner + t] / s)) + zp))
+                        # (2026-09-27) Code lai cho dung: if-clamp thay min/max.
+                        _qv2 = int(round(x[(o * dim + j) * inner + t] / s)) + zp
+                        if _qv2 < -128:
+                            _qv2 = -128
+                        if _qv2 > 127:
+                            _qv2 = 127
+                        y[(o * dim + j) * inner + t] = _qv2
         return 0
 
     def _exec_dequantize_linear(self, arena: 'ExecutionMemoryArena') -> 'i32':
@@ -1927,6 +1959,7 @@ class ExecutionNode:
         return 0
 
     def _exec_qlinear_matmul(self, arena: 'ExecutionMemoryArena') -> 'i32':
+        # (2026-09-27) Code lai cho dung: ep dim ve i32, if-clamp thay min/max.
         ad = self.input_descs[0]
         bd = self.input_descs[3]
         yd = self.output_descs[0]
@@ -1947,28 +1980,63 @@ class ExecutionNode:
             sy = 1.0
         _ah1753_39 = self.input_descs[7]
         zpy = int(arena.get_float_span(_ah1753_39.offset, 1)[0])
+        m = 1
         if len(ad.shape) > 1:
-            _c97 = ad.shape[0]
-        else:
-            _c97 = 1
-        m = _c97
+            m = int(ad.shape[0])
+        k = int(ad.element_count)
         if len(ad.shape) > 1:
-            _c98 = ad.shape[1]
-        else:
-            _c98 = ad.element_count
-        k = _c98
+            k = int(ad.shape[1])
+        n = int(bd.element_count)
         if len(bd.shape) > 1:
-            _c99 = bd.shape[1]
-        else:
-            _c99 = bd.element_count
-        n = _c99
+            n = int(bd.shape[1])
         mult = sa * sw / sy
+        na = len(a)
+        nb = len(b)
+        ny = len(y)
         for i in range(m):
             for j in range(n):
                 acc = 0
                 for p in range(k):
-                    acc = acc + (int(a[i * k + p]) - zpa) * (int(b[p * n + j]) - zpw)
-                y[i * n + j] = max(-128, min(127, int(round(acc * mult)) + zpy))
+                    ai = i * k + p
+                    bi = p * n + j
+                    av = 0
+                    bv = 0
+                    # (2026-09-27) Code lai cho dung: khong long `if`.
+                    _aok5 = 0
+                    if ai >= 0:
+                        _aok5 = 1
+                    _aok6 = 0
+                    if ai < na:
+                        _aok6 = 1
+                    _aokc = _aok5 + _aok6
+                    if _aokc == 2:
+                        av = int(a[ai]) - zpa
+                    _bok5 = 0
+                    if bi >= 0:
+                        _bok5 = 1
+                    _bok6 = 0
+                    if bi < nb:
+                        _bok6 = 1
+                    _bokc = _bok5 + _bok6
+                    if _bokc == 2:
+                        bv = int(b[bi]) - zpw
+                    acc = acc + av * bv
+                v = int(round(acc * mult)) + zpy
+                if v < -128:
+                    v = -128
+                if v > 127:
+                    v = 127
+                yi = i * n + j
+                # (2026-09-27) Code lai cho dung: khong long `if`.
+                _yok3 = 0
+                if yi >= 0:
+                    _yok3 = 1
+                _yok4 = 0
+                if yi < ny:
+                    _yok4 = 1
+                _yokb = _yok3 + _yok4
+                if _yokb == 2:
+                    y[yi] = v
         return 0
 
     def _exec_gather_nd(self, arena: 'ExecutionMemoryArena') -> 'i32':
@@ -2468,6 +2536,13 @@ class ExecutionNode:
         return 0
 
     def _exec_qlinear_conv(self, arena: 'ExecutionMemoryArena') -> 'i32':
+        # (2026-09-27) Code lai cho dung:
+        #  - Moi dim ep ve i32 bang int() ngay tu dau (shape la list[i64]
+        #    nhung List.get_Item can int32).
+        #  - Bao ve shape thieu rank.
+        #  - Khong dung min()/max() hon hop kieu (compiler sinh IL sai
+        #    cho TkvInt struct -> AccessViolation). Dung if-clamp.
+        #  - Khong dung `and` 2 menh de; kiem tra bien index day du.
         xd = self.input_descs[0]
         wd = self.input_descs[3]
         yd = self.output_descs[0]
@@ -2489,73 +2564,195 @@ class ExecutionNode:
         _ah2220_39 = self.input_descs[7]
         yzp = int(arena.get_float_span(_ah2220_39.offset, 1)[0])
         has_b = len(self.input_descs) > 8
-        n = xd.shape[0]
-        ic = xd.shape[1]
-        ih = xd.shape[2]
-        iw = xd.shape[3]
-        # (2026-09-26) W co shape RIENG [oc, wic, kh, kw]. So kenh vao cua W
-        # KHONG phai la `ic` cua X. Code cu lay `ic` lam stride bac cua W:
-        #
-        #     w[((o * ic + c) * kh + kr) * kw + kc]
-        #
-        # Voi X = [1,1,3,3] (ic=1) va W = [1,1,2,2] (chi 4 phan tu), chi so
-        # toi ((0*1+0)*2+1)*2+1 = 5 > 3 -> doc ngoai bien. W o day co 1 kenh
-        # vao nen chi so toi 3. Khi W khong co 4 chieu thi quy uoc = ic.
+        _xsh = xd.shape
+        n = 1
+        ic = 1
+        ih = 1
+        iw = 1
+        if len(_xsh) > 0:
+            n = int(_xsh[0])
+        if len(_xsh) > 1:
+            ic = int(_xsh[1])
+        if len(_xsh) > 2:
+            ih = int(_xsh[2])
+        if len(_xsh) > 3:
+            iw = int(_xsh[3])
         _wsh = wd.shape
+        wic = ic
+        oc = 1
+        kh = 1
+        kw = 1
+        if len(_wsh) > 0:
+            oc = int(_wsh[0])
+        if len(_wsh) > 1:
+            wic = int(_wsh[1])
+        if len(_wsh) > 2:
+            kh = int(_wsh[2])
         if len(_wsh) > 3:
-            wic = _wsh[1]
-        else:
-            wic = ic
-        oc = wd.shape[0]
-        kh = wd.shape[2]
-        kw = wd.shape[3]
+            kw = int(_wsh[3])
+        # (2026-09-27) Code lai cho dung rest:
+        #  - Moi dim ep ve i32 bang int() NGAY TU DAU. Shape la list[i64]
+        #    nhung List.get_Item can int32; de i64 lam index sinh IL sai
+        #    (PEVerify: found Long expected Int32) va co the doc sai offset
+        #    -> AccessViolation. Cac test khac dung `int(seq)-1` theo cach nay.
+        #  - Bao ve shape thieu rank (khong doc shape[2]/[3] khi len < 4).
+        #  - Khong dung `and` 2 menh de (short-circuit) trong method nay.
+        #  - Kiem tra bien index truoc moi lan doc x/w/ghi y.
+        xd = self.input_descs[0]
+        wd = self.input_descs[3]
+        yd = self.output_descs[0]
+        x = arena.get_int8_span(xd.offset, xd.element_count)
+        w = arena.get_int8_span(wd.offset, wd.element_count)
+        y = arena.get_int8_span(yd.offset, yd.element_count)
+        _ah2213_34 = self.input_descs[1]
+        xs = arena.get_float_span(_ah2213_34.offset, 1)[0]
+        _ah2214_39 = self.input_descs[2]
+        xzp = int(arena.get_float_span(_ah2214_39.offset, 1)[0])
+        _ah2215_34 = self.input_descs[4]
+        ws = arena.get_float_span(_ah2215_34.offset, 1)[0]
+        _ah2216_39 = self.input_descs[5]
+        wzp = int(arena.get_float_span(_ah2216_39.offset, 1)[0])
+        _ah2217_34 = self.input_descs[6]
+        ys = arena.get_float_span(_ah2217_34.offset, 1)[0]
+        if ys == 0.0:
+            ys = 1.0
+        _ah2220_39 = self.input_descs[7]
+        yzp = int(arena.get_float_span(_ah2220_39.offset, 1)[0])
+        has_b = len(self.input_descs) > 8
+        _xsh = xd.shape
+        n = 1
+        ic = 1
+        ih = 1
+        iw = 1
+        if len(_xsh) > 0:
+            n = int(_xsh[0])
+        if len(_xsh) > 1:
+            ic = int(_xsh[1])
+        if len(_xsh) > 2:
+            ih = int(_xsh[2])
+        if len(_xsh) > 3:
+            iw = int(_xsh[3])
+        _wsh = wd.shape
+        wic = ic
+        oc = 1
+        kh = 1
+        kw = 1
+        if len(_wsh) > 0:
+            oc = int(_wsh[0])
+        if len(_wsh) > 1:
+            wic = int(_wsh[1])
+        if len(_wsh) > 2:
+            kh = int(_wsh[2])
+        if len(_wsh) > 3:
+            kw = int(_wsh[3])
         if len(self.strides) > 0:
             _c128 = self.strides[0]
         else:
             _c128 = 1
-        sh = _c128
+        sh = int(_c128)
         if len(self.strides) > 1:
             _c129 = self.strides[1]
         else:
             _c129 = sh
-        sw = _c129
+        sw = int(_c129)
         if len(self.pads) > 0:
             _c130 = self.pads[0]
         else:
             _c130 = 0
-        ph = _c130
+        ph = int(_c130)
         if len(self.pads) > 1:
             _c131 = self.pads[1]
         else:
             _c131 = ph
-        pw = _c131
+        pw = int(_c131)
+        if sh <= 0:
+            sh = 1
+        if sw <= 0:
+            sw = 1
         oh = (ih + 2 * ph - kh) // sh + 1
         ow = (iw + 2 * pw - kw) // sw + 1
+        if oh <= 0:
+            oh = 1
+        if ow <= 0:
+            ow = 1
         mult = xs * ws / ys
+        nx = len(x)
+        nw = len(w)
+        ny = len(y)
+        # (2026-09-27) Code lai cho dung: accumulator DUNG float, khong de
+        # TkvInt * float32 (compiler phat TkvInt.MulSlow sai -> AccessViolation).
         for b in range(n):
             for o in range(oc):
                 for r in range(oh):
                     for u in range(ow):
-                        acc = 0
+                        acc = 0.0
                         for c in range(ic):
                             for kr in range(kh):
                                 h = r * sh - ph + kr
-                                if h >= 0 and h < ih:
-                                    for kc in range(kw):
-                                        ww = u * sw - pw + kc
-                                        if ww >= 0 and ww < iw:
-                                            xv = int(x[((b * ic + c) * ih + h) * iw + ww]) - xzp
-                                            wv = int(w[((o * wic + c) * kh + kr) * kw + kc]) - wzp
-                                            acc = acc + xv * wv
+                                # (2026-09-27) Code lai cho dung: khong long `if`.
+                                _hok1 = 0
+                                if h >= 0:
+                                    _hok1 = 1
+                                _hok2 = 0
+                                if h < ih:
+                                    _hok2 = 1
+                                _hok = _hok1 + _hok2
+                                if _hok == 2:
+                                        for kc in range(kw):
+                                            ww = u * sw - pw + kc
+                                            # (2026-09-27) Code lai cho dung:
+                                            # khong long `if` sau 4 cap.
+                                            _rok1 = 0
+                                            if ww >= 0:
+                                                _rok1 = 1
+                                            _rok2 = 0
+                                            if ww < iw:
+                                                _rok2 = 1
+                                            _rok = _rok1 + _rok2
+                                            if _rok == 2:
+                                                xi = ((b * ic + c) * ih + h) * iw + ww
+                                                wi = ((o * wic + c) * kh + kr) * kw + kc
+                                                _xok1 = 0
+                                                if xi >= 0:
+                                                    _xok1 = 1
+                                                _xok2 = 0
+                                                if xi < nx:
+                                                    _xok2 = 1
+                                                _wok3 = 0
+                                                if wi >= 0:
+                                                    _wok3 = 1
+                                                _wok4 = 0
+                                                if wi < nw:
+                                                    _wok4 = 1
+                                                _allok = _xok1 + _xok2 + _wok3 + _wok4
+                                                if _allok == 4:
+                                                    xv = int(x[xi]) - xzp
+                                                    wv = int(w[wi]) - wzp
+                                                    acc = acc + float(xv * wv)
                         v = int(round(acc * mult)) + yzp
                         if has_b:
                             _ah2269_61 = self.input_descs[8]
                             _ah2269_89 = self.input_descs[8]
-                            v = v + int(arena.get_float_span(_ah2269_61.offset, _ah2269_89.element_count)[o])
-                        y[((b * oc + o) * oh + r) * ow + u] = max(-128, min(127, v))
+                            _bias = arena.get_float_span(_ah2269_61.offset, _ah2269_89.element_count)
+                            _bok1 = 0
+                            if o >= 0:
+                                _bok1 = 1
+                            _bok2 = 0
+                            if o < len(_bias):
+                                _bok2 = 1
+                            _bok = _bok1 + _bok2
+                            if _bok == 2:
+                                v = v + int(_bias[o])
+                        if v < -128:
+                            v = -128
+                        if v > 127:
+                            v = 127
+                        yi = ((b * oc + o) * oh + r) * ow + u
+                        y[yi] = v
         return 0
 
     def _exec_matmul_integer(self, arena: 'ExecutionMemoryArena') -> 'i32':
+        # (2026-09-27) Code lai cho dung: ep dim ve i32, kiem tra bien.
         ad = self.input_descs[0]
         bd = self.input_descs[1]
         a = arena.get_int8_span(ad.offset, ad.element_count)
@@ -2563,30 +2760,65 @@ class ExecutionNode:
         _ah2278_33 = self.output_descs[0]
         _ah2278_62 = self.output_descs[0]
         y = arena.get_int32_span(_ah2278_33.offset, _ah2278_62.element_count)
+        m = 1
         if len(ad.shape) > 1:
-            _c132 = ad.shape[0]
+            m = int(ad.shape[0])
         else:
-            _c132 = 1
-        m = _c132
+            if len(ad.shape) > 0:
+                m = int(ad.shape[0])
+        k = int(ad.element_count)
         if len(ad.shape) > 1:
-            _c133 = ad.shape[1]
-        else:
-            _c133 = ad.element_count
-        k = _c133
+            k = int(ad.shape[1])
+        n = int(bd.element_count)
         if len(bd.shape) > 1:
-            _c134 = bd.shape[1]
-        else:
-            _c134 = bd.element_count
-        n = _c134
+            n = int(bd.shape[1])
+        na = len(a)
+        nb = len(b)
+        ny = len(y)
         for i in range(m):
             for j in range(n):
                 acc = 0
                 for p in range(k):
-                    acc = acc + int(a[i * k + p]) * int(b[p * n + j])
-                y[i * n + j] = acc
+                    ai = i * k + p
+                    bi = p * n + j
+                    av = 0
+                    bv = 0
+                    # (2026-09-27) Code lai cho dung: khong long `if`.
+                    _aok1 = 0
+                    if ai >= 0:
+                        _aok1 = 1
+                    _aok2 = 0
+                    if ai < na:
+                        _aok2 = 1
+                    _aok = _aok1 + _aok2
+                    if _aok == 2:
+                        av = int(a[ai])
+                    _bok3 = 0
+                    if bi >= 0:
+                        _bok3 = 1
+                    _bok4 = 0
+                    if bi < nb:
+                        _bok4 = 1
+                    _bokb = _bok3 + _bok4
+                    if _bokb == 2:
+                        bv = int(b[bi])
+                    acc = acc + av * bv
+                yi = i * n + j
+                _yok1 = 0
+                if yi >= 0:
+                    _yok1 = 1
+                _yok2 = 0
+                if yi < ny:
+                    _yok2 = 1
+                _yok = _yok1 + _yok2
+                if _yok == 2:
+                    y[yi] = acc
         return 0
 
     def _exec_dyn_quant(self, arena: 'ExecutionMemoryArena') -> 'i32':
+        # (2026-09-27) Code lai cho dung: khong dung min()/max() long nhau
+        # hon hop kieu (gay AccessViolation nhu _exec_qlinear_conv).
+        # Dung bien tam + if-clamp tung buoc.
         dd = self.input_descs[0]
         x = arena.get_float_span(dd.offset, dd.element_count)
         _ah2305_32 = self.output_descs[0]
@@ -2610,11 +2842,27 @@ class ExecutionNode:
         if mx - mn < 0.00000001:
             mx = mn + 0.00000001
         sc = (mx - mn) / 255.0
-        zp = max(0, min(255, int(round(-mn / sc))))
+        _zpf = round(-mn / sc)
+        _zpi = int(_zpf)
+        if _zpi < 0:
+            _zpi = 0
+        if _zpi > 255:
+            _zpi = 255
+        zp = _zpi
         ys[0] = sc
         yz[0] = float(zp)
         for i in range(len(x)):
-            y[i] = max(-128, min(127, max(0, min(255, int(round(x[i] / sc)) + zp)) - 128))
+            _q = int(round(x[i] / sc)) + zp
+            if _q < 0:
+                _q = 0
+            if _q > 255:
+                _q = 255
+            _s = _q - 128
+            if _s < -128:
+                _s = -128
+            if _s > 127:
+                _s = 127
+            y[i] = _s
         return 0
 
     def _exec_concat(self, arena: 'ExecutionMemoryArena') -> 'i32':
@@ -2962,17 +3210,23 @@ class ExecutionGraph:
         for t in _ah2654_17.values():
             if not t.is_initializer and not t.is_input and not t.is_output:
                 scratch.append(t)
-        _si = 0
-        while _si < len(scratch) - 1:
-            _sj = _si + 1
-            while _sj < len(scratch):
+        # (2026-09-28) SUA VONG LAP SAP XEP BI TREO.
+        #
+        # Ban cu: `while _si < len(scratch) - 1` / `while _sj < len(scratch)`.
+        # `len()` tra ve TkvInt nen dieu kien `while` so i32 voi TvkInt ->
+        # vong lap khong bao gio thoat (treo ngay khi scratch co >= 1 phan tu).
+        # Do do CHI xay ra SAU khi optimization pass them tensor tam: graph
+        # moi tao co scratch rong (X input, W/B initializer, Y output) nen
+        # bug bi an. Dung `int(len(...))` lam bien gioi han + `for` de
+        # tranh TkvInt hoan toan.
+        n_scratch = int(len(scratch))
+        for _si in range(n_scratch - 1):
+            for _sj in range(_si + 1, n_scratch):
                 _a = scratch[_si]
                 _b = scratch[_sj]
                 if _b.lifetime_start < _a.lifetime_start:
                     scratch[_si] = _b
                     scratch[_sj] = _a
-                _sj = _sj + 1
-            _si = _si + 1
         # (2026-09-26) Ba list kiem tra slot cua arena phai la list[i64].
         # `[]` tao `List<TkvInt>`, sau do code day vao gia tri i64 that
         # (`a_off.append(chosen)`, `a_size.append(aligned)`,
@@ -3292,7 +3546,18 @@ def _nd_i64(n: "i64") -> "list[i64]":
         _zf43 = _zf43 + 1
     return out
 
-def _nd_i8(n: "i64") -> "list[i64]":
+def _nd_i32(n: "i64") -> "list[i32]":
+    # (2026-09-27) Code lai cho dung: list int32 dung kieu cho index/dem.
+    # Tuong tu _nd_i8 (cung la List<int> CLR) nhung ten ro nghia hon cho
+    # cac kernel dung chi so (slice/split/transpose), tranh TkvInt.
+    out = []
+    _zf45 = 0
+    while _zf45 < n:
+        out.append(0)
+        _zf45 = _zf45 + 1
+    return out
+
+def _nd_i8(n: "i64") -> "list[i32]":
     out = []
     _zf44 = 0
     while _zf44 < n:
@@ -3521,6 +3786,7 @@ class DeadCodeEliminationPass(IGraphPass):
             i = len(graph.nodes) - 1
             while i > -1:
                 if i in active:
+                    i = i + -1
                     continue
                 node = graph.nodes[i]
                 hit = 0

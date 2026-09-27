@@ -1,0 +1,200 @@
+# TokenVector Module: Server — Dynamic micro-batcher with session pool
+# Batch members run in parallel over a pool of sessions (one arena each):
+# no shared-arena race and real concurrent throughput. Bounded queue with
+# backpressure (enqueue raises ServerBusy instead of growing memory blindly).
+
+import tv.runtime.session
+import tv.numerics.tensor
+
+
+def _bch_now_us() -> "i64":
+    return 0
+
+
+def _bch_spin_yield() -> "i32":
+    return 0
+
+
+class Cancelled(Exception):
+    msg: "str"
+
+class Infer(Exception):
+    msg: "str"
+
+class ServerBusy(Exception):
+    msg: "str"
+
+class BatchRequest:
+    _ok: "i64"
+    input: "list[f32]"
+    done: "i32"
+    cancelled: "i32"
+    result: "list[f32]"
+    error: "str"
+    def __init__(self, inp: "list[f32]"):
+        self.input = inp
+        self.done = 0
+        self.cancelled = 0
+        self.result = []
+        self.error = ""
+
+
+class BatcherQueue:
+    _ok: "i64"
+    items: "list[BatchRequest]"
+    def __init__(self):
+        self.items = []
+    def write(self, req: "BatchRequest") -> "i32":
+        self.items.append(req)
+        return 0
+    def try_read(self) -> "BatchRequest":
+        if len(self.items) == 0:
+            # (2026-09-27) Code lai cho dung: sentinel done=1/cancelled=1
+            # (worker bo qua), input rong mac dinh.
+            _empty = BatchRequest(1, 1, 1, "")
+            return _empty
+        head = self.items[0]
+        rest = []
+        for i in range(1, len(self.items)):
+            rest.append(self.items[i])
+        self.items = rest
+        return head
+    def wait_read(self, timeout_ms: "i64") -> "BatchRequest":
+        return self.try_read()
+    def close(self) -> "i32":
+        self.items = []
+        return 0
+
+
+class DynamicBatcher:
+    _ok: "i64"
+    max_batch: "i64"
+    timeout_us: "i64"
+    max_queue: "i64"
+    pool: "list[i64]"
+    queue: "BatcherQueue"
+    queued: "i64"
+    dropped_total: "i64"
+    _closed: "i32"
+    def __init__(self, session: "InferenceSession", max_batch: "i64" = 32, timeout_us: "i64" = 200, worker_count: "i64" = 4, max_queue: "i64" = 10000):
+        self.max_batch = max(1, max_batch)
+        self.timeout_us = timeout_us
+        self.max_queue = max(1, max_queue)
+        # pool[0] reuses the caller's (already optimized) session; the rest share
+        # its optimized graph with their own arenas - graph is read-only during run.
+        # NOTE: single-session pool (worker sessions need ctor support for
+        # record-typed fields, chua co) - mo rong sau.
+        self.pool = [session]
+        self.queue = BatcherQueue(1)
+        self.queued = 0
+        self.dropped_total = 0
+        self._closed = 0
+        spawn(self._worker)
+
+    def enqueue(self, inp: "list[f32]") -> "list[f32]":
+        if self._closed:
+            raise Disposed("DynamicBatcher")
+        if self.queued >= self.max_queue:
+            self.dropped_total = self.dropped_total + 1
+            raise ServerBusy("batcher queue full. Retry later.")
+        req = BatchRequest(1, 0, 0, "")
+        # (2026-09-27) Code lai cho dung: .ctor record chi nhan field KHONG
+        # container theo thu tu (_ok, done, cancelled, error); field container
+        # (input, result) tu khoi tao rong, phai gan EXPLICIT (mau _mk_node).
+        # Cu: BatchRequest(inp, 0, 0, "") dat inp vao _ok, input mai rong.
+        req.input = inp
+        self.queued = self.queued + 1
+        _ah63_8 = self.queue
+        _ah63_8.write(req)
+        while not req.done and not req.cancelled:
+            _bch_spin_yield()
+        self.queued = self.queued - 1
+        if req.cancelled:
+            raise Cancelled("request cancelled while queued")
+        if req.error != "":
+            raise Infer(req.error)
+        return req.result
+
+    def cancel_all(self) -> 'i32':
+        # best-effort drain: mark queued requests cancelled
+        _wloop0 = 1
+        while _wloop0:
+            _ah76_18 = self.queue
+            req = _ah76_18.try_read()
+            if req.done and req.cancelled:
+                break
+            req.cancelled = 1
+            self.queued = self.queued - 1
+        return 0
+
+    def _worker(self) -> 'i32':
+        batch = []
+        batch.append(BatchRequest([], 0, 0, ""))
+        batch.pop()
+        while not self._closed:
+            _ah87_20 = self.queue
+            first = _ah87_20.wait_read(50)
+            if first.done and first.cancelled:
+                continue
+            if first.cancelled:
+                self.queued = self.queued - 1
+                continue
+            batch.append(first)
+            t0 = _bch_now_us()
+            while len(batch) < self.max_batch and (_bch_now_us() - t0) < self.timeout_us:
+                _ah96_22 = self.queue
+                nxt = _ah96_22.try_read()
+                if not (nxt.done and nxt.cancelled):
+                    if nxt.cancelled:
+                        self.queued = self.queued - 1
+                    else:
+                        batch.append(nxt)
+                else:
+                    _bch_spin_yield()
+            self._exec_batch(batch)
+            batch = []
+            batch.append(BatchRequest([], 0, 0, ""))
+            batch.pop()
+        return 0
+
+    def _exec_batch(self, batch: "list[BatchRequest]") -> 'i32':
+        _nthread = len(self.pool)
+        if _nthread <= 1:
+            _nthread = 1
+        for i in range(len(batch)):
+            _sess = self.pool[i % _nthread]
+            _run_one(batch[i], _sess)
+        return 0
+
+    def queue_depth(self) -> "i64":
+        return self.queued
+
+    def dispose(self) -> 'i32':
+        self._closed = 1
+        _ah120_8 = self.queue
+        _ah120_8.close()
+        return 0
+
+def _run_one(req: "BatchRequest", session: "InferenceSession") -> "i32":
+    if req.cancelled or req.done:
+        return 0
+    try:
+        req.result = session.run_single(req.input)
+        req.done = 1
+    except Exception as e:
+        req.error = "infer failed"
+        req.done = 1
+    return 0
+
+
+# 2026-09-25: factory khoi tao DynamicBatcher.
+# '.ctor' cua record nhan DUNG 1 tham so cho MOI field KHONG container, theo
+# THU TU FIELD - nen goi thang 'DynamicBatcher(session, max_batch, ...)' (theo
+# thu tu __init__) khong bien dich duoc. Day la wrapper giong het
+# default_server_options()/new_embedded_server() o cac module khac.
+# '_db.pool' (field container) duoc khoi tao rong boi chinh .ctor, nen nguoi
+# goi them session vao (xem new_embedded_server).
+def new_dynamic_batcher(ok: "i64", max_batch: "i64", timeout_us: "i64",
+                        max_queue: "i64") -> "DynamicBatcher":
+    _q = BatcherQueue(1)
+    return DynamicBatcher(ok, max_batch, timeout_us, max_queue, _q, 0, 0, 0)

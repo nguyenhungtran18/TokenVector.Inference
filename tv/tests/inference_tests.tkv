@@ -748,12 +748,37 @@ def test_lstm_unrolled_end_to_end() -> 'i32':
     mg3 = m.graph
     _ah1075_4 = mg3.nodes
     _ah1075_4.append(lstm)
+    # (2026-09-27) Code lai cho dung: model phai khai bao dims cho X/Y/YH.
+    # Truoc day dung _vi1 tran (dims rong) nen _rnn_common khong suy ra duoc
+    # seq/bat/inp (seq=0) -> UnsupportedOp; Y/YH rong khien arena thieu byte.
+    # X = [seq=2, bat=1, inp=2] (4 float), Y = [2,1,1,2] (4 float),
+    # YH = [1,1,2] (2 float). Dung _nd_i64 + gan index (mau dung nhu
+    # translator: `_nd_i64(1); shape[0] = 1`), khong dung literal [].
+    _xvi = _vi1("X")
+    _xdims = _nd_i64(3)
+    _xdims[0] = 2
+    _xdims[1] = 1
+    _xdims[2] = 2
+    _xvi.dims = _xdims
     _ah1076_4 = mg3.inputs
-    _ah1076_4.append(_vi1("X"))
+    _ah1076_4.append(_xvi)
+    _yvi = _vi1("Y")
+    _ydims = _nd_i64(4)
+    _ydims[0] = 2
+    _ydims[1] = 1
+    _ydims[2] = 1
+    _ydims[3] = 2
+    _yvi.dims = _ydims
     _ah1077_4 = mg3.outputs
-    _ah1077_4.append(_vi1("Y"))
+    _ah1077_4.append(_yvi)
+    _yhvi = _vi1("YH")
+    _yhdims = _nd_i64(3)
+    _yhdims[0] = 1
+    _yhdims[1] = 1
+    _yhdims[2] = 2
+    _yhvi.dims = _yhdims
     _ah1078_4 = mg3.outputs
-    _ah1078_4.append(_vi1("YH"))
+    _ah1078_4.append(_yhvi)
     _onnx_tensor_init(m.graph, "W", [1, 8, 2], _rep_f32(0.1, 16))
     _onnx_tensor_init(m.graph, "R", [1, 8, 2], _rep_f32(0.1, 16))
     g = translate(m)
@@ -910,7 +935,7 @@ def test_qlinear_conv_matmulinteger_dynquant() -> 'i32':
     yq = _nd_i8(3)
     ysc = _nd_f32(1)
     yzp = _nd_f32(1)
-    s.run([named_tensor("I0", d)], [named_qdata("Y", yq), named_qdata("YS", ysc), named_qdata("YZ", yzp)])
+    s.run([named_tensor("I0", d)], [named_qdata("Y", yq), named_tensor("YS", ysc), named_tensor("YZ", yzp)])
     s.close()
     assert abs(ysc[0] - 2.0 / 255.0) < 0.000001 and yzp[0] == 0.0
     assert yq[0] == -128 and yq[2] == 127

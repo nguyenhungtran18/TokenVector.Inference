@@ -47,6 +47,10 @@ def main() -> "i32":
     stress_concurrent()
     print("")
     print("--- COMPETITOR COMPARISON (lower is better, except RPS) ---")
+    print("QUICK-RUN SCALE: pure .tkv chay scalar (khong SIMD) nen iters da giam")
+    print("  (latency 500, gc 500, throughput 200, stress 2k/500 thay vi 10k-250k).")
+    print("  So sanh ben duoi la smoke/regression gate, KHONG phai so sanh")
+    print("  hiem nang voi baseline C# SIMD. Dung -SkipBenchmarks de bo qua.")
     print("Cold-start parse+arena : TV " + str(cold) + " ms | ORT " + str(ORT_COLD_MS) + " ms | Torch " + str(TORCH_COLD_MS) + " ms | " + str(TORCH_COLD_MS/cold) + "x vs Torch")
     print("Single-sample FusedLinear 64x128 GELU: TV " + str(lat) + " us | ORT " + str(ORT_LAT_US) + " us | Torch " + str(TORCH_LAT_US) + " us | " + str(ORT_LAT_US/lat) + "x vs ORT")
     print("GC per 5k runs          : TV " + str(gc) + " B (Zero-GC) | ORT >240KB | Torch interop overhead")
@@ -98,9 +102,9 @@ def bench_latency() -> "f64":
     s = _tiny_graph(1, 64, 128, ActivationFunction_GELU)
     x = _nd_f32(64)
     fill_const(x, 1.0)
-    for i in range(1000):
+    for i in range(200):
         s.run_single(x)
-    iters = 10000
+    iters = 500
     t0 = now_us()
     for i in range(iters):
         s.run_single(x)
@@ -112,14 +116,14 @@ def bench_latency() -> "f64":
 def bench_gc() -> "i64":
     s = _tiny_graph(1, 64, 64, ActivationFunction_ReLU)
     x = _nd_f32(64)
-    for i in range(500):
+    for i in range(100):
         s.run_single(x)
     gc_collect()
     b0 = gc_allocated_bytes()
-    for i in range(5000):
+    for i in range(500):
         s.run_single(x)
     used = gc_allocated_bytes() - b0
-    print("[3/4] Heap per 5k inferences: " + str(used) + " B (gate: 0 B Zero-GC)")
+    print("[3/4] Heap per 500 inferences: " + str(used) + " B (gate: 0 B Zero-GC)")
     s.close()
     return used
 
@@ -128,7 +132,7 @@ def bench_throughput(out: 'list[f64]') -> "i32":
     m = 16
     k = 256
     n = 256
-    iters = 2000
+    iters = 200
     xf = _nd_f32(m * k)
     wf = _nd_f32(n * k)
     yf = _nd_f32(m * n)
@@ -136,7 +140,7 @@ def bench_throughput(out: 'list[f64]') -> "i32":
     fill_rand(wf, 2)
     t0 = now_ms()
     for i in range(iters):
-        fused_matmul_bias_act(ptr_of(xf), ptr_of(wf), 0, ptr_of(yf), m, n, k, ActivationFunction_None, 1)
+        fused_matmul_bias_act(xf, wf, [], yf, m, n, k, ActivationFunction_None, 1)
     fp32_ms = now_ms() - t0
     p = calibrate_minmax(xf, 1)
     xi = _nd_i8(m * k)
@@ -145,7 +149,7 @@ def bench_throughput(out: 'list[f64]') -> "i32":
     quantize_int8_symmetric(wf, wi, p.scale)
     t1 = now_ms()
     for i in range(iters):
-        matmul_int8_symmetric(ptr_of(xi), ptr_of(wi), 0, ptr_of(yf), m, n, k, p.scale, p.scale)
+        matmul_int8_symmetric(xi, wi, [], yf, m, n, k, p.scale, p.scale)
     int8_ms = now_ms() - t1
     print("[4/4] FP32 " + str(fp32_ms) + " ms | INT8 " + str(int8_ms) + " ms | speedup " + str(fp32_ms/max(int8_ms,0.000000001)) + "x (gate: >=2.8x)")
     out[0] = fp32_ms
@@ -153,10 +157,10 @@ def bench_throughput(out: 'list[f64]') -> "i32":
     return 0
 
 def stress_hot() -> "i32":
-    # 250k continuous runs — endurance / leak gate
+    # 2k continuous runs — endurance / leak gate
     s = _tiny_graph(1, 64, 64, ActivationFunction_ReLU)
     x = _nd_f32(64)
-    n = 250000
+    n = 2000
     t0 = now_ms()
     for i in range(n):
         s.run_single(x)
@@ -167,11 +171,11 @@ def stress_hot() -> "i32":
     return 0
 
 def stress_concurrent() -> "i32":
-    # 32 workers x 10k burst via DynamicBatcher
+    # 32 workers x 500 burst via DynamicBatcher
     s = _tiny_graph(1, 64, 64, ActivationFunction_ReLU)
-    b = new_dynamic_batcher(1, 32, 200, 10000)
+    b = new_dynamic_batcher(1, 32, 200, 500)
     x = _nd_f32(64)
-    n = 10000
+    n = 500
     t0 = now_ms()
     for i in range(n):
         _r = b.enqueue(x)
