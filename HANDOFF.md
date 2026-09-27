@@ -114,7 +114,7 @@ Lưu ý khi viết test: đừng tạo node ghi đè một tensor đã được 
 ## 5. Việc CÒN LẠI (chưa làm)
 
 1. **Timing helpers là stub trả 0** nên benchmark in `0.0 us`, `0 B`, `0.0x`, `req/s = 5e14` (chia cho 0). Các hàm đang là stub trong chính file benchmark: `now_ms`, `now_us`, `gc_allocated_bytes`, `gc_counts`, `fill_rand`, `fill_const`, `ptr_of`, `parallel_for`. Phải nối vào stdlib thật thì mới chứng minh được cải tiến hiệu năng. **Đây là ưu tiên cao nhất** vì nó chặn mọi phép đo.
-2. **`native_arena_alloc` vẫn là stub `return 0`** (`tv/runtime/session.tkv:228`) — arena thực tế là `dict[i64, list[f32]]` (list-boxed). Đây là chặn chính cho SIMD/zero-GC thật.
+2. **`native_arena_alloc` vẫn là stub `return 0`** (`tv/runtime/session.tkv:228`) — nhưng đây là stub **cấp repo**, không phải giới hạn ngôn ngữ: `nativebuf.tkv` đã có `alloc_bytes`/`free_bytes`/`read_i32`/`write_i32` trả con trỏ thật (đã probe). Sửa được ngay trong repo này.
 3. **Chưa có SIMD** — phân tích, so sánh 3 hướng và lộ trình nằm ở `SIMD_NOTES.md`. Tiền đề là mục 2 ở trên.
 4. **Test chưa mirror hết C# cũ**: `ZeroGCHotPathTests`, `StressTests`, `ExecutionModelTests` (MLP/ResNet/LLaMA-layer/50 tầng), `GraphOptimizationTests` (fusion/DCE/const-fold theo cặp), `DynamicBatcherTests` phần async/concurrency. Hiện mới mirror protobuf/quant/batcher-queue + 4 test hồi quy lỗi treo. **Không nên xem là tương đương hoàn toàn cho tới khi bổ sung.**
 5. **`BatcherQueue`/`DynamicBatcher` chưa thật sự đa luồng.** `spawn(self._worker)` không tạo worker (runtime single-thread), nên `enqueue` chạy inline ⇒ không có micro-batching thật, batch luôn bằng 1. Cần worker thật (xem câu hỏi mở ở `SIMD_NOTES.md` mục 8).
