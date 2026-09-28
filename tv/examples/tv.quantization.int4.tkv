@@ -1,0 +1,207 @@
+# TokenVector Module: Quantization — INT4 group-wise (GPTQ/AWQ-class layout)
+# Symmetric 4-bit, group_size columns share one fp16-range scale (stored fp32).
+# Packing: two int4 nibbles per byte, low nibble first, values biased by +8.
+# Layout: weights [rows, cols] -> packed [rows, cols/2] + scales [rows, num_groups].
+
+import tv.runtime.session
+import tv.numerics.tensor
+
+
+# NOTE: bien dich khong ho tro tuple return - cac ham nhieu ket qua duoc viet
+# dang 'vao tham so out' (packed_out/scales_out/zps_out do caller cap phat).
+def _int4_scales_sym(src: 'list[f32]', rows: 'i64', cols: 'i64', group_size: 'i64', ng: 'i64', scales: 'list[f32]') -> 'i32':
+    for r in range(rows):
+        for g in range(ng):
+            am = 0.0
+            for c in range(group_size):
+                a = abs(src[r * cols + g * group_size + c])
+                if a > am:
+                    am = a
+            if am < 0.00000001:
+                am = 0.00000001
+            scales.append(am / 7.0)
+    return 0
+
+
+def quantize_int4_grouped(src: 'list[f32]', rows: 'i64', cols: 'i64', group_size: 'i64', packed_out: 'list[i32]', scales_out: 'list[f32]') -> 'i32':
+    if cols % group_size != 0:
+        raise ValueError("cols must be a multiple of group_size")
+    if cols % 2 != 0:
+        raise ValueError("cols must be even for nibble packing")
+    if len(src) < rows * cols:
+        raise ValueError("src smaller than rows*cols")
+    if len(packed_out) < rows * cols // 2:
+        raise ValueError("packed_out too small")
+    ng = cols // group_size
+    for i in range(len(packed_out)):
+        packed_out[i] = 0
+    _int4_scales_sym(src, rows, cols, group_size, ng, scales_out)
+    for r in range(rows):
+        for c in range(0, cols, 2):
+            g = c // group_size
+            sc = scales_out[r * ng + g]
+            inv = 1.0 / sc
+            q0 = max(-8, min(7, int(round(src[r * cols + c] * inv)))) + 8
+            q1 = max(-8, min(7, int(round(src[r * cols + c + 1] * inv)))) + 8
+            packed_out[r * cols // 2 + c // 2] = (q1 << 4) | q0
+    return 0
+
+
+def dequantize_int4_grouped(packed: 'list[i32]', dst: 'list[f32]', rows: 'i64', cols: 'i64', group_size: 'i64', scales: 'list[f32]') -> 'i32':
+    ng = cols // group_size
+    if len(scales) < rows * ng:
+        raise ValueError("scales smaller than rows*num_groups")
+    if len(dst) < rows * cols:
+        raise ValueError("dst too small")
+    for r in range(rows):
+        for c in range(0, cols, 2):
+            g = c // group_size
+            sc = scales[r * ng + g]
+            b = int(packed[r * cols // 2 + c // 2])
+            dst[r * cols + c] = float((b & 0xF) - 8) * sc
+            dst[r * cols + c + 1] = float(((b >> 4) & 0xF) - 8) * sc
+    return 0
+
+
+# AWQ-style asymmetric grouped INT4: per-group (scale, zero-point), uint4 0..15.
+def quantize_int4_grouped_asym(src: 'list[f32]', rows: 'i64', cols: 'i64', group_size: 'i64', packed_out: 'list[i32]', scales_out: 'list[f32]', zps_out: 'list[i64]') -> 'i32':
+    if cols % group_size != 0:
+        raise ValueError("cols must be a multiple of group_size")
+    if cols % 2 != 0:
+        raise ValueError("cols must be even for nibble packing")
+    if len(src) < rows * cols:
+        raise ValueError("src smaller than rows*cols")
+    if len(packed_out) < rows * cols // 2:
+        raise ValueError("packed_out too small")
+    ng = cols // group_size
+    for i in range(len(packed_out)):
+        packed_out[i] = 0
+    for r in range(rows):
+        for gg in range(ng):
+            mn = src[r * cols + gg * group_size]
+            mx = mn
+            for c in range(1, group_size):
+                v = src[r * cols + gg * group_size + c]
+                if v < mn:
+                    mn = v
+                if v > mx:
+                    mx = v
+            if mx - mn < 0.00000001:
+                mx = mn + 0.00000001
+            # (2026-09-26) Chon `sc` va `zp` DONG THOI sao cho vung bieu dien
+            # [-zp*sc, (15-zp)*sc] bao phu het [mn, mx].
+            #
+            # Dequantize doc `v = (q - zp) * sc`, nen ca hai dau cua khoang
+            # bieu dien deu phai roi vao [0, 15]. Ban dau tinh
+            # `sc = (mx - mn) / 15` roi `zp = clamp(round(-mn / sc), 0, 15)`.
+            # Khi ca nhom > 0 (vi du nhom [2,3,4,5]) thi -mn/sc < 0 nen
+            # `zp` bi clamp ve 0, nhung q = round(v/sc) + 0 van vuot 15
+            # (v/sc = 10, 15, 20, 25) -> bi clip ve 15 -> gia tri sai
+            # (4.0 -> 3.0, 5.0 -> 3.0). Bay gio tinh lai `sc` sau khi `zp`
+            # da bi clamp, de lan cuoi cung nap duoc ca hai dau.
+            sc = (mx - mn) / 15.0
+            zp = int(round(-mn / sc))
+            if zp < 0:
+                zp = 0
+            if zp > 15:
+                zp = 15
+            if zp == 0:
+                sc = mx / 15.0
+            elif zp == 15:
+                sc = -mn / 15.0
+            if sc < 0.00000001:
+                sc = 0.00000001
+            scales_out.append(sc)
+            zps_out.append(zp)
+    for r in range(rows):
+        for c in range(0, cols, 2):
+            gg = c // group_size
+            sc = scales_out[r * ng + gg]
+            zp = zps_out[r * ng + gg]
+            mn = -zp * sc
+            q0 = max(0, min(15, int(round((src[r * cols + c] - mn) / sc))))
+            q1 = max(0, min(15, int(round((src[r * cols + c + 1] - mn) / sc))))
+            packed_out[r * cols // 2 + c // 2] = (q1 << 4) | q0
+    return 0
+
+
+def dequantize_int4_grouped_asym(packed: 'list[i32]', dst: 'list[f32]', rows: 'i64', cols: 'i64', group_size: 'i64', scales: 'list[f32]', zps: 'list[i64]') -> 'i32':
+    ng = cols // group_size
+    for r in range(rows):
+        for c in range(0, cols, 2):
+            gg = c // group_size
+            sc = scales[r * ng + gg]
+            zp = zps[r * ng + gg]
+            b = int(packed[r * cols // 2 + c // 2])
+            dst[r * cols + c] = float((b & 0xF) - zp) * sc
+            dst[r * cols + c + 1] = float(((b >> 4) & 0xF) - zp) * sc
+    return 0
+
+
+# GPTQ act-order support: permute columns by activation order at quant time,
+# gather activation columns inside the GEMM (O(1) memory, exact).
+def permute_cols(src: 'list[f32]', rows: 'i64', cols: 'i64', perm: 'list[i64]') -> 'list[f32]':
+    if len(perm) != cols:
+        raise ValueError("perm length must equal cols")
+    out = _nd_f32(rows * cols)
+    for r in range(rows):
+        for c in range(cols):
+            out[r * cols + c] = src[r * cols + perm[c]]
+    return out
+
+
+def inv_permute_cols(src: 'list[f32]', rows: 'i64', cols: 'i64', perm: 'list[i64]') -> 'list[f32]':
+    if len(perm) != cols:
+        raise ValueError("perm length must equal cols")
+    out = _nd_f32(rows * cols)
+    for r in range(rows):
+        for c in range(cols):
+            out[r * cols + perm[c]] = src[r * cols + c]
+    return out
+
+
+def matmul_int4_grouped_ordered(pa: 'list[f32]', packed_w: 'list[i32]', pbias: 'list[f32]', py: 'list[f32]', m: 'i64', n: 'i64', k: 'i64', group_size: 'i64', scales_w: 'list[f32]', perm: 'list[i64]') -> 'i32':
+    ng = k // group_size
+    for mm in range(m):
+        for nn in range(n):
+            acc = 0.0
+            for kk in range(k):
+                gg = kk // group_size
+                b = int(packed_w[nn * k // 2 + kk // 2])
+                if kk % 2 == 0:
+                    nib = b & 0xF
+                else:
+                    nib = (b >> 4) & 0xF
+                acc = acc + pa[mm * k + perm[kk]] * (float(nib - 8) * scales_w[nn * ng + gg])
+            if len(pbias) > 0:
+                bias = pbias[nn]
+            else:
+                bias = 0.0
+            py[mm * n + nn] = acc + bias
+    return 0
+
+
+# Grouped INT4 GEMM: Y = (A_fp32 @ W_int4^T) + Bias with per-group scales.
+# Correctness-first path: streaming dequantize per K-block keeps memory O(block).
+def matmul_int4_grouped(pa: 'list[f32]', packed_w: 'list[i32]', pbias: 'list[f32]', py: 'list[f32]', m: 'i64', n: 'i64', k: 'i64', group_size: 'i64', scales_w: 'list[f32]') -> 'i32':
+    ng = k // group_size
+    if len(scales_w) < n * ng:
+        raise ValueError("scales_w smaller than N*num_groups")
+    for mm in range(m):
+        for nn in range(n):
+            acc = 0.0
+            for kk in range(k):
+                g = kk // group_size
+                b = int(packed_w[nn * k // 2 + kk // 2])
+                if kk % 2 == 0:
+                    nib = b & 0xF
+                else:
+                    nib = (b >> 4) & 0xF
+                w = float(nib - 8) * scales_w[nn * ng + g]
+                acc = acc + pa[mm * k + kk] * w
+            if len(pbias) > 0:
+                bias = pbias[nn]
+            else:
+                bias = 0.0
+            py[mm * n + nn] = acc + bias
+    return 0

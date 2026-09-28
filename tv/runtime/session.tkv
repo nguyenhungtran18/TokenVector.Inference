@@ -3803,7 +3803,20 @@ class DeadCodeEliminationPass(IGraphPass):
                 i = i + -1
         _qx1000 = []
         for i in range(len(graph.nodes)):
-            if i not in active:
+            # (2026-09-28) SUA DIEU KIEN LOC - DAY LA BUG PHAM VI.
+            #
+            # Cu: `if i not in active: _qx1000.append(...)` => GIU node da
+            # CHET va XOA node dang SONG. Haieu qua: moi session dung
+            # optimization (`session_from_graph(g, 1)`) ra graph rong, chay
+            # xong tra ve toan 0/0/0 ma KHONG nem loi.
+            #
+            # VI SAO BI BO SOT: `active[i] = 1` danh dau node can giu, nen
+            # phai loc `i in active`. Toan bo test cu chi goi
+            # `session_from_graph(g, 0)` (TAT optimization) nen khong test
+            # nao chay nhanh nay - chi benchmark (compare_rivals.tkv) va
+            # `gap_tests` moi goi (1), va chung chi assert `len(y)`, khong
+            # assert gia tri.
+            if i in active:
                 _qx1000.append(graph.nodes[i])
         graph.nodes = _qx1000
         dead = []

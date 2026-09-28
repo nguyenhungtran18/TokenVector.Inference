@@ -1,0 +1,302 @@
+import tv.numerics.tensor
+ActivationFunction_None = 0
+ActivationFunction_ReLU = 1
+ActivationFunction_GELU = 2
+ActivationFunction_SiLU = 3
+ActivationFunction_Sigmoid = 4
+ActivationFunction_Tanh = 5
+VEC_W = 8
+BIN_ADD = 0
+BIN_SUB = 1
+BIN_MUL = 2
+BIN_DIV = 3
+
+def apply_activation(x: 'f32', act: 'i64') -> 'f32':
+    if act == ActivationFunction_ReLU:
+        if x > 0.0:
+            _c1 = x
+        else:
+            _c1 = 0.0
+        return _c1
+    if act == ActivationFunction_GELU:
+        x3 = x * x * x
+        return 0.5 * x * (1.0 + _tanh(0.79788456 * (x + 0.044715 * x3)))
+    if act == ActivationFunction_SiLU:
+        return x / (1.0 + exp(-x))
+    if act == ActivationFunction_Sigmoid:
+        return 1.0 / (1.0 + exp(-x))
+    if act == ActivationFunction_Tanh:
+        return _tanh(x)
+    return x
+
+def _tanh(x: 'f32') -> 'f32':
+    if x > 10.0:
+        return 1.0
+    if x < -10.0:
+        return -1.0
+    e = exp(2.0 * x)
+    return (e - 1.0) / (e + 1.0)
+
+def fused_matmul_bias_act(x: 'list[f32]', w: 'list[f32]', bias: 'list[f32]', y: 'list[f32]', m: 'i64', n: 'i64', k: 'i64', act: 'i64', trans_b: 'i32'=1) -> 'i32':
+    has_b = len(bias) > 0
+    for mm in range(m):
+        for nn in range(n):
+            if has_b:
+                _c2 = bias[nn]
+            else:
+                _c2 = 0.0
+            acc = _c2
+            if trans_b:
+                base = nn * k
+                kk = 0
+                while kk + 32 <= k:
+                    for l in range(32):
+                        acc = acc + x[mm * k + kk + l] * w[base + kk + l]
+                    kk = kk + 32
+                while kk < k:
+                    acc = acc + x[mm * k + kk] * w[base + kk]
+                    kk = kk + 1
+            else:
+                for p in range(k):
+                    acc = acc + x[mm * k + p] * w[p * n + nn]
+            y[mm * n + nn] = apply_activation(acc, act)
+    return 0
+
+def fused_rms_norm(x: 'list[f32]', gamma: 'list[f32]', y: 'list[f32]', n: 'i64', d: 'i64', eps: 'f32') -> 'i32':
+    has_g = len(gamma) > 0
+    for i in range(n):
+        base = i * d
+        ss = 0.0
+        j = 0
+        while j + VEC_W <= d:
+            for l in range(VEC_W):
+                ss = ss + x[base + j + l] * x[base + j + l]
+            j = j + VEC_W
+        while j < d:
+            ss = ss + x[base + j] * x[base + j]
+            j = j + 1
+        rs = 1.0 / sqrt(ss / d + eps)
+        j = 0
+        while j + VEC_W <= d:
+            for l in range(VEC_W):
+                if has_g:
+                    _c3 = gamma[j + l]
+                else:
+                    _c3 = 1.0
+                g = _c3
+                y[base + j + l] = x[base + j + l] * rs * g
+            j = j + VEC_W
+        while j < d:
+            if has_g:
+                _c4 = gamma[j]
+            else:
+                _c4 = 1.0
+            g = _c4
+            y[base + j] = x[base + j] * rs * g
+            j = j + 1
+    return 0
+
+def fused_layer_norm(x: 'list[f32]', gamma: 'list[f32]', beta: 'list[f32]', y: 'list[f32]', n: 'i64', d: 'i64', eps: 'f32') -> 'i32':
+    has_g = len(gamma) > 0
+    has_b = len(beta) > 0
+    for i in range(n):
+        base = i * d
+        s = 0.0
+        for j in range(d):
+            s = s + x[base + j]
+        mean = s / d
+        vs = 0.0
+        for j in range(d):
+            df = x[base + j] - mean
+            vs = vs + df * df
+        inv = 1.0 / sqrt(vs / d + eps)
+        for j in range(d):
+            if has_g:
+                _c5 = gamma[j]
+            else:
+                _c5 = 1.0
+            g = _c5
+            if has_b:
+                _c6 = beta[j]
+            else:
+                _c6 = 0.0
+            b = _c6
+            y[base + j] = (x[base + j] - mean) * inv * g + b
+    return 0
+
+def fused_conv2d_bn_relu(x: 'list[f32]', w: 'list[f32]', bias: 'list[f32]', mean: 'list[f32]', var: 'list[f32]', gamma: 'list[f32]', beta: 'list[f32]', y: 'list[f32]', batch: 'i64', in_c: 'i64', in_h: 'i64', in_w: 'i64', out_c: 'i64', kh: 'i64', kw: 'i64', sh: 'i64', sw: 'i64', ph: 'i64', pw2: 'i64', eps: 'f32') -> 'i32':
+    for oc in range(out_c):
+        if len(gamma) > 0:
+            _c7 = gamma[oc]
+        else:
+            _c7 = 1.0
+        g = _c7
+        if len(beta) > 0:
+            _c8 = beta[oc]
+        else:
+            _c8 = 0.0
+        bb = _c8
+        if len(mean) > 0:
+            _c9 = mean[oc]
+        else:
+            _c9 = 0.0
+        mm = _c9
+        if len(var) > 0:
+            _c10 = var[oc]
+        else:
+            _c10 = 1.0
+        vv = _c10
+        if len(bias) > 0:
+            _c11 = bias[oc]
+        else:
+            _c11 = 0.0
+        ob = _c11
+        inv = 1.0 / sqrt(vv + eps)
+        se = g * inv
+        be = bb + (ob - mm) * se
+        oh = (in_h + 2 * ph - kh) // sh + 1
+        ow = (in_w + 2 * pw2 - kw) // sw + 1
+        for b in range(batch):
+            for o in range(oh):
+                ih0 = o * sh - ph
+                for u in range(ow):
+                    iw0 = u * sw - pw2
+                    s = 0.0
+                    for ic in range(in_c):
+                        for r in range(kh):
+                            h = ih0 + r
+                            if h < 0 or h >= in_h:
+                                continue
+                            for t in range(kw):
+                                ww = iw0 + t
+                                if ww < 0 or ww >= in_w:
+                                    continue
+                                s = s + x[((b * in_c + ic) * in_h + h) * in_w + ww] * w[((oc * in_c + ic) * kh + r) * kw + t]
+                    v = s * se + be
+                    if v > 0.0:
+                        _c12 = v
+                    else:
+                        _c12 = 0.0
+                    y[((b * out_c + oc) * oh + o) * ow + u] = _c12
+    return 0
+
+def memcpy_views(dst: 'list[f32]', src: 'list[f32]', n: 'i64') -> 'i32':
+    i = 0
+    while i + VEC_W <= n:
+        for l in range(VEC_W):
+            dst[i + l] = src[i + l]
+        i = i + VEC_W
+    while i < n:
+        dst[i] = src[i]
+        i = i + 1
+    return 0
+
+def transpose2d_views(src: 'list[f32]', dst: 'list[f32]', rows: 'i64', cols: 'i64') -> 'i32':
+    for r in range(rows):
+        for c in range(cols):
+            dst[c * rows + r] = src[r * cols + c]
+    return 0
+
+def unary_relu(x: 'list[f32]', y: 'list[f32]') -> 'i32':
+    n = len(x)
+    i = 0
+    while i + VEC_W <= n:
+        for l in range(VEC_W):
+            v = x[i + l]
+            if v > 0.0:
+                _c13 = v
+            else:
+                _c13 = 0.0
+            y[i + l] = _c13
+        i = i + VEC_W
+    while i < n:
+        v = x[i]
+        if v > 0.0:
+            _c14 = v
+        else:
+            _c14 = 0.0
+        y[i] = _c14
+        i = i + 1
+    return 0
+
+def elementwise_binary(a: 'list[f32]', b: 'list[f32]', y: 'list[f32]', op: 'i64') -> 'i32':
+    if op == BIN_ADD:
+        _bin_loop(a, b, y, 0)
+    elif op == BIN_SUB:
+        _bin_loop(a, b, y, 1)
+    elif op == BIN_MUL:
+        _bin_loop(a, b, y, 2)
+    else:
+        _bin_loop(a, b, y, 3)
+    return 0
+
+def _bin_loop(a: 'list[f32]', b: 'list[f32]', y: 'list[f32]', op: 'i64') -> 'i32':
+    ca = len(a)
+    cb = len(b)
+    cy = len(y)
+    same = ca == cy and cb == cy
+    bcast_b = cb == 1
+    bcast_a = ca == 1 and (not same)
+    i = 0
+    if same:
+        while i + VEC_W <= cy:
+            for l in range(VEC_W):
+                y[i + l] = _bin_scalar(a[i + l], b[i + l], op)
+            i = i + VEC_W
+        while i < cy:
+            y[i] = _bin_scalar(a[i], b[i], op)
+            i = i + 1
+    elif bcast_b:
+        sb = b[0]
+        while i + VEC_W <= cy:
+            for l in range(VEC_W):
+                y[i + l] = _bin_scalar(a[i + l], sb, op)
+            i = i + VEC_W
+        while i < cy:
+            y[i] = _bin_scalar(a[i], sb, op)
+            i = i + 1
+    elif bcast_a:
+        sa = a[0]
+        while i + VEC_W <= cy:
+            for l in range(VEC_W):
+                y[i + l] = _bin_scalar(sa, b[i + l], op)
+            i = i + VEC_W
+        while i < cy:
+            y[i] = _bin_scalar(sa, b[i], op)
+            i = i + 1
+    else:
+        while i < cy:
+            y[i] = _bin_scalar(a[i % ca], b[i % cb], op)
+            i = i + 1
+    return 0
+
+def _bin_scalar(a: 'f32', b: 'f32', op: 'i64') -> 'f32':
+    if op == BIN_ADD:
+        return a + b
+    if op == BIN_SUB:
+        return a - b
+    if op == BIN_MUL:
+        return a * b
+    return a / b
+
+def softmax_rows(x: 'list[f32]', y: 'list[f32]', n_rows: 'i64', d: 'i64') -> 'i32':
+    for r in range(n_rows):
+        base = r * d
+        mx = x[base]
+        for j in range(1, d):
+            v = x[base + j]
+            if v > mx:
+                mx = v
+        s = 0.0
+        for j in range(d):
+            e = exp(x[base + j] - mx)
+            y[base + j] = e
+            s = s + e
+        if s > 0.00000001:
+            _c15 = s
+        else:
+            _c15 = 0.00000001
+        inv = 1.0 / _c15
+        for j in range(d):
+            y[base + j] = y[base + j] * inv
+    return 0

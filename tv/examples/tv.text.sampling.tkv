@@ -1,0 +1,174 @@
+import tv.runtime.session
+import tv.numerics.tensor
+
+class SampleParams:
+    _ok: 'i64'
+    temperature: 'f32'
+    top_k: 'i64'
+    top_p: 'f32'
+    min_p: 'f32'
+    repeat_penalty: 'f32'
+    repeat_last_n: 'i64'
+    seed: 'i64'
+
+    def __init__(self):
+        self.temperature = 1.0
+        self.top_k = 0
+        self.top_p = 1.0
+        self.min_p = 0.0
+        self.repeat_penalty = 1.0
+        self.repeat_last_n = 64
+        self.seed = 42
+
+def default_sample_params() -> 'SampleParams':
+    return SampleParams(1, 1.0, 0, 1.0, 0.0, 1.0, 64, 42)
+
+
+def sample_token(logits: 'list[f32]', params: 'SampleParams', history: 'list[i64]') -> 'i64':
+    n = len(logits)
+    work = _nd_f32(n)
+    for i in range(n):
+        work[i] = logits[i]
+    if params.repeat_penalty != 1.0 and params.repeat_last_n > 0:
+        start = max(0, len(history) - params.repeat_last_n)
+        for k in range(start, len(history)):
+            t = history[k]
+            if t >= 0 and t < n:
+                if work[t] > 0.0:
+                    work[t] = work[t] / params.repeat_penalty
+                else:
+                    work[t] = work[t] * params.repeat_penalty
+    if params.temperature <= 0.0:
+        return _argmax(work)
+    inv = 1.0 / params.temperature
+    keep = []
+    _ki = 0
+    while _ki < n:
+        keep.append(1)
+        _ki = _ki + 1
+    if params.top_k > 0:
+        keep = _topk_mask(work, params.top_k)
+    mx = work[0]
+    for i in range(1, n):
+        if keep[i] and work[i] > mx:
+            mx = work[i]
+    probs = _nd_f32(n)
+    s = 0.0
+    for i in range(n):
+        if not keep[i]:
+            probs[i] = 0.0
+        else:
+            e = exp((work[i] - mx) * inv)
+            probs[i] = e
+            s = s + e
+    if s > 0.000000000001:
+        _c2 = s
+    else:
+        _c2 = 0.000000000001
+    inv_s = 1.0 / _c2
+    for i in range(n):
+        probs[i] = probs[i] * inv_s
+    if params.top_p < 1.0:
+        allowed = {}
+        cum = 0.0
+        _wloop0 = 1
+        while _wloop0:
+            best = -1
+            for i in range(n):
+                if i not in allowed and (best < 0 or probs[i] > probs[best]):
+                    best = i
+            if best < 0 or probs[best] <= 0.0:
+                break
+            allowed[best] = 1
+            cum = cum + probs[best]
+            if cum >= params.top_p:
+                break
+        s2 = 0.0
+        for i in range(n):
+            if i not in allowed:
+                probs[i] = 0.0
+            else:
+                s2 = s2 + probs[i]
+        if s2 > 0.000000000001:
+            _c3 = s2
+        else:
+            _c3 = 0.000000000001
+        inv2 = 1.0 / _c3
+        for i in range(n):
+            probs[i] = probs[i] * inv2
+    if params.min_p > 0.0:
+        pmax = probs[0]
+        for i in range(1, n):
+            if probs[i] > pmax:
+                pmax = probs[i]
+        floor = pmax * params.min_p
+        s3 = 0.0
+        for i in range(n):
+            if probs[i] < floor:
+                probs[i] = 0.0
+            else:
+                s3 = s3 + probs[i]
+        if s3 > 0.000000000001:
+            _c4 = s3
+        else:
+            _c4 = 0.000000000001
+        inv3 = 1.0 / _c4
+        for i in range(n):
+            probs[i] = probs[i] * inv3
+    r = _rand_next(params.seed)
+    params.seed = r
+    u = r % 1000000 / 1000000.0
+    cum = 0.0
+    for i in range(n):
+        cum = cum + probs[i]
+        if u < cum:
+            return i
+    return _argmax(probs)
+
+def _argmax(a: 'list[f32]') -> 'i64':
+    best = 0
+    for i in range(1, len(a)):
+        if a[i] > a[best]:
+            best = i
+    return best
+
+def _topk_mask(a: 'list[f32]', k: 'i64') -> 'list[i32]':
+    kk = min(k, len(a))
+    _qx1000 = []
+    for i in range(len(a)):
+        _qx1000.append(a[i])
+    vals = _qx1000
+    lo = 0
+    nvals = 0
+    for _ in vals:
+        nvals = nvals + 1
+    hi = nvals - 1
+    while lo < hi:
+        p = vals[(lo + hi) // 2]
+        i = lo
+        j = hi
+        while i <= j:
+            while vals[i] > p:
+                i = i + 1
+            while vals[j] < p:
+                j = j - 1
+            if i <= j:
+                t = vals[i]
+                vals[i] = vals[j]
+                vals[j] = t
+                i = i + 1
+                j = j - 1
+        if j < kk - 1:
+            lo = i
+        if kk - 1 < i:
+            hi = j
+        if lo >= hi:
+            break
+    thr = vals[kk - 1]
+    _qx1001 = []
+    for i in range(len(a)):
+        _qx1001.append(a[i] >= thr)
+    return _qx1001
+
+def _rand_next(seed: 'i64') -> 'i64':
+    return seed * 6364136223846793005 + 1442695040888963407 & 18446744073709551615

@@ -1,0 +1,81 @@
+import tv.text.tokenizer
+import tv.runtime.session
+import tv.text.sampling
+import tv.numerics.tensor
+
+def speculative_generate(target: 'InferenceSession', draft: 'InferenceSession', tokenizer: 'Tokenizer', prompt: 'str', max_new_tokens: 'i64', k: 'i64', params: 'SampleParams', in_dim: 'i64', vocab: 'i64', eos: 'i64'=-1) -> 'list[i64]':
+    ids = tokenizer.encode(prompt)
+    _qx1000 = []
+    for _qx1002 in ids:
+        _qx1000.append(_qx1002)
+    history = _qx1000
+    gen = []
+    while len(gen) < max_new_tokens:
+        greedy = default_sample_params()
+        greedy.temperature = 0.0
+        prop = []
+        _qx1001 = []
+        for _qx1003 in history:
+            _qx1001.append(_qx1003)
+        dhist = _qx1001
+        for _ in range(min(k, max_new_tokens - len(gen))):
+            lg = _spec_logits_for(draft, dhist, in_dim, vocab)
+            t = sample_token(lg, greedy, dhist)
+            prop.append(t)
+            dhist.append(t)
+            if t == eos:
+                break
+        accepted = 0
+        for t in prop:
+            lg = _spec_logits_for(target, history, in_dim, vocab)
+            if _accepts(lg, t, params, history):
+                history.append(t)
+                gen.append(t)
+                accepted = accepted + 1
+                if t == eos or len(gen) >= max_new_tokens:
+                    break
+            else:
+                nt = sample_token(lg, params, history)
+                history.append(nt)
+                gen.append(nt)
+                break
+        if accepted == len(prop) and len(prop) > 0 and (len(gen) < max_new_tokens):
+            lg = _spec_logits_for(target, history, in_dim, vocab)
+            nt = sample_token(lg, params, history)
+            history.append(nt)
+            gen.append(nt)
+        if len(gen) > 0 and gen[len(gen) - 1] == eos:
+            break
+        if len(prop) == 0:
+            break
+    return gen
+
+def _accepts(logits: 'list[f32]', t: 'i64', params: 'SampleParams', history: 'list[i64]') -> 'i32':
+    g = default_sample_params()
+    g.temperature = 0.0
+    return sample_token(logits, g, history) == t
+
+def _spec_logits_for(session: 'InferenceSession', history: 'list[i64]', in_dim: 'i64', vocab: 'i64') -> 'list[f32]':
+    inp = _nd_f32(in_dim)
+    for i in range(in_dim):
+        inp[i] = 0.0
+    n_hist = 0
+    for _ in history:
+        n_hist = n_hist + 1
+    if n_hist > in_dim:
+        tail_n = in_dim
+        start = n_hist - in_dim
+    else:
+        tail_n = n_hist
+        start = 0
+    base = in_dim - tail_n
+    for i in range(tail_n):
+        inp[base + i] = float(history[start + i])
+    out = session.run_single(inp)
+    ln = min(len(out), vocab)
+    lg = _nd_f32(ln)
+    for i in range(ln):
+        lg[i] = out[len(out) - ln + i]
+    return lg
+
+

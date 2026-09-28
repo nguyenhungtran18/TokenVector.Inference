@@ -1,0 +1,169 @@
+import tv.runtime.session
+import tv.text.sampling
+import tv.text.tokenizer
+import tv.numerics.tensor
+
+class Beam:
+    _ok: 'i64'
+    tokens: 'list[i64]'
+    score: 'f32'
+
+    def __init__(self, tokens: 'list[i64]', score: 'f32'):
+        _qx1000 = []
+        for _qx1003 in tokens:
+            _qx1000.append(_qx1003)
+        self.tokens = _qx1000
+        self.score = score
+
+    def clone(self) -> 'Beam':
+        _nb = Beam(1, self.score)
+        _nb.tokens = self.tokens
+        return _nb
+
+class BeamConfig:
+    _ok: 'i64'
+    width: 'i64'
+    max_new_tokens: 'i64'
+    length_penalty: 'f32'
+    eos_token: 'i64'
+    forbid_eos_until: 'i64'
+
+    def __init__(self):
+        self.width = 4
+        self.max_new_tokens = 32
+        self.length_penalty = 0.6
+        self.eos_token = -1
+        self.forbid_eos_until = 0
+
+def log_softmax(logits: 'list[f32]') -> 'list[f32]':
+    n = len(logits)
+    mx = logits[0]
+    for i in range(1, n):
+        if logits[i] > mx:
+            mx = logits[i]
+    s = 0.0
+    for i in range(n):
+        s = s + exp(logits[i] - mx)
+    ls = log(s)
+    out = _nd_f32(n)
+    for i in range(n):
+        out[i] = logits[i] - mx - ls
+    return out
+
+def _mask(logits: 'list[f32]') -> 'list[f32]':
+    return logits
+
+def _score(tokens: 'list[i64]', lp: 'f32', sum_logp: 'f32') -> 'f32':
+    ln = max(1, len(tokens))
+    pen = pow_float(ln, lp)
+    return sum_logp / pen
+
+def pow_float(x: 'f32', e: 'f32') -> 'f32':
+    if e == 0.0:
+        return 1.0
+    if x <= 0.0:
+        return 1.0
+    return exp(e * log(x))
+
+def _beam_logits_for(session: 'InferenceSession', history: 'list[i64]', in_dim: 'i64', vocab: 'i64') -> 'list[f32]':
+    inp = _nd_f32(in_dim)
+    for i in range(in_dim):
+        inp[i] = 0.0
+    n_hist = 0
+    for _ in history:
+        n_hist = n_hist + 1
+    if n_hist > in_dim:
+        tail_n = in_dim
+        start = n_hist - in_dim
+    else:
+        tail_n = n_hist
+        start = 0
+    base = in_dim - tail_n
+    for i in range(tail_n):
+        inp[base + i] = float(history[start + i])
+    out = session.run_single(inp)
+    ln = min(len(out), vocab)
+    lg = _nd_f32(ln)
+    for i in range(ln):
+        lg[i] = out[len(out) - ln + i]
+    return lg
+
+def beam_search(session: 'InferenceSession', tokenizer: 'Tokenizer', prompt: 'str', cfg: 'BeamConfig', in_dim: 'i64', vocab: 'i64') -> 'Beam':
+    ids = tokenizer.encode(prompt)
+    beams = []
+    _b0 = Beam(1, 0.0)
+    _b0.tokens = ids
+    beams.append(_b0)
+    for step in range(cfg.max_new_tokens):
+        candidates = []
+        for b in beams:
+            lg = _beam_logits_for(session, b.tokens, in_dim, vocab)
+            lg = _mask(lg)
+            lp = log_softmax(lg)
+            _ptoks = []
+            _ptoks.append(0)
+            _ptoks.pop()
+            _pvals = []
+            _pvals.append(0.0)
+            _pvals.pop()
+            for _ in range(cfg.width):
+                best = -1
+                best_v = -340000000000000000000000000000000000000.0
+                for i in range(len(lp)):
+                    if i in _ptoks:
+                        continue
+                    if lp[i] > best_v:
+                        best_v = lp[i]
+                        best = i
+                if best >= 0 and best_v > -1000000000000000000000000000000.0:
+                    _ptoks.append(best)
+                    _pvals.append(best_v)
+            for _pi in range(len(_ptoks)):
+                tok = _ptoks[_pi]
+                lpp = _pvals[_pi]
+                nb = b.clone()
+                _ah117_16 = nb.tokens
+                _ah117_16.append(tok)
+                nb.score = b.score + lpp
+                candidates.append(nb)
+        for c in candidates:
+            c.score = _score(c.tokens, cfg.length_penalty, c.score)
+        _ci = 0
+        while _ci < len(candidates) - 1:
+            _cj = _ci + 1
+            while _cj < len(candidates):
+                _ca = candidates[_ci]
+                _cb = candidates[_cj]
+                if _cb.score > _ca.score:
+                    candidates[_ci] = _cb
+                    candidates[_cj] = _ca
+                _cj = _cj + 1
+            _ci = _ci + 1
+        beams = []
+        seen = {}
+        for c in candidates:
+            _qx1002 = []
+            for t in c.tokens:
+                _qx1002.append(str(t))
+            _ah129_18 = ","
+            key = _ah129_18.join(_qx1002)
+            if key in seen:
+                continue
+            seen[key] = 1
+            beams.append(c)
+            if len(beams) >= cfg.width:
+                break
+        done = 1
+        for b in beams:
+            if cfg.eos_token < 0 or len(b.tokens) == 0 or b.tokens[len(b.tokens) - 1] != cfg.eos_token:
+                done = 0
+                break
+        if done:
+            break
+    bestb = beams[0]
+    for b in beams:
+        if b.score > bestb.score:
+            bestb = b
+    return bestb
+
+

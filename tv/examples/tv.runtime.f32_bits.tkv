@@ -1,0 +1,74 @@
+# TokenVector Runtime: IEEE-754 binary32 <-> binary64 bit-reinterpretation
+# (thuan .tkv - KHONG can P/Invoke, KHONG can DLL native)
+import tv.numerics.tensor
+
+
+def f64_to_f32_bits(x: 'f64') -> 'i64':
+    """Bit IEEE-754 binary32 cua gia tri f64 `x` (tuong duong
+    BitConverter.SingleToInt32Bits cua .NET sau khi lam tron float).
+
+    Vì sao cần: chuan ONNX - truong `float` trong protobuf luu 4 byte,
+    ma nguon la so double. Day la ham 'viet lai' phep ep kieu, khong
+    phai ham doc manh.
+
+    HANG SO duoc khai BAO CUC BO trong tung ham (khong dung bien global
+    cap module): compiler KHONG tu khoi tao bien global truoc khi goi
+    ham - xem ghi chu 'thu vien khong tu khoi tao bien global' trong
+    tkv_compile.tkv. Dung global se sinh NullReferenceException luc chay.
+    """
+    if x == 0.0:
+        return 0
+    s = 0
+    a = x
+    if x < 0.0:
+        s = 2147483648
+        a = 0.0 - x
+    e = 0
+    while a >= 2.0:
+        a = a / 2.0
+        e = e + 1
+    while a < 1.0:
+        a = a * 2.0
+        e = e - 1
+    ex = e + 127
+    if ex >= 255:
+        return s + 255 * 8388608
+    if ex <= 0:
+        sh = e + 149
+        if sh <= 0:
+            return s
+        return s + int(a * pow(2.0, float(sh)) + 0.5)
+    t = (a - 1.0) * 8388608.0
+    f = int(t)
+    r = t - float(f)
+    if r > 0.5:
+        m = f + 1
+    elif r < 0.5:
+        m = f
+    else:
+        m = f
+        if f % 2 != 0:
+            m = f + 1
+    if m > 8388607:
+        m = 0
+        ex = ex + 1
+        if ex >= 255:
+            return s + 255 * 8388608
+    return s + ex * 8388608 + m
+
+
+def f32_bits_to_f64(b: 'i64') -> 'f64':
+    """Gia tri (binary64, chinh xac bit-for-bit) cua 4 byte IEEE-754
+    binary32 cho truoc `b` - nguoc cua f64_to_f32_bits."""
+    s = b & 2147483648
+    ex = (b >> 23) & 255
+    mant = b & 8388607
+    if ex == 0:
+        v = float(mant) * pow(2.0, 0.0 - 149.0)
+    elif ex == 255:
+        v = pow(2.0, 128.0) * 2.0
+    else:
+        v = (1.0 + float(mant) / 8388608.0) * pow(2.0, float(ex - 127))
+    if s != 0:
+        v = 0.0 - v
+    return v

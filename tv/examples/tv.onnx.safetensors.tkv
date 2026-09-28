@@ -1,0 +1,212 @@
+import tv.runtime.session
+import tv.numerics.tensor
+
+class STTensor:
+    _ok: 'i64'
+    name: 'str'
+    dtype: 'str'
+    shape: 'list[i64]'
+    begin: 'i64'
+    end: 'i64'
+
+    def __init__(self, name: 'str', dtype: 'str', shape: 'list[i64]', begin: 'i64', end: 'i64'):
+        self.name = name
+        self.dtype = dtype
+        self.shape = shape
+        self.begin = begin
+        self.end = end
+
+def _skip_ws(s: 'str', i: 'i64') -> 'i64':
+    while i < len(s) and (s[i:i + 1] == " " or s[i:i + 1] == "\n" or s[i:i + 1] == "\t" or (s[i:i + 1] == "\r")):
+        i = i + 1
+    return i
+
+def _read_str_val(s: 'str', i: 'i64') -> 'str':
+    i = i + 1
+    out = ""
+    while i < len(s):
+        c = s[i:i + 1]
+        if c == "\\":
+            out = out + s[i + 1:i + 2]
+            i = i + 2
+            continue
+        if c == "\"":
+            return out
+        out = out + c
+        i = i + 1
+    return out
+
+def _read_str_pos(s: 'str', i: 'i64') -> 'i64':
+    i = i + 1
+    while i < len(s):
+        c = s[i:i + 1]
+        if c == "\\":
+            i = i + 2
+            continue
+        if c == "\"":
+            return i + 1
+        i = i + 1
+    return i
+
+def _read_int_val(s: 'str', i: 'i64') -> 'i64':
+    neg = 0
+    if s[i:i + 1] == "-":
+        neg = 1
+        i = i + 1
+    v = 0
+    while i < len(s) and s[i:i + 1] >= "0" and (s[i:i + 1] <= "9"):
+        v = v * 10 + int(s[i:i + 1])
+        i = i + 1
+    if neg:
+        return -v
+    return v
+
+def _read_int_pos(s: 'str', i: 'i64') -> 'i64':
+    if s[i:i + 1] == "-":
+        i = i + 1
+    while i < len(s) and s[i:i + 1] >= "0" and (s[i:i + 1] <= "9"):
+        i = i + 1
+    return i
+
+def _read_int_list(s: 'str', i: 'i64', out: 'list[i64]') -> 'i64':
+    i = _skip_ws(s, i)
+    if s[i:i + 1] == "[":
+        i = i + 1
+    _wloop0 = 1
+    while _wloop0:
+        i = _skip_ws(s, i)
+        if s[i:i + 1] == "]":
+            return i
+        out.append(_read_int_val(s, i))
+        i = _read_int_pos(s, i)
+        i = _skip_ws(s, i)
+        if s[i:i + 1] == ",":
+            i = i + 1
+    return i
+
+def list_tensors(path: 'str') -> 'list[STTensor]':
+    raw = st_read_bytes(path)
+    hlen = st_u32_le(raw, 0)
+    hdr = st_bytes_to_str(raw, 8, hlen)
+    out = []
+    i = _skip_ws(hdr, 0)
+    i = _skip_ws(hdr, i + 1)
+    _wloop1 = 1
+    while _wloop1:
+        i = _skip_ws(hdr, i)
+        if hdr[i:i + 1] == "}":
+            break
+        key = _read_str_val(hdr, i)
+        i = _read_str_pos(hdr, i)
+        i = _skip_ws(hdr, i + 1)
+        i = _skip_ws(hdr, i)
+        if key == "__metadata__":
+            depth = 0
+            _wloop2 = 1
+            while _wloop2:
+                c = hdr[i:i + 1]
+                if c == "{":
+                    depth = depth + 1
+                if c == "}":
+                    depth = depth - 1
+                    if depth == 0:
+                        i = i + 1
+                        break
+                i = i + 1
+        else:
+            dtype = ""
+            shape = []
+            bo = 0
+            eo = 0
+            i = _skip_ws(hdr, i + 1)
+            _wloop3 = 1
+            while _wloop3:
+                i = _skip_ws(hdr, i)
+                if hdr[i:i + 1] == "}":
+                    i = i + 1
+                    break
+                fk = _read_str_val(hdr, i)
+                i = _read_str_pos(hdr, i)
+                i = _skip_ws(hdr, i + 1)
+                i = _skip_ws(hdr, i)
+                if fk == "dtype":
+                    dtype = _read_str_val(hdr, i)
+                    i = _read_str_pos(hdr, i)
+                elif fk == "shape":
+                    shape = []
+                    i = _read_int_list(hdr, i, shape)
+                elif fk == "data_offsets":
+                    _t1 = _skip_ws(hdr, i + 1)
+                    bo = _read_int_val(hdr, _t1)
+                    i2 = _read_int_pos(hdr, _t1)
+                    i2 = _skip_ws(hdr, i2 + 1)
+                    eo = _read_int_val(hdr, i2)
+                    i = _read_int_pos(hdr, i2)
+                    i = _skip_ws(hdr, i)
+                    i = _skip_ws(hdr, i + 1)
+                elif hdr[i:i + 1] == "\"":
+                    i = _read_str_pos(hdr, i)
+                else:
+                    i = i + 1
+                i = _skip_ws(hdr, i)
+                if hdr[i:i + 1] == ",":
+                    i = i + 1
+            _st = STTensor(1, key, dtype, bo, eo)
+            _st.shape = shape
+            out.append(_st)
+        i = _skip_ws(hdr, i)
+        if hdr[i:i + 1] == ",":
+            i = i + 1
+    return out
+
+def load_tensor(path: 'str', t: 'STTensor') -> 'list[f32]':
+    raw = st_read_bytes(path)
+    hlen = st_u32_le(raw, 0)
+    base = 8 + hlen + t.begin
+    n = 1
+    for d in t.shape:
+        n = n * d
+    if len(t.shape) > 0:
+        _c2 = t.shape
+    else:
+        _c2 = [1]
+    out = _nd_f32(n)
+    if t.dtype == "F32":
+        for i in range(n):
+            out[i] = st_f32_from_bits(st_u32_le(raw, base + i * 4))
+    elif t.dtype == "F16":
+        for i in range(n):
+            out[i] = st_f16_from_bits(st_u16_le(raw, base + i * 2))
+    elif t.dtype == "BF16":
+        for i in range(n):
+            out[i] = st_bf16_from_bits(st_u16_le(raw, base + i * 2))
+    else:
+        raise Arg("safetensors dtype not supported: " + t.dtype + " (use F32/F16/BF16)")
+    return out
+
+def load_all_float(path: 'str') -> 'dict[str,list[f32]]':
+    res = {}
+    for t in list_tensors(path):
+        res[t.name] = load_tensor(path, t)
+    return res
+
+def st_read_bytes(path: 'str') -> 'str':
+    return ""
+
+def st_u32_le(raw: 'str', pos: 'i64') -> 'i64':
+    return 0
+
+def st_u16_le(raw: 'str', pos: 'i64') -> 'i64':
+    return 0
+
+def st_f32_from_bits(b: 'i64') -> 'f32':
+    return 0.0
+
+def st_f16_from_bits(b: 'i64') -> 'f32':
+    return 0.0
+
+def st_bf16_from_bits(b: 'i64') -> 'f32':
+    return 0.0
+
+def st_bytes_to_str(raw: 'str', pos: 'i64', ln: 'i64') -> 'str':
+    return ""

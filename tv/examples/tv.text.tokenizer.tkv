@@ -1,0 +1,166 @@
+class Tokenizer:
+    """Kieu chung cua moi tokenizer (dung lam kieu tham so cho ham text).
+    Cac lop con ghi de encode/decode/vocab_size; ban goc o day chi la
+    phong ngua 'biến chưa duoc khai bao' khi goi method chua co o lop con."""
+    _ok: 'i64'
+    def encode(self, text: 'str') -> 'list[i64]':
+        return []
+    def decode(self, ids: 'list[i64]') -> 'str':
+        return ""
+    def vocab_size(self) -> 'i64':
+        return 0
+
+class BPETokenizer(Tokenizer):
+    vocab: 'dict[str,i64]'
+    id_to_tok: 'dict[i64,str]'
+    merges: 'list[str]'
+    rank: 'dict[str,i64]'
+    unk_id: 'i64'
+    _byte_map: 'dict[int,str]'
+
+    def __init__(self, vocab_path: 'str', merges_path: 'str', unk_id: 'i64'=0):
+        self.vocab = vocab_load_json(vocab_path)
+        self.id_to_tok = {}
+        for t in self.vocab:
+            self.id_to_tok[self.vocab[t]] = t
+        self.merges = merges_load_txt(merges_path)
+        self.rank = {}
+        for i in range(len(self.merges)):
+            self.rank[self.merges[i]] = i
+        self.unk_id = unk_id
+        self._byte_map = _bytes_to_unicode()
+
+    def encode(self, text: 'str') -> 'list[i64]':
+        ids = []
+        for word in _pretokenize(text):
+            _ew = self._encode_word(word)
+            ids.extend(_ew)
+        return ids
+
+    def decode(self, ids: 'list[i64]') -> 'str':
+        parts = []
+        for i in ids:
+            if i in self.id_to_tok:
+                _c1 = self.id_to_tok[i]
+            else:
+                _c1 = ""
+            t = _c1
+            parts.append(t)
+        _ah31_33 = ""
+        return _unicode_to_bytes(_ah31_33.join(parts))
+
+    def _encode_word(self, word: 'str') -> 'list[i64]':
+        syms = []
+        for ch in word:
+            for b in utf8_bytes(ch):
+                syms.append(self._byte_map[b])
+        while len(syms) > 1:
+            best = -1
+            best_rank = -1
+            for i in range(len(syms) - 1):
+                if syms[i] + " " + syms[i + 1] in self.rank:
+                    _c2 = self.rank[syms[i] + " " + syms[i + 1]]
+                else:
+                    _c2 = -1
+                r = _c2
+                if r >= 0 and (best < 0 or r < best_rank):
+                    best = i
+                    best_rank = r
+            if best < 0:
+                break
+            merged = syms[best] + syms[best + 1]
+            syms = syms[:best] + [merged] + syms[best + 2:]
+        ids = []
+        for s in syms:
+            if s in self.vocab:
+                _c3 = self.vocab[s]
+            else:
+                _c3 = self.unk_id
+            ids.append(_c3)
+        return ids
+
+    def vocab_size(self) -> 'i64':
+        return len(self.id_to_tok)
+
+class WordPieceTokenizer(Tokenizer):
+    vocab_path: 'str'
+    vocab: 'dict[str,i64]'
+    id_to_tok: 'dict[i64,str]'
+    unk_id: 'i64'
+    unk_token: 'str'
+
+    def __init__(self, vocab_path: 'str', unk_token: 'str'="[UNK]"):
+        self.vocab_path = vocab_path
+        lines = file_read_lines(vocab_path)
+        self.vocab = {}
+        for i in range(len(lines)):
+            self.vocab[lines[i]] = i
+        if unk_token in self.vocab:
+            _c4 = self.vocab[unk_token]
+        else:
+            _c4 = 0
+        self.unk_id = _c4
+
+    def encode(self, text: 'str') -> 'list[i64]':
+        ids = []
+        for word in _pretokenize(text):
+            _ew = self._encode_word(word)
+            ids.extend(_ew)
+        return ids
+
+    def _encode_word(self, word: 'str') -> 'list[i64]':
+        ids = []
+        start = 0
+        while start < len(word):
+            end = len(word)
+            cur = -1
+            while start < end:
+                sub = word[start:end]
+                if start > 0:
+                    sub = "##" + sub
+                if sub in self.vocab:
+                    cur = self.vocab[sub]
+                    break
+                end = end - 1
+            if cur < 0:
+                return [self.unk_id]
+            ids.append(cur)
+            start = end
+        return ids
+
+def _pretokenize(text: 'str') -> 'list[str]':
+    return pretokenize_split(text)
+
+def _bytes_to_unicode() -> "dict[int, str]":
+    m = {}
+    n = 0
+    for b in range(256):
+        if b >= 33 and b <= 126 or (b >= 161 and b <= 172) or (b >= 174 and b <= 255):
+            m[b] = chr(b)
+        else:
+            m[b] = chr(256 + n)
+            n = n + 1
+    return m
+
+def _unicode_to_bytes(s: 'str') -> 'str':
+    return unicode_unescape(s)
+
+def vocab_load_json(path: 'str') -> 'dict[str,i64]':
+    m = {}
+    return m
+
+def merges_load_txt(path: 'str') -> 'list[str]':
+    m = []
+    return m
+
+def file_read_lines(path: 'str') -> 'list[str]':
+    return []
+
+def pretokenize_split(text: 'str') -> 'list[str]':
+    return []
+
+def utf8_bytes(ch: 'str') -> 'list[i64]':
+    return []
+
+def unicode_unescape(s: 'str') -> 'str':
+    return ""

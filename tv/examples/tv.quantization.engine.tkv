@@ -1,0 +1,323 @@
+# TokenVector Module: Quantization — PTQ Engine
+# Calibration runs offline (allocations allowed); hot-path quantize/dequantize stay allocation-free.
+
+import tv.runtime.session
+import tv.quantization.types
+import tv.numerics.tensor
+
+
+def _quant_identity() -> 'QuantParams':
+    return QuantParams(1, 1.0, 0, -340282346638528859811704183484516925440.0, 340282346638528859811704183484516925440.0)
+
+
+def calibrate_minmax(data: 'list[f32]', symmetric: 'i32' = 1) -> 'QuantParams':
+    if len(data) == 0:
+        return _quant_identity()
+    mn = data[0]
+    mx = data[0]
+    for i in range(1, len(data)):
+        v = data[i]
+        if v < mn:
+            mn = v
+        if v > mx:
+            mx = v
+    if symmetric:
+        am = abs(mx)
+        if abs(mn) > am:
+            am = abs(mn)
+        if am < 0.00000001:
+            am = 0.00000001
+        return QuantParams(1, am / 127.0, 0, -am, am)
+    if abs(mx - mn) < 0.00000001:
+        mx = mn + 0.00000001
+    scale = (mx - mn) / 255.0
+    zp = int(round(-mn / scale)) - 128
+    zp = max(-128, min(127, zp))
+    return QuantParams(1, scale, zp, mn, mx)
+
+
+# TensorRT-style KL calibration: for each candidate threshold the histogram tail
+# is merged into the last kept bin, the truncated distribution is quantized down
+# to target_bins levels and expanded back, then KL(P || Q) is minimized.
+def calibrate_kl(data: 'list[f32]', num_bins: 'i64' = 2048, target_bins: 'i64' = 128) -> 'QuantParams':
+    if len(data) == 0:
+        return _quant_identity()
+    am = 0.0
+    for i in range(len(data)):
+        a = abs(data[i])
+        if a > am:
+            am = a
+    if am < 0.00000001:
+        return calibrate_minmax(data, 1)
+    hist = []
+    _hb = 0
+    while _hb < num_bins:
+        hist.append(0)
+        _hb = _hb + 1
+    bw = am / num_bins
+    for i in range(len(data)):
+        b = int(abs(data[i]) / bw)
+        if b >= num_bins:
+            b = num_bins - 1
+        hist[b] = hist[b] + 1
+    total = 0.0
+    for i in range(num_bins):
+        total = total + hist[i]
+    if total == 0:
+        return calibrate_minmax(data, 1)
+    p = []
+    _pb = 0
+    while _pb < num_bins:
+        p.append(0.0)
+        _pb = _pb + 1
+    q = []
+    _qb = 0
+    while _qb < num_bins:
+        q.append(0.0)
+        _qb = _qb + 1
+    best_bin = num_bins
+    best_kl = 1000000000000000000000000000000000000000000000.0
+    th = target_bins
+    while th <= num_bins:
+        s = 0.0
+        for i in range(th):
+            p[i] = float(hist[i])
+            s = s + hist[i]
+        for i in range(th, num_bins):
+            p[th - 1] = p[th - 1] + float(hist[i])
+            s = s + float(hist[i])
+        if s != 0:
+            for i in range(th):
+                p[i] = p[i] / s
+            per = th // target_bins
+            if per >= 1:
+                for i in range(th):
+                    q[i] = 0.0
+                b = 0
+                while b < target_bins:
+                    start = b * per
+                    if b == target_bins - 1:
+                        end = th
+                    else:
+                        end = start + per
+                    mass = 0.0
+                    for i in range(start, end):
+                        mass = mass + p[i]
+                    _span = end - start
+                    if _span < 1:
+                        _span = 1
+                    share = mass / _span
+                    for i in range(start, end):
+                        q[i] = share
+                    b = b + 1
+                kl = 0.0
+                for i in range(th):
+                    if p[i] > 0.000000000001 and q[i] > 0.000000000001:
+                        kl = kl + p[i] * log(p[i] / q[i])
+                if kl < best_kl:
+                    best_kl = kl
+                    best_bin = th
+        th = th + 16
+    thr = best_bin * bw
+    return QuantParams(1, thr / 127.0, 0, -thr, thr)
+
+
+# Percentile calibration: clips at |data| percentile — robust to outliers.
+def calibrate_percentile(data: 'list[f32]', percentile: 'f32' = 99.99, symmetric: 'i32' = 1) -> 'QuantParams':
+    if len(data) == 0:
+        return _quant_identity()
+    if percentile <= 0.0 or percentile > 100.0:
+        raise ValueError("percentile must be in (0, 100]")
+    ab = _nd_f32(len(data))
+    for i in range(len(data)):
+        ab[i] = abs(data[i])
+    sort_inplace(ab)
+    _nab = len(ab) - 1
+    if _nab < 0:
+        _nab = 0
+    _p100 = 100.0
+    idx = int(min(_nab, percentile / _p100 * len(ab)))
+    clip = ab[idx]
+    if clip <= 0.00000001:
+        clip = 0.00000001
+    if symmetric:
+        return QuantParams(1, clip / 127.0, 0, -clip, clip)
+    mn = data[0]
+    mx = data[0]
+    for i in range(1, len(data)):
+        v = data[i]
+        if v < -clip:
+            v = -clip
+        if v > clip:
+            v = clip
+        if v < mn:
+            mn = v
+        if v > mx:
+            mx = v
+    if abs(mx - mn) < 0.00000001:
+        mx = mn + 0.00000001
+    scale = (mx - mn) / 255.0
+    zp = int(round(-mn / scale)) - 128
+    return QuantParams(1, scale, max(-128, min(127, zp)), mn, mx)
+
+
+# MSE calibration: grid-searches symmetric thresholds to minimize quantization MSE.
+def calibrate_mse(data: 'list[f32]', num_candidates: 'i64' = 50) -> 'QuantParams':
+    if len(data) == 0:
+        return _quant_identity()
+    if num_candidates < 4:
+        num_candidates = 4
+    am = 0.0
+    for i in range(len(data)):
+        a = abs(data[i])
+        if a > am:
+            am = a
+    if am < 0.00000001:
+        return calibrate_minmax(data, 1)
+    best_thr = am
+    best_mse = 1000000000000000000000000000000000000000000000.0
+    for c in range(1, num_candidates + 1):
+        thr = am * c / num_candidates
+        scale = thr / 127.0
+        inv = 1.0 / scale
+        mse = 0.0
+        for i in range(len(data)):
+            cl = data[i]
+            if cl < -thr:
+                cl = -thr
+            if cl > thr:
+                cl = thr
+            dq = max(-127, min(127, int(round(cl * inv)))) * scale
+            d = data[i] - dq
+            mse = mse + d * d
+        mse = mse / len(data)
+        if mse < best_mse:
+            best_mse = mse
+            best_thr = thr
+    return QuantParams(1, best_thr / 127.0, 0, -best_thr, best_thr)
+
+
+# Per-channel (row-wise) symmetric calibration for [rows, cols] weight matrices.
+# LLM weights require per-output-channel scales; per-tensor alone collapses accuracy.
+def calibrate_per_channel_minmax(data: 'list[f32]', rows: 'i64', cols: 'i64', symmetric: 'i32' = 1) -> 'list[QuantParams]':
+    if rows <= 0 or cols <= 0:
+        raise ValueError("rows/cols must be > 0")
+    if len(data) < rows * cols:
+        raise ValueError("data smaller than rows*cols")
+    out = []
+    for r in range(rows):
+        row = []
+        for c in range(cols):
+            row.append(data[r * cols + c])
+        out.append(calibrate_minmax(row, symmetric))
+    return out
+
+
+def quantize_int8_symmetric(src: 'list[f32]', dst: 'list[i32]', scale: 'f32') -> 'i32':
+    if len(dst) < len(src):
+        raise ValueError("dst too small")
+    if scale > 0.00000001:
+        inv = 1.0 / scale
+    else:
+        inv = 1.0 / 0.00000001
+    for i in range(len(src)):
+        q = int(round(src[i] * inv))
+        dst[i] = max(-127, min(127, q))
+    return 0
+
+
+def dequantize_int8_symmetric(src: 'list[i32]', dst: 'list[f32]', scale: 'f32') -> 'i32':
+    if len(dst) < len(src):
+        raise ValueError("dst too small")
+    for i in range(len(src)):
+        dst[i] = float(src[i]) * scale
+    return 0
+
+
+def quantize_int8_per_channel(src: 'list[f32]', dst: 'list[i32]', rows: 'i64', cols: 'i64', scales: 'list[f32]') -> 'i32':
+    if len(dst) < rows * cols or len(src) < rows * cols:
+        raise ValueError("span too small")
+    if len(scales) < rows:
+        raise ValueError("scales smaller than rows")
+    for r in range(rows):
+        sc = scales[r]
+        if sc <= 0.00000001:
+            sc = 0.00000001
+        inv = 1.0 / sc
+        for c in range(cols):
+            i = r * cols + c
+            dst[i] = max(-127, min(127, int(round(src[i] * inv))))
+    return 0
+
+
+def dequantize_int8_per_channel(src: 'list[i32]', dst: 'list[f32]', rows: 'i64', cols: 'i64', scales: 'list[f32]') -> 'i32':
+    if len(dst) < rows * cols or len(src) < rows * cols:
+        raise ValueError("span too small")
+    if len(scales) < rows:
+        raise ValueError("scales smaller than rows")
+    for r in range(rows):
+        for c in range(cols):
+            i = r * cols + c
+            dst[i] = float(src[i]) * scales[r]
+    return 0
+
+
+# Dynamic (activation) row-wise INT8 quant: derives per-row scales on the fly.
+def quantize_dynamic_int8_rowwise(src: 'list[f32]', dst: 'list[i32]', rows: 'i64', cols: 'i64', scales_out: 'list[f32]') -> 'i32':
+    if len(dst) < rows * cols or len(src) < rows * cols:
+        raise ValueError("span too small")
+    if len(scales_out) < rows:
+        raise ValueError("scales_out smaller than rows")
+    for r in range(rows):
+        am = 0.0
+        for c in range(cols):
+            a = abs(src[r * cols + c])
+            if a > am:
+                am = a
+        if am < 0.00000001:
+            am = 0.00000001
+        sc = am / 127.0
+        scales_out[r] = sc
+        inv = 1.0 / sc
+        for c in range(cols):
+            i = r * cols + c
+            dst[i] = max(-127, min(127, int(round(src[i] * inv))))
+    return 0
+
+
+# Pure .tkv sort (calibration-time only, never hot path): heap sort, khong de
+# quy vi bien dich khong cho phep goi de quy.
+def sort_inplace(a: 'list[f32]') -> 'i32':
+    n = len(a)
+    if n < 2:
+        return 0
+    _i = n // 2 - 1
+    while _i >= 0:
+        _sift_down(a, _i, n)
+        _i = _i - 1
+    _j = n - 1
+    while _j > 0:
+        _t = a[0]
+        a[0] = a[_j]
+        a[_j] = _t
+        _sift_down(a, 0, _j)
+        _j = _j - 1
+    return 0
+
+
+def _sift_down(a: 'list[f32]', root: 'i64', size: 'i64') -> 'i32':
+    while 1 != 0:
+        _moved = 0
+        child = 2 * root + 1
+        if child < size:
+            if child + 1 < size and a[child] < a[child + 1]:
+                child = child + 1
+            if a[root] < a[child]:
+                t = a[root]
+                a[root] = a[child]
+                a[child] = t
+                root = child
+                _moved = 1
+        if _moved == 0:
+            return 0
+    return 0

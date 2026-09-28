@@ -64,7 +64,7 @@ ops (need sequence dtype in `tv.numerics`) and Scan with runtime trip count | **
 
 | Capability | TokenVector `.tkv` | ONNX Runtime | llama.cpp | PyTorch |
 |---|---|---|---|---|
-| CPU | ✅ SIMD-blocked `.tkv` (VEC_W=8, 32-blocked INT8 dot), Zero-GC arena + liveness reuse | ✅ MLAS, all archs incl. ARM/mobile | ✅ all CPUs, AMX/NEON/SVE threads | ✅ MKL/OpenBLAS |
+| CPU | ? pure `.tkv`, 8-wide blocked loops that are still scalar (VEC_W=8), liveness-based slot reuse; **no SIMD, arena not zero-GC** |
 | GPU | ❌ | ✅ CUDA/TensorRT/DirectML/ROCm/Metal | ✅ CUDA/HIP/Metal/Vulkan/SYCL/offload split | ✅ CUDA/ROCm/XPU |
 | NPU / edge | ❌ | ✅ QNN, OpenVINO, CoreML, NNAPI | ⚠️ Snapdragon Hexagon | ⚠️ ExecuTorch |
 | Footprint | ✅ pure `.tkv`, no native DLLs | ⚠️ ~100 MB+ with EPs | ✅ single binary | ❌ GB-scale |
@@ -108,12 +108,17 @@ Remaining — each with its precise technical reason:
 
 ## 9. Quick start (`.tkv`)
 
-```tokenvector
-import tv.inference
-
-session = tv.inference.load_onnx("models/llama_block.onnx")
-input_tensor = tensor.zeros([1, 64], dtype=float32)
-output_tensor = session.run(input_tensor)
-print("Output length:", output_tensor.length)
-session.close()
+```powershell
+$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
+& $tkvc build tv/examples/quickstart.tkv --out quickstart.exe
+.\quickstart.exe      # Y[0] = 2.25 / quickstart: OK
 ```
+
+The API is graph-based — there is no `tv.inference.load_onnx()`, no `NDArray` and no
+`tensor.zeros`. Build an `ExecutionGraph`, then `session_from_graph(g, 1)` and
+`session.run_single(x, "X", "Y")`. See `USER_GUIDE.md` and `tv/examples/quickstart.tkv`
+for the full snippet, and `HANDOFF.md` for the stubs that are not wired up.
+
+Because there is no SIMD and the arena is not zero-GC, the CPU and footprint rows above
+describe what the code *is* (pure `.tkv`, no native DLLs in the package), not a measured
+advantage. Benchmark numbers are currently unusable: see `BENCHMARKS.md`.

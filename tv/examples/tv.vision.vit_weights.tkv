@@ -1,0 +1,75 @@
+# TokenVector Module: Vision — Multimodal weight loading (ViT/CLIP SafeTensors)
+# Maps HuggingFace-style checkpoint names onto build_vit_graph initializers so
+# real vision encoder weights run end-to-end. Structural tensors keep defaults.
+#
+# vit.tkv initializer naming:
+#   patch_w / patch_b / cls_token / pos_embed
+#   L<i>_ln1_g / L<i>_ln1_b,  L<i>_qkv_w / L<i>_qkv_b
+#   L<i>_proj_w / L<i>_proj_b, L<i>_ln2_g / L<i>_ln2_b
+#   L<i>_fc1_w / L<i>_fc1_b,  L<i>_fc2_w / L<i>_fc2_b
+#   lnf_g / lnf_b
+
+import tv.vision.vit
+import tv.onnx.safetensors
+import tv.runtime.session
+import tv.numerics.tensor
+
+
+def _remap_layer_key(key: 'str') -> 'str':
+    if key == "patch_embed.proj.weight":
+        return "patch_w"
+    if key == "patch_embed.proj.bias":
+        return "patch_b"
+    if key == "cls_token":
+        return "cls_token"
+    if key == "pos_embed":
+        return "pos_embed"
+    if key == "norm.weight":
+        return "lnf_g"
+    if key == "norm.bias":
+        return "lnf_b"
+    if not key.startswith("blocks."):
+        return key
+    _rest = key[len("blocks."):]
+    _dot = _rest.find(".")
+    if _dot < 0:
+        return key
+    _layer = _rest[:_dot]
+    _tail = _rest[_dot + 1:]
+    _pre = "L" + _layer + "_"
+    if _tail == "norm1.weight":
+        return _pre + "ln1_g"
+    if _tail == "norm1.bias":
+        return _pre + "ln1_b"
+    if _tail == "attn.qkv.weight":
+        return _pre + "qkv_w"
+    if _tail == "attn.qkv.bias":
+        return _pre + "qkv_b"
+    if _tail == "attn.proj.weight":
+        return _pre + "proj_w"
+    if _tail == "attn.proj.bias":
+        return _pre + "proj_b"
+    if _tail == "norm2.weight":
+        return _pre + "ln2_g"
+    if _tail == "norm2.bias":
+        return _pre + "ln2_b"
+    if _tail == "mlp.fc1.weight":
+        return _pre + "fc1_w"
+    if _tail == "mlp.fc1.bias":
+        return _pre + "fc1_b"
+    if _tail == "mlp.fc2.weight":
+        return _pre + "fc2_w"
+    if _tail == "mlp.fc2.bias":
+        return _pre + "fc2_b"
+    return key
+
+
+def remap_vit_weights(weights: 'dict[str,list[f32]]') -> 'dict[str,list[f32]]':
+    out = {}
+    for key in weights:
+        out[_remap_layer_key(key)] = weights[key]
+    return out
+
+
+def load_vit_checkpoint(g: 'ExecutionGraph', weights: 'dict[str,list[f32]]') -> 'i32':
+    return load_vit_weights(g, remap_vit_weights(weights))

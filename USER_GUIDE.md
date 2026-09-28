@@ -1,55 +1,104 @@
 ﻿# TokenVector.Inference User Guide
 
 ## 1. Overview
-`TokenVector.Inference` provides high-performance deep learning model serving, graph optimizations, and multi-precision quantization for the TokenVector language (`.tkv`) and `tkvc` compiler.
+`TokenVector.Inference` is a pure TokenVector (`.tkv`) graph runtime: graph optimization,
+INT8/INT4/FP8 quantization, and an in-process micro-batcher. Everything below is the
+**verified** API. `HANDOFF.md` lists the gaps, `SIMD_NOTES.md` covers vectorization.
 
-## 2. Loading ONNX Models
-```tokenvector
-import tv.inference
-
-# Load from disk
-session = tv.inference.load_onnx("model.onnx")
+## 2. Build and run the quickstart
+```powershell
+$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
+& $tkvc build tv/examples/quickstart.tkv --out quickstart.exe
+.\quickstart.exe      # Y[0] = 2.25 / quickstart: OK
 ```
 
-## 3. Hot-Path Execution
-```tokenvector
-import tv.inference
-import tv.numerics.tensor
+## 3. Constructing and running a graph
+There is no `NDArray` and no `tv.inference.load_onnx()`. Tensors are flat `list[f32]`,
+and a session comes from an `ExecutionGraph`.
 
-session = tv.inference.load_onnx("model.onnx")
-input_tensor = tensor.zeros([1, 64], dtype=float32)
-output_tensor = session.run(input_tensor)
-print("Output shape:", output_tensor.shape)
+```tokenvector
+import tv.runtime.session
+
+# Module-level constants cannot be imported across modules; redeclare them.
+OperatorType_FusedLinear = 2
+ActivationFunction_Relu = 1
+
+g = ExecutionGraph(1, "demo", 0)
+g.inputs.append("X")
+g.outputs.append("Y")
+g.initializers["W"] = w            # list[f32], length n*k
+g.initializers["B"] = b            # list[f32], length n
+g.get_or_create_tensor("X", [1, 4])
+g.get_or_create_tensor("W", [8, 4])
+g.get_or_create_tensor("B", [8])
+g.get_or_create_tensor("Y", [1, 8])
+
+node = new_node("gemm", OperatorType_FusedLinear)
+node.activation = ActivationFunction_Relu
+node.inputs.append("X")            # then append("W"), append("B")
+node.outputs.append("Y")
+g.nodes.append(node)
+
+# 1 = run ConstantFolding, QdqFold, OperatorFusion, DeadCodeElimination.
+session = session_from_graph(g, 1)
+y = session.run_single(x, "X", "Y")
 session.close()
 ```
 
-Buffers are pre-sized for the arena-reuse hot path (Zero-GC design goal).
+`run_single(input, input_name, output_name)` takes flat `list[f32]` buffers. Passing
+`""` for the names falls back to the graph's first input/output.
 
-## 4. Post-Training Quantization (PTQ)
+## 4. ONNX parsing from bytes
+`parse_bytes(buf)` works on an in-memory buffer; `parse_file(path)` does **not** yet,
+because `parser_read_bytes` is a stub returning `""`.
+
+```tokenvector
+import tv.onnx.parser
+import tv.onnx.translator
+import tv.runtime.session
+
+model = parse_bytes(buf)      # buf: the ONNX file contents
+g = translate(model)
+session = session_from_graph(g, 1)
+```
+
+## 5. Post-Training Quantization (PTQ)
 ```tokenvector
 import tv.quantization.engine
+import tv.quantization.types
 
-# MinMax / KL / percentile / MSE calibration on activations,
-# then INT8 / INT4 / FP8 weight transforms — see tv/quantization/engine.tkv
+p = calibrate_minmax(x, 1)
+xi = _nd_i8(len(x))
+quantize_int8_symmetric(x, xi, p.scale)
+# INT4 / FP8 E4M3+E5M2 / FP16: see tv/quantization/*.tkv
 ```
 
-CLI:
-```powershell
-tkvc build tv/tools/cli.tkv
-# calibrate --model path.onnx ...
-```
+## 6. Micro-batching
+The batcher's synchronous path runs inference on the calling thread; there is no
+worker thread yet, so micro-batching does not actually batch.
 
-## 5. Micro-Serving & Dynamic Batching
 ```tokenvector
-import tv.inference
-
-session = tv.inference.load_onnx("model.onnx")
-server = session.serve(port=8080)
-# OpenAI-compatible: /v1/chat/completions, SSE streaming, /metrics
+import tv.server.batcher
+# __init__ of a record is SKIPPED at compile time, so the session must be
+# appended to pool by hand - that is what this factory does.
+b = new_dynamic_batcher_with_session(session, 32, 200, 10000)
+y = b.enqueue(x)        # never blocks; runs inline if no worker picks it up
+b.dispose()
 ```
 
-## 6. Toolchain
+The embedded REST server does not listen: `http_listen()` is a stub returning `0`.
+The CLI is present but `argv()` is a stub, so it always prints usage and takes no
+arguments.
+
+## 7. Toolchain
 ```powershell
-# Compiler location
-D:\TokenVector\3.code\dist\tkvc.exe build <source.tkv> [--out app.exe]
+$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
+& $tkvc build <entry-point.tkv> --out app.exe
+
+powershell -File tools\run_cases.ps1 -Compiler $tkvc     # 26 cases + 16 gap cases
+powershell -File build_inference.ps1 -SkipBenchmarks     # build + test
 ```
+
+Build entry points only. Building a single module makes `tkvc` rewrite the generated
+`tv.*.tkv` import copies, which has been observed to leave nine of them filled with
+NUL bytes.

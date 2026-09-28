@@ -288,17 +288,23 @@ def _gap_gemm_graph() -> 'ExecutionGraph':
 def test_optimized_session_terminates() -> 'i32':
     # Hoi quy (2026-09-28): DeadCodeEliminationPass.run() co
     # `if i in active: continue` ma KHONG giam `i`, nen vong
-    # `while i > -1` quay vo han ngay khi co node da active. Moi
-    # session_from_graph(graph, 1) deu treo. Test truoc day chi goi
-    # session_from_graph(g, 0) (tat optimization) nen khong bat duoc.
+    # `while i > -1` quay vo han ngay khi co node da active.
+    #
+    # Quan trong: PHAI assert GIA TRI, khong chi do dai. Dinh dang
+    # DeadCodeElimination loai node nguoc (`if i not in active`) nen
+    # session_from_graph(g, 1) xoa sach graph va tra ve toan 0 ma khong
+    # nem loi - assert `len(y) == 8` van xanh.
     g = _gap_gemm_graph()
     s = session_from_graph(g, 1)
     assert s._disposed == 0
     x = _nd_f32(4)
     for i in range(4):
         x[i] = 1.0
-    y = s.run_single(x)
+    y = s.run_single(x, "X", "Y")
     assert len(y) == 8
+    # Y[j] = ReLU(4 * 0.5 + 0.25) = 2.25 cho moi j
+    for j in range(8):
+        assert abs(y[j] - 2.25) < 0.00001
     s.close()
     return 0
 
@@ -357,8 +363,11 @@ def test_scratch_liveness_terminates() -> 'i32':
     x = _nd_f32(4)
     for i in range(4):
         x[i] = 1.0
-    y = s.run_single(x)
+    y = s.run_single(x, "X", "Z")
     assert len(y) == 8
+    # Y = ReLU(gemm) = 2.25; T0 = ReLU(X) = 1.0; Z = Y + T0 = 3.25
+    for j in range(8):
+        assert abs(y[j] - 3.25) < 0.00001
     s.close()
     return 0
 

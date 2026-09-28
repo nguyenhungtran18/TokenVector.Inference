@@ -1,0 +1,444 @@
+
+OperatorType_Abs = 58
+OperatorType_Add = 13
+OperatorType_ArgMax = 49
+OperatorType_Attention = 7
+OperatorType_AveragePool = 36
+OperatorType_BatchNormalization = 37
+OperatorType_Cast = 30
+OperatorType_Clip = 29
+OperatorType_Concat = 20
+OperatorType_Conv2D = 3
+OperatorType_DequantizeLinear = 64
+OperatorType_Div = 16
+OperatorType_Dropout = 40
+OperatorType_DynamicQuantizeLinear = 79
+OperatorType_Elu = 43
+OperatorType_Exp = 47
+OperatorType_Expand = 28
+OperatorType_Flatten = 38
+OperatorType_FusedConv2D = 4
+OperatorType_FusedLinear = 2
+OperatorType_Gather = 23
+OperatorType_Gelu = 9
+OperatorType_Gemm = 41
+OperatorType_GlobalAveragePool = 34
+OperatorType_LayerNorm = 6
+OperatorType_LeakyRelu = 42
+OperatorType_Log = 59
+OperatorType_LogSoftmax = 60
+OperatorType_MatMul = 1
+OperatorType_MatMulInteger = 78
+OperatorType_Max = 53
+OperatorType_MaxPool = 35
+OperatorType_Mean = 54
+OperatorType_Min = 52
+OperatorType_Mul = 15
+OperatorType_Neg = 48
+OperatorType_Pad = 39
+OperatorType_Pow = 45
+OperatorType_QLinearConv = 77
+OperatorType_QLinearMatMul = 65
+OperatorType_QuantizeLinear = 63
+OperatorType_QuantizedGemm = 21
+OperatorType_RMSNorm = 5
+OperatorType_Reciprocal = 57
+OperatorType_ReduceMax = 33
+OperatorType_ReduceMean = 31
+OperatorType_ReduceSum = 32
+OperatorType_Relu = 8
+OperatorType_Reshape = 18
+OperatorType_Shape = 50
+OperatorType_Sigmoid = 11
+OperatorType_Silu = 10
+OperatorType_Size = 51
+OperatorType_Slice = 24
+OperatorType_Softmax = 17
+OperatorType_Softplus = 44
+OperatorType_Split = 25
+OperatorType_Sqrt = 46
+OperatorType_Squeeze = 26
+OperatorType_StringConcat = 80
+OperatorType_StringEqual = 81
+OperatorType_StringLength = 82
+OperatorType_Sub = 14
+OperatorType_Sum = 55
+OperatorType_Tanh = 12
+OperatorType_TopK = 62
+OperatorType_Transpose = 19
+OperatorType_Trilu = 61
+OperatorType_Unsqueeze = 27
+OperatorType_Where = 56
+import tv.onnx.models
+import tv.runtime.session
+import tv.runtime.f32_bits
+import tv.numerics.tensor
+
+# enum -> module constants (attribute, synced)
+AttributeType_Undefined = 0
+AttributeType_Float = 1
+AttributeType_Int = 2
+AttributeType_String = 3
+AttributeType_Tensor = 4
+AttributeType_Graph = 5
+AttributeType_Floats = 6
+AttributeType_Ints = 7
+AttributeType_Strings = 8
+AttributeType_Tensors = 9
+AttributeType_Graphs = 10
+
+# enum -> module constants (optype, synced with runtime bundle)
+OperatorType_Custom = 0
+OperatorType_Identity = 22
+OperatorType_GatherND = 66
+OperatorType_ScatterElements = 67
+OperatorType_Range = 68
+OperatorType_EyeLike = 69
+OperatorType_ConstantOfShape = 70
+OperatorType_CumSum = 71
+OperatorType_InstanceNormalization = 72
+OperatorType_Mish = 73
+OperatorType_PRelu = 74
+OperatorType_Resize = 75
+OperatorType_Einsum = 76
+
+def varint(buf: 'list[i64]', v: 'i64') -> 'i32':
+    n = v
+    if n < 0:
+        n = n + (1 << 64)
+    while n > 127:
+        buf.append(n & 127 | 128)
+        n = n >> 7
+    buf.append(n & 127)
+    return 0
+
+def tag(buf: 'list[i64]', field: 'i64', wire: 'i64') -> 'i32':
+    varint(buf, field << 3 | wire)
+    return 0
+
+def w_varint(buf: 'list[i64]', field: 'i64', v: 'i64') -> 'i32':
+    tag(buf, field, 0)
+    varint(buf, v)
+    return 0
+
+def w_bytes(buf: 'list[i64]', field: 'i64', payload: 'list[i64]') -> 'i32':
+    tag(buf, field, 2)
+    varint(buf, len(payload))
+    for b in payload:
+        buf.append(b)
+    return 0
+
+def w_str(buf: 'list[i64]', field: 'i64', s: 'str') -> 'i32':
+    w_bytes(buf, field, utf8_encode(s))
+    return 0
+
+def w_float(buf: 'list[i64]', field: 'i64', x: 'f32') -> 'i32':
+    tag(buf, field, 5)
+    bits = float_to_bits(x)
+    buf.append(bits & 255)
+    buf.append(bits >> 8 & 255)
+    buf.append(bits >> 16 & 255)
+    buf.append(bits >> 24 & 255)
+    return 0
+
+def w_packed_float(buf: 'list[i64]', field: 'i64', xs: 'list[f32]') -> 'i32':
+    raw = []
+    for x in xs:
+        bits = float_to_bits(x)
+        raw.append(bits & 255)
+        raw.append(bits >> 8 & 255)
+        raw.append(bits >> 16 & 255)
+        raw.append(bits >> 24 & 255)
+    w_bytes(buf, field, raw)
+    return 0
+
+def w_packed_int64(buf: 'list[i64]', field: 'i64', xs: 'list[i64]') -> 'i32':
+    inner = []
+    for v in xs:
+        varint(inner, v)
+    w_bytes(buf, field, inner)
+    return 0
+
+def write_tensor(t: 'OnnxTensor', data: 'list[f32]') -> 'list[i64]':
+    buf = []
+    _qx1002 = []
+    for d in t.dims:
+        _qx1002.append(int(d))
+    w_packed_int64(buf, 1, _qx1002)
+    w_varint(buf, 2, int(t.dtype))
+    raw = []
+    for i in range(len(data)):
+        bits = float_to_bits(data[i])
+        raw.append(bits & 255)
+        raw.append(bits >> 8 & 255)
+        raw.append(bits >> 16 & 255)
+        raw.append(bits >> 24 & 255)
+    w_bytes(buf, 9, raw)
+    w_str(buf, 8, t.name)
+    return buf
+
+def write_value_info(name: 'str', dtype: 'i64', shape: 'list[i64]') -> 'list[i64]':
+    shape_b = []
+    for d in shape:
+        db = []
+        if d > 0:
+            _c1 = d
+        else:
+            _c1 = 1
+        w_varint(db, 1, _c1)
+        w_bytes(shape_b, 1, db)
+    tt = []
+    w_varint(tt, 1, int(dtype))
+    w_bytes(tt, 2, shape_b)
+    tp = []
+    w_bytes(tp, 1, tt)
+    buf = []
+    w_str(buf, 1, name)
+    w_bytes(buf, 2, tp)
+    return buf
+
+def write_node(n: 'OnnxNode') -> 'list[i64]':
+    buf = []
+    for s in n.inputs:
+        w_str(buf, 1, s)
+    for s in n.outputs:
+        w_str(buf, 2, s)
+    w_str(buf, 3, n.name)
+    w_str(buf, 4, n.op_type)
+    _attr_keys = n.attrs.keys()
+    for key in _attr_keys:
+        a = n.attrs[key]
+        ab = []
+        w_str(ab, 1, a.name)
+        if a.type == AttributeType_Float:
+            w_float(ab, 2, a.f)
+        elif a.type == AttributeType_Int:
+            w_varint(ab, 3, int(a.i))
+        elif a.type == AttributeType_String:
+            w_str(ab, 4, a.s)
+        elif len(a.floats) > 0:
+            w_packed_float(ab, 7, a.floats)
+        elif len(a.ints) > 0:
+            _qx1003 = []
+            for x in a.ints:
+                _qx1003.append(int(x))
+            w_packed_int64(ab, 8, _qx1003)
+        w_varint(ab, 20, int(a.type))
+        w_bytes(buf, 5, ab)
+    return buf
+
+def export_model(g: 'ExecutionGraph', producer: 'str'="tokenvector", opset: 'i64'=17) -> 'str':
+    ibuf = []
+    _init_keys = g.initializers.keys()
+    for name in _init_keys:
+        t = OnnxTensor(1, name, 1, "")
+        d = g.tensors[name]
+        _qx1004 = []
+        for i in range(len(d.shape)):
+            _qx1004.append(d.shape[i])
+        t.dims = _qx1004
+        t.dtype = d.dtype
+        w_bytes(ibuf, 5, write_tensor(t, g.initializers[name]))
+    nbuf = []
+    for node in g.nodes:
+        on = onnx_node_new()
+        on.name = node.name
+        on.op_type = _back_map(node.op_type)
+        _qx1000 = []
+        for _qx1005 in node.inputs:
+            _qx1000.append(_qx1005)
+        on.inputs = _qx1000
+        _qx1001 = []
+        for _qx1006 in node.outputs:
+            _qx1001.append(_qx1006)
+        on.outputs = _qx1001
+        w_bytes(nbuf, 1, write_node(on))
+    vbuf = []
+    for nm in g.inputs:
+        d = g.tensors[nm]
+        w_bytes(vbuf, 11, write_value_info(nm, d.dtype, d.shape))
+    obuf = []
+    for nm in g.outputs:
+        d = g.tensors[nm]
+        w_bytes(obuf, 12, write_value_info(nm, d.dtype, d.shape))
+    gr = []
+    gr.extend(nbuf)
+    if g.name != "":
+        w_str(gr, 2, g.name)
+    gr.extend(ibuf)
+    gr.extend(vbuf)
+    gr.extend(obuf)
+    oi = []
+    w_str(oi, 1, "")
+    w_varint(oi, 2, opset)
+    model = []
+    w_varint(model, 1, 8)
+    w_str(model, 3, producer)
+    w_bytes(model, 13, oi)
+    w_bytes(model, 8, gr)
+    return bytes_from_list(model)
+
+def _back_map(op: 'i64') -> 'str':
+    if op == OperatorType_FusedLinear:
+        return "Gemm"
+    if op == OperatorType_MatMul:
+        return "MatMul"
+    if op == OperatorType_Conv2D or op == OperatorType_FusedConv2D:
+        return "Conv"
+    if op == OperatorType_RMSNorm:
+        return "SimplifiedLayerNormalization"
+    if op == OperatorType_LayerNorm:
+        return "LayerNormalization"
+    if op == OperatorType_Attention:
+        return "Attention"
+    if op == OperatorType_Relu:
+        return "Relu"
+    if op == OperatorType_Gelu:
+        return "Gelu"
+    if op == OperatorType_Silu:
+        return "Silu"
+    if op == OperatorType_Sigmoid:
+        return "Sigmoid"
+    if op == OperatorType_Tanh:
+        return "Tanh"
+    if op == OperatorType_LeakyRelu:
+        return "LeakyRelu"
+    if op == OperatorType_Elu:
+        return "Elu"
+    if op == OperatorType_Softplus:
+        return "Softplus"
+    if op == OperatorType_Add:
+        return "Add"
+    if op == OperatorType_Sub:
+        return "Sub"
+    if op == OperatorType_Mul:
+        return "Mul"
+    if op == OperatorType_Div:
+        return "Div"
+    if op == OperatorType_Pow:
+        return "Pow"
+    if op == OperatorType_Sqrt:
+        return "Sqrt"
+    if op == OperatorType_Exp:
+        return "Exp"
+    if op == OperatorType_Log:
+        return "Log"
+    if op == OperatorType_Neg:
+        return "Neg"
+    if op == OperatorType_Reciprocal:
+        return "Reciprocal"
+    if op == OperatorType_Abs:
+        return "Abs"
+    if op == OperatorType_Min:
+        return "Min"
+    if op == OperatorType_Max:
+        return "Max"
+    if op == OperatorType_Mean:
+        return "Mean"
+    if op == OperatorType_Sum:
+        return "Sum"
+    if op == OperatorType_Where:
+        return "Where"
+    if op == OperatorType_Clip:
+        return "Clip"
+    if op == OperatorType_Cast:
+        return "Cast"
+    if op == OperatorType_Dropout:
+        return "Dropout"
+    if op == OperatorType_Softmax:
+        return "Softmax"
+    if op == OperatorType_LogSoftmax:
+        return "LogSoftmax"
+    if op == OperatorType_Trilu:
+        return "Trilu"
+    if op == OperatorType_TopK:
+        return "TopK"
+    if op == OperatorType_Gather:
+        return "Gather"
+    if op == OperatorType_Slice:
+        return "Slice"
+    if op == OperatorType_Split:
+        return "Split"
+    if op == OperatorType_Squeeze:
+        return "Squeeze"
+    if op == OperatorType_Unsqueeze:
+        return "Unsqueeze"
+    if op == OperatorType_Expand:
+        return "Expand"
+    if op == OperatorType_Reshape:
+        return "Reshape"
+    if op == OperatorType_Flatten:
+        return "Flatten"
+    if op == OperatorType_Transpose:
+        return "Transpose"
+    if op == OperatorType_Concat:
+        return "Concat"
+    if op == OperatorType_Pad:
+        return "Pad"
+    if op == OperatorType_ReduceMean:
+        return "ReduceMean"
+    if op == OperatorType_ReduceSum:
+        return "ReduceSum"
+    if op == OperatorType_ReduceMax:
+        return "ReduceMax"
+    if op == OperatorType_ArgMax:
+        return "ArgMax"
+    if op == OperatorType_Shape:
+        return "Shape"
+    if op == OperatorType_Size:
+        return "Size"
+    if op == OperatorType_GlobalAveragePool:
+        return "GlobalAveragePool"
+    if op == OperatorType_MaxPool:
+        return "MaxPool"
+    if op == OperatorType_AveragePool:
+        return "AveragePool"
+    if op == OperatorType_BatchNormalization:
+        return "BatchNormalization"
+    if op == OperatorType_Gemm:
+        return "Gemm"
+    if op == OperatorType_QuantizeLinear:
+        return "QuantizeLinear"
+    if op == OperatorType_DequantizeLinear:
+        return "DequantizeLinear"
+    if op == OperatorType_QLinearMatMul:
+        return "QLinearMatMul"
+    if op == OperatorType_QLinearConv:
+        return "QLinearConv"
+    if op == OperatorType_MatMulInteger:
+        return "MatMulInteger"
+    if op == OperatorType_DynamicQuantizeLinear:
+        return "DynamicQuantizeLinear"
+    if op == OperatorType_StringConcat:
+        return "StringConcat"
+    if op == OperatorType_StringEqual:
+        return "StringEqual"
+    if op == OperatorType_StringLength:
+        return "StringLength"
+    if op == OperatorType_QuantizedGemm:
+        return "QLinearMatMul"
+    return "Identity"
+
+def utf8_encode(s: 'str') -> 'list[i64]':
+    out = []
+    for i in range(len(s)):
+        cp = ord(s[i])
+        if cp < 128:
+            out.append(cp)
+        elif cp < 2048:
+            out.append(192 + (cp >> 6))
+            out.append(128 + (cp & 63))
+        else:
+            out.append(224 + (cp >> 12))
+            out.append(128 + ((cp >> 6) & 63))
+            out.append(128 + (cp & 63))
+    return out
+
+def float_to_bits(x: 'f32') -> 'i64':
+    return f64_to_f32_bits(x)
+
+def bytes_from_list(xs: 'list[i64]') -> 'str':
+    out = ""
+    for i in range(len(xs)):
+        out = out + chr(xs[i] & 255)
+    return out

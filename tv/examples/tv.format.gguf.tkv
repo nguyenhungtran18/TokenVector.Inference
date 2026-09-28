@@ -1,0 +1,634 @@
+import tv.runtime.session
+import tv.numerics.tensor
+
+GGUF_F32 = 0
+GGUF_F16 = 1
+GGUF_Q4_0 = 2
+GGUF_Q4_1 = 3
+GGUF_Q5_0 = 6
+GGUF_Q5_1 = 7
+GGUF_Q8_0 = 8
+GGUF_Q2_K = 10
+GGUF_Q3_K = 11
+GGUF_Q4_K = 12
+GGUF_Q5_K = 13
+GGUF_Q6_K = 14
+GGUF_I8 = 24
+GGUF_I16 = 25
+GGUF_I32 = 26
+GGUF_I64 = 27
+GGUF_F64 = 28
+GGUF_BF16 = 30
+
+class GGUFMeta:
+    _ok: 'i64'
+    key: 'str'
+    value: 'str'
+
+    def __init__(self, key: 'str', value: 'str'):
+        self.key = key
+        self.value = value
+
+class GGUFInfo:
+    _ok: 'i64'
+    # 2026-09-25: khai bao day du 5 field ma __init__ gan - truoc day chi
+    # khai '_ok', nen moi co 't.n_elems' (va 't.name'/'t.dtype'/...) la
+    # doc field KHONG TON TAI -> bien dich that bai loi.
+    # 'shape' la field container -> .ctor tu khoi tao rong, khong nhan
+    # tham so (van truyen qua __init__ de gan gia tri that).
+    name: 'str'
+    dtype: 'i64'
+    shape: 'list[i64]'
+    offset: 'i64'
+    n_elems: 'i64'
+
+    def __init__(self, name: 'str', dtype: 'i64', shape: 'list[i64]', offset: 'i64', n_elems: 'i64'):
+        self.name = name
+        self.dtype = dtype
+        self.shape = shape
+        self.offset = offset
+        self.n_elems = n_elems
+
+class GGUFReader:
+    _ok: 'i64'
+    raw: 'str'
+    pos: 'i64'
+    allow_unverified: 'i32'
+    metas: 'list[GGUFMeta]'
+    tensors: 'list[GGUFInfo]'
+    data_start: 'i64'
+
+    def __init__(self, path: 'str', allow_unverified: 'i32'=0):
+        self.raw = gguf_read_bytes(path)
+        self.pos = 0
+        self.allow_unverified = allow_unverified
+        self.metas = []
+        self.tensors = []
+        self.data_start = 0
+        self._parse()
+
+    def _u32(self) -> 'i64':
+        v = gguf_u32_le(self.raw, self.pos)
+        self.pos = self.pos + 4
+        return v
+
+    def _u64(self) -> 'i64':
+        lo = gguf_u32_le(self.raw, self.pos)
+        hi = gguf_u32_le(self.raw, self.pos + 4)
+        self.pos = self.pos + 8
+        return lo + (hi << 32)
+
+    def _str(self) -> 'str':
+        ln = self._u64()
+        s = gguf_bytes_to_str(self.raw, self.pos, ln)
+        self.pos = self.pos + ln
+        return s
+
+    def _parse(self) -> 'i32':
+        if gguf_u32_le(self.raw, 0) != 1179993927:
+            raise Arg("not a GGUF file (bad magic)")
+        self.pos = 4
+        ver = self._u32()
+        if ver < 2 or ver > 3:
+            raise Arg("unsupported GGUF version " + str(ver) + "")
+        n_tensors = self._u64()
+        n_kv = self._u64()
+        for _ in range(n_kv):
+            key = self._str()
+            typ = self._u32()
+            _ah83_12 = self.metas
+            _ah83_12.append(GGUFMeta(1, key, self._read_value(typ)))
+        for _ in range(n_tensors):
+            name = self._str()
+            nd = self._u32()
+            dims = []
+            for _ in range(nd):
+                dims.append(self._u64())
+            dtype = self._u32()
+            off = self._u64()
+            n = 1
+            for d in dims:
+                n = n * d
+            shape = []
+            i = len(dims)
+            while i > 0:
+                i = i - 1
+                shape.append(dims[i])
+            info = GGUFInfo(1, name, dtype, off, n)
+            info.shape = shape
+            _ah100_12 = self.tensors
+            _ah100_12.append(info)
+        self.data_start = self.pos + (32 - self.pos % 32) % 32
+        return 0
+
+    def _read_value(self, typ: 'i64') -> 'str':
+        if typ == 0:
+            v = ord(self.raw[self.pos])
+            self.pos = self.pos + 1
+            return str(v)
+        if typ == 1:
+            v = ord(self.raw[self.pos])
+            self.pos = self.pos + 1
+            if v > 127:
+                _c1 = v - 256
+            else:
+                _c1 = v
+            return str(_c1)
+        if typ == 2:
+            v = gguf_u32_le(self.raw, self.pos) & 65535
+            self.pos = self.pos + 2
+            return str(v)
+        if typ == 3:
+            v = gguf_u32_le(self.raw, self.pos) & 65535
+            self.pos = self.pos + 2
+            if v > 32767:
+                _c2 = v - 65536
+            else:
+                _c2 = v
+            return str(_c2)
+        if typ == 4 or typ == 10:
+            if typ == 10:
+                _c3 = self._u64()
+            else:
+                _c3 = self._u32()
+            v = _c3
+            return str(v)
+        if typ == 5 or typ == 11:
+            if typ == 11:
+                _c4 = self._u64()
+            else:
+                _c4 = self._u32()
+            v = _c4
+            if typ == 5 and v > 2147483647:
+                _one5 = v - v + 1
+                v = v - (_one5 << 32)
+            return str(v)
+        if typ == 6:
+            v = gguf_f32_from_bits(gguf_u32_le(self.raw, self.pos))
+            self.pos = self.pos + 4
+            return str(v)
+        if typ == 7:
+            v = ord(self.raw[self.pos])
+            self.pos = self.pos + 1
+            if v != 0:
+                _c5 = "true"
+            else:
+                _c5 = "false"
+            return _c5
+        if typ == 8:
+            return self._str()
+        if typ == 9:
+            at = self._u32()
+            ln = self._u64()
+            parts = []
+            for _ in range(ln):
+                parts.append(self._read_value(at))
+            _ah165_25 = ","
+            return "[" + _ah165_25.join(parts) + "]"
+        if typ == 12:
+            lo = gguf_u32_le(self.raw, self.pos)
+            hi = gguf_u32_le(self.raw, self.pos + 4)
+            self.pos = self.pos + 8
+            return str(gguf_f64_from_bits(lo, hi))
+        raise Arg("unsupported GGUF metadata type " + str(typ) + "")
+
+    def meta(self, key: 'str') -> 'str':
+        for m in self.metas:
+            if m.key == key:
+                return m.value
+        return ""
+
+    def load_tensor(self, name: 'str') -> 'list[f32]':
+        for t in self.tensors:
+            if t.name == name:
+                return _dequant_tensor(self.raw, self.data_start + t.offset, t, self.allow_unverified)
+        raise Arg("tensor not found: " + name)
+
+    def load_all(self) -> 'dict[str,list[f32]]':
+        res = {}
+        for t in self.tensors:
+            res[t.name] = _dequant_tensor(self.raw, self.data_start + t.offset, t, self.allow_unverified)
+        return res
+
+def _sbyte(b: 'i64') -> 'i64':
+    if b > 127:
+        _c6 = b - 256
+    else:
+        _c6 = b
+    return _c6
+
+def _dequant_tensor(raw: 'str', base: 'i64', t: 'GGUFInfo', allow_unverified: 'i32'=0) -> 'list[f32]':
+    n = t.n_elems
+    if len(t.shape) > 0:
+        _c7 = t.shape
+    else:
+        _c7 = [1]
+    out = _nd_f32(n)
+    dt = t.dtype
+    if dt == GGUF_F32:
+        for i in range(n):
+            out[i] = gguf_f32_from_bits(gguf_u32_le(raw, base + i * 4))
+        return out
+    if dt == GGUF_F16:
+        for i in range(n):
+            out[i] = gguf_f16_from_bits(gguf_u32_le(raw, base + i * 2) & 65535)
+        return out
+    if dt == GGUF_BF16:
+        for i in range(n):
+            out[i] = gguf_bf16_from_bits(gguf_u32_le(raw, base + i * 2) & 65535)
+        return out
+    if dt == GGUF_I8:
+        for i in range(n):
+            out[i] = float(_sbyte(ord(raw[base + i])))
+        return out
+    if dt == GGUF_I16:
+        for i in range(n):
+            v = gguf_u32_le(raw, base + i * 2) & 65535
+            if v > 32767:
+                _c8 = v - 65536
+            else:
+                _c8 = v
+            out[i] = float(_c8)
+        return out
+    if dt == GGUF_I32:
+        for i in range(n):
+            v = gguf_u32_le(raw, base + i * 4)
+            if v > 2147483647:
+                _one9 = v - v + 1
+                _c9 = v - (_one9 << 32)
+            else:
+                _c9 = v
+            out[i] = float(_c9)
+        return out
+    if dt == GGUF_I64:
+        for i in range(n):
+            lo = gguf_u32_le(raw, base + i * 8)
+            hi = gguf_u32_le(raw, base + i * 8 + 4)
+            out[i] = float(lo + (hi << 32))
+        return out
+    if dt == GGUF_F64:
+        for i in range(n):
+            lo = gguf_u32_le(raw, base + i * 8)
+            hi = gguf_u32_le(raw, base + i * 8 + 4)
+            out[i] = gguf_f64_from_bits(lo, hi)
+        return out
+    if dt == GGUF_Q8_0:
+        nb = n // 32
+        for b in range(nb):
+            d = gguf_f16_from_bits(gguf_u32_le(raw, base + b * 34) & 65535)
+            for i in range(32):
+                out[b * 32 + i] = d * _sbyte(ord(raw[base + b * 34 + 2 + i]))
+        return out
+    if dt == GGUF_Q4_0 or dt == GGUF_Q4_1:
+        nb = n // 32
+        if dt == GGUF_Q4_0:
+            _c10 = 18
+        else:
+            _c10 = 20
+        step = _c10
+        for b in range(nb):
+            d = gguf_f16_from_bits(gguf_u32_le(raw, base + b * step) & 65535)
+            m = 8.0
+            qs = 2
+            if dt == GGUF_Q4_1:
+                m = gguf_f16_from_bits(gguf_u32_le(raw, base + b * step + 2) & 65535)
+                qs = 4
+            for i in range(16):
+                byte = ord(raw[base + b * step + qs + i])
+                if dt == GGUF_Q4_0:
+                    out[b * 32 + i] = d * float((byte & 15) - 8)
+                    out[b * 32 + i + 16] = d * float((byte >> 4 & 15) - 8)
+                else:
+                    out[b * 32 + i] = d * float(byte & 15) - m
+                    out[b * 32 + i + 16] = d * float(byte >> 4 & 15) - m
+        return out
+    if dt == GGUF_Q5_0 or dt == GGUF_Q5_1:
+        nb = n // 32
+        if dt == GGUF_Q5_0:
+            _c11 = 22
+        else:
+            _c11 = 24
+        step = _c11
+        for b in range(nb):
+            d = gguf_f16_from_bits(gguf_u32_le(raw, base + b * step) & 65535)
+            m = 16.0
+            qh = 2
+            qs = 6
+            if dt == GGUF_Q5_1:
+                m = gguf_f16_from_bits(gguf_u32_le(raw, base + b * step + 2) & 65535)
+                qh = 4
+                qs = 8
+            for i in range(16):
+                hb_lo = ord(raw[base + b * step + qh + i // 8]) >> i % 8 & 1
+                hb_hi = ord(raw[base + b * step + qh + (i + 16) // 8]) >> (i + 16) % 8 & 1
+                byte = ord(raw[base + b * step + qs + i])
+                if dt == GGUF_Q5_0:
+                    out[b * 32 + i] = d * float(byte & 15 | hb_lo << 4) - d * m
+                    out[b * 32 + i + 16] = d * float(byte >> 4 & 15 | hb_hi << 4) - d * m
+                else:
+                    out[b * 32 + i] = d * float(byte & 15 | hb_lo << 4) - m
+                    out[b * 32 + i + 16] = d * float(byte >> 4 & 15 | hb_hi << 4) - m
+        return out
+    if dt == GGUF_Q4_K or dt == GGUF_Q5_K:
+        return _dequant_k4k5(raw, base, n, dt == GGUF_Q5_K)
+    if dt == GGUF_Q6_K:
+        return _dequant_k_gated(raw, base, n, 6, allow_unverified)
+    if dt == GGUF_Q2_K:
+        return _dequant_k_gated(raw, base, n, 2, allow_unverified)
+    if dt == GGUF_Q3_K:
+        return _dequant_k_gated(raw, base, n, 3, allow_unverified)
+    raise Arg("GGUF dtype " + str(dt) + " not supported (IQ/TQ need bit-exact reference vectors)")
+
+def _k4_scale(scales: 'list[i64]', j: 'i64', out: 'list[i64]') -> 'i32':
+    if j < 4:
+        out[0] = scales[j] & 63
+        out[1] = scales[j + 4] & 63
+    else:
+        out[0] = scales[j + 4] & 15 | scales[j - 4] >> 6 << 4
+        out[1] = scales[j + 4] >> 4 | scales[j] >> 6 << 4
+    return 0
+
+def _dequant_k4k5(raw: 'str', base: 'i64', n: 'i64', is_q5: 'i32') -> 'list[f32]':
+    out = _nd_f32(n)
+    nb = n // 256
+    if is_q5:
+        _c12 = 176
+    else:
+        _c12 = 144
+    step = _c12
+    for b in range(nb):
+        bo = base + b * step
+        d = gguf_f16_from_bits(gguf_u32_le(raw, bo) & 65535)
+        dmin = gguf_f16_from_bits(gguf_u32_le(raw, bo + 2) & 65535)
+        scales = []
+        for i in range(12):
+            scales.append(ord(raw[bo + 4 + i]))
+        if is_q5:
+            _c13 = bo + 16
+        else:
+            _c13 = 0
+        qh0 = _c13
+        if is_q5:
+            _c14 = bo + 48
+        else:
+            _c14 = bo + 16
+        qs0 = _c14
+        for s in range(4):
+            _k4a = [0, 0]
+            _k4_scale(scales, 2 * s, _k4a)
+            sc0 = _k4a[0]
+            m0 = _k4a[1]
+            _k4b = [0, 0]
+            _k4_scale(scales, 2 * s + 1, _k4b)
+            sc1 = _k4b[0]
+            m1 = _k4b[1]
+            d0 = d * sc0
+            dm0 = dmin * m0
+            d1 = d * sc1
+            dm1 = dmin * m1
+            for l in range(32):
+                qb = ord(raw[qs0 + s * 32 + l])
+                if is_q5:
+                    u = 0
+                    for u8 in range(8):
+                        u = u + ord(raw[qh0 + s * 8 + u8]) * (1 << 8 * u8)
+                    b0 = u >> l & 1
+                    b1 = u >> l + 32 & 1
+                    out[b * 256 + s * 64 + l] = d0 * float(qb & 15 | b0 << 4) - dm0
+                    out[b * 256 + s * 64 + 32 + l] = d1 * float(qb >> 4 & 15 | b1 << 4) - dm1
+                else:
+                    out[b * 256 + s * 64 + l] = d0 * float(qb & 15) - dm0
+                    out[b * 256 + s * 64 + 32 + l] = d1 * float(qb >> 4 & 15) - dm1
+    return out
+
+def _dequant_k_gated(raw: 'str', base: 'i64', n: 'i64', which: 'i64', allow_unverified: 'i32'=0) -> 'list[f32]':
+    if n % 256 != 0:
+        raise Arg("Q" + str(which) + "_K tensor length " + str(n) + " not multiple of 256")
+    step = 84
+    if which == 3:
+        step = 110
+    if which == 6:
+        step = 210
+    nb = n // 256
+    need = base + nb * step
+    if need > len(raw):
+        raise Arg("Q" + str(which) + "_K truncated: need " + str(need) + " bytes, have " + str(len(raw)) + "")
+    if which == 6:
+        out = _dequant_q6_k(raw, base, nb)
+    elif which == 2:
+        out = _dequant_q2_k(raw, base, nb)
+    else:
+        out = _dequant_q3_k(raw, base, nb)
+    if not allow_unverified:
+        _self_gate_k(raw, base, nb, which)
+    return out
+
+def _dequant_q6_k(raw: 'str', base: 'i64', nb: 'i64') -> 'list[f32]':
+    n = nb * 256
+    out = _nd_f32(n)
+    for b in range(nb):
+        bo = base + b * 210
+        d = gguf_f16_from_bits(gguf_u32_le(raw, bo + 208) & 65535)
+        y0 = b * 256
+        for half in range(2):
+            ql0 = bo + half * 64
+            qh0 = bo + 128 + half * 32
+            sc0 = bo + 192 + half * 8
+            yh = y0 + half * 128
+            for l in range(32):
+                is_ = l // 16
+                qb = ord(raw[ql0 + l])
+                qb32 = ord(raw[ql0 + l + 32])
+                qh = ord(raw[qh0 + l])
+                q1 = (qb & 15 | (qh >> 0 & 3) << 4) - 32
+                q2 = (qb32 & 15 | (qh >> 2 & 3) << 4) - 32
+                q3 = (qb >> 4 | (qh >> 4 & 3) << 4) - 32
+                q4 = (qb32 >> 4 | (qh >> 6 & 3) << 4) - 32
+                s0 = _sbyte(ord(raw[sc0 + is_ + 0]))
+                s2 = _sbyte(ord(raw[sc0 + is_ + 2]))
+                s4 = _sbyte(ord(raw[sc0 + is_ + 4]))
+                s6 = _sbyte(ord(raw[sc0 + is_ + 6]))
+                out[yh + l + 0] = d * float(s0) * float(q1)
+                out[yh + l + 32] = d * float(s2) * float(q2)
+                out[yh + l + 64] = d * float(s4) * float(q3)
+                out[yh + l + 96] = d * float(s6) * float(q4)
+    return out
+
+def _dequant_q2_k(raw: 'str', base: 'i64', nb: 'i64') -> 'list[f32]':
+    n = nb * 256
+    out = _nd_f32(n)
+    for b in range(nb):
+        bo = base + b * 84
+        d = gguf_f16_from_bits(gguf_u32_le(raw, bo + 80) & 65535)
+        dmin = gguf_f16_from_bits(gguf_u32_le(raw, bo + 82) & 65535)
+        y = b * 256
+        is_ = 0
+        for half in range(2):
+            q0 = bo + 16 + half * 32
+            shift = 0
+            for j in range(4):
+                sc = ord(raw[bo + is_])
+                is_ = is_ + 1
+                dl = d * float(sc & 15)
+                ml = dmin * float(sc >> 4)
+                for l in range(16):
+                    out[y] = dl * float(ord(raw[q0 + l]) >> shift & 3) - ml
+                    y = y + 1
+                sc = ord(raw[bo + is_])
+                is_ = is_ + 1
+                dl = d * float(sc & 15)
+                ml = dmin * float(sc >> 4)
+                for l in range(16):
+                    out[y] = dl * float(ord(raw[q0 + l + 16]) >> shift & 3) - ml
+                    y = y + 1
+                shift = shift + 2
+    return out
+
+def _q3k_unpack_scales(scales: 'str', off: 'i64', res: 'list[i64]') -> 'i32':
+    kmask1 = 50529027
+    kmask2 = 252645135
+    aux0 = ord(scales[off]) | ord(scales[off + 1]) << 8 | ord(scales[off + 2]) << 16 | ord(scales[off + 3]) << 24
+    aux1 = ord(scales[off + 4]) | ord(scales[off + 5]) << 8 | ord(scales[off + 6]) << 16 | ord(scales[off + 7]) << 24
+    aux2 = ord(scales[off + 8]) | ord(scales[off + 9]) << 8 | ord(scales[off + 10]) << 16 | ord(scales[off + 11]) << 24
+    tmp = aux2
+    aux2 = aux0 >> 4 & kmask2 | (tmp >> 4 & kmask1) << 4
+    aux3 = aux1 >> 4 & kmask2 | (tmp >> 6 & kmask1) << 4
+    aux0 = aux0 & kmask2 | (tmp >> 0 & kmask1) << 4
+    aux1 = aux1 & kmask2 | (tmp >> 2 & kmask1) << 4
+    for aux in [aux0, aux1, aux2, aux3]:
+        for k in range(4):
+            bb = aux >> 8 * k & 255
+            if bb < 128:
+                _c15 = bb
+            else:
+                _c15 = bb - 256
+            res.append(_c15)
+    return 0
+
+def _dequant_q3_k(raw: 'str', base: 'i64', nb: 'i64') -> 'list[f32]':
+    n = nb * 256
+    out = _nd_f32(n)
+    for b in range(nb):
+        bo = base + b * 110
+        d_all = gguf_f16_from_bits(gguf_u32_le(raw, bo + 108) & 65535)
+        sc = []
+        _q3k_unpack_scales(raw, bo + 96, sc)
+        sc.append(0)
+        sc.pop(12)
+        y = b * 256
+        is_ = 0
+        m = 1
+        for half in range(2):
+            q0 = bo + 32 + half * 32
+            h0 = bo
+            shift = 0
+            for j in range(4):
+                dl = d_all * float(sc[is_] - 32)
+                is_ = is_ + 1
+                for l in range(16):
+                    if ord(raw[h0 + l]) & m != 0:
+                        _c16 = 0
+                    else:
+                        _c16 = 4
+                    hb = _c16
+                    out[y] = dl * float((ord(raw[q0 + l]) >> shift & 3) - hb)
+                    y = y + 1
+                dl = d_all * float(sc[is_] - 32)
+                is_ = is_ + 1
+                for l in range(16):
+                    if ord(raw[h0 + l + 16]) & m != 0:
+                        _c17 = 0
+                    else:
+                        _c17 = 4
+                    hb = _c17
+                    out[y] = dl * float((ord(raw[q0 + l + 16]) >> shift & 3) - hb)
+                    y = y + 1
+                shift = shift + 2
+                m = m << 1 & 255
+    return out
+
+def _self_gate_k(raw: 'str', base: 'i64', nb: 'i64', which: 'i64') -> 'i32':
+    if nb == 0:
+        return 0
+    step = 84
+    if which == 3:
+        step = 110
+    if which == 6:
+        step = 210
+    probes = nb
+    if probes > 4:
+        probes = 4
+    for b in range(probes):
+        bo = base + b * step
+        if which == 6:
+            d = gguf_f16_from_bits(gguf_u32_le(raw, bo + 208) & 65535)
+            for half in range(2):
+                ql0 = bo + half * 64
+                qh0 = bo + 128 + half * 32
+                sc0 = bo + 192 + half * 8
+                for l in range(16):
+                    is_ = l // 16
+                    qb = ord(raw[ql0 + l])
+                    qh = ord(raw[qh0 + l])
+                    q = (qb & 15 | (qh >> 0 & 3) << 4) - 32
+                    s = _sbyte(ord(raw[sc0 + is_]))
+                    if s == 0 or d == 0.0:
+                        continue
+                    yv = d * float(s) * float(q)
+                    back = yv / (d * float(s))
+                    if abs(back - float(q)) > 0.51:
+                        raise Arg("Q6_K self-gate failed block " + str(b) + " half " + str(half) + " l " + str(l) + "")
+        elif which == 2:
+            d = gguf_f16_from_bits(gguf_u32_le(raw, bo + 80) & 65535)
+            dmin = gguf_f16_from_bits(gguf_u32_le(raw, bo + 82) & 65535)
+            sc = ord(raw[bo])
+            dl = d * float(sc & 15)
+            ml = dmin * float(sc >> 4)
+            if dl == 0.0:
+                continue
+            q = ord(raw[bo + 16]) >> 0 & 3
+            yv = dl * float(q) - ml
+            back = (yv + ml) / dl
+            if abs(back - float(q)) > 0.51:
+                raise Arg("Q2_K self-gate failed block " + str(b) + "")
+        else:
+            d_all = gguf_f16_from_bits(gguf_u32_le(raw, bo + 108) & 65535)
+            sc3 = []
+            _q3k_unpack_scales(raw, bo + 96, sc3)
+            sc3.append(0)
+            sc3.pop(12)
+            dl = d_all * float(sc3[0] - 32)
+            if dl == 0.0:
+                continue
+            if ord(raw[bo]) & 1 != 0:
+                _c18 = 0
+            else:
+                _c18 = 4
+            hb = _c18
+            q = (ord(raw[bo + 32]) >> 0 & 3) - hb
+            yv = dl * float(q)
+            back = yv / dl
+            if abs(back - float(q)) > 0.51:
+                raise Arg("Q3_K self-gate failed block " + str(b) + "")
+    return 0
+
+def gguf_read_bytes(path: 'str') -> 'str':
+    return ""
+
+def gguf_u32_le(raw: 'str', pos: 'i64') -> 'i64':
+    return 0
+
+def gguf_bytes_to_str(raw: 'str', pos: 'i64', ln: 'i64') -> 'str':
+    return ""
+
+def gguf_f32_from_bits(b: 'i64') -> 'f32':
+    return 0.0
+
+def gguf_f16_from_bits(b: 'i64') -> 'f32':
+    return 0.0
+
+def gguf_bf16_from_bits(b: 'i64') -> 'f32':
+    return 0.0
+
+def gguf_f64_from_bits(lo: 'i64', hi: 'i64') -> 'f32':
+    return 0.0

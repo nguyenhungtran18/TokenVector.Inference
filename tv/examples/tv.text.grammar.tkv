@@ -1,0 +1,507 @@
+# TokenVector Module: Text — Grammar-constrained generation (GBNF subset)
+# Compiles a documented subset (rule refs, "literals", [a-z] classes, (...),
+# * + ? alternation |) into a backtracking matcher with cycle guard, then
+# masks per-step logits to tokens that keep a live parse. Token filtering is
+# O(vocab) decode-checks per step — exact, suited to small vocabs / JSON modes.
+
+import tv.runtime.session
+import tv.text.sampling
+import tv.text.tokenizer
+import tv.text.generate
+import tv.numerics.tensor
+
+# element kinds
+G_LIT = 0
+G_CLASS = 1
+G_REF = 2
+G_REP = 3
+G_GROUP = 4
+
+
+class GElem:
+    _ok: 'i64'
+    kind: 'i64'
+    text: 'str'
+    lo: 'list[str]'
+    hi: 'list[str]'
+    ref: 'str'
+    sub_one: 'list[GElem]'
+    sub_alts: 'list[GElem]'
+    sub_breaks: 'list[i64]'
+    mn: 'i64'
+    mx: 'i64'
+    def __init__(self, kind: 'i64', text: 'str', ref: 'str', mn: 'i64', mx: 'i64'):
+        self.kind = kind
+        self.text = text
+        self.ref = ref
+        self.mn = mn
+        self.mx = mx
+
+
+class RuleAlts:
+    _ok: 'i64'
+    flat: 'list[GElem]'
+    breaks: 'list[i64]'
+
+
+class Grammar:
+    _ok: 'i64'
+    rules: 'dict[str,RuleAlts]'
+    root: 'str'
+    def __init__(self, root: 'str'):
+        self.root = root
+
+
+def _new_lit(text: 'str') -> 'GElem':
+    return GElem(1, 0, text, "", 1, 1)
+
+
+def _new_class() -> 'GElem':
+    return GElem(1, 1, "", "", 1, 1)
+
+
+def _new_ref(ref: 'str') -> 'GElem':
+    return GElem(1, 2, "", ref, 1, 1)
+
+
+def _new_rep(inner: 'GElem', mn: 'i64', mx: 'i64') -> 'GElem':
+    e = GElem(1, 3, "", "", mn, mx)
+    _so = e.sub_one
+    _so.append(inner)
+    return e
+
+
+def _new_group(flat: 'list[GElem]', breaks: 'list[i64]') -> 'GElem':
+    e = GElem(1, 4, "", "", 1, 1)
+    e.sub_alts = flat
+    e.sub_breaks = breaks
+    return e
+
+
+def _lines(s: 'str') -> 'list[str]':
+    # VIET LAI (2026-09-26) - ban cu nem AccessViolationException.
+    # Repro toi gian nhat da xac nhan: vong `while` co dieu kien TkvInt
+    # (bien co gia tri hang so) + 2 bieu thuc slice khac nhau trong than
+    # ('s[:i]' va 's[i+1:]'). Bien 's' de bi bien doi IL nhay sai ->
+    # doc vung nho -> bao loi, ke ca o NHANH KHONG bao gio chay.
+    #
+    # Ban moi: dieu kien la bien i32 so sanh voi hang so (`done == 0`) va
+    # THAY `break` bang gan co - KHONG dung co TkvInt, KHONG dung `break`
+    # trong vong. Da kiem chung build+chay that voi 1/2/3 dong.
+    out = []
+    rest = s
+    done = 0
+    while done == 0:
+        i = rest.find("\n")
+        if i < 0:
+            out.append(rest)
+            done = 1
+        else:
+            out.append(rest[:i])
+            rest = rest[i + 1:]
+    return out
+
+
+def _sorted_ints(xs: 'dict[i64,i32]') -> 'list[i64]':
+    out = []
+    out.append(0)
+    out.pop()
+    for k in xs:
+        out.append(k)
+    for i in range(1, len(out)):
+        t = out[i]
+        j = i - 1
+        while j >= 0 and out[j] > t:
+            out[j + 1] = out[j]
+            j = j - 1
+        out[j + 1] = t
+    return out
+
+
+def compile_grammar(text: 'str') -> 'Grammar':
+    g = Grammar(1, "root")
+    _ls = _lines(text)
+    for line in _ls:
+        _ln = line.strip()
+        if _ln == "" or _ln.startswith("#"):
+            continue
+        sep = _ln.find("::=")
+        if sep < 0:
+            continue
+        name = _ln[:sep].strip()
+        body = _ln[sep + 3:]
+        _rl = g.rules
+        _flat = []
+        _brks = []
+        _brks.append(0)
+        _brks.pop()
+        _parse_alts(body, _flat, _brks)
+        _ra = RuleAlts(1)
+        _ra.flat = _flat
+        _ra.breaks = _brks
+        _rl[name] = _ra
+        if g.root == "root":
+            g.root = name
+    _rl2 = g.rules
+    if "root" in _rl2:
+        g.root = "root"
+    return g
+
+
+def _parse_alts(body: 'str', flat_out: 'list[GElem]', breaks_out: 'list[i64]') -> 'i32':
+    depth = 0
+    cur = ""
+    instr = 0
+    inclass = 0
+    for i in range(len(body)):
+        c = body[i:i + 1]
+        if c == "\"" and inclass == 0:
+            instr = 1 - instr
+        if instr == 0 and inclass == 0 and c == "[":
+            inclass = 1
+        if instr == 0 and inclass == 1 and c == "]":
+            inclass = 0
+        if instr == 0 and inclass == 0 and c == "|" and depth == 0:
+            _parse_seq(cur, flat_out)
+            breaks_out.append(len(flat_out))
+            cur = ""
+        else:
+            if instr == 0 and inclass == 0 and c == "(":
+                depth = depth + 1
+            if instr == 0 and inclass == 0 and c == ")":
+                depth = depth - 1
+            cur = cur + c
+    _parse_seq(cur, flat_out)
+    breaks_out.append(len(flat_out))
+    return 0
+
+
+def _parse_seq(s: 'str', out: 'list[GElem]') -> 'i32':
+    i = 0
+    n = len(s)
+    _stops = []
+    _stops.append(" ")
+    _stops.append("\"")
+    _stops.append("[")
+    _stops.append("(")
+    _stops.append(")")
+    _stops.append("|")
+    _stops.append("*")
+    _stops.append("+")
+    _stops.append("?")
+    while i < n:
+        while i < n and s[i:i + 1] == " ":
+            i = i + 1
+        if i >= n:
+            break
+        c = s[i:i + 1]
+        has_el = 0
+        el = _new_lit("")
+        if c == "\"":
+            j = _es_find_from(s, "\"", i + 1)
+            if j < 0:
+                break
+            el = _new_lit(s[i + 1:j])
+            has_el = 1
+            i = j + 1
+        elif c == "[":
+            j = _es_find_from(s, "]", i)
+            if j < 0:
+                break
+            el = _new_class()
+            _parse_class(s[i + 1:j], el.lo, el.hi)
+            has_el = 1
+            i = j + 1
+        elif c == "(":
+            depth = 1
+            j = i + 1
+            instr = 0
+            while j < n and depth > 0:
+                if s[j:j + 1] == "\"":
+                    instr = 1 - instr
+                if instr == 0 and s[j:j + 1] == "(":
+                    depth = depth + 1
+                if instr == 0 and s[j:j + 1] == ")":
+                    depth = depth - 1
+                j = j + 1
+            _gflat = []
+            _gbrk = []
+            _gbrk.append(0)
+            _gbrk.pop()
+            _parse_alts(s[i + 1:j - 1], _gflat, _gbrk)
+            el = _new_group(_gflat, _gbrk)
+            has_el = 1
+            i = j
+        else:
+            j = i
+            while j < n and s[j:j + 1] not in _stops:
+                j = j + 1
+            el = _new_ref(s[i:j])
+            has_el = 1
+            i = j
+        if has_el and i < n and s[i:i + 1] in _stops:
+            q = s[i:i + 1]
+            if q == "*" or q == "+" or q == "?":
+                i = i + 1
+                if q == "*":
+                    el = _new_rep(el, 0, -1)
+                elif q == "+":
+                    el = _new_rep(el, 1, -1)
+                else:
+                    el = _new_rep(el, 0, 1)
+        if has_el:
+            out.append(el)
+    return 0
+
+
+def _es_find_from(s: 'str', sub: 'str', start: 'i64') -> 'i64':
+    tail = s[start:]
+    r = tail.find(sub)
+    if r < 0:
+        return -1
+    return start + r
+
+
+def _parse_class(s: 'str', lo_out: 'list[str]', hi_out: 'list[str]') -> 'i32':
+    i = 0
+    while i < len(s):
+        if i + 2 < len(s) and s[i + 1:i + 2] == "-":
+            lo_out.append(s[i:i + 1])
+            hi_out.append(s[i + 2:i + 3])
+            i = i + 3
+        else:
+            lo_out.append(s[i:i + 1])
+            hi_out.append(s[i:i + 1])
+            i = i + 1
+    return 0
+
+
+def match_ends(g: 'Grammar', rule: 'str', text: 'str', pos: 'i64') -> 'list[i64]':
+    _stk = []
+    _stk.append("")
+    _stk.pop()
+    return _sorted_ints(_match_rule(g, rule, text, pos, _stk, 0))
+
+
+def _new_pos_dict() -> 'dict[i64,i32]':
+    # Dict rong CO KIEU: gia tri i32 (khong phai TkvInt).
+    #
+    # LY DO (2026-09-26): `d = {}` khong co context nao de suy kieu ->
+    # compiler tu chon `Dictionary<int64, TkvInt>` cho `nxt = {}`, trong khi
+    # `cur = {}` lai duoc suy `Dictionary<int64, int32>` tu kieu tra ve cua
+    # ham. Khi do `cur = nxt` ghep 2 dict KHAC kieu gia tri -> IL sinh ra
+    # `call TkvInt::ToI32(...)` tren doi tuong Dictionary ->
+    # OverflowException ("chi so int qua lon: khong vua int32") luc CHAY.
+    #
+    # TokenVector KHONG kiem tra kieu khi gan dict vao nhau, nen phai tao
+    # dict co kieu ro rang o moi noi.
+    d = {}
+    return d
+
+
+def _match_rule(g: 'Grammar', rule: 'str', text: 'str', pos: 'i64', stack: 'list[str]', depth: 'i64') -> 'dict[i64,i32]':
+    out = _new_pos_dict()
+    if depth > 32 or (rule + "@" + str(pos)) in stack:
+        return out
+    _rl = g.rules
+    if rule not in _rl:
+        return out
+    stack.append(rule + "@" + str(pos))
+    _alts = _rl[rule]
+    for _ai in range(len(_alts.breaks)):
+        if _ai == 0:
+            _s = 0
+        else:
+            _s = _alts.breaks[_ai - 1]
+        _e = _alts.breaks[_ai]
+        alt = _alts.flat[_s:_e]
+        _ends = _match_seq(g, alt, text, pos, stack, depth + 1)
+        for e in _ends:
+            out[e] = 1
+    stack.pop()
+    return out
+
+
+def _match_seq(g: 'Grammar', seq: 'list[GElem]', text: 'str', pos: 'i64', stack: 'list[str]', depth: 'i64') -> 'dict[i64,i32]':
+    cur = _new_pos_dict()
+    cur[pos] = 1
+    for el in seq:
+        nxt = _new_pos_dict()
+        for p in cur:
+            _ends = _match_elem(g, el, text, p, stack, depth)
+            for e in _ends:
+                nxt[e] = 1
+        cur = nxt
+        if len(cur) == 0:
+            break
+    return cur
+
+
+def _match_elem(g: 'Grammar', el: 'GElem', text: 'str', pos: 'i64', stack: 'list[str]', depth: 'i64') -> 'dict[i64,i32]':
+    out = _new_pos_dict()
+    if el.kind == G_LIT:
+        _et = el.text
+        _lt = len(_et)
+        # CLAMP dai can cat vao cuoi `text` (2026-09-26).
+        # `text[pos:pos+_lt]` khi `pos` gan cuoi se goi String.Substring
+        # voi `startIndex + length > Length` ->
+        # ArgumentOutOfRangeException ("Index and length must refer to a
+        # location within the string"). Truoc day chi co `if pos < len(text)`
+        # o nhanh G_CLASS, nhanh G_LIT thì cat thang.
+        _avail = len(text) - pos
+        if _avail < 0:
+            _avail = 0
+        if _lt > _avail:
+            _lt = _avail
+        seg = text[pos:pos + _lt]
+        if _lt < len(_et):
+            # Da cham cuoi chuoi roi - chi khop duoc khi het text.
+            if pos + _lt == len(text):
+                out[len(text)] = 1
+            return out
+        if seg == _et:
+            out[pos + _lt] = 1
+            return out
+        _ls = len(seg)
+        if _et[:_ls] == seg and pos + _ls == len(text):
+            out[len(text)] = 1
+        return out
+    if el.kind == G_CLASS:
+        if pos < len(text):
+            c = text[pos:pos + 1]
+            for i in range(len(el.lo)):
+                if c >= el.lo[i] and c <= el.hi[i]:
+                    out[pos + 1] = 1
+                    break
+        return out
+    if el.kind == G_REF:
+        return _match_rule(g, el.ref, text, pos, stack, depth)
+    if el.kind == G_REP:
+        return _match_rep_elem(g, el, text, pos, stack, depth)
+    cur = _new_pos_dict()
+    for _ai in range(len(el.sub_breaks)):
+        if _ai == 0:
+            _s = 0
+        else:
+            _s = el.sub_breaks[_ai - 1]
+        _e = el.sub_breaks[_ai]
+        alt = el.sub_alts[_s:_e]
+        _ends = _match_seq(g, alt, text, pos, stack, depth)
+        for e in _ends:
+            cur[e] = 1
+    return cur
+
+
+def _match_rep_elem(g: 'Grammar', el: 'GElem', text: 'str', pos: 'i64', stack: 'list[str]', depth: 'i64') -> 'dict[i64,i32]':
+    cur = _new_pos_dict()
+    cur[pos] = 1
+    reps = _match_rep_count(el.mn, el.mx)
+    for _ in range(reps):
+        nxt = _new_pos_dict()
+        for p in cur:
+            _so = el.sub_one
+            _ends = _match_elem(g, _so[0], text, p, stack, depth)
+            for e in _ends:
+                nxt[e] = 1
+        if _same_keys(nxt, cur):
+            break
+        cur = nxt
+        if len(cur) == 0:
+            break
+    if el.mn == 0:
+        cur[pos] = 1
+    return cur
+
+
+def _match_rep_count(mn: 'i64', mx: 'i64') -> 'i64':
+    if mx < 0:
+        return 64
+    return mx
+
+
+def _same_keys(a: 'dict[i64,i32]', b: 'dict[i64,i32]') -> 'i32':
+    if len(a) != len(b):
+        return 0
+    for k in a:
+        if k not in b:
+            return 0
+    return 1
+
+
+def is_live(g: 'Grammar', text: 'str') -> 'i32':
+    _stk = []
+    _stk.append("")
+    _stk.pop()
+    ends = _match_rule(g, g.root, text, 0, _stk, 0)
+    if len(text) in ends:
+        return 1
+    return 0
+
+
+def _one_id(v: 'i64') -> 'list[i64]':
+    # List 1 phan tu co kieu i64 RO rang.
+    #
+    # `_one = []` + `_one.append(i)` tao List`1<TkvInt> (TkvInt = so nguyen
+    # khong kich thuoc) trong khi `Tokenizer.decode` khai bao
+    # `ids: 'list[i64]'` -> truyen tham so sai kieu, doc `ids[i]` ra rat
+    # rac -> danh sach token sai. TokenVector KHONG kiem tra kieu khi
+    # truyen doi so ham, nen phai tao list co kieu ro rang.
+    out = []
+    out.append(v)
+    return out
+
+
+def allowed_token_ids(g: 'Grammar', tok: 'Tokenizer', vocab_size: 'i64', current: 'str') -> 'list[i64]':
+    out = []
+    out.append(0)
+    out.pop()
+    for i in range(vocab_size):
+        _one = _one_id(i)
+        if is_live(g, current + tok.decode(_one)):
+            out.append(i)
+    return out
+
+
+def generate_guided(session: 'InferenceSession', tok: 'Tokenizer', prompt: 'str', grammar_text: 'str', cfg: 'GenConfig', max_new_tokens: 'i64') -> 'str':
+    g = compile_grammar(grammar_text)
+    ids = tok.encode(prompt)
+    cur = tok.decode(ids)
+    _sess = session
+    _gr = _sess.graph
+    _in0 = _gr.inputs[0]
+    _desc = _gr.tensors[_in0]
+    in_dim = _desc.element_count
+    vocab = tok.vocab_size()
+    for _ in range(max_new_tokens):
+        allowed = allowed_token_ids(g, tok, vocab, cur)
+        if len(allowed) == 0:
+            break
+        inp = _nd_f32(in_dim)
+        for i in range(in_dim):
+            inp[i] = 0.0
+        tail = ids[len(ids) - in_dim:]
+        if len(ids) <= in_dim:
+            tail = ids
+        base = in_dim - len(tail)
+        for i in range(len(tail)):
+            inp[base + i] = float(tail[i])
+        out = session.run_single(inp)
+        ln = min(len(out), vocab)
+        if len(out) < vocab:
+            ln = len(out)
+        lg = _nd_f32(ln)
+        for i in range(ln):
+            lg[i] = out[len(out) - ln + i]
+        ok = {}
+        for a in allowed:
+            if a < ln:
+                ok[a] = 1
+        for i in range(ln):
+            if i not in ok:
+                lg[i] = -340282346638528859811704183484516925440.0
+        nxt = sample_token(lg, cfg.params, ids)
+        ids.append(nxt)
+        _one = []
+        _one.append(nxt)
+        cur = cur + tok.decode(_one)
+    return cur

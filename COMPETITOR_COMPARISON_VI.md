@@ -1,4 +1,4 @@
-﻿# So sánh Chức năng: TokenVector.Inference (thuần `.tkv`) vs ONNX Runtime vs llama.cpp vs PyTorch
+# So sánh Chức năng: TokenVector.Inference (thuần `.tkv`) vs ONNX Runtime vs llama.cpp vs PyTorch
 
 > Phạm vi: so sánh **chức năng** (làm được gì), không phải tốc độ. Repo hiện 100% TokenVector —
 > 43 module `.tkv`, 14.278 dòng. Toàn bộ compute và client đều thuần `.tkv`;
@@ -60,7 +60,7 @@ Chú thích: (✅) có · (giới hạn) một phần · (thiếu) chưa có
 
 | Khả năng | TokenVector `.tkv` | ONNX Runtime | llama.cpp | PyTorch |
 |---|---|---|---|---|
-| CPU | kernel `.tkv` block-SIMD, arena Zero-GC | MLAS, mọi arch + mobile | mọi CPU, AMX/NEON/SVE | MKL/OpenBLAS |
+| CPU | kernel `.tkv` khối 8 rộng nhưng vẫn scalar (VEC_W=8), tái dùng slot theo liveness; **không SIMD, arena chưa zero-GC** | MLAS, mọi arch + mobile | mọi CPU, AMX/NEON/SVE | MKL/OpenBLAS |
 | GPU | (thiếu) provider stub báo lỗi rõ | CUDA/TRT/DirectML/ROCm/Metal | CUDA/HIP/Metal/Vulkan, offload tách lớp | CUDA/ROCm/XPU |
 | NPU/edge | (thiếu) | QNN, OpenVINO, CoreML | Hexagon (giới hạn) | ExecuTorch |
 | Footprint | thuần `.tkv`, không DLL | ~100 MB+ kèm EP | một binary | cỡ GB |
@@ -97,12 +97,17 @@ Số latency/throughput chỉ ghi trong một lần chạy có ngày tháng củ
 
 ## 9. Quick start (`.tkv`)
 
-```tokenvector
-import tv.inference
-
-session = tv.inference.load_onnx("models/llama_block.onnx")
-input_tensor = tensor.zeros([1, 64], dtype=float32)
-output_tensor = session.run(input_tensor)
-print("Output length:", output_tensor.length)
-session.close()
+```powershell
+$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
+& $tkvc build tv/examples/quickstart.tkv --out quickstart.exe
+.\quickstart.exe      # Y[0] = 2.25 / quickstart: OK
 ```
+
+API làm việc trên **graph** — không có `tv.inference.load_onnx()`, không `NDArray`, không
+`tensor.zeros`. Dựng `ExecutionGraph`, rồi `session_from_graph(g, 1)` và
+`session.run_single(x, "X", "Y")`. Xem `USER_GUIDE_VI.md` và `tv/examples/quickstart.tkv`
+cho snippet đầy đủ, và `HANDOFF.md` cho các stub chưa nối.
+
+Vì không có SIMD và arena chưa zero-GC, các dòng CPU và footprint ở trên mô tả **đặc
+tính của mã** (thuần `.tkv`, không DLL native trong gói), không phải lợi thế đo được.
+Số liệu benchmark hiện không dùng được: xem `BENCHMARKS_VI.md`.

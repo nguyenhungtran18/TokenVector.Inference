@@ -1,0 +1,63 @@
+# TokenVector.Inference - Quickstart (pure .tkv, khong can file .onnx)
+#
+# Chay:
+#   tkvc build tv/examples/quickstart.tkv --out quickstart.exe
+#   .\quickstart.exe
+#
+# Day la duong API THAT SU ton tai trong runtime nay. Xem README muc
+# "Quick start" va USER_GUIDE.md.
+#
+# Luu y: hang so cap module KHONG import duoc giua cac module (chi ham/record
+# moi import duoc), nen `OperatorType_*` va `ActivationFunction_*` phai khai
+# bao lai o day. Gia tri lay tu tv/runtime/session.tkv va
+# tv/optimization/kernels.tkv.
+
+import tv.runtime.session
+
+OperatorType_FusedLinear = 2
+ActivationFunction_Relu = 1
+
+
+def main() -> "i32":
+    # 1. Tao graph: Y[1,8] = ReLU(X[1,4] @ W[8,4]^T + B[8])
+    g = ExecutionGraph(1, "quickstart", 0)
+    g.inputs.append("X")
+    g.outputs.append("Y")
+
+    w = _nd_f32(32)
+    b = _nd_f32(8)
+    for i in range(32):
+        w[i] = 0.5
+    for i in range(8):
+        b[i] = 0.25
+    g.initializers["W"] = w
+    g.initializers["B"] = b
+
+    g.get_or_create_tensor("X", [1, 4])
+    g.get_or_create_tensor("W", [8, 4])
+    g.get_or_create_tensor("B", [8])
+    g.get_or_create_tensor("Y", [1, 8])
+
+    node = new_node("gemm", OperatorType_FusedLinear)
+    node.activation = ActivationFunction_Relu
+    node.inputs.append("X")
+    node.inputs.append("W")
+    node.inputs.append("B")
+    node.outputs.append("Y")
+    g.nodes.append(node)
+
+    # 2. Bien dich graph thanh session. Tham so 1 = bat cac pass toi uu
+    #    (ConstantFolding, QdqFold, OperatorFusion, DeadCodeElimination).
+    session = session_from_graph(g, 1)
+
+    # 3. Chay forward. Tensor la list[f32] phang, khong phai NDArray.
+    x = _nd_f32(4)
+    for i in range(4):
+        x[i] = 1.0
+    y = session.run_single(x)
+    print("Y[0] = " + str(y[0]) + "  (mong doi 2.25)")
+
+    # 4. Giai phong
+    session.close()
+    print("quickstart: OK")
+    return 0

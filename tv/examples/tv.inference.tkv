@@ -1,0 +1,4 @@
+# Stub module: tv.inference (auto-generated)
+
+def create_session(path: "str") -> "i32":
+    return 0

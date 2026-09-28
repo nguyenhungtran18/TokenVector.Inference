@@ -1,0 +1,258 @@
+# TokenVector Module: Quantization — Types (FP8 bit-accurate)
+
+import tv.runtime.f32_bits
+
+
+# enum -> module constants
+QuantPrecision_FP32 = 0
+QuantPrecision_FP16 = 1
+QuantPrecision_INT8_Symmetric = 2
+QuantPrecision_INT8_Asymmetric = 3
+QuantPrecision_FP8_E4M3 = 4
+QuantPrecision_FP8_E5M2 = 5
+CalibrationMethod_MinMax = 0
+CalibrationMethod_KLDivergence = 1
+CalibrationMethod_Percentile = 2
+
+class QuantParams:
+    _ok: "i64"
+    scale: 'f32'
+    zero_point: 'i64'
+    min_val: 'f32'
+    max_val: 'f32'
+    def __init__(self, scale: "f32" = 1.0, zero_point: "i64" = 0, min_v: "f32" = -340282346638528859811704183484516925440.0, max_v: "f32" = 340282346638528859811704183484516925440.0):
+        self.scale = scale
+        self.zero_point = zero_point
+        self.min_val = min_v
+        self.max_val = max_v
+
+# FP8 E4M3: s1.e4.m3, bias 7 — weights/activations
+class FP8E4M3:
+    _ok: "i64"
+    value: 'i64'
+    def __init__(self, v: "i64" = 0):
+        self.value = v & 0xFF
+
+    def to_float(self) -> "f32":
+        return native_fp8_e4m3_decode(self.value)
+
+# FP8 E5M2: s1.e5.m2, bias 15 — gradients / attention logits
+class FP8E5M2:
+    _ok: "i64"
+    value: 'i64'
+    def __init__(self, v: "i64" = 0):
+        self.value = v & 0xFF
+
+    def to_float(self) -> "f32":
+        return native_fp8_e5m2_decode(self.value)
+
+# FP16 (1-5-10, IEEE): compute path mirrors FP8 (decode-on-the-fly GEMM).
+class FP16:
+    _ok: "i64"
+    value: 'i64'
+    def __init__(self, v: "i64" = 0):
+        self.value = v & 0xFFFF
+
+    def to_float(self) -> "f32":
+        return native_f16_decode(self.value)
+
+# --- Chuyen doi float <-> FP16 / FP8: thuan .tkv (2026-09-26) ---
+#
+# Do `native/` va P/Invoke da bi xoa, nam ham `native_f16_encode`,
+# `native_f16_decode`, `native_fp8_e4m3_*` va `native_fp8_e5m2_*` chi con la
+# stub `return 0` / `return 0.0`. Do moi wrapper deu uoc lenh voi chung,
+# `fp16_from_float(1.0).value == 0` (dung ra phai la 0x3C00) va
+# `matmul_fp16` tra ve ma tran toan 0 ma KHONG bao loi nao.
+#
+# Phai viet lai bang so nguyen tren bit IEEE-754. Dung `f64_to_f32_bits` /
+# `f32_bits_to_f64` de vao/ra lop binary32 (chuyen f32 -> f64 khong mat thong
+# tin, nen doc lai f32 se ra dung bit pattern cua f32 ban dau).
+
+def _qt_rne_rshift(v: 'i64', s: 'i64') -> 'i64':
+    # Lam tron `v` (khong am) sang phai `s` bit, tie -> chan (round half to even).
+    #
+    # `s` co the rat lon khi gia tri nho xuong muc subnormal: vi du x = 0.0
+    # thi e = -126 nen e16 = -111 va s = 24 - 10 - e16 = 125. Tinh
+    # `half = 2^(s-1)` se tran int64 (OverflowException). Moi noi goi truyen
+    # `v` la tay phan (<= 2^24), nen moi dich phai > 40 deu cho 0.
+    if s > 40:
+        return 0
+    if s <= 0:
+        return v
+    half = 1
+    for _q1 in range(s - 1):
+        half = half * 2
+    q = v >> s
+    rem = v - (q << s)
+    if rem > half:
+        return q + 1
+    if rem < half:
+        return q
+    if (q & 1) == 1:
+        return q + 1
+    return q
+
+def native_f16_encode(x: "f32") -> "i64":
+    # f32 (s1.e8.m23, bias 127) -> f16 (s1.e5.m10, bias 15)
+    b = f64_to_f32_bits(x)
+    sign = (b >> 31) & 1
+    ex = (b >> 23) & 255
+    man = b & 8388607
+    if ex == 255:
+        if man != 0:
+            return (sign << 15) | 31744 | 512
+        return (sign << 15) | 31744
+    if ex == 0:
+        e = -126
+        full = man
+    else:
+        e = ex - 127
+        full = man | 8388608
+    e16 = e + 15
+    if e16 >= 31:
+        return (sign << 15) | 31744
+    if e16 <= 0:
+        # f16 subnormal: value = m * 2^-24 nen
+        # m = full * 2^(e16 + 10 - 24) = full >> (24 - 10 - e16)
+        m = _qt_rne_rshift(full, 24 - 10 - e16)
+        if m > 1023:
+            m = 1023
+        return (sign << 15) | m
+    r = _qt_rne_rshift(full, 23 - 10)
+    if r >= 2048:
+        r = 1024
+        e16 = e16 + 1
+        if e16 >= 31:
+            return (sign << 15) | 31744
+    return (sign << 15) | (e16 << 10) | (r - 1024)
+
+def native_f16_decode(v: "i64") -> "f32":
+    sign = (v >> 15) & 1
+    e16 = (v >> 10) & 31
+    m16 = v & 1023
+    if e16 == 31:
+        if m16 != 0:
+            return float(f32_bits_to_f64((sign << 31) | 2139095040 | 4194304))
+        return float(f32_bits_to_f64((sign << 31) | 2139095040))
+    if e16 == 0:
+        if m16 == 0:
+            return float(f32_bits_to_f64(sign << 31))
+        # f16 subnormal: value = m16 * 2^-24. Chuan hoa bang cach dich len
+        # cho den khi bit 10 bat len, roi value = 1.man * 2^(-14 - n).
+        t = m16
+        n = 0
+        while t < 1024:
+            t = t * 2
+            n = n + 1
+        e32 = 127 - 14 - n
+        man32 = (t - 1024) << 13
+    else:
+        e32 = e16 - 15 + 127
+        man32 = m16 << 13
+    return float(f32_bits_to_f64((sign << 31) | (e32 << 23) | man32))
+
+def _qt_fp8_encode(x: "f32", bias: "i64", w: "i64", emax_field: "i64", has_inf: "i64", sat_bits: "i64") -> "i64":
+    # Dung chung cho e4m3 (bias 7, w 3, emax 15, co sat) va
+    # e5m2 (bias 15, w 2, emax 31, co inf).
+    b = f64_to_f32_bits(x)
+    sign = (b >> 31) & 1
+    ex = (b >> 23) & 255
+    man = b & 8388607
+    if ex == 255:
+        if man != 0:
+            if has_inf == 1:
+                return (sign << 7) | sat_bits
+            return (sign << 7) | 127
+        if has_inf == 1:
+            return (sign << 7) | emax_field
+        return (sign << 7) | 127
+    if ex == 0:
+        e = -126
+        full = man
+    else:
+        e = ex - 127
+        full = man | 8388608
+    e8 = e + bias
+    if e8 >= emax_field:
+        return (sign << 7) | sat_bits
+    if e8 <= 0:
+        m = _qt_rne_rshift(full, 24 - w - e8)
+        lim = (1 << w) - 1
+        if m > lim:
+            m = lim
+        return (sign << 7) | m
+    r = _qt_rne_rshift(full, 23 - w)
+    base = 1 << w
+    if r >= base * 2:
+        r = base
+        e8 = e8 + 1
+        if e8 >= emax_field:
+            return (sign << 7) | sat_bits
+    return (sign << 7) | (e8 << w) | (r - base)
+
+def _qt_fp8_decode(v: "i64", bias: "i64", w: "i64", emax_field: "i64", has_inf: "i64") -> "f32":
+    # (2026-09-27) Code lai cho dung: mask exponent theo tham so.
+    # Cu cung mask 5-bit (31) cho ca e4m3 (4-bit): 0xB8 (-1.0) co e8 doc
+    # thanh 23 thay vi 7 -> giai ma ra -65536.0. e4m3 (emax 15) mask 15.
+    sign = (v >> 7) & 1
+    _ebits = 5
+    if emax_field == 15:
+        _ebits = 4
+    _emask = (1 << _ebits) - 1
+    e8 = (v >> w) & _emask
+    m8 = v & ((1 << w) - 1)
+    base = 1 << w
+    if e8 == emax_field:
+        if has_inf == 0:
+            if m8 == 7:
+                return float(f32_bits_to_f64((sign << 31) | 2139095040 | 4194304))
+        else:
+            if m8 != 0:
+                return float(f32_bits_to_f64((sign << 31) | 2139095040 | 4194304))
+            return float(f32_bits_to_f64((sign << 31) | 2139095040))
+    if e8 == 0:
+        if m8 == 0:
+            return float(f32_bits_to_f64(sign << 31))
+        t = m8
+        n = 0
+        while t < base:
+            t = t * 2
+            n = n + 1
+        e32 = 127 - bias - n
+        man32 = (t - base) << (23 - w)
+    else:
+        e32 = e8 - bias + 127
+        man32 = m8 << (23 - w)
+    return float(f32_bits_to_f64((sign << 31) | (e32 << 23) | man32))
+
+def native_fp8_e4m3_encode(x: "f32") -> "i64":
+    # e4m3: bias 7, 3 bit mantissa, gia tri toi da 448 (0x7E).
+    return _qt_fp8_encode(x, 7, 3, 15, 0, 126)
+
+def native_fp8_e4m3_decode(v: "i64") -> "f32":
+    return _qt_fp8_decode(v, 7, 3, 15, 0)
+
+def native_fp8_e5m2_encode(x: "f32") -> "i64":
+    # e5m2: bias 15, 2 bit mantissa, co inf/NaN, gia toi da 57344.
+    return _qt_fp8_encode(x, 15, 2, 31, 1, 252)
+
+def native_fp8_e5m2_decode(v: "i64") -> "f32":
+    return _qt_fp8_decode(v, 15, 2, 31, 1)
+
+# --- hoisted static methods ---
+
+def identity() -> "QuantParams":
+    return QuantParams(1, 1.0, 0, -340282346638528859811704183484516925440.0, 340282346638528859811704183484516925440.0)
+
+
+def fp8e4m3_from_float(x: "f32") -> "FP8E4M3":
+    return FP8E4M3(1, native_fp8_e4m3_encode(x))
+
+
+def fp8e5m2_from_float(x: "f32") -> "FP8E5M2":
+    return FP8E5M2(1, native_fp8_e5m2_encode(x))
+
+
+def fp16_from_float(x: "f32") -> "FP16":
+    return FP16(1, native_f16_encode(x))
+

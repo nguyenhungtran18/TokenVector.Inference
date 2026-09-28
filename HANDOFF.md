@@ -18,7 +18,7 @@ Chuyển toàn bộ chức năng từ C# sang pure `.tkv`, xác minh tương đ�
 ```powershell
 powershell -File tools\run_cases.ps1
 # TOTAL: pass=26 fail=0 crash=0
-# gap tests: PASS (12/12)
+# gap tests: PASS (16/16)
 ```
 
 ```powershell
@@ -27,8 +27,8 @@ powershell -File build_inference.ps1 -SkipBenchmarks
 ```
 
 - `tv/tests/inference_tests.tkv`: 26/26 PASS
-- `tv/tests/gap_tests.tkv`: 12/12 PASS (mirror xUnit cũ: protobuf, utf8, calibrate, INT8, FP8 E4M3/E5M2, batcher queue, SIMT/backend/dynamic-shape/ViT/clipping)
-- Benchmark chạy tới `[4/4]` + `stress_hot` OK (xem mục 5 còn lỗi)
+- `tv/tests/gap_tests.tkv`: 16/16 PASS (12 case mirror xUnit cũ: protobuf, utf8, calibrate, INT8, FP8 E4M3/E5M2, batcher queue, SIMT/backend/dynamic-shape/ViT/clipping — cộng 4 test hồi quy lỗi treo/lọc ngược)
+- Benchmark chạy trọn tới hết (`[1/4]`…`[4/4]` + cả 2 stress), `ok=500 err=0`
 
 ## 3. Thay đổi chính trong phiên này
 
@@ -54,9 +54,31 @@ powershell -File build_inference.ps1 -BenchmarkTimeoutSeconds 300
 - `tv/quantization/types.tkv` — sửa decode FP8 E4M3 (exponent mask 4 bit, không phải 5).
 - `tv/server/batcher.tkv` — sửa semantics constructor `BatchRequest` + sentinel queue rỗng.
 
-### 3.3 Sửa 2 bug vô hạn lặp trong runtime (mới, chưa ai biết trước đây)
+### 3.3 Sửa 3 bug trong runtime (mới, chưa ai biết trước đây)
 
-**(a) `DeadCodeEliminationPass.run()` — treo vô hạn** — `tv/runtime/session.tkv:3787`
+**(a) `DeadCodeEliminationPass` lọc NGUỘC node — nghiêm trọng nhất** — `tv/runtime/session.tkv:3806`
+
+```python
+if i not in active:      # <-- GIU node chet, XOA node song
+    _qx1000.append(graph.nodes[i])
+```
+
+Triệu chứng: `session_from_graph(g, 1)` **xoá sạch mọi node** rồi trả về toàn `0`, **không
+ném lỗi**:
+
+```
+opt=0 nodes=1 Y[0]=2.25  ← đúng
+opt=1 nodes=0 Y[0]=0.0   ← sai
+```
+
+Vì sao sống dai: **mọi test trong `inference_tests.tkv` đều dựng session bằng
+`session_from_graph(g, 0)`** (tắt optimization). Chỉ benchmark và `gap_tests` gọi `(1)`,
+mà chúng chỉ assert `len(y)` chứ không assert giá trị. Fix: `if i in active:`.
+
+Bài học: **test phải assert giá trị, không chỉ độ dài**, và phải có ít nhất một case bật
+optimization. Cả hai test hồi quy trong `gap_tests` nay đã assert số (2.25 và 3.25).
+
+**(b) `DeadCodeEliminationPass.run()` — treo vô hạn** — `tv/runtime/session.tkv:3787`
 
 ```python
 while i > -1:
@@ -66,15 +88,13 @@ while i > -1:
 
 Vòng `while changed` ngoài chạy lần 2 thì node đã `active` → `continue` mãi. Đây là lý do **mọi** `session_from_graph(g, 1)` (tức mọi session bật optimization) treo. Fix: `i = i + -1` trước `continue`.
 
-Lưu ý: graph *mới* tạo tay chưa lộ bug này vì `scratch` rỗng; chỉ khi chạy pass mới lộ. Test cũ không cover nhánh này.
-
-**(b) Bubble sort scratch trong `analyze_liveness_and_allocate_offsets()`** — `tv/runtime/session.tkv:3213`
+**(c) Bubble sort scratch trong `analyze_liveness_and_allocate_offsets()`** — `tv/runtime/session.tkv:3213`
 
 ```python
 while _si < len(scratch) - 1:      # i32 < TkvInt  => lap vo han
 ```
 
-Fix: `n_scratch = int(len(scratch))` + `for` loop thay `while`. Đây là fix phòng ngừa (cùng họ bug TkvInt đã gặp nhiều lần trong repo), không phải nguyên nhân chính của (a).
+Fix: `n_scratch = int(len(scratch))` + `for` loop thay `while`. Đây là fix phòng ngừa (cùng họ bug TkvInt đã gặp nhiều lần trong repo), không phải nguyên nhân chính của (b).
 
 ### 3.4 Sửa batcher + benchmark
 
@@ -132,11 +152,16 @@ Lưu ý khi viết test: đừng tạo node ghi đè một tensor đã được 
 - `tv/benchmarks/compare_rivals.tkv`
 - `tools/run_cases.ps1`
 
-**File mới:** `build_inference.ps1` (untracked), `tv/tests/tv.server.batcher.tkv` (untracked, copy phục vụ import — cần giữ).
+**File mới:** `build_inference.ps1`, `HANDOFF.md`, `SIMD_NOTES.md`, `tv/examples/quickstart.tkv` (+ các copy `tv.*.tkv` cạnh nó), `tv/tests/tv.server.batcher.tkv`.
 
 **Nhiều `tv.*.tkv` bị `M`:** đây là import-copy sinh tự động, đã sync từ canonical. `.gitignore` chỉ ignore `/tv.*.tkv` ở gốc nên các copy trong thư mục con vẫn được track. Cân nhắc thêm pattern ignore cho `**/tv.*.tkv` hoặc commit cả copy cho khớp trạng thái hiện tại.
 
-**Không đụng:** `TOKENVECTOR_SYNTAX_SPEC.md`, `assets/tokenvector-logo.svg`, `stdlib/tv/inference/inference.tv` (pre-existing, không liên quan).
+**Đã dọn trong phiên dọn dẹp (2026-09-28):**
+- Xoá `stdlib/tv/inference/inference.tv` — prototype `.tv` còn sót từ trước lúc đổi tên `.tv` → `.tkv`, dùng `NDArray[float32]`/`data_ptr`/`zeros_like` (không tồn tại) và không ai tham chiếu.
+- Viết lại toàn bộ docs theo trạng thái thật (xem mục 3.6).
+- `TOKENVECTOR_SYNTAX_SPEC.md` trước đó bị ghi đè thành 660 byte khoảng trắng; bản trong git cũng chỉ là placeholder 599 char mô tả API không tồn tại. Đã viết lại cả 2 bản EN/VI.
+
+**Không đụng:** `assets/tokenvector-logo.svg` (thay đổi có sẵn, không liên quan).
 
 **Không được:** `git reset --hard` / `git clean -fd` — có thay đổi binary/untracked có sẵn từ trước.
 
@@ -146,7 +171,7 @@ Lưu ý khi viết test: đừng tạo node ghi đè một tensor đã được 
 # 1. Test (bắt buộc xanh)
 powershell -File tools\run_cases.ps1
 #   TOTAL: pass=26 fail=0 crash=0
-#   gap tests: PASS (12/12)
+#   gap tests: PASS (16/16)
 
 # 2. Build + test + benchmark
 powershell -File build_inference.ps1 -SkipBenchmarks

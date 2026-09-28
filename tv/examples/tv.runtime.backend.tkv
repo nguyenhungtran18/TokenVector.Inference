@@ -1,0 +1,107 @@
+import tv.runtime.hal
+import tv.runtime.simt
+
+BackendKind_CPU = 0
+BackendKind_SIMT = 1
+BackendKind_CUDA = 2
+BackendKind_NPU = 3
+
+class BackendCaps:
+    _ok: 'i64'
+    name: 'str'
+    kind: 'i64'
+    available: 'i32'
+    lanes: 'i64'
+    tile: 'i64'
+    supports_matmul: 'i32'
+    supports_relu: 'i32'
+    supports_softmax: 'i32'
+    error: 'str'
+
+    def __init__(self, name: 'str', kind: 'i64', available: 'i32', lanes: 'i64', tile: 'i64', matmul: 'i32', relu: 'i32', softmax: 'i32', error: 'str'):
+        self.name = name
+        self.kind = kind
+        self.available = available
+        self.lanes = lanes
+        self.tile = tile
+        self.supports_matmul = matmul
+        self.supports_relu = relu
+        self.supports_softmax = softmax
+        self.error = error
+
+class BackendDispatch:
+    _ok: 'i64'
+    caps: 'BackendCaps'
+    selected: 'str'
+
+    def __init__(self, caps: 'BackendCaps', selected: 'str'):
+        self.caps = caps
+        self.selected = selected
+
+    def matmul(self, a: 'list[f32]', b: 'list[f32]', y: 'list[f32]', m: 'i64', n: 'i64', k: 'i64') -> 'i32':
+        c = self.caps
+        if self.selected == "simt":
+            _lanes = c.lanes
+            _tile = c.tile
+            return simt_matmul(a, b, y, m, n, k, _lanes, _tile, 0)
+        if self.selected == "cpu":
+            _lanes2 = c.lanes
+            return hal_matmul(a, b, y, m, n, k, _lanes2)
+        raise Arg("backend matmul unavailable: " + c.error)
+
+    def relu(self, x: 'list[f32]', y: 'list[f32]') -> 'i32':
+        c = self.caps
+        if self.selected == "simt":
+            return simt_relu(x, y)
+        if self.selected == "cpu":
+            _lanes = c.lanes
+            return hal_relu(x, y, _lanes)
+        raise Arg("backend relu unavailable: " + c.error)
+
+    def softmax_rows(self, x: 'list[f32]', y: 'list[f32]', rows: 'i64', cols: 'i64') -> 'i32':
+        c = self.caps
+        if self.selected == "simt":
+            return simt_softmax_rows(x, y, rows, cols)
+        if self.selected == "cpu":
+            return hal_softmax_rows(x, y, rows, cols)
+        raise Arg("backend softmax unavailable: " + c.error)
+
+def cpu_backend() -> 'BackendDispatch':
+    c = BackendCaps(1, "cpu", BackendKind_CPU, 1, 8, 64, 1, 1, 1, "")
+    return BackendDispatch(1, c, "cpu")
+
+def simt_backend(lanes: 'i64', tile: 'i64') -> 'BackendDispatch':
+    if lanes < 1:
+        lanes = 1
+    if tile < 1:
+        tile = 1
+    c = BackendCaps(1, "tokenvector-simt", BackendKind_SIMT, 1, lanes, tile, 1, 1, 1, "")
+    return BackendDispatch(1, c, "simt")
+
+def unavailable_backend(kind: 'i64', name: 'str', error: 'str') -> 'BackendDispatch':
+    c = BackendCaps(1, name, kind, 0, 0, 0, 0, 0, 0, error)
+    return BackendDispatch(1, c, "unavailable")
+
+def simulation_backend(lanes: 'i64', tile: 'i64') -> 'BackendDispatch':
+    return simt_backend(lanes, tile)
+
+def backend_status(d: 'BackendDispatch') -> 'str':
+    c = d.caps
+    if c.available == 0:
+        return "unavailable: " + c.error
+    if d.selected == "simt":
+        return "simulated"
+    if d.selected == "cpu":
+        return "available"
+    return "compiled-only"
+
+def backend_for_kind(kind: 'i64') -> 'BackendDispatch':
+    if kind == BackendKind_CPU:
+        return cpu_backend()
+    if kind == BackendKind_SIMT:
+        return simt_backend(8, 8)
+    if kind == BackendKind_CUDA:
+        return unavailable_backend(2, "cuda", "no GPU backend in pure-TokenVector runtime (cuda/native bridge removed 2026-09-26)")
+    if kind == BackendKind_NPU:
+        return unavailable_backend(3, "npu", "no NPU backend in pure-TokenVector runtime (openvino/native stub removed 2026-09-26)")
+    return unavailable_backend(0, "unknown", "unknown backend kind")

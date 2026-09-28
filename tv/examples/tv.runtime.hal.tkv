@@ -1,0 +1,129 @@
+import tv.runtime.session
+import tv.numerics.tensor
+
+# enum -> module constants (device, synced with runtime bundle)
+DeviceKind_CPU = 0
+DeviceKind_CUDA = 1
+DeviceKind_ROCM = 2
+DeviceKind_METAL = 3
+DeviceKind_VULKAN = 4
+DeviceKind_NPU = 5
+
+class DeviceCaps:
+    _ok: 'i64'
+    name: 'str'
+    kind: 'i64'
+    lanes: 'i64'
+    max_threads: 'i64'
+    shared_mem_bytes: 'i64'
+    tensor_cores: 'i32'
+
+    def __init__(self, name: 'str', kind: 'i64', lanes: 'i64', max_threads: 'i64', shared_mem_bytes: 'i64', tensor_cores: 'i32'):
+        self.name = name
+        self.kind = kind
+        self.lanes = lanes
+        self.max_threads = max_threads
+        self.shared_mem_bytes = shared_mem_bytes
+        self.tensor_cores = tensor_cores
+
+def cpu_caps() -> "DeviceCaps":
+    return DeviceCaps(1, "TokenVectorCPU", DeviceKind_CPU, 8, 1, 0, 0)
+TILE = 64
+LANE = 8
+
+def hal_matmul(a: 'list[f32]', b: 'list[f32]', y: 'list[f32]', m: 'i64', n: 'i64', k: 'i64', lanes: 'i64'=8) -> 'i32':
+    t = TILE
+    i0 = 0
+    while i0 < m:
+        j0 = 0
+        while j0 < n:
+            for ii in range(i0, min(i0 + t, m)):
+                for jj in range(j0, min(j0 + t, n)):
+                    acc = 0.0
+                    kk = 0
+                    kk2 = min(k, (k + lanes - 1) // lanes * lanes)
+                    while kk + lanes <= kk2:
+                        for l in range(lanes):
+                            acc = acc + a[ii * k + kk + l] * b[(kk + l) * n + jj]
+                        kk = kk + lanes
+                    while kk < k:
+                        acc = acc + a[ii * k + kk] * b[kk * n + jj]
+                        kk = kk + 1
+                    y[ii * n + jj] = acc
+            j0 = j0 + t
+        i0 = i0 + t
+    return 0
+
+def hal_relu(x: 'list[f32]', y: 'list[f32]', lanes: 'i64'=8) -> 'i32':
+    n = len(x)
+    i = 0
+    while i + lanes <= n:
+        for l in range(lanes):
+            v = x[i + l]
+            if v > 0.0:
+                _c1 = v
+            else:
+                _c1 = 0.0
+            y[i + l] = _c1
+        i = i + lanes
+    while i < n:
+        v = x[i]
+        if v > 0.0:
+            _c2 = v
+        else:
+            _c2 = 0.0
+        y[i] = _c2
+        i = i + 1
+    return 0
+
+def hal_softmax_rows(x: 'list[f32]', y: 'list[f32]', rows: 'i64', cols: 'i64') -> 'i32':
+    for r in range(rows):
+        base = r * cols
+        mx = x[base]
+        for j in range(1, cols):
+            if x[base + j] > mx:
+                mx = x[base + j]
+        s = 0.0
+        for j in range(cols):
+            e = exp(x[base + j] - mx)
+            y[base + j] = e
+            s = s + e
+        inv = 1.0 / s
+        for j in range(cols):
+            y[base + j] = y[base + j] * inv
+    return 0
+
+class HalDispatch:
+    _ok: 'i64'
+    kernels: 'dict[str,str]'
+    caps: 'DeviceCaps'
+    backend: 'str'
+
+    def __init__(self):
+        self.kernels = {}
+        self.caps = cpu_caps()
+        self.backend = "cpu"
+
+    def register(self, op: 'str', kernel: 'str') -> 'i32':
+        self.kernels[op] = kernel
+        return 0
+
+    def has(self, op: 'str') -> 'i32':
+        return op in self.kernels
+
+    def get(self, op: 'str') -> 'str':
+        if op not in self.kernels:
+            raise NotFound("HAL kernel '" + str(op) + "' not registered (backend=" + str(self.backend) + ")")
+        return self.kernels[op]
+
+    def bind_provider(self, provider: 'ExecutionProvider') -> 'i32':
+        require(provider)
+        self.backend = provider.name()
+        return 0
+
+def default_dispatch() -> "HalDispatch":
+    d = HalDispatch(1, cpu_caps(), "cpu")
+    d.register("matmul", "hal_matmul")
+    d.register("relu", "hal_relu")
+    d.register("softmax_rows", "hal_softmax_rows")
+    return d

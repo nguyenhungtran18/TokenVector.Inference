@@ -1,0 +1,469 @@
+import tv.runtime.session
+import tv.numerics.tensor
+
+# enum -> module constants (optype, synced with runtime bundle)
+OperatorType_Custom = 0
+OperatorType_MatMul = 1
+OperatorType_FusedLinear = 2
+OperatorType_Conv2D = 3
+OperatorType_FusedConv2D = 4
+OperatorType_RMSNorm = 5
+OperatorType_LayerNorm = 6
+OperatorType_Attention = 7
+OperatorType_Relu = 8
+OperatorType_Gelu = 9
+OperatorType_Silu = 10
+OperatorType_Sigmoid = 11
+OperatorType_Tanh = 12
+OperatorType_Add = 13
+OperatorType_Sub = 14
+OperatorType_Mul = 15
+OperatorType_Div = 16
+OperatorType_Softmax = 17
+OperatorType_Reshape = 18
+OperatorType_Transpose = 19
+OperatorType_Concat = 20
+OperatorType_QuantizedGemm = 21
+OperatorType_Identity = 22
+OperatorType_Gather = 23
+OperatorType_Slice = 24
+OperatorType_Split = 25
+OperatorType_Squeeze = 26
+OperatorType_Unsqueeze = 27
+OperatorType_Expand = 28
+OperatorType_Clip = 29
+OperatorType_Cast = 30
+OperatorType_ReduceMean = 31
+OperatorType_ReduceSum = 32
+OperatorType_ReduceMax = 33
+OperatorType_GlobalAveragePool = 34
+OperatorType_MaxPool = 35
+OperatorType_AveragePool = 36
+OperatorType_BatchNormalization = 37
+OperatorType_Flatten = 38
+OperatorType_Pad = 39
+OperatorType_Dropout = 40
+OperatorType_Gemm = 41
+OperatorType_LeakyRelu = 42
+OperatorType_Elu = 43
+OperatorType_Softplus = 44
+OperatorType_Pow = 45
+OperatorType_Sqrt = 46
+OperatorType_Exp = 47
+OperatorType_Neg = 48
+OperatorType_ArgMax = 49
+OperatorType_Shape = 50
+OperatorType_Size = 51
+OperatorType_Min = 52
+OperatorType_Max = 53
+OperatorType_Mean = 54
+OperatorType_Sum = 55
+OperatorType_Where = 56
+OperatorType_Reciprocal = 57
+OperatorType_Abs = 58
+OperatorType_Log = 59
+OperatorType_LogSoftmax = 60
+OperatorType_Trilu = 61
+OperatorType_TopK = 62
+OperatorType_QuantizeLinear = 63
+OperatorType_DequantizeLinear = 64
+OperatorType_QLinearMatMul = 65
+OperatorType_GatherND = 66
+OperatorType_ScatterElements = 67
+OperatorType_Range = 68
+OperatorType_EyeLike = 69
+OperatorType_ConstantOfShape = 70
+OperatorType_CumSum = 71
+OperatorType_InstanceNormalization = 72
+OperatorType_Mish = 73
+OperatorType_PRelu = 74
+OperatorType_Resize = 75
+OperatorType_Einsum = 76
+OperatorType_QLinearConv = 77
+OperatorType_MatMulInteger = 78
+OperatorType_DynamicQuantizeLinear = 79
+OperatorType_StringConcat = 80
+OperatorType_StringEqual = 81
+OperatorType_StringLength = 82
+
+class ViTConfig:
+    _ok: 'i64'
+    image_size: 'i64'
+    patch_size: 'i64'
+    in_channels: 'i64'
+    hidden: 'i64'
+    num_heads: 'i64'
+    num_layers: 'i64'
+    mlp_ratio: 'i64'
+    num_classes: 'i64'
+    eps: 'f32'
+
+    def __init__(self):
+        self.image_size = 224
+        self.patch_size = 16
+        self.in_channels = 3
+        self.hidden = 768
+        self.num_heads = 12
+        self.num_layers = 12
+        self.mlp_ratio = 4
+        self.num_classes = 0
+        self.eps = 0.00001
+
+def _vit_extend(dst: 'list[str]', src: 'list[str]') -> 'i32':
+    for value in src:
+        dst.append(value)
+    return 0
+
+def _vit_rnd(rnd_state: 'list[i64]', inv_scale: 'f32') -> 'f32':
+    s = rnd_state[0]
+    # LCG 31-bit (cung khuyen voi java.util.Random).
+    #
+    # DA DOI (2026-09-26): ban dau dung LCG 64-bit
+    #     s * 6364136223846793005 + 1442695040888963407) % 9223372036854775807
+    # TokenVector bien phieu tinh tren bien i64 thanh IL `mul.ovf` / `add.ovf`
+    # (KEM TRA TRAN) - hang 64-bit nhan voi i64 ~2^63 het 64 bit ngay ->
+    # OverflowException ("Arithmetic operation resulted in an overflow")
+    # luc build_vit_graph chay. Ban Python goc khong loi vi `int` tu y.
+    #
+    # LCG 31-bit: s < 2^31 nhan 1103515245 (< 2^30) -> < 2^61, an toan
+    # trong int64; ket qua van la so ngau nhien tien dinh de khoi tao trong
+    # so, va DUY NHAU theo seed.
+    s = (s * 1103515245 + 12345) % 2147483648
+    rnd_state[0] = s
+    return (float(s % 1000) / 1000.0 - 0.5) * inv_scale
+
+
+def _vit_init_mat(g: 'ExecutionGraph', rnd_state: 'list[i64]', inv_scale: 'f32', name: 'str', rows: 'i64', cols: 'i64') -> 'i32':
+    m = _nd_f32(rows * cols)
+    for i in range(len(m)):
+        m[i] = _vit_rnd(rnd_state, inv_scale)
+    g.initializers[name] = m
+    g.get_or_create_tensor(name, [rows, cols])
+    return 0
+
+
+def _vit_init_vec(g: 'ExecutionGraph', name: 'str', n: 'i64') -> 'i32':
+    v = _nd_f32(n)
+    for i in range(n):
+        v[i] = 0.0
+    g.initializers[name] = v
+    g.get_or_create_tensor(name, [n])
+    return 0
+
+
+def build_vit_graph(cfg: 'ViTConfig', seed: 'i64'=3) -> 'ExecutionGraph':
+    _isz = cfg.image_size
+    _ips = cfg.patch_size
+    _ic = cfg.in_channels
+    if _isz % _ips != 0:
+        raise Arg("image_size must be divisible by patch_size")
+    n_patches = _isz // _ips * (_isz // _ips)
+    dim = cfg.hidden
+    _ncls = cfg.num_classes
+    g = ExecutionGraph(1, "vit", 0)
+    _ah121_4 = g.inputs
+    _ah121_4.append("images")
+    g.get_or_create_tensor("images", [1, _ic, _isz, _isz])
+    rnd_state = [seed]
+    inv_scale = 0.02
+    in_feat = _ic * _ips * _ips
+    _vit_init_mat(g, rnd_state, inv_scale, "patch_w", in_feat, dim)
+    _vit_init_vec(g, "patch_b", dim)
+    _vit_init_mat(g, rnd_state, inv_scale, "cls_token", 1, dim)
+    _vit_init_mat(g, rnd_state, inv_scale, "pos_embed", n_patches + 1, dim)
+    sh = _nd_f32(3)
+    sh[0] = 1.0
+    sh[1] = float(n_patches)
+    sh[2] = float(in_feat)
+    g.initializers["reshape_to"] = sh
+    g.get_or_create_tensor("reshape_to", [3])
+    r = new_node("rshp", OperatorType_Reshape)
+    _ah162_4 = r.inputs
+    _vit_extend(_ah162_4, ["images", "reshape_to"])
+    _ah163_4 = r.outputs
+    _ah163_4.append("patches")
+    g.get_or_create_tensor("patches", [1, n_patches, in_feat])
+    _ah165_4 = g.nodes
+    _ah165_4.append(r)
+    sh2 = _nd_f32(2)
+    sh2[0] = n_patches
+    sh2[1] = in_feat
+    g.initializers["reshape_2d"] = sh2
+    g.get_or_create_tensor("reshape_2d", [2])
+    r2 = new_node("r2", OperatorType_Reshape)
+    _ah172_4 = r2.inputs
+    _vit_extend(_ah172_4, ["patches", "reshape_2d"])
+    _ah173_4 = r2.outputs
+    _ah173_4.append("patches2d")
+    g.get_or_create_tensor("patches2d", [n_patches, in_feat])
+    _ah175_4 = g.nodes
+    _ah175_4.append(r2)
+    mm = new_node("pp", OperatorType_MatMul)
+    _ah177_4 = mm.inputs
+    _vit_extend(_ah177_4, ["patches2d", "patch_w"])
+    _ah178_4 = mm.outputs
+    _ah178_4.append("emb")
+    g.get_or_create_tensor("emb", [n_patches, dim])
+    _ah180_4 = g.nodes
+    _ah180_4.append(mm)
+    ba = new_node("pb", OperatorType_Add)
+    _ah182_4 = ba.inputs
+    _vit_extend(_ah182_4, ["emb", "patch_b"])
+    _ah183_4 = ba.outputs
+    _ah183_4.append("emb_b")
+    g.get_or_create_tensor("emb_b", [n_patches, dim])
+    _ah185_4 = g.nodes
+    _ah185_4.append(ba)
+    cc = new_node("cls", OperatorType_Concat)
+    _ah187_4 = cc.inputs
+    _vit_extend(_ah187_4, ["cls_token", "emb_b"])
+    _ah188_4 = cc.outputs
+    _ah188_4.append("with_cls")
+    cc.axis = 0
+    g.get_or_create_tensor("with_cls", [n_patches + 1, dim])
+    _ah191_4 = g.nodes
+    _ah191_4.append(cc)
+    pe = new_node("pos", OperatorType_Add)
+    _ah193_4 = pe.inputs
+    _vit_extend(_ah193_4, ["with_cls", "pos_embed"])
+    _ah194_4 = pe.outputs
+    _ah194_4.append("x")
+    g.get_or_create_tensor("x", [n_patches + 1, dim])
+    _ah196_4 = g.nodes
+    _ah196_4.append(pe)
+    cur = "x"
+    for layer in range(cfg.num_layers):
+        pre = "L" + str(layer) + "_"
+        _vit_init_mat(g, rnd_state, inv_scale, pre + "ln1_g", 1, dim)
+        _vit_init_vec(g, pre + "ln1_b", dim)
+        for i in range(dim):
+            _gsc = g.initializers[pre + "ln1_g"]
+            _gsc[i] = 1.0
+        ln1 = new_node(pre + "ln", OperatorType_LayerNorm)
+        _ah205_8 = ln1.inputs
+        _vit_extend(_ah205_8, [cur, pre + "ln1_g", pre + "ln1_b"])
+        _ah206_8 = ln1.outputs
+        _ah206_8.append(pre + "h")
+        ln1.epsilon = cfg.eps
+        g.get_or_create_tensor(pre + "h", [n_patches + 1, dim])
+        _ah209_8 = g.nodes
+        _ah209_8.append(ln1)
+        _vit_init_mat(g, rnd_state, inv_scale, pre + "qkv_w", dim, 3 * dim)
+        _vit_init_vec(g, pre + "qkv_b", 3 * dim)
+        qkv = new_node(pre + "qkv", OperatorType_MatMul)
+        _ah213_8 = qkv.inputs
+        _vit_extend(_ah213_8, [pre + "h", pre + "qkv_w"])
+        _ah214_8 = qkv.outputs
+        _ah214_8.append(pre + "qkv_y")
+        g.get_or_create_tensor(pre + "qkv_y", [n_patches + 1, 3 * dim])
+        _ah216_8 = g.nodes
+        _ah216_8.append(qkv)
+        qkvb = new_node(pre + "qkvb", OperatorType_Add)
+        _ah218_8 = qkvb.inputs
+        _vit_extend(_ah218_8, [pre + "qkv_y", pre + "qkv_b"])
+        _ah219_8 = qkvb.outputs
+        _ah219_8.append(pre + "qkvb_y")
+        g.get_or_create_tensor(pre + "qkvb_y", [n_patches + 1, 3 * dim])
+        _ah221_8 = g.nodes
+        _ah221_8.append(qkvb)
+        sp = new_node(pre + "split", OperatorType_Split)
+        _ah223_8 = sp.inputs
+        _ah223_8.append(pre + "qkvb_y")
+        _ah224_8 = sp.outputs
+        _vit_extend(_ah224_8, [pre + "Q", pre + "K", pre + "V"])
+        sp.axis = 1
+        g.get_or_create_tensor(pre + "Q", [n_patches + 1, dim])
+        g.get_or_create_tensor(pre + "K", [n_patches + 1, dim])
+        g.get_or_create_tensor(pre + "V", [n_patches + 1, dim])
+        _ah229_8 = g.nodes
+        _ah229_8.append(sp)
+        attn = new_node(pre + "attn", OperatorType_Attention)
+        _ah231_8 = attn.inputs
+        _vit_extend(_ah231_8, [pre + "Q", pre + "K", pre + "V"])
+        _ah232_8 = attn.outputs
+        _ah232_8.append(pre + "A")
+        attn.num_heads = cfg.num_heads
+        attn.causal = 0
+        g.get_or_create_tensor(pre + "A", [n_patches + 1, dim])
+        _ah236_8 = g.nodes
+        _ah236_8.append(attn)
+        _vit_init_mat(g, rnd_state, inv_scale, pre + "proj_w", dim, dim)
+        _vit_init_vec(g, pre + "proj_b", dim)
+        pj = new_node(pre + "pj", OperatorType_MatMul)
+        _ah240_8 = pj.inputs
+        _vit_extend(_ah240_8, [pre + "A", pre + "proj_w"])
+        _ah241_8 = pj.outputs
+        _ah241_8.append(pre + "pj_y")
+        g.get_or_create_tensor(pre + "pj_y", [n_patches + 1, dim])
+        _ah243_8 = g.nodes
+        _ah243_8.append(pj)
+        pjb = new_node(pre + "pjb", OperatorType_Add)
+        _ah245_8 = pjb.inputs
+        _vit_extend(_ah245_8, [pre + "pj_y", pre + "proj_b"])
+        _ah246_8 = pjb.outputs
+        _ah246_8.append(pre + "pj_b")
+        g.get_or_create_tensor(pre + "pj_b", [n_patches + 1, dim])
+        _ah248_8 = g.nodes
+        _ah248_8.append(pjb)
+        res1 = new_node(pre + "r1", OperatorType_Add)
+        _ah250_8 = res1.inputs
+        _vit_extend(_ah250_8, [cur, pre + "pj_b"])
+        _ah251_8 = res1.outputs
+        _ah251_8.append(pre + "a1")
+        g.get_or_create_tensor(pre + "a1", [n_patches + 1, dim])
+        _ah253_8 = g.nodes
+        _ah253_8.append(res1)
+        _vit_init_mat(g, rnd_state, inv_scale, pre + "ln2_g", 1, dim)
+        _vit_init_vec(g, pre + "ln2_b", dim)
+        for i in range(dim):
+            _gsc = g.initializers[pre + "ln2_g"]
+            _gsc[i] = 1.0
+        ln2 = new_node(pre + "ln2", OperatorType_LayerNorm)
+        _ah259_8 = ln2.inputs
+        _vit_extend(_ah259_8, [pre + "a1", pre + "ln2_g", pre + "ln2_b"])
+        _ah260_8 = ln2.outputs
+        _ah260_8.append(pre + "m")
+        ln2.epsilon = cfg.eps
+        g.get_or_create_tensor(pre + "m", [n_patches + 1, dim])
+        _ah263_8 = g.nodes
+        _ah263_8.append(ln2)
+        hid = dim * cfg.mlp_ratio
+        _vit_init_mat(g, rnd_state, inv_scale, pre + "fc1_w", dim, hid)
+        _vit_init_vec(g, pre + "fc1_b", hid)
+        fc1 = new_node(pre + "fc1", OperatorType_MatMul)
+        _ah268_8 = fc1.inputs
+        _vit_extend(_ah268_8, [pre + "m", pre + "fc1_w"])
+        _ah269_8 = fc1.outputs
+        _ah269_8.append(pre + "fc1_y")
+        g.get_or_create_tensor(pre + "fc1_y", [n_patches + 1, hid])
+        _ah271_8 = g.nodes
+        _ah271_8.append(fc1)
+        fc1b = new_node(pre + "fc1b", OperatorType_Add)
+        _ah273_8 = fc1b.inputs
+        _vit_extend(_ah273_8, [pre + "fc1_y", pre + "fc1_b"])
+        _ah274_8 = fc1b.outputs
+        _ah274_8.append(pre + "fc1_b_y")
+        g.get_or_create_tensor(pre + "fc1_b_y", [n_patches + 1, hid])
+        _ah276_8 = g.nodes
+        _ah276_8.append(fc1b)
+        act = new_node(pre + "gelu", OperatorType_Gelu)
+        _ah278_8 = act.inputs
+        _ah278_8.append(pre + "fc1_b_y")
+        _ah279_8 = act.outputs
+        _ah279_8.append(pre + "g")
+        g.get_or_create_tensor(pre + "g", [n_patches + 1, hid])
+        _ah281_8 = g.nodes
+        _ah281_8.append(act)
+        _vit_init_mat(g, rnd_state, inv_scale, pre + "fc2_w", hid, dim)
+        _vit_init_vec(g, pre + "fc2_b", dim)
+        fc2 = new_node(pre + "fc2", OperatorType_MatMul)
+        _ah285_8 = fc2.inputs
+        _vit_extend(_ah285_8, [pre + "g", pre + "fc2_w"])
+        _ah286_8 = fc2.outputs
+        _ah286_8.append(pre + "fc2_y")
+        g.get_or_create_tensor(pre + "fc2_y", [n_patches + 1, dim])
+        _ah288_8 = g.nodes
+        _ah288_8.append(fc2)
+        fc2b = new_node(pre + "fc2b", OperatorType_Add)
+        _ah290_8 = fc2b.inputs
+        _vit_extend(_ah290_8, [pre + "fc2_y", pre + "fc2_b"])
+        _ah291_8 = fc2b.outputs
+        _ah291_8.append(pre + "fc2_b")
+        g.get_or_create_tensor(pre + "fc2_b", [n_patches + 1, dim])
+        _ah293_8 = g.nodes
+        _ah293_8.append(fc2b)
+        res2 = new_node(pre + "r2", OperatorType_Add)
+        _ah295_8 = res2.inputs
+        _vit_extend(_ah295_8, [pre + "a1", pre + "fc2_b"])
+        _ah296_8 = res2.outputs
+        _ah296_8.append(pre + "out")
+        g.get_or_create_tensor(pre + "out", [n_patches + 1, dim])
+        _ah298_8 = g.nodes
+        _ah298_8.append(res2)
+        cur = pre + "out"
+    _vit_init_mat(g, rnd_state, inv_scale, "lnf_g", 1, dim)
+    _vit_init_vec(g, "lnf_b", dim)
+    for i in range(dim):
+        _gsc = g.initializers["lnf_g"]
+        _gsc[i] = 1.0
+    lnf = new_node("ln", OperatorType_LayerNorm)
+    _ah305_4 = lnf.inputs
+    _vit_extend(_ah305_4, [cur, "lnf_g", "lnf_b"])
+    _ah306_4 = lnf.outputs
+    _ah306_4.append("feat_all")
+    g.get_or_create_tensor("feat_all", [n_patches + 1, dim])
+    _ah308_4 = g.nodes
+    _ah308_4.append(lnf)
+    sh3 = _nd_f32(1)
+    g.initializers["cls_slice_s"] = sh3
+    g.get_or_create_tensor("cls_slice_s", [1])
+    sh4 = _nd_f32(1)
+    sh4[0] = 1.0
+    g.initializers["cls_slice_e"] = sh4
+    g.get_or_create_tensor("cls_slice_e", [1])
+    sl = new_node("cls_sl", OperatorType_Slice)
+    _ah317_4 = sl.inputs
+    _vit_extend(_ah317_4, ["feat_all", "cls_slice_s", "cls_slice_e"])
+    _ah318_4 = sl.outputs
+    _ah318_4.append("cls_feat")
+    g.get_or_create_tensor("cls_feat", [1, dim])
+    _ah320_4 = g.nodes
+    _ah320_4.append(sl)
+    if cfg.num_classes > 0:
+        _vit_init_mat(g, rnd_state, inv_scale, "head_w", dim, cfg.num_classes)
+        _vit_init_vec(g, "head_b", cfg.num_classes)
+        hw = new_node("head", OperatorType_MatMul)
+        _ah325_8 = hw.inputs
+        _vit_extend(_ah325_8, ["cls_feat", "head_w"])
+        _ah326_8 = hw.outputs
+        _ah326_8.append("head_y")
+        g.get_or_create_tensor("head_y", [1, _ncls])
+        _ah328_8 = g.nodes
+        _ah328_8.append(hw)
+        hb = new_node("headb", OperatorType_Add)
+        _ah330_8 = hb.inputs
+        _vit_extend(_ah330_8, ["head_y", "head_b"])
+        _ah331_8 = hb.outputs
+        _ah331_8.append("logits")
+        g.get_or_create_tensor("logits", [1, _ncls])
+        _ah333_8 = g.nodes
+        _ah333_8.append(hb)
+        _ah334_8 = g.outputs
+        _ah334_8.append("logits")
+    else:
+        _ah336_8 = g.outputs
+        _ah336_8.append("cls_feat")
+    return g
+
+def load_vit_weights(g: 'ExecutionGraph', weights: 'dict[str,list[f32]]') -> 'i32':
+    missing = []
+    missing.append("")
+    structural = []
+    structural.append("reshape_to")
+    structural.append("reshape_2d")
+    structural.append("cls_slice_s")
+    structural.append("cls_slice_e")
+    _init_keys = g.initializers.keys()
+    for name in _init_keys:
+        if name in weights:
+            src = weights[name]
+            dst = g.initializers[name]
+            if len(src) == len(dst):
+                for i in range(len(dst)):
+                    dst[i] = src[i]
+            else:
+                _nm = name + "(shape)"
+                missing.append(_nm)
+        elif name not in structural:
+            missing.append(name)
+    if len(missing) > 0:
+        _ah353_44 = ","
+        raise Arg("ViT weight mismatch: " + _ah353_44.join(missing))
+    return 0
+
+
+
+
+
+def default_vit_config() -> 'ViTConfig':
+    return ViTConfig(1, 224, 16, 3, 768, 12, 12, 4, 0, 0.00001)

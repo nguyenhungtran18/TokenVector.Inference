@@ -1,0 +1,127 @@
+import tv.numerics.tensor
+import tv.quantization.types
+
+def matmul_int8_symmetric(pa: 'list[i32]', pw: 'list[i32]', pbias: 'list[f32]', py: 'list[f32]', m: 'i64', n: 'i64', k: 'i64', scale_a: 'f32', scale_w: 'f32') -> 'i32':
+    s = scale_a * scale_w
+    for mm in range(m):
+        for nn in range(n):
+            acc = _dot_int8(pa, mm * k, pw, nn * k, k)
+            if len(pbias) > 0:
+                _c1 = pbias[nn]
+            else:
+                _c1 = 0.0
+            bias = _c1
+            py[mm * n + nn] = acc * s + bias
+    return 0
+
+def matmul_int8_per_channel(pa: 'list[i32]', pw: 'list[i32]', pbias: 'list[f32]', py: 'list[f32]', m: 'i64', n: 'i64', k: 'i64', scale_a: 'f32', scales_w: 'list[f32]') -> 'i32':
+    if len(scales_w) < n:
+        raise ValueError("scales_w smaller than N")
+    for mm in range(m):
+        for nn in range(n):
+            acc = _dot_int8(pa, mm * k, pw, nn * k, k)
+            if len(pbias) > 0:
+                _c2 = pbias[nn]
+            else:
+                _c2 = 0.0
+            bias = _c2
+            py[mm * n + nn] = acc * scale_a * scales_w[nn] + bias
+    return 0
+
+def matmul_int8_asymmetric(pa: 'list[i32]', pw: 'list[i32]', pbias: 'list[f32]', py: 'list[f32]', m: 'i64', n: 'i64', k: 'i64', scale_a: 'f32', zp_a: 'i64', scale_w: 'f32', zp_w: 'i64') -> 'i32':
+    s = scale_a * scale_w
+    for mm in range(m):
+        for nn in range(n):
+            acc = 0
+            for kk in range(k):
+                acc = acc + (int(pa[mm * k + kk]) - zp_a) * (int(pw[nn * k + kk]) - zp_w)
+            if len(pbias) > 0:
+                _c3 = pbias[nn]
+            else:
+                _c3 = 0.0
+            bias = _c3
+            py[mm * n + nn] = acc * s + bias
+    return 0
+
+def matmul_fp8_e4m3(pa: 'list[i32]', pw: 'list[i32]', pbias: 'list[f32]', py: 'list[f32]', m: 'i64', n: 'i64', k: 'i64') -> 'i32':
+    for mm in range(m):
+        for nn in range(n):
+            acc = 0.0
+            for kk in range(k):
+                acc = acc + _fp8_decode(int(pa[mm * k + kk])) * _fp8_decode(int(pw[nn * k + kk]))
+            if len(pbias) > 0:
+                _c4 = pbias[nn]
+            else:
+                _c4 = 0.0
+            bias = _c4
+            py[mm * n + nn] = acc + bias
+    return 0
+
+def quantize_fp8_e4m3(src: 'list[f32]', dst: 'list[i32]') -> 'i32':
+    if len(dst) < len(src):
+        raise ValueError("dst too small")
+    for i in range(len(src)):
+        _tq1 = fp8e4m3_from_float(src[i])
+        dst[i] = _tq1.value - 128
+    return 0
+
+def dequantize_fp8_e4m3(src: 'list[i32]', dst: 'list[f32]') -> 'i32':
+    if len(dst) < len(src):
+        raise ValueError("dst too small")
+    for i in range(len(src)):
+        dst[i] = _fp8_decode(int(src[i]))
+    return 0
+
+def _fp8_decode(v: 'i64') -> 'f32':
+    _tq2 = FP8E4M3(1, v + 128)
+    return _tq2.to_float()
+
+def matmul_fp16(pa: 'list[i32]', pw: 'list[i32]', pbias: 'list[f32]', py: 'list[f32]', m: 'i64', n: 'i64', k: 'i64') -> 'i32':
+    for mm in range(m):
+        for nn in range(n):
+            acc = 0.0
+            for kk in range(k):
+                a0 = int(pa[(mm * k + kk) * 2]) & 255
+                a1 = int(pa[(mm * k + kk) * 2 + 1]) & 255
+                w0 = int(pw[(nn * k + kk) * 2]) & 255
+                w1 = int(pw[(nn * k + kk) * 2 + 1]) & 255
+                _tq3 = FP16(1, a0 | a1 << 8)
+                _tq4 = FP16(1, w0 | w1 << 8)
+                acc = acc + _tq3.to_float() * _tq4.to_float()
+            if len(pbias) > 0:
+                _c5 = pbias[nn]
+            else:
+                _c5 = 0.0
+            bias = _c5
+            py[mm * n + nn] = acc + bias
+    return 0
+
+def _to_sbyte(u: 'i64') -> 'i64':
+    if u > 127:
+        _c6 = u - 256
+    else:
+        _c6 = u
+    return _c6
+
+def quantize_fp16(src: 'list[f32]', dst: 'list[i32]') -> 'i32':
+    if len(dst) < len(src) * 2:
+        raise ValueError("dst too small (need 2 bytes/elem)")
+    for i in range(len(src)):
+        _tq5 = fp16_from_float(src[i])
+        v = _tq5.value
+        dst[i * 2] = _to_sbyte(v & 255)
+        dst[i * 2 + 1] = _to_sbyte(v >> 8 & 255)
+    return 0
+
+def _dot_int8(a: 'list[i32]', ao: 'i64', b: 'list[i32]', bo: 'i64', k: 'i64') -> 'i64':
+    acc = 0
+    kk = 0
+    limit = k - 31
+    while kk < limit:
+        for l in range(32):
+            acc = acc + int(a[ao + kk + l]) * int(b[bo + kk + l])
+        kk = kk + 32
+    while kk < k:
+        acc = acc + int(a[ao + kk]) * int(b[bo + kk])
+        kk = kk + 1
+    return acc

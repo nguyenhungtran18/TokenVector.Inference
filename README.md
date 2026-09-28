@@ -7,9 +7,12 @@
 
 <img src="assets/tokenvector-logo.svg" alt="TokenVector logo" width="96" height="96">
 
-**TokenVector.Inference** is an industrial-grade, **Zero-GC Allocation**, pure **TokenVector (`.tkv`)** deep learning model serving, graph optimization, and precision quantization engine designed for the TokenVector AI ecosystem.
+**TokenVector.Inference** is a pure **TokenVector (`.tkv`)** deep learning graph runtime — graph optimization, precision quantization, and a micro-batcher — built for the TokenVector AI ecosystem.
 
-> **Current release status:** 47 `.tkv` modules build clean with the packaged `tkvc`, `tv/tests/gap_tests.tkv` passes, and the runtime test suite runs. The runtime is **100% TokenVector with zero native dependencies** — no C/C++ sources, no P/Invoke, no companion DLL. CPU execution is available, TokenVector SIMT is a deterministic simulation, and CUDA/OpenCL/OpenVINO are reported honestly as unavailable.
+> **Current status, verified 2026-09-28:** 26/26 cases in `tv/tests/inference_tests.tkv` and 16/16 in `tv/tests/gap_tests.tkv` pass. The runtime is **100% TokenVector with no native code in this package** — no C/C++, no P/Invoke, no companion DLL. CPU execution works, TokenVector SIMT is a deterministic simulation, and CUDA/OpenCL/OpenVINO are honestly reported as unavailable.
+>
+> Read the caveats before relying on it: the tensor arena is **not** zero-GC (see below), there is **no SIMD**, and several entry points are stubs. `HANDOFF.md` lists every known gap; `SIMD_NOTES.md` covers vectorization.
+
 
 ### Backend status
 
@@ -63,9 +66,9 @@ Training (`tv/training/autograd.tkv`) runs on the CPU path only: forward, backwa
 
 ## 🌟 Key Capabilities & Highlights
 
-1. **Zero-GC Allocation Hot Path:**
-   - Pre-allocates a unified memory arena using **Tensor Liveness Analysis**.
-   - Hot-path execution aims for **0 Byte** heap churn on the arena-reuse path.
+1. **Tensor Liveness Analysis** (arena reuse, *not* zero-GC today):
+   - `ExecutionGraph.analyze_liveness_and_allocate_offsets()` computes live ranges and reuses scratch slots.
+   - The arena is `dict[i64, list[f32]]` — boxed element storage, and `native_arena_alloc` is still a stub returning `0`. So each tensor costs managed allocations. The 0-byte hot-path goal is **not** met; see `SIMD_NOTES.md` §7 for the fix.
 2. **Zero-Copy Protobuf & ONNX Reader:**
    - Pure `.tkv` protobuf wire reader decoding ONNX binaries from raw byte lists without intermediate string/object garbage.
 3. **Graph Optimization Pipeline:**
@@ -76,11 +79,11 @@ Training (`tv/training/autograd.tkv`) runs on the CPU path only: forward, backwa
    - Static PTQ via MinMax, KL, percentile, and MSE calibration.
    - Symmetric & asymmetric INT8 plus grouped INT4 (AWQ-style) and per-channel GEMM.
    - FP8 E4M3/E5M2 and FP16 compute paths for modern Transformer architectures.
-5. **Ultra-Low Latency Embedded Serving:**
-   - In-process REST engine (`EmbeddedServer`) with OpenAI-compatible API, SSE streaming, auth, limits, and Prometheus metrics.
-   - Micro-batching / continuous batching over a session pool with paged KV + prefix skip.
-6. **TokenVector-first runtime — zero native dependencies:**
-   - Core compute, graph execution, serving, quantization and tests are `.tkv` sources compiled with `tkvc`.
+5. **In-process serving structures (not yet listening):**
+   - `EmbeddedServer` and `DynamicBatcher` exist and the batcher's synchronous path works, but `http_listen()` is a stub returning `0` and `spawn()` creates no worker thread, so no socket is bound and no micro-batching happens across threads.
+   - Paged KV + prefix skip are implemented and covered by tests.
+6. **TokenVector-first runtime — no native code in this package:**
+   - Core compute, graph execution, quantization and tests are `.tkv` sources compiled with `tkvc`.
    - **No C/C++ in the repository, no `__tkv_extern_pinvoke__`, no companion DLL.** Byte codecs and IEEE-754 float bit reinterpretation are implemented in `.tkv` (`tv/runtime/f32_bits.tkv`), so the ONNX writer needs nothing beside its own executable.
    - GPU/NPU offload would have to ship as a separate native utility, not as a library every executable must carry.
 
@@ -100,42 +103,86 @@ See `BENCHMARKS.md` / `BENCHMARKS_VI.md` for suite structure and `COMPETITOR_COM
 
 ## ⚡ Quick Start (`.tkv`)
 
-```tokenvector
-import tv.inference
+Runnable example — `tv/examples/quickstart.tkv` builds a graph, turns it into a
+session and runs one forward pass:
 
-session = tv.inference.load_onnx("models/transformer.onnx")
-input_tensor = tensor.zeros([1, 64], dtype=float32)
-output_tensor = session.run(input_tensor)
-print("Output shape:", output_tensor.shape)
+```powershell
+$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
+& $tkvc build tv/examples/quickstart.tkv --out quickstart.exe
+.\quickstart.exe      # prints: Y[0] = 2.25  /  quickstart: OK
+```
+
+The API is graph-based; there is no `tv.inference.load_onnx()` and no `NDArray`:
+
+```tokenvector
+import tv.runtime.session
+# Module-level constants are NOT importable - redeclare them (values from
+# tv/runtime/session.tkv and tv/optimization/kernels.tkv).
+OperatorType_FusedLinear = 2
+ActivationFunction_Relu = 1
+
+g = ExecutionGraph(1, "quickstart", 0)
+g.inputs.append("X")
+g.outputs.append("Y")
+g.initializers["W"] = w          # list[f32] of length n*k
+g.initializers["B"] = b          # list[f32] of length n
+g.get_or_create_tensor("X", [1, 4])
+g.get_or_create_tensor("W", [8, 4])
+g.get_or_create_tensor("B", [8])
+g.get_or_create_tensor("Y", [1, 8])
+
+node = new_node("gemm", OperatorType_FusedLinear)
+node.activation = ActivationFunction_Relu
+node.inputs.append("X")          # node.inputs.append("W"), append("B")
+node.outputs.append("Y")
+g.nodes.append(node)
+
+session = session_from_graph(g, 1)   # 1 = run the optimization passes
+y = session.run_single(x, "X", "Y")  # x is a flat list[f32]
 session.close()
 ```
 
-CLI:
+What is **not** wired up yet (stubs, do not put these in a quick start):
 
-```powershell
-tkvc build tv/tools/cli.tkv
-# then run the produced executable with serve|gen|export|calibrate|latency
-```
+| API | State |
+| :--- | :--- |
+| `tv.inference.load_onnx()` | `tv.inference` is an auto-generated stub; the module does not exist |
+| `tensor.zeros(...)` | no such symbol; tensors are plain `list[f32]` |
+| `parse_file("m.onnx")` | `parser_read_bytes` is a stub returning `""`, so file reading is not implemented |
+| `cli.tkv serve ...` | `argv()` is a stub returning `[]`, so the CLI always prints usage |
+| `http_listen()` (embedded server) | stub returning `0`; nothing binds a socket |
 
 ---
 
 ## Build, Test, and Packaging
 
 ```powershell
-# TokenVector compiler (packaged as compiler/tkvc_patched.exe)
-$tkvc = ".\compiler\tkvc_patched.exe"
+# TokenVector compiler
+$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
 
-& $tkvc build tv/tests/inference_tests.tkv --out inference_tests.exe
-& $tkvc build tv/benchmarks/compare_rivals.tkv
-& $tkvc build tv/tests/gap_tests.tkv --out gap_tests.exe
-.\gap_tests.exe
+# Tests: 26 cases, each in its own process, then the 16-case gap suite
+powershell -File tools\run_cases.ps1 -Compiler $tkvc
+#   TOTAL: pass=26 fail=0 crash=0
+#   gap tests: PASS (16/16)
+
+# Build + test + benchmark in one go
+powershell -File build_inference.ps1 -SkipBenchmarks
 ```
 
-Build **every** module (the canonical sources are the files not named `tv.*.tkv` — those are generated import copies):
+**Do not build modules one by one.** `tkvc build <single module>` rewrites the
+generated dotted import copies, and has been observed to leave nine of them filled
+with NUL bytes (restored with `git checkout HEAD -- <file>`). Build only entry
+points:
 
 ```powershell
-$files = Get-ChildItem -Recurse -Filter *.tkv | Where-Object { $_.Name -notmatch '^tv\.' }
-foreach ($f in $files) { & $tkvc build $f.FullName --target library --out out.dll }
+& $tkvc build tv/tests/inference_tests.tkv --out inference_tests.exe
+& $tkvc build tv/tests/gap_tests.tkv        --out gap_tests.exe
+& $tkvc build tv/examples/quickstart.tkv    --out quickstart.exe
+& $tkvc build tv/benchmarks/compare_rivals.tkv --out compare_rivals.exe
 ```
+
+The canonical sources are the files **not** named `tv.*.tkv` — those are generated
+import copies, and after editing a canonical file you must copy it to every
+matching `tv.*.tkv`.
 
 The produced executables are self-contained: no DLL needs to sit next to them.
