@@ -156,7 +156,7 @@ def _st_nd_i64(n: "i64") -> "list[i64]":
         _zf46 = _zf46 + 1
     return out
 
-def _st_nd_i8(n: "i64") -> "list[i64]":
+def _st_nd_i8(n: "i64") -> "list[i32]":
     out = []
     _zf47 = 0
     while _zf47 < n:
@@ -166,10 +166,10 @@ def _st_nd_i8(n: "i64") -> "list[i64]":
 
 
 def str_tensor_new() -> 'StringTensor':
-    return StringTensor(1)
+    return StringTensor([])
 
 def str_tensor(vals: 'list[str]') -> 'StringTensor':
-    t = StringTensor(1)
+    t = StringTensor([])
     t.values = vals
     return t
 
