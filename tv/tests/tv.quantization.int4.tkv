@@ -106,7 +106,26 @@ def quantize_int4_grouped_asym(src: 'list[f32]', rows: 'i64', cols: 'i64', group
             if zp > 15:
                 zp = 15
             if zp == 0:
-                sc = mx / 15.0
+                if mn > 0:
+                    # (2026-09-30) Nhom TOAN DUONG. `sc = mx / 15` tuong duong
+                    # rang buoc `mn = 0` - sai khi `mn > 0`: cac gia tri giua
+                    # `mn` va `0` roi ngoai dai [-zp*sc, (15-zp)*sc] nen bi lam
+                    # tron sai (vi du nhom [4,5,6,7]: 4.0 -> 2.667).
+                    # Cach dung: chon `zp` va `sc` sao cho ca `mn` va `mx`
+                    # cung nap du dai 15 bac `[-zp*sc, (15-zp)*sc]`.
+                    # Rang buoc can duoi: `-zp*sc <= mn` <=> `zp >= -mn/sc`.
+                    # Voi `mn > 0` thi ve phai la 0 - tuc `zp = 0`, va khi do
+                    # can duoi cua dai la 0 < `mn`, nen `sc` phai NOI LEN cho
+                    # den khi `(15 - zp) * sc >= mx` tuc `sc >= mx / 15`.
+                    # Day la truong hop nhom duong: ca chuc nho duoc rut gon
+                    # ve phia 0, thay vi giu ca do rong (mx-mn)/15 (khi do
+                    # cac gia tri o giua mn va 0 vuot dai va bi lam tron sai).
+                    sc = mx / 15.0
+                    if sc < 0.00000001:
+                        sc = 0.00000001
+                    zp = 0
+                else:
+                    sc = mx / 15.0
             elif zp == 15:
                 sc = -mn / 15.0
             if sc < 0.00000001:

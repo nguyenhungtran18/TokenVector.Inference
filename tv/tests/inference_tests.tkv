@@ -633,7 +633,12 @@ def test_awq_asym_and_fp16() -> 'i32':
     w = _nd_f32(8)
     for i in range(8):
         w[i] = float(i) - 2.0
-    packed = _nd_i64(4)
+    # (2026-09-30) `packed` phai la `list[i32]`: ham
+    # `quantize_int4_grouped_asym` khai tham so `packed_out: 'list[i32]'`.
+    # Truoc day tao bang `_nd_i64` (ra `list[i64]`) - khac kieu, nen gia
+    # tri ghi vao khong cham vao mang dich. Compiler moi (3.code a87087b)
+    # ep kieu container o diem goi nen loi lo ra thay vi im lang.
+    packed = _nd_i32(4)
     scales = _nd_f32(0)
     zps = _nd_i64(0)
     quantize_int4_grouped_asym(w, 1, 8, 4, packed, scales, zps)
