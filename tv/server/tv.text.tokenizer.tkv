@@ -92,6 +92,7 @@ class WordPieceTokenizer(Tokenizer):
     def __init__(self, vocab_path: 'str', unk_token: 'str'="[UNK]"):
         self.vocab_path = vocab_path
         lines = file_read_lines(vocab_path)
+        self.id_to_tok = {}
         self.vocab = {}
         for i in range(len(lines)):
             self.vocab[lines[i]] = i

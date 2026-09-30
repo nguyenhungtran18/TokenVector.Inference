@@ -481,6 +481,7 @@ class EmbeddedServer:
     def __init__(self, session: "InferenceSession", port: "i64", opts: "ServerOptions"):
         self.session = session
         _db = DynamicBatcher(1, 32, 200, 10000)
+        self.buckets = {}
         _pl = _db.pool
         _pl.append(session)
         self.batcher = _db

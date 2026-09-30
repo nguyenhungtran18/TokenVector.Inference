@@ -23,6 +23,8 @@ class GenRequest:
     def __init__(self, max_tokens: "i64", done: "i32", error: "str", cache: "AttentionKvCache", paged: "PagedSequence", seq_id: "i64"):
         self.max_tokens = max_tokens
         self.done = done
+        self.prompt = []
+        self.tokens = []
         self.error = error
         self.cache = cache
         self.paged = paged
@@ -55,6 +57,8 @@ class ContBatcher:
     def __init__(self, session: "InferenceSession", hidden_dim: "i64", max_seq: "i64" = 2048, max_running: "i64" = 4, pool_pages: "i64" = 256, page_len: "i64" = 16, workers: "i64" = 4):
         self.session = session
         self.hidden_dim = hidden_dim
+        self.running = []
+        self.waiting = []
         self.max_seq = max_seq
         self.max_running = max(1, max_running)
         _mr = self.max_running

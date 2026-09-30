@@ -19,6 +19,7 @@ class DraftNode:
     def __init__(self, token: 'i64', parent: 'i64', logp: 'f32'):
         self.token = token
         self.parent = parent
+        self.children = []
         self.logp = logp
         self.target_ok = 0
 

@@ -3118,6 +3118,7 @@ class ExecutionGraph:
     def __init__(self, name: "str" = "TokenVectorGraph"):
         self.name = name
         self.nodes = []
+        self.dim_params = {}
         self.tensors = {}
         self.inputs = []
         self.outputs = []

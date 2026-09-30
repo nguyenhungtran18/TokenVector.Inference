@@ -134,6 +134,11 @@ class StrAcc:
     _ok: 'i64'
     items: 'list[str]'
 
+    def __init__(self, _ok: "i64") -> "i32":
+        self.items = []
+        return 0
+
+
 
 def _td_i64_list(dims: 'list[i64]') -> 'list[i64]':
     # (2026-09-26) Dung list RONG roi append, KHONG duoc viet `q = []` roi
@@ -1835,6 +1840,11 @@ class RnnDims:
     hid: "i64"
     ndir: "i64"
     acts: "list[str]"
+
+    def __init__(self, _ok: "i64", seq: "i64", bat: "i64", inp: "i64", hid: "i64", ndir: "i64") -> "i32":
+        self.acts = []
+        return 0
+
 
 def _rnn_common(g: 'ExecutionGraph', on: 'OnnxNode', kind: 'str') -> 'RnnDims':
     hid = 0
