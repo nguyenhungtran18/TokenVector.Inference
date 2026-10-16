@@ -1,6 +1,16 @@
 import tv.runtime.session
 import tv.numerics.tensor
 
+# (2026-10-16) Compiler moi yeu cau `//`/`%` tren so nguyen co "nho tam" o
+# nhieu ngu canh (trong tham so ham, trong bieu thuc gan co chi so...). Boc
+# vao ham la cach an toan: giu nguyen nghia, khong phai do lai tung bien.
+def _idiv_hal(a: 'i64', b: 'i64') -> 'i64':
+    return a // b
+
+
+def _imod_hal(a: 'i64', b: 'i64') -> 'i64':
+    return a % b
+
 # enum -> module constants (device, synced with runtime bundle)
 DeviceKind_CPU = 0
 DeviceKind_CUDA = 1
@@ -41,7 +51,10 @@ def hal_matmul(a: 'list[f32]', b: 'list[f32]', y: 'list[f32]', m: 'i64', n: 'i64
                 for jj in range(j0, min(j0 + t, n)):
                     acc = 0.0
                     kk = 0
-                    kk2 = min(k, (k + lanes - 1) // lanes * lanes)
+                    # (2026-10-16) Compiler moi: `//` trong THAM SO HAM can
+                    # nho tam -> tach bien truoc.
+                    _kkd = _idiv_hal((k + lanes - 1), lanes)
+                    kk2 = min(k, _kkd * lanes)
                     while kk + lanes <= kk2:
                         for l in range(lanes):
                             acc = acc + a[ii * k + kk + l] * b[(kk + l) * n + jj]

@@ -8,6 +8,32 @@ import tv.quantization.matmul
 import tv.runtime.string_tensor
 import tv.onnx.string_ops
 
+# (2026-10-15) Compiler moi yeu cau `//`/`%` tren so nguyen co "nho tam":
+# bieu thuc chua qua first-pass se nem loi
+# "'//' hoac '%' tren so nguyen thieu o nho tam ...".
+# Boc vao ham la cach an toan nhat (giu nguyen nghia, khong phai do lai tung bien).
+def _idiv(a: 'i64', b: 'i64') -> 'i64':
+    return a // b
+
+
+def _imod(a: 'i64', b: 'i64') -> 'i64':
+    return a % b
+
+# (2026-10-15) Compiler moi KHONG cho index ngay tren ket qua len goi
+# method/ham: loi "'<bieu thuc>[i]' - khong suy duoc hinh dang cua bieu thuc
+# ben trai". Phai gan ket qua vao bien truoc roi index.
+def _span0(a: 'ExecutionMemoryArena', off: 'i64', cnt: 'i64') -> 'f32':
+    _t = a.get_float_span(off, cnt)
+    return _t[0]
+
+# (2026-10-15) Compiler moi KHONG cho index truc tiep vao property `shape`:
+# loi "il_codegen: d.shape[0] khong hop le (shape=[])". Doc property qua
+# bien trung gian roi index moi duoc, nen bo ham nay cho cac diem can doc 1
+# phan tu cua shape.
+def _shp_at_sd(d: 'TensorDesc', i: 'i64') -> 'i64':
+    _s = d.shape
+    return _s[i]
+
 # ===== device (merged) =====
 class Arg(Exception):
     msg: "str"
@@ -104,7 +130,7 @@ class ExecutionMemoryArena:
         if size_in_bytes == 0:
             size_in_bytes = 64
         # Align up to 64 bytes (AVX2 / AVX-512)
-        size_in_bytes = (size_in_bytes + 63) // 64 * 64
+        size_in_bytes = _idiv((size_in_bytes + 63), 64) * 64
         self.size_in_bytes = size_in_bytes
         self.handle = native_arena_alloc(size_in_bytes)
         self.fmap = {}
@@ -240,7 +266,7 @@ def native_arena_int32_view(handle: "i64", byte_offset: "i64", count: "i64") -> 
 def arena_create(size_in_bytes: 'i64') -> 'ExecutionMemoryArena':
     if size_in_bytes == 0:
         size_in_bytes = 64
-    aligned = (size_in_bytes + 63) // 64 * 64
+    aligned = _idiv((size_in_bytes + 63), 64) * 64
     h = native_arena_alloc(aligned)
     return ExecutionMemoryArena(1, aligned, h)
 
@@ -712,29 +738,29 @@ class ExecutionNode:
         b = self.input_descs[1]
         y = self.output_descs[0]
         if len(a.shape) > 1:
-            _c1 = a.shape[0]
+            _c1 = _shp_at_sd(a, 0)
         else:
             _c1 = 1
         m = _c1
         if len(a.shape) > 1:
-            _c2 = a.shape[len(a.shape) - 1]
+            _c2 = _shp_at_sd(a, len(a.shape) - 1)
         else:
             _c2 = a.element_count
         k = _c2
         if len(a.shape) > 2:
             m = 1
             for i in range(len(a.shape) - 1):
-                m = m * a.shape[i]
-            k = a.shape[len(a.shape) - 1]
+                m = m * _shp_at_sd(a, i)
+            k = _shp_at_sd(a, len(a.shape) - 1)
         n = b.element_count
         trans_b = self.trans_b != 0
         if len(b.shape) == 2:
-            if b.shape[1] == k:
+            if _shp_at_sd(b, 1) == k:
                 trans_b = 1
-                n = b.shape[0]
-            elif b.shape[0] == k:
+                n = _shp_at_sd(b, 0)
+            elif _shp_at_sd(b, 0) == k:
                 trans_b = 0
-                n = b.shape[1]
+                n = _shp_at_sd(b, 1)
         xv = arena.get_float_span(a.offset, a.element_count)
         wv = arena.get_float_span(b.offset, b.element_count)
         yv = arena.get_float_span(y.offset, y.element_count)
@@ -791,22 +817,22 @@ class ExecutionNode:
         b = arena.get_float_span(bd.offset, bd.element_count)
         y = arena.get_float_span(yd.offset, yd.element_count)
         if len(ad.shape) > 1:
-            _c3 = ad.shape[0]
+            _c3 = _shp_at_sd(ad, 0)
         else:
             _c3 = 1
         m = _c3
         if len(ad.shape) > 1:
-            _c4 = ad.shape[1]
+            _c4 = _shp_at_sd(ad, 1)
         else:
             _c4 = ad.element_count
         ka = _c4
         if len(bd.shape) > 1:
-            _c5 = bd.shape[0]
+            _c5 = _shp_at_sd(bd, 0)
         else:
             _c5 = bd.element_count
         kb = _c5
         if len(bd.shape) > 1:
-            _c6 = bd.shape[1]
+            _c6 = _shp_at_sd(bd, 1)
         else:
             _c6 = bd.element_count
         n = _c6
@@ -848,37 +874,37 @@ class ExecutionNode:
         w = self.input_descs[1]
         y = self.output_descs[0]
         if len(x.shape) >= 4:
-            _c11 = x.shape[0]
+            _c11 = _shp_at_sd(x, 0)
         else:
             _c11 = 1
         batch = _c11
         if len(x.shape) >= 4:
-            _c12 = x.shape[1]
+            _c12 = _shp_at_sd(x, 1)
         else:
             _c12 = 1
         in_c = _c12
         if len(x.shape) >= 4:
-            _c13 = x.shape[2]
+            _c13 = _shp_at_sd(x, 2)
         else:
-            _c13 = x.shape[0]
+            _c13 = _shp_at_sd(x, 0)
         in_h = _c13
         if len(x.shape) >= 4:
-            _c14 = x.shape[3]
+            _c14 = _shp_at_sd(x, 3)
         else:
-            _c14 = x.shape[1]
+            _c14 = _shp_at_sd(x, 1)
         in_w = _c14
         if len(w.shape) >= 4:
-            _c15 = w.shape[0]
+            _c15 = _shp_at_sd(w, 0)
         else:
             _c15 = 1
         out_c = _c15
         if len(w.shape) >= 4:
-            _c16 = w.shape[2]
+            _c16 = _shp_at_sd(w, 2)
         else:
             _c16 = 3
         kh = _c16
         if len(w.shape) >= 4:
-            _c17 = w.shape[3]
+            _c17 = _shp_at_sd(w, 3)
         else:
             _c17 = 3
         kw = _c17
@@ -1031,7 +1057,7 @@ class ExecutionNode:
             if ca == 1:
                 _c26 = a[0]
             else:
-                _c26 = a[i % ca]
+                _c26 = a[_imod(i, ca)]
             if ca == len(y):
                 _c27 = a[i]
             else:
@@ -1039,7 +1065,7 @@ class ExecutionNode:
             if cb == 1:
                 _c28 = b[0]
             else:
-                _c28 = b[i % cb]
+                _c28 = b[_imod(i, cb)]
             if cb == len(y):
                 _c29 = b[i]
             else:
@@ -1138,10 +1164,10 @@ class ExecutionNode:
         hi = self.clip_max
         if len(self.input_descs) > 1:
             _ah1000_38 = self.input_descs[1]
-            lo = arena.get_float_span(_ah1000_38.offset, 1)[0]
+            lo = _span0(arena, _ah1000_38.offset, 1)
         if len(self.input_descs) > 2:
             _ah1002_38 = self.input_descs[2]
-            hi = arena.get_float_span(_ah1002_38.offset, 1)[0]
+            hi = _span0(arena, _ah1002_38.offset, 1)
         for i in range(len(x)):
             v = x[i]
             if v < lo:
@@ -1154,7 +1180,7 @@ class ExecutionNode:
     def _exec_softmax(self, arena: 'ExecutionMemoryArena') -> 'i32':
         x = self.input_descs[0]
         if len(x.shape) > 0:
-            _c39 = x.shape[len(x.shape) - 1]
+            _c39 = _shp_at_sd(x, len(x.shape) - 1)
         else:
             _c39 = x.element_count
         d = _c39
@@ -1162,7 +1188,7 @@ class ExecutionNode:
             _c40 = d
         else:
             _c40 = 1
-        n = x.element_count // _c40
+        n = _idiv(x.element_count, _c40)
         _ah1024_34 = self.input_descs[0]
         _ah1024_62 = self.input_descs[0]
         xv = arena.get_float_span(_ah1024_34.offset, _ah1024_62.element_count)
@@ -1178,27 +1204,27 @@ class ExecutionNode:
         vd = self.input_descs[2]
         yd = self.output_descs[0]
         if len(qd.shape) > 1:
-            _c41 = qd.shape[0]
+            _c41 = _shp_at_sd(qd, 0)
         else:
             _c41 = 1
         sq = _c41
         if len(qd.shape) > 1:
-            _c42 = qd.shape[1]
+            _c42 = _shp_at_sd(qd, 1)
         else:
             _c42 = qd.element_count
         hidden = _c42
         if len(kd.shape) > 1:
-            _c43 = kd.shape[0]
+            _c43 = _shp_at_sd(kd, 0)
         else:
             _c43 = 1
         skv = _c43
         if len(kd.shape) > 1:
-            _c44 = kd.shape[1]
+            _c44 = _shp_at_sd(kd, 1)
         else:
             _c44 = kd.element_count
         hidden_k = _c44
         if len(vd.shape) > 1:
-            _c45 = vd.shape[1]
+            _c45 = _shp_at_sd(vd, 1)
         else:
             _c45 = vd.element_count
         hidden_v = _c45
@@ -1209,17 +1235,17 @@ class ExecutionNode:
         else:
             _c46 = 1
         heads = _c46
-        if hidden % heads != 0:
+        if _imod(hidden, heads) != 0:
             raise Shape("hidden " + str(hidden) + " not divisible by num_heads " + str(heads) + "")
-        head_dim = hidden // heads
+        head_dim = _idiv(hidden, heads)
         if self.num_kv_heads > 0:
             _c47 = self.num_kv_heads
         else:
             _c47 = heads
         kv_heads = _c47
-        if heads % kv_heads != 0:
+        if _imod(heads, kv_heads) != 0:
             raise Shape("num_heads " + str(heads) + " must be a multiple of num_kv_heads " + str(kv_heads) + "")
-        group = heads // kv_heads
+        group = _idiv(heads, kv_heads)
         if self.attn_scale_override > 0.0:
             _c48 = self.attn_scale_override
         else:
@@ -1235,10 +1261,10 @@ class ExecutionNode:
         else:
             maskdesc = self.input_descs[0]
         mask = arena.get_float_span(maskdesc.offset, maskdesc.element_count)
-        mask_skv = maskdesc.shape[1]
+        mask_skv = _shp_at_sd(maskdesc, 1)
         for qi in range(sq):
             for h in range(heads):
-                kvh = h // group
+                kvh = _idiv(h, group)
                 qb = qi * hidden + h * head_dim
                 yb = qi * hidden + h * head_dim
                 max_v = -340000000000000000000000000000000000000
@@ -1302,11 +1328,11 @@ class ExecutionNode:
         ax = _c53
         outer = 1
         for i in range(ax):
-            outer = outer * dd.shape[i]
-        axis_dim = dd.shape[ax]
+            outer = outer * _shp_at_sd(dd, i)
+        axis_dim = _shp_at_sd(dd, ax)
         inner = 1
         for i in range(ax + 1, rank):
-            inner = inner * dd.shape[i]
+            inner = inner * _shp_at_sd(dd, i)
         ni = id.element_count
         for o in range(outer):
             for j in range(ni):
@@ -1404,7 +1430,7 @@ class ExecutionNode:
         for a in range(rank):
             _oln = 0
             if hi[a] > lo[a]:
-                _oln = (hi[a] - lo[a] + st[a] - 1) // st[a]
+                _oln = _idiv((hi[a] - lo[a] + st[a] - 1), st[a])
             out_lens[a] = _oln
         _src_st = _nd_i32(rank)
         _acc = 1
@@ -1432,10 +1458,10 @@ class ExecutionNode:
                 _ola = out_lens[a]
                 c = 0
                 if _ola > 0:
-                    c = rem % _ola
+                    c = _imod(rem, _ola)
                 _nrem = 0
                 if _ola > 0:
-                    _nrem = rem // _ola
+                    _nrem = _idiv(rem, _ola)
                 rem = _nrem
                 off = off + (lo[a] + c * st[a]) * src_st[a]
                 a = a + -1
@@ -1460,8 +1486,11 @@ class ExecutionNode:
         if len(self.input_descs) > 1 and _ah1296_41.element_count == len(self.output_descs):
             sizes = _read_ints(arena, self.input_descs, 1)
         else:
-            total = dd.shape[ax]
-            each = total // len(self.output_descs)
+            total = _shp_at_sd(dd, ax)
+            # (2026-10-15) Compiler moi: `//`/`%` tren so nguyen co toan hang
+            # la LOI GOI HAM se loi "thieu o nho tam". Tach len truoc.
+            _nout = len(self.output_descs)
+            each = _idiv(total, _nout)
             sizes = []
             _zf105 = 0
             while _zf105 < len(self.output_descs):
@@ -1469,10 +1498,10 @@ class ExecutionNode:
                 _zf105 = _zf105 + 1
         outer = 1
         for i in range(ax):
-            outer = outer * dd.shape[i]
+            outer = outer * _shp_at_sd(dd, i)
         inner = 1
         for i in range(ax + 1, rank):
-            inner = inner * dd.shape[i]
+            inner = inner * _shp_at_sd(dd, i)
         base = 0
         for o in range(len(self.output_descs)):
             _ah1314_37 = self.output_descs[o]
@@ -1481,7 +1510,7 @@ class ExecutionNode:
             for r in range(outer):
                 for t in range(sizes[o]):
                     for u in range(inner):
-                        y[(r * sizes[o] + t) * inner + u] = x[(r * dd.shape[ax] + base + t) * inner + u]
+                        y[(r * sizes[o] + t) * inner + u] = x[(r * _shp_at_sd(dd, ax) + base + t) * inner + u]
             base = base + sizes[o]
         return 0
 
@@ -1494,7 +1523,8 @@ class ExecutionNode:
         y = arena.get_float_span(_ah1324_33.offset, _ah1324_62.element_count)
         cx = len(x)
         for i in range(len(y)):
-            y[i] = x[i % cx]
+            _bi = _imod(i, cx)
+            y[i] = x[_bi]
         return 0
 
     def _exec_reduce(self, arena: 'ExecutionMemoryArena', code: 'i64') -> 'i32':
@@ -1560,17 +1590,17 @@ class ExecutionNode:
         _ah1388_62 = self.output_descs[0]
         y = arena.get_float_span(_ah1388_33.offset, _ah1388_62.element_count)
         if len(dd.shape) > 0:
-            _c67 = dd.shape[0]
+            _c67 = _shp_at_sd(dd, 0)
         else:
             _c67 = 1
         n = _c67
         if len(dd.shape) > 1:
-            _c68 = dd.shape[1]
+            _c68 = _shp_at_sd(dd, 1)
         else:
             _c68 = 1
         c = _c68
         if n * c > 0:
-            _c69 = dd.element_count // (n * c)
+            _c69 = _idiv(dd.element_count, (n * c))
         else:
             _c69 = 1
         spatial = _c69
@@ -1592,10 +1622,10 @@ class ExecutionNode:
         _ah1419_33 = self.output_descs[0]
         _ah1419_62 = self.output_descs[0]
         y = arena.get_float_span(_ah1419_33.offset, _ah1419_62.element_count)
-        n = dd.shape[0]
-        c = dd.shape[1]
-        ih = dd.shape[2]
-        iw = dd.shape[3]
+        n = _shp_at_sd(dd, 0)
+        c = _shp_at_sd(dd, 1)
+        ih = _shp_at_sd(dd, 2)
+        iw = _shp_at_sd(dd, 3)
         if len(self.kernel_shape) > 0:
             _c71 = self.kernel_shape[0]
         else:
@@ -1630,12 +1660,12 @@ class ExecutionNode:
             _c77 = self.pads[2]
         else:
             _c77 = pt
-        oh = (ih + pt + _c77 - kh) // sh + 1
+        oh = _idiv((ih + pt + _c77 - kh), sh) + 1
         if len(self.pads) > 3:
             _c78 = self.pads[3]
         else:
             _c78 = pl
-        ow = (iw + pl + _c78 - kw) // sw + 1
+        ow = _idiv((iw + pl + _c78 - kw), sw) + 1
         for b in range(n):
             for ch in range(c):
                 for o in range(oh):
@@ -1677,12 +1707,12 @@ class ExecutionNode:
         _ah1502_62 = self.output_descs[0]
         y = arena.get_float_span(_ah1502_33.offset, _ah1502_62.element_count)
         if len(dd.shape) > 1:
-            _c82 = dd.shape[1]
+            _c82 = _shp_at_sd(dd, 1)
         else:
             _c82 = 1
         ch = _c82
         if ch > 0:
-            _c83 = dd.element_count // ch
+            _c83 = _idiv(dd.element_count, ch)
         else:
             _c83 = 1
         spatial = _c83
@@ -1700,7 +1730,7 @@ class ExecutionNode:
         var = arena.get_float_span(_ah1516_35.offset, _ah1516_63.element_count)
         for i in range(dd.element_count):
             if spatial > 0:
-                _c84 = i // spatial % ch
+                _c84 = _idiv(i, spatial) % ch
             else:
                 _c84 = 0
             c = _c84
@@ -1719,7 +1749,7 @@ class ExecutionNode:
         val = 0.0
         if len(self.input_descs) > 2:
             _ah1535_39 = self.input_descs[2]
-            val = arena.get_float_span(_ah1535_39.offset, 1)[0]
+            val = _span0(arena, _ah1535_39.offset, 1)
         _ah1536_20 = self.output_descs[0]
         out_shape = _ah1536_20.shape
         for i in range(len(y)):
@@ -1732,8 +1762,9 @@ class ExecutionNode:
             ok = 1
             a = rank - 1
             while a > -1:
-                co = rem % dd.shape[a]
-                rem = rem // dd.shape[a]
+                _dim_a = _shp_at_sd(dd, a)
+                co = _imod(rem, _dim_a)
+                rem = _idiv(rem, _dim_a)
                 if a < len(pads):
                     _c85 = pads[a]
                 else:
@@ -1747,7 +1778,7 @@ class ExecutionNode:
     def _exec_log_softmax(self, arena: 'ExecutionMemoryArena') -> 'i32':
         x = self.input_descs[0]
         if len(x.shape) > 0:
-            _c86 = x.shape[len(x.shape) - 1]
+            _c86 = _shp_at_sd(x, len(x.shape) - 1)
         else:
             _c86 = x.element_count
         d = _c86
@@ -1755,7 +1786,7 @@ class ExecutionNode:
             _c87 = d
         else:
             _c87 = 1
-        n = x.element_count // _c87
+        n = _idiv(x.element_count, _c87)
         _ah1571_34 = self.input_descs[0]
         _ah1571_62 = self.input_descs[0]
         xv = arena.get_float_span(_ah1571_34.offset, _ah1571_62.element_count)
@@ -1790,8 +1821,8 @@ class ExecutionNode:
             return 0
         xv = arena.get_float_span(x.offset, x.element_count)
         yv = arena.get_float_span(y.offset, y.element_count)
-        rows = x.shape[0]
-        cols = x.shape[1]
+        rows = _shp_at_sd(x, 0)
+        cols = _shp_at_sd(x, 1)
         for i in range(rows):
             for j in range(cols):
                 if self.tri_upper != 0:
@@ -1823,15 +1854,15 @@ class ExecutionNode:
             ax = _c91
         if kk < 1:
             kk = 1
-        if kk > dd.shape[ax]:
-            kk = dd.shape[ax]
+        if kk > _shp_at_sd(dd, ax):
+            kk = _shp_at_sd(dd, ax)
         outer = 1
         for i in range(ax):
-            outer = outer * dd.shape[i]
-        dim = dd.shape[ax]
+            outer = outer * _shp_at_sd(dd, i)
+        dim = _shp_at_sd(dd, ax)
         inner = 1
         for i in range(ax + 1, rank):
-            inner = inner * dd.shape[i]
+            inner = inner * _shp_at_sd(dd, i)
         _ah1641_34 = self.output_descs[0]
         _ah1641_63 = self.output_descs[0]
         yv = arena.get_float_span(_ah1641_34.offset, _ah1641_63.element_count)
@@ -1875,7 +1906,7 @@ class ExecutionNode:
         if len(self.input_descs) > 2:
             _ah1674_42 = self.input_descs[2]
             _ah1674_70 = self.input_descs[2]
-            zp = int(arena.get_float_span(_ah1674_42.offset, _ah1674_70.element_count)[0])
+            zp = int(_span0(arena, _ah1674_42.offset, _ah1674_70.element_count))
         if len(sc) == 1:
             if sc[0] > 0.000000000001:
                 _c93 = sc[0]
@@ -1899,11 +1930,11 @@ class ExecutionNode:
             ax = _c94
             outer = 1
             for i in range(ax):
-                outer = outer * dd.shape[i]
-            dim = dd.shape[ax]
+                outer = outer * _shp_at_sd(dd, i)
+            dim = _shp_at_sd(dd, ax)
             inner = 1
             for i in range(ax + 1, rank):
-                inner = inner * dd.shape[i]
+                inner = inner * _shp_at_sd(dd, i)
             for o in range(outer):
                 for j in range(dim):
                     if sc[j] > 0.000000000001:
@@ -1934,7 +1965,7 @@ class ExecutionNode:
         if len(self.input_descs) > 2:
             _ah1715_42 = self.input_descs[2]
             _ah1715_70 = self.input_descs[2]
-            zp = int(arena.get_float_span(_ah1715_42.offset, _ah1715_70.element_count)[0])
+            zp = int(_span0(arena, _ah1715_42.offset, _ah1715_70.element_count))
         if len(sc) == 1:
             for i in range(len(x)):
                 y[i] = float(int(x[i]) - zp) * sc[0]
@@ -1947,11 +1978,11 @@ class ExecutionNode:
             ax = _c96
             outer = 1
             for i in range(ax):
-                outer = outer * dd.shape[i]
-            dim = dd.shape[ax]
+                outer = outer * _shp_at_sd(dd, i)
+            dim = _shp_at_sd(dd, ax)
             inner = 1
             for i in range(ax + 1, rank):
-                inner = inner * dd.shape[i]
+                inner = inner * _shp_at_sd(dd, i)
             for o in range(outer):
                 for j in range(dim):
                     for t in range(inner):
@@ -1967,28 +1998,28 @@ class ExecutionNode:
         b = arena.get_int8_span(bd.offset, bd.element_count)
         y = arena.get_int8_span(yd.offset, yd.element_count)
         _ah1746_34 = self.input_descs[1]
-        sa = arena.get_float_span(_ah1746_34.offset, 1)[0]
+        sa = _span0(arena, _ah1746_34.offset, 1)
         _ah1747_39 = self.input_descs[2]
-        zpa = int(arena.get_float_span(_ah1747_39.offset, 1)[0])
+        zpa = int(_span0(arena, _ah1747_39.offset, 1))
         _ah1748_34 = self.input_descs[4]
-        sw = arena.get_float_span(_ah1748_34.offset, 1)[0]
+        sw = _span0(arena, _ah1748_34.offset, 1)
         _ah1749_39 = self.input_descs[5]
-        zpw = int(arena.get_float_span(_ah1749_39.offset, 1)[0])
+        zpw = int(_span0(arena, _ah1749_39.offset, 1))
         _ah1750_34 = self.input_descs[6]
-        sy = arena.get_float_span(_ah1750_34.offset, 1)[0]
+        sy = _span0(arena, _ah1750_34.offset, 1)
         if sy == 0.0:
             sy = 1.0
         _ah1753_39 = self.input_descs[7]
-        zpy = int(arena.get_float_span(_ah1753_39.offset, 1)[0])
+        zpy = int(_span0(arena, _ah1753_39.offset, 1))
         m = 1
         if len(ad.shape) > 1:
-            m = int(ad.shape[0])
+            m = int(_shp_at_sd(ad, 0))
         k = int(ad.element_count)
         if len(ad.shape) > 1:
-            k = int(ad.shape[1])
+            k = int(_shp_at_sd(ad, 1))
         n = int(bd.element_count)
         if len(bd.shape) > 1:
-            n = int(bd.shape[1])
+            n = int(_shp_at_sd(bd, 1))
         mult = sa * sw / sy
         na = len(a)
         nb = len(b)
@@ -2047,13 +2078,13 @@ class ExecutionNode:
         _ah1783_33 = self.output_descs[0]
         _ah1783_62 = self.output_descs[0]
         y = arena.get_float_span(_ah1783_33.offset, _ah1783_62.element_count)
-        k = id.shape[len(id.shape) - 1]
+        k = _shp_at_sd(id, len(id.shape) - 1)
         slice_len = 1
         for i in range(k, len(dd.shape)):
-            slice_len = slice_len * dd.shape[i]
+            slice_len = slice_len * _shp_at_sd(dd, i)
         dstr = _strides(dd.shape)
         if k > 0:
-            _c100 = id.element_count // k
+            _c100 = _idiv(id.element_count, k)
         else:
             _c100 = 0
         n_idx = _c100
@@ -2062,8 +2093,8 @@ class ExecutionNode:
             for j in range(k):
                 ii = int(idx[s * k + j])
                 if ii < 0:
-                    ii = ii + dd.shape[j]
-                if ii < 0 or ii >= dd.shape[j]:
+                    ii = ii + _shp_at_sd(dd, j)
+                if ii < 0 or ii >= _shp_at_sd(dd, j):
                     raise Arg("gathernd index " + str(ii) + " out of range")
                 off = off + ii * dstr[j]
             for t in range(slice_len):
@@ -2092,11 +2123,11 @@ class ExecutionNode:
         ax = _c101
         outer = 1
         for i in range(ax):
-            outer = outer * dd.shape[i]
-        dim = dd.shape[ax]
+            outer = outer * _shp_at_sd(dd, i)
+        dim = _shp_at_sd(dd, ax)
         inner = 1
         for i in range(ax + 1, rank):
-            inner = inner * dd.shape[i]
+            inner = inner * _shp_at_sd(dd, i)
         for o in range(outer):
             for j in range(dim):
                 if inner > 0:
@@ -2114,11 +2145,11 @@ class ExecutionNode:
 
     def _exec_range(self, arena: 'ExecutionMemoryArena') -> 'i32':
         _ah1844_33 = self.input_descs[0]
-        s = arena.get_float_span(_ah1844_33.offset, 1)[0]
+        s = _span0(arena, _ah1844_33.offset, 1)
         _ah1845_33 = self.input_descs[1]
-        e = arena.get_float_span(_ah1845_33.offset, 1)[0]
+        e = _span0(arena, _ah1845_33.offset, 1)
         _ah1846_33 = self.input_descs[2]
-        d = arena.get_float_span(_ah1846_33.offset, 1)[0]
+        d = _span0(arena, _ah1846_33.offset, 1)
         _ah1847_33 = self.output_descs[0]
         _ah1847_62 = self.output_descs[0]
         y = arena.get_float_span(_ah1847_33.offset, _ah1847_62.element_count)
@@ -2145,13 +2176,13 @@ class ExecutionNode:
         y = arena.get_float_span(_ah1866_33.offset, _ah1866_62.element_count)
         if len(x.shape) != 2:
             raise Shape("EyeLike requires rank 2")
-        for i in range(x.shape[0]):
-            for j in range(x.shape[1]):
+        for i in range(_shp_at_sd(x, 0)):
+            for j in range(_shp_at_sd(x, 1)):
                 if i == j:
                     _c103 = 1.0
                 else:
                     _c103 = 0.0
-                y[i * x.shape[1] + j] = _c103
+                y[i * _shp_at_sd(x, 1) + j] = _c103
         return 0
 
     def _exec_const_of_shape(self, arena: 'ExecutionMemoryArena') -> 'i32':
@@ -2178,11 +2209,11 @@ class ExecutionNode:
             raise Arg("cumsum axis out of range")
         outer = 1
         for i in range(ax):
-            outer = outer * dd.shape[i]
-        dim = dd.shape[ax]
+            outer = outer * _shp_at_sd(dd, i)
+        dim = _shp_at_sd(dd, ax)
         inner = 1
         for i in range(ax + 1, rank):
-            inner = inner * dd.shape[i]
+            inner = inner * _shp_at_sd(dd, i)
         for o in range(outer):
             for t in range(inner):
                 acc = 0.0
@@ -2215,17 +2246,17 @@ class ExecutionNode:
         _ah1926_62 = self.output_descs[0]
         y = arena.get_float_span(_ah1926_33.offset, _ah1926_62.element_count)
         if len(dd.shape) > 0:
-            _c104 = dd.shape[0]
+            _c104 = _shp_at_sd(dd, 0)
         else:
             _c104 = 1
         n = _c104
         if len(dd.shape) > 1:
-            _c105 = dd.shape[1]
+            _c105 = _shp_at_sd(dd, 1)
         else:
             _c105 = 1
         c = _c105
         if n * c > 0:
-            _c106 = dd.element_count // (n * c)
+            _c106 = _idiv(dd.element_count, (n * c))
         else:
             _c106 = 1
         spatial = _c106
@@ -2301,7 +2332,8 @@ class ExecutionNode:
             if len(s) == 1:
                 _c111 = s[0]
             else:
-                _c111 = s[i % len(s)]
+                _ns = len(s)
+                _c111 = s[_imod(i, _ns)]
             if same:
                 _c112 = s[i]
             else:
@@ -2320,14 +2352,14 @@ class ExecutionNode:
         _ah2016_33 = self.output_descs[0]
         _ah2016_62 = self.output_descs[0]
         y = arena.get_float_span(_ah2016_33.offset, _ah2016_62.element_count)
-        n = dd.shape[0]
-        c = dd.shape[1]
-        ih = dd.shape[2]
-        iw = dd.shape[3]
+        n = _shp_at_sd(dd, 0)
+        c = _shp_at_sd(dd, 1)
+        ih = _shp_at_sd(dd, 2)
+        iw = _shp_at_sd(dd, 3)
         _ah2021_13 = self.output_descs[0]
-        oh = _ah2021_13.shape[2]
+        oh = _shp_at_sd(_ah2021_13, 2)
         _ah2022_13 = self.output_descs[0]
-        ow = _ah2022_13.shape[3]
+        ow = _shp_at_sd(_ah2022_13, 3)
         sh = oh / ih
         sw = ow / iw
         for b in range(n):
@@ -2500,8 +2532,9 @@ class ExecutionNode:
                 _zf31 = _zf31 + 1
             i = len(batch) - 1
             while i > -1:
-                bc[i] = rem % batch[i]
-                rem = rem // batch[i]
+                _rem_b = _imod(rem, batch[i])
+                bc[i] = _rem_b
+                rem = _idiv(rem, batch[i])
                 i = i + -1
             nout = 1
             for i in range(len(co)):
@@ -2512,8 +2545,9 @@ class ExecutionNode:
                 i = len(co) - 1
                 while i > -1:
                     L = co[i:i + 1]
-                    val[L] = rem % sizes[L]
-                    rem = rem // sizes[L]
+                    _rem_s = _imod(rem, sizes[L])
+                    val[L] = _rem_s
+                    rem = _idiv(rem, sizes[L])
                     i = i + -1
                 acc = 0.0
                 nred = 1
@@ -2523,8 +2557,9 @@ class ExecutionNode:
                     rem = rf
                     i = len(red) - 1
                     while i > -1:
-                        val[red[i]] = rem % sizes[red[i]]
-                        rem = rem // sizes[red[i]]
+                        _rem_r = _imod(rem, sizes)[red[i]]
+                        val[red[i]] = _rem_r
+                        rem = _idiv(rem, sizes)[red[i]]
                         i = i + -1
                     if b is not None:
                         _c127 = b[_einsum_off(val, bc, batch, sb, cb)]
@@ -2550,19 +2585,19 @@ class ExecutionNode:
         w = arena.get_int8_span(wd.offset, wd.element_count)
         y = arena.get_int8_span(yd.offset, yd.element_count)
         _ah2213_34 = self.input_descs[1]
-        xs = arena.get_float_span(_ah2213_34.offset, 1)[0]
+        xs = _span0(arena, _ah2213_34.offset, 1)
         _ah2214_39 = self.input_descs[2]
-        xzp = int(arena.get_float_span(_ah2214_39.offset, 1)[0])
+        xzp = int(_span0(arena, _ah2214_39.offset, 1))
         _ah2215_34 = self.input_descs[4]
-        ws = arena.get_float_span(_ah2215_34.offset, 1)[0]
+        ws = _span0(arena, _ah2215_34.offset, 1)
         _ah2216_39 = self.input_descs[5]
-        wzp = int(arena.get_float_span(_ah2216_39.offset, 1)[0])
+        wzp = int(_span0(arena, _ah2216_39.offset, 1))
         _ah2217_34 = self.input_descs[6]
-        ys = arena.get_float_span(_ah2217_34.offset, 1)[0]
+        ys = _span0(arena, _ah2217_34.offset, 1)
         if ys == 0.0:
             ys = 1.0
         _ah2220_39 = self.input_descs[7]
-        yzp = int(arena.get_float_span(_ah2220_39.offset, 1)[0])
+        yzp = int(_span0(arena, _ah2220_39.offset, 1))
         has_b = len(self.input_descs) > 8
         _xsh = xd.shape
         n = 1
@@ -2605,19 +2640,19 @@ class ExecutionNode:
         w = arena.get_int8_span(wd.offset, wd.element_count)
         y = arena.get_int8_span(yd.offset, yd.element_count)
         _ah2213_34 = self.input_descs[1]
-        xs = arena.get_float_span(_ah2213_34.offset, 1)[0]
+        xs = _span0(arena, _ah2213_34.offset, 1)
         _ah2214_39 = self.input_descs[2]
-        xzp = int(arena.get_float_span(_ah2214_39.offset, 1)[0])
+        xzp = int(_span0(arena, _ah2214_39.offset, 1))
         _ah2215_34 = self.input_descs[4]
-        ws = arena.get_float_span(_ah2215_34.offset, 1)[0]
+        ws = _span0(arena, _ah2215_34.offset, 1)
         _ah2216_39 = self.input_descs[5]
-        wzp = int(arena.get_float_span(_ah2216_39.offset, 1)[0])
+        wzp = int(_span0(arena, _ah2216_39.offset, 1))
         _ah2217_34 = self.input_descs[6]
-        ys = arena.get_float_span(_ah2217_34.offset, 1)[0]
+        ys = _span0(arena, _ah2217_34.offset, 1)
         if ys == 0.0:
             ys = 1.0
         _ah2220_39 = self.input_descs[7]
-        yzp = int(arena.get_float_span(_ah2220_39.offset, 1)[0])
+        yzp = int(_span0(arena, _ah2220_39.offset, 1))
         has_b = len(self.input_descs) > 8
         _xsh = xd.shape
         n = 1
@@ -2669,8 +2704,8 @@ class ExecutionNode:
             sh = 1
         if sw <= 0:
             sw = 1
-        oh = (ih + 2 * ph - kh) // sh + 1
-        ow = (iw + 2 * pw - kw) // sw + 1
+        oh = _idiv((ih + 2 * ph - kh), sh) + 1
+        ow = _idiv((iw + 2 * pw - kw), sw) + 1
         if oh <= 0:
             oh = 1
         if ow <= 0:
@@ -2762,16 +2797,16 @@ class ExecutionNode:
         y = arena.get_int32_span(_ah2278_33.offset, _ah2278_62.element_count)
         m = 1
         if len(ad.shape) > 1:
-            m = int(ad.shape[0])
+            m = int(_shp_at_sd(ad, 0))
         else:
             if len(ad.shape) > 0:
-                m = int(ad.shape[0])
+                m = int(_shp_at_sd(ad, 0))
         k = int(ad.element_count)
         if len(ad.shape) > 1:
-            k = int(ad.shape[1])
+            k = int(_shp_at_sd(ad, 1))
         n = int(bd.element_count)
         if len(bd.shape) > 1:
-            n = int(bd.shape[1])
+            n = int(_shp_at_sd(bd, 1))
         na = len(a)
         nb = len(b)
         ny = len(y)
@@ -2877,23 +2912,23 @@ class ExecutionNode:
         ax = _c135
         outer = 1
         for i in range(ax):
-            outer = outer * first.shape[i]
+            outer = outer * _shp_at_sd(first, i)
         inner = 1
         for i in range(ax + 1, rank):
-            inner = inner * first.shape[i]
+            inner = inner * _shp_at_sd(first, i)
         dst_base = 0
         for k in range(len(self.input_descs)):
             dk = self.input_descs[k]
             v = arena.get_float_span(dk.offset, dk.element_count)
             if ax < len(dk.shape):
-                _c136 = dk.shape[ax]
+                _c136 = _shp_at_sd(dk, ax)
             else:
                 _c136 = dk.element_count
             dim = _c136
             for o in range(outer):
                 for t in range(dim):
                     for u in range(inner):
-                        y[(o * yd.shape[ax] + dst_base + t) * inner + u] = v[(o * dim + t) * inner + u]
+                        y[(o * _shp_at_sd(yd, ax) + dst_base + t) * inner + u] = v[(o * dim + t) * inner + u]
             dst_base = dst_base + dim
         return 0
 
@@ -2917,11 +2952,11 @@ class ExecutionNode:
             ax = _c138
         outer = 1
         for i in range(ax):
-            outer = outer * dd.shape[i]
-        dim = dd.shape[ax]
+            outer = outer * _shp_at_sd(dd, i)
+        dim = _shp_at_sd(dd, ax)
         inner = 1
         for i in range(ax + 1, rank):
-            inner = inner * dd.shape[i]
+            inner = inner * _shp_at_sd(dd, i)
         for o in range(outer):
             for t in range(inner):
                 best = 0
@@ -2940,7 +2975,7 @@ class ExecutionNode:
         _ah2398_62 = self.output_descs[0]
         y = arena.get_float_span(_ah2398_33.offset, _ah2398_62.element_count)
         for i in range(len(dd.shape)):
-            y[i] = float(dd.shape[i])
+            y[i] = float(_shp_at_sd(dd, i))
         return 0
 
     def _exec_size(self, arena: 'ExecutionMemoryArena') -> 'i32':
@@ -2969,7 +3004,7 @@ class ExecutionNode:
         if len(x.shape) == 2:
             xv = arena.get_float_span(x.offset, x.element_count)
             yv = arena.get_float_span(y.offset, y.element_count)
-            transpose2d_views(xv, yv, x.shape[0], x.shape[1])
+            transpose2d_views(xv, yv, _shp_at_sd(x, 0), _shp_at_sd(x, 1))
         else:
             self._exec_identity(arena)
         return 0
@@ -2981,12 +3016,12 @@ class ExecutionNode:
             _c139 = d
         else:
             _c139 = 1
-        return x.element_count // _c139
+        return _idiv(x.element_count, _c139)
 
     def _d(self) -> 'i64':
         x = self.input_descs[0]
         if len(x.shape) > 0:
-            _c140 = x.shape[len(x.shape) - 1]
+            _c140 = _shp_at_sd(x, len(x.shape) - 1)
         else:
             _c140 = x.element_count
         return _c140
@@ -2994,7 +3029,7 @@ class ExecutionNode:
     def _m(self) -> 'i64':
         a = self.input_descs[0]
         if len(a.shape) > 1:
-            _c141 = a.shape[0]
+            _c141 = _shp_at_sd(a, 0)
         else:
             _c141 = 1
         return _c141
@@ -3002,7 +3037,7 @@ class ExecutionNode:
     def _k_gemm(self) -> 'i64':
         a = self.input_descs[0]
         if len(a.shape) > 1:
-            _c142 = a.shape[1]
+            _c142 = _shp_at_sd(a, 1)
         else:
             _c142 = a.element_count
         return _c142
@@ -3010,7 +3045,7 @@ class ExecutionNode:
     def _n_gemm(self) -> 'i64':
         b = self.input_descs[1]
         if len(b.shape) > 1:
-            _c143 = b.shape[0]
+            _c143 = _shp_at_sd(b, 0)
         else:
             _c143 = b.element_count
         return _c143
@@ -3073,8 +3108,8 @@ def _reduce_out_index(n: 'i64', shape: 'list[i64]', src_st: 'list[i64]', axes: '
     o = len(out_shape) - 1
     a = len(shape) - 1
     while a > -1:
-        c = rem % shape[a]
-        rem = rem // shape[a]
+        c = _imod(rem, shape[a])
+        rem = _idiv(rem, shape[a])
         if a in axes:
             if keepdims != 0:
                 idx = idx + 0 * out_st[o]
@@ -3185,26 +3220,26 @@ class ExecutionGraph:
                 t = self.tensors[nm]
                 t.is_initializer = 1
                 t.offset = cur
-                cur = cur + ((t.byte_size + 63) // 64 * 64)
+                cur = cur + (_idiv((t.byte_size + 63), 64) * 64)
         _i8_keys = self.initializers_int8.keys()
         for nm in _i8_keys:
             if nm in self.tensors:
                 t = self.tensors[nm]
                 t.is_initializer = 1
                 t.offset = cur
-                cur = cur + ((t.byte_size + 63) // 64 * 64)
+                cur = cur + (_idiv((t.byte_size + 63), 64) * 64)
         for nm in self.inputs:
             if nm in self.tensors:
                 t = self.tensors[nm]
                 if t.offset == -1:
                     t.offset = cur
-                    cur = cur + ((t.byte_size + 63) // 64 * 64)
+                    cur = cur + (_idiv((t.byte_size + 63), 64) * 64)
         for nm in self.outputs:
             if nm in self.tensors:
                 t = self.tensors[nm]
                 if t.offset == -1:
                     t.offset = cur
-                    cur = cur + ((t.byte_size + 63) // 64 * 64)
+                    cur = cur + (_idiv((t.byte_size + 63), 64) * 64)
         # scratchpad reuse, sorted by lifetime_start
         scratch = []
         _ah2654_17 = self.tensors
@@ -3281,7 +3316,7 @@ class ExecutionGraph:
                     break
             if chosen == -1:
                 chosen = cur + max_scratch
-                aligned = (t.byte_size + 63) // 64 * 64
+                aligned = _idiv((t.byte_size + 63), 64) * 64
                 max_scratch = max_scratch + aligned
                 a_off.append(chosen)
                 a_size.append(aligned)
@@ -3636,10 +3671,10 @@ class ConstantFoldingPass(IGraphPass):
             sdesc = graph.tensors[node.inputs[0]]
             src = graph.initializers[node.inputs[0]]
             if node.op_type == OperatorType_Transpose and len(sdesc.shape) == 2:
-                folded = _nd_f32([sdesc.shape[1], sdesc.shape[0]])
-                for r in range(sdesc.shape[0]):
-                    for c in range(sdesc.shape[1]):
-                        folded[c * sdesc.shape[0] + r] = src[r * sdesc.shape[1] + c]
+                folded = _nd_f32([_shp_at_sd(sdesc, 1), _shp_at_sd(sdesc, 0)])
+                for r in range(_shp_at_sd(sdesc, 0)):
+                    for c in range(_shp_at_sd(sdesc, 1)):
+                        folded[c * _shp_at_sd(sdesc, 0) + r] = src[r * _shp_at_sd(sdesc, 1) + c]
                 graph.initializers[out_name] = folded
                 doomed.append(_ni)
                 modified = 1

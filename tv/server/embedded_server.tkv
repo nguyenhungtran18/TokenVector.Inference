@@ -11,6 +11,10 @@ import tv.text.chat_template
 import tv.text.generate
 import tv.numerics.tensor
 
+def _enq0(b: 'DynamicBatcher', inp: 'list[f32]') -> 'f32':
+    _t = b.enqueue(inp)
+    return _t[0]
+
 
 class HttpRequest:
     _ok: "i64"
@@ -762,7 +766,7 @@ class EmbeddedServer:
         base = in_dim - len(tail)
         for i in range(len(tail)):
             inp[base + i] = float(tail[i])
-        return self.batcher.enqueue(inp)[0]
+        return _enq0(self.batcher, inp)
 
     def _score_vec(self, q: 'list[f32]', d: 'list[f32]') -> 'f32':
         arr = []
@@ -783,7 +787,7 @@ class EmbeddedServer:
                 inp[i] = arr[i]
             else:
                 inp[i] = 0.0
-        return self.batcher.enqueue(inp)[0]
+        return _enq0(self.batcher, inp)
 
     def _infer(self, arr: 'list[f32]') -> 'list[f32]':
         inp = _nd_f32(len(arr))

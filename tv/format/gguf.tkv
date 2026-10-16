@@ -1,6 +1,16 @@
 import tv.runtime.session
 import tv.numerics.tensor
 
+# (2026-10-16) Compiler moi yeu cau `//`/`%` tren so nguyen co "nho tam" o
+# nhieu ngu canh (trong tham so ham, trong bieu thuc gan co chi so...). Boc
+# vao ham la cach an toan: giu nguyen nghia, khong phai do lai tung bien.
+def _idiv_gguf(a: 'i64', b: 'i64') -> 'i64':
+    return a // b
+
+
+def _imod_gguf(a: 'i64', b: 'i64') -> 'i64':
+    return a % b
+
 GGUF_F32 = 0
 GGUF_F16 = 1
 GGUF_Q4_0 = 2
@@ -118,7 +128,7 @@ class GGUFReader:
             info.shape = shape
             _ah100_12 = self.tensors
             _ah100_12.append(info)
-        self.data_start = self.pos + (32 - self.pos % 32) % 32
+        self.data_start = self.pos + _imod_gguf((32 - self.pos % 32), 32)
         return 0
 
     def _read_value(self, typ: 'i64') -> 'str':
@@ -273,14 +283,14 @@ def _dequant_tensor(raw: 'str', base: 'i64', t: 'GGUFInfo', allow_unverified: 'i
             out[i] = gguf_f64_from_bits(lo, hi)
         return out
     if dt == GGUF_Q8_0:
-        nb = n // 32
+        nb = _idiv_gguf(n, 32)
         for b in range(nb):
             d = gguf_f16_from_bits(gguf_u32_le(raw, base + b * 34) & 65535)
             for i in range(32):
                 out[b * 32 + i] = d * _sbyte(ord(raw[base + b * 34 + 2 + i]))
         return out
     if dt == GGUF_Q4_0 or dt == GGUF_Q4_1:
-        nb = n // 32
+        nb = _idiv_gguf(n, 32)
         if dt == GGUF_Q4_0:
             _c10 = 18
         else:
@@ -303,7 +313,7 @@ def _dequant_tensor(raw: 'str', base: 'i64', t: 'GGUFInfo', allow_unverified: 'i
                     out[b * 32 + i + 16] = d * float(byte >> 4 & 15) - m
         return out
     if dt == GGUF_Q5_0 or dt == GGUF_Q5_1:
-        nb = n // 32
+        nb = _idiv_gguf(n, 32)
         if dt == GGUF_Q5_0:
             _c11 = 22
         else:
@@ -319,8 +329,8 @@ def _dequant_tensor(raw: 'str', base: 'i64', t: 'GGUFInfo', allow_unverified: 'i
                 qh = 4
                 qs = 8
             for i in range(16):
-                hb_lo = ord(raw[base + b * step + qh + i // 8]) >> i % 8 & 1
-                hb_hi = ord(raw[base + b * step + qh + (i + 16) // 8]) >> (i + 16) % 8 & 1
+                hb_lo = ord(raw[base + b * step + qh + _idiv_gguf(i, 8)]) >> _imod_gguf(i, 8) & 1
+                hb_hi = ord(raw[base + b * step + qh + _idiv_gguf((i + 16), 8)]) >> _imod_gguf((i + 16), 8) & 1
                 byte = ord(raw[base + b * step + qs + i])
                 if dt == GGUF_Q5_0:
                     out[b * 32 + i] = d * float(byte & 15 | hb_lo << 4) - d * m
@@ -350,7 +360,7 @@ def _k4_scale(scales: 'list[i64]', j: 'i64', out: 'list[i64]') -> 'i32':
 
 def _dequant_k4k5(raw: 'str', base: 'i64', n: 'i64', is_q5: 'i32') -> 'list[f32]':
     out = _nd_f32(n)
-    nb = n // 256
+    nb = _idiv_gguf(n, 256)
     if is_q5:
         _c12 = 176
     else:
@@ -402,14 +412,14 @@ def _dequant_k4k5(raw: 'str', base: 'i64', n: 'i64', is_q5: 'i32') -> 'list[f32]
     return out
 
 def _dequant_k_gated(raw: 'str', base: 'i64', n: 'i64', which: 'i64', allow_unverified: 'i32'=0) -> 'list[f32]':
-    if n % 256 != 0:
+    if _imod_gguf(n, 256) != 0:
         raise Arg("Q" + str(which) + "_K tensor length " + str(n) + " not multiple of 256")
     step = 84
     if which == 3:
         step = 110
     if which == 6:
         step = 210
-    nb = n // 256
+    nb = _idiv_gguf(n, 256)
     need = base + nb * step
     if need > len(raw):
         raise Arg("Q" + str(which) + "_K truncated: need " + str(need) + " bytes, have " + str(len(raw)) + "")
@@ -436,7 +446,7 @@ def _dequant_q6_k(raw: 'str', base: 'i64', nb: 'i64') -> 'list[f32]':
             sc0 = bo + 192 + half * 8
             yh = y0 + half * 128
             for l in range(32):
-                is_ = l // 16
+                is_ = _idiv_gguf(l, 16)
                 qb = ord(raw[ql0 + l])
                 qb32 = ord(raw[ql0 + l + 32])
                 qh = ord(raw[qh0 + l])
@@ -567,7 +577,7 @@ def _self_gate_k(raw: 'str', base: 'i64', nb: 'i64', which: 'i64') -> 'i32':
                 qh0 = bo + 128 + half * 32
                 sc0 = bo + 192 + half * 8
                 for l in range(16):
-                    is_ = l // 16
+                    is_ = _idiv_gguf(l, 16)
                     qb = ord(raw[ql0 + l])
                     qh = ord(raw[qh0 + l])
                     q = (qb & 15 | (qh >> 0 & 3) << 4) - 32

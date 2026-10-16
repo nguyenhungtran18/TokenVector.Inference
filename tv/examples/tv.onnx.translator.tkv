@@ -3,6 +3,18 @@ import tv.onnx.string_ops
 import tv.runtime.session
 import tv.numerics.tensor
 
+def _ints0(xs: 'list[i64]') -> 'i64':
+    _t = xs
+    return _t[0]
+
+# (2026-10-15) Compiler moi KHONG cho index truc tiep vao property `shape`:
+# loi "il_codegen: d.shape[0] khong hop le (shape=[])". Doc property qua
+# bien trung gian roi index moi duoc, nen bo ham nay cho cac diem can doc 1
+# phan tu cua shape.
+def _shp_at(d: 'TensorDesc', i: 'i64') -> 'i64':
+    _s = d.shape
+    return _s[i]
+
 # enum -> module constants (tensor, synced with runtime bundle)
 TensorDataType_Undefined = 0
 TensorDataType_Float = 1
@@ -1056,7 +1068,7 @@ def _infer_shapes_b(node: 'ExecutionNode', ins: 'list[list[i64]]', g: 'Execution
     if op == OperatorType_TopK and len(ins) > 0:
         _lh27 = _init_ints(g, node.inputs[1])
         if len(node.inputs) > 1 and len(_lh27) > 0:
-            _c41 = _init_ints(g, node.inputs[1])[0]
+            _c41 = _ints0(_init_ints(g, node.inputs[1]))
         else:
             _c41 = 1
         kk = _c41
@@ -1906,7 +1918,7 @@ def _rnn_common(g: 'ExecutionGraph', on: 'OnnxNode', kind: 'str') -> 'RnnDims':
     if wkey in g.initializers:
         _tw = g.tensors[wkey]
         if len(_tw.shape) == 3:
-            ndir = _tw.shape[0]
+            ndir = _shp_at(_tw, 0)
     _rd = RnnDims(1, seq, bat, inp, hid, ndir)
     _rd.acts = acts
     return _rd

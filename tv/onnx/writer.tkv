@@ -74,6 +74,14 @@ import tv.runtime.session
 import tv.runtime.f32_bits
 import tv.numerics.tensor
 
+# (2026-10-15) Compiler moi KHONG cho index truc tiep vao property `shape`:
+# loi "il_codegen: d.shape[0] khong hop le (shape=[])". Doc property qua
+# bien trung gian roi index moi duoc, nen bo ham nay cho cac diem can doc 1
+# phan tu cua shape.
+def _shp_at_wr(d: 'TensorDesc', i: 'i64') -> 'i64':
+    _s = d.shape
+    return _s[i]
+
 # enum -> module constants (attribute, synced)
 AttributeType_Undefined = 0
 AttributeType_Float = 1
@@ -235,7 +243,7 @@ def export_model(g: 'ExecutionGraph', producer: 'str'="tokenvector", opset: 'i64
         d = g.tensors[name]
         _qx1004 = []
         for i in range(len(d.shape)):
-            _qx1004.append(d.shape[i])
+            _qx1004.append(_shp_at_wr(d, i))
         t.dims = _qx1004
         t.dtype = d.dtype
         w_bytes(ibuf, 5, write_tensor(t, g.initializers[name]))

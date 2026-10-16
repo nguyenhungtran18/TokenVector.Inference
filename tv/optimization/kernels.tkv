@@ -266,7 +266,11 @@ def _bin_loop(a: 'list[f32]', b: 'list[f32]', y: 'list[f32]', op: 'i64') -> 'i32
             i = i + 1
     else:
         while i < cy:
-            y[i] = _bin_scalar(a[i % ca], b[i % cb], op)
+            # (2026-10-15) Compiler moi: `//`/`%` nam trong THAM SO HAM se
+            # loi "thieu o nho tam ... khong di qua first-pass". Tach bien.
+            _ia = i % ca
+            _ib = i % cb
+            y[i] = _bin_scalar(a[_ia], b[_ib], op)
             i = i + 1
     return 0
 

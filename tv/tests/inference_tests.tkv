@@ -35,6 +35,14 @@ import tv.text.tree_speculative
 import tv.onnx.string_ops
 import tv.format.gguf
 
+# (2026-10-15) Compiler moi KHONG cho index truc tiep vao property `shape`:
+# loi "il_codegen: d.shape[0] khong hop le (shape=[])". Doc property qua
+# bien trung gian roi index moi duoc, nen bo ham nay cho cac diem can doc 1
+# phan tu cua shape.
+def _shp_at_it(d: 'TensorDesc', i: 'i64') -> 'i64':
+    _s = d.shape
+    return _s[i]
+
 
 
 OperatorType_Custom = 0
@@ -278,7 +286,7 @@ def _t_init_vec(g: 'ExecutionGraph', name: 'str', vals: 'list[f32]') -> 'i32':
     # rong) -> byte_size van la 4 byte -> initialize_weights copy 8 byte
     # vao slot 4 byte -> ArgumentOutOfRangeException. Sua o day.
     d = g.get_or_create_tensor(name, [n])
-    if len(d.shape) != 1 or d.shape[0] != n:
+    if len(d.shape) != 1 or _shp_at_it(d, 0) != n:
         d.shape = [n]
         d.element_count = n
         d.byte_size = n * 4

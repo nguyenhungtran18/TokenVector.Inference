@@ -8,9 +8,13 @@
 #
 # Cach dung:
 #   powershell -File tools\run_cases.ps1
-#   powershell -File tools\run_cases.ps1 -Compiler "D:\path\to\tkvc.exe"
+#   powershell -File tools\run_cases.ps1 -Compiler "D:\path\to\tkvc-tv.exe"
+#
+# (2026-10-15) Compiler da duoc viet lai (self-host). CLI moi KHONG con
+# subcommand `build` va KHONG con `--out`:
+#   tkvc-tv.exe <nguon.tkv> <ra.exe> [ten_ham_vao]
 param(
-    [string]$Compiler = "D:\TokenVector\3.code\dist\tkvc_patched.exe",
+    [string]$Compiler = "D:\TokenVector\Release\dist\tkvc-tv.exe",
     [string]$WorkDir = $env:TEMP
 )
 
@@ -20,7 +24,7 @@ $src = Join-Path $root "tv\tests\inference_tests.tkv"
 $exe = Join-Path $WorkDir "inference_cases.exe"
 
 Write-Host "[1/3] Bien dich $src ..."
-& $Compiler build $src --out $exe | Out-Null
+& $Compiler $src $exe | Out-Null
 if (-not (Test-Path -LiteralPath $exe)) {
     Write-Host "LOI: bien dich that bai."
     exit 1
@@ -80,7 +84,7 @@ $gapSrc = Join-Path $root "tv\tests\gap_tests.tkv"
 $gapExe = Join-Path $WorkDir "gap_cases.exe"
 Write-Host ""
 Write-Host "[3/3] Bien dich + chay gap_tests ..."
-& $Compiler build $gapSrc --out $gapExe | Out-Null
+& $Compiler $gapSrc $gapExe | Out-Null
 if (-not (Test-Path -LiteralPath $gapExe)) {
     Write-Host "LOI: bien dich gap_tests that bai."
     exit 1

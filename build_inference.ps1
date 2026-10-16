@@ -1,4 +1,4 @@
-﻿# TokenVector.Inference - Pure TokenVector Build, Test & Benchmark Pipeline
+# TokenVector.Inference - Pure TokenVector Build, Test & Benchmark Pipeline
 #
 # Repo thuan TokenVector: khong con C#, khong dotnet. Mọi build/test chay
 # qua tkvc + tools\run_cases.ps1.
@@ -7,11 +7,11 @@
 #   powershell -File build_inference.ps1
 #   powershell -File build_inference.ps1 -SkipTests
 #   powershell -File build_inference.ps1 -SkipBenchmarks
-#   powershell -File build_inference.ps1 -Compiler "D:\path\to\tkvc.exe" -WorkDir $env:TEMP
+#   powershell -File build_inference.ps1 -Compiler "D:\path\to\tkvc-tv.exe" -WorkDir $env:TEMP
 param(
     [switch]$SkipTests = $false,
     [switch]$SkipBenchmarks = $false,
-    [string]$Compiler = "D:\TokenVector\3.code\dist\tkvc_patched.exe",
+    [string]$Compiler = "D:\TokenVector\Release\dist\tkvc-tv.exe",
     [string]$WorkDir = $env:TEMP,
     [int]$BenchmarkTimeoutSeconds = 900
 )
@@ -35,7 +35,9 @@ $entries = @(
 foreach ($e in $entries) {
     $src = Join-Path $root $e.Src
     $out = Join-Path $WorkDir $e.Out
-    & $Compiler build $src --out $out 2>&1 | Out-Null
+    # CLI moi (2026-10-15): tkvc-tv.exe <nguon.tkv> <ra.exe> — khong co
+    # subcommand `build`, khong co `--out`.
+    & $Compiler $src $out 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $out)) {
         Write-Host "LOI: bien dich that bai: $($e.Src)" -ForegroundColor Red
         exit 1
