@@ -465,7 +465,7 @@ def test_speculative_all_accept() -> 'i32':
     return 0
 
 def test_tools_parse_validate() -> 'i32':
-    _td = ToolDef(1, "search", "web search")
+    _td = ToolDef("search", "web search", [])
     _td.required = ["q"]
     tools = []
     tools.append(_td)
@@ -473,7 +473,7 @@ def test_tools_parse_validate() -> 'i32':
     assert call is not None and call.name == "search"
     assert validate_args(call, tools) == ""
     assert parse_tool_call("no json here") is None
-    bad = ToolCall(1, "nope", "{}")
+    bad = ToolCall("nope", "{}")
     assert validate_args(bad, tools) != ""
     return 0
 
@@ -1097,7 +1097,7 @@ def test_scan_run_driver() -> 'i32':
     return 0
 
 def test_prefix_skip_plan() -> 'i32':
-    store = PrefixStore(1, 8, 0, 0)
+    store = PrefixStore(8)
     # Phai dung _nd_i64 (list[i64]) chu KHONG dung literal `[1, 2, ...]`.
     # Literal int khong kich thuoc tao List`1<TkvInt>; `intern`/`plan_prefix`
     # khai bao `toks: 'list[i64]'` -> doc `toks[i]` ra rac ->

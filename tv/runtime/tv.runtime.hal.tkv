@@ -37,7 +37,7 @@ class DeviceCaps:
         self.tensor_cores = tensor_cores
 
 def cpu_caps() -> "DeviceCaps":
-    return DeviceCaps(1, "TokenVectorCPU", DeviceKind_CPU, 8, 1, 0, 0)
+    return DeviceCaps("TokenVectorCPU", DeviceKind_CPU, 8, 1, 0, 0)
 TILE = 64
 LANE = 8
 

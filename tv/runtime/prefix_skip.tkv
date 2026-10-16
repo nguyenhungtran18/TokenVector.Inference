@@ -38,7 +38,7 @@ def plan_prefix(store: "PrefixStore", tokens: "list[i64]", page_len: "i64") -> "
         hit = 1
     else:
         hit = 0
-    return PrefixPlan(1, skip, skip, shared, hit)
+    return PrefixPlan(skip, skip, shared, hit)
 
 # after planning: decode may pass kv_offset=skip_len so attention only scores
 # new suffix keys against the cached prefix (prefix rows stay in the store).

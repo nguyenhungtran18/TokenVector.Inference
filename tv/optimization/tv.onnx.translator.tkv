@@ -11,7 +11,7 @@ def _ints0(xs: 'list[i64]') -> 'i64':
 # loi "il_codegen: d.shape[0] khong hop le (shape=[])". Doc property qua
 # bien trung gian roi index moi duoc, nen bo ham nay cho cac diem can doc 1
 # phan tu cua shape.
-def _shp_at(d: 'TensorDesc', i: 'i64') -> 'i64':
+def _shp_at_tr(d: 'TensorDesc', i: 'i64') -> 'i64':
     _s = d.shape
     return _s[i]
 
@@ -216,7 +216,7 @@ def translate(model: 'OnnxModel') -> 'ExecutionGraph':
     else:
         _c1 = "OnnxExecutionGraph"
     _arena0 = 0
-    g = ExecutionGraph(1, _c1, _arena0)
+    g = ExecutionGraph(1, _c1, 0)
     # Ten cac initializer FLOAT, thu theo THU TU ghi vao g.initializers.
     # Xem ghi chu tai dong '_f32_init_names.append(init.name)' ben duoi.
     _f32_init_names = []
@@ -1918,7 +1918,7 @@ def _rnn_common(g: 'ExecutionGraph', on: 'OnnxNode', kind: 'str') -> 'RnnDims':
     if wkey in g.initializers:
         _tw = g.tensors[wkey]
         if len(_tw.shape) == 3:
-            ndir = _shp_at(_tw, 0)
+            ndir = _shp_at_tr(_tw, 0)
     _rd = RnnDims(1, seq, bat, inp, hid, ndir)
     _rd.acts = acts
     return _rd

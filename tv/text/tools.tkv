@@ -54,7 +54,7 @@ def parse_tool_call(text: "str") -> "ToolCall":
         body = text[body_start:end]
         nm = _extract_field(body, "name")
         if nm != "":
-            return ToolCall(1, nm, body)
+            return ToolCall(nm, body)
         start = text.find("```json", end)
     return None
 
@@ -99,11 +99,11 @@ def run_tool_loop(session: "InferenceSession", tokenizer: 'Tokenizer', messages:
             return res.text
         err = validate_args(call, tools)
         if err != "":
-            convo.append(ChatMessage(1, "assistant", res.text))
-            convo.append(ChatMessage(1, "user", "Tool error: " + err + ". Fix the call."))
+            convo.append(ChatMessage("assistant", res.text))
+            convo.append(ChatMessage("user", "Tool error: " + err + ". Fix the call."))
             continue
         result = "tool " + call.name + " dispatched"
-        convo.append(ChatMessage(1, "assistant", res.text))
+        convo.append(ChatMessage("assistant", res.text))
         convo.append(ChatMessage(1, "user", "Tool result (" + call.name + "): " + result + ". Continue."))
     last = chat_generate(session, tokenizer, convo, cfg)
     return last.text

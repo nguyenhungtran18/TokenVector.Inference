@@ -16,7 +16,7 @@ class Beam:
         self.score = score
 
     def clone(self) -> 'Beam':
-        _nb = Beam(1, self.score)
+        _nb = Beam([], self.score)
         _nb.tokens = self.tokens
         return _nb
 
@@ -91,7 +91,7 @@ def _beam_logits_for(session: 'InferenceSession', history: 'list[i64]', in_dim: 
 def beam_search(session: 'InferenceSession', tokenizer: 'Tokenizer', prompt: 'str', cfg: 'BeamConfig', in_dim: 'i64', vocab: 'i64') -> 'Beam':
     ids = tokenizer.encode(prompt)
     beams = []
-    _b0 = Beam(1, 0.0)
+    _b0 = Beam([], 0.0)
     _b0.tokens = ids
     beams.append(_b0)
     for step in range(cfg.max_new_tokens):

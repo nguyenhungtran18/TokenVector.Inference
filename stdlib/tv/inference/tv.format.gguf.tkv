@@ -124,8 +124,7 @@ class GGUFReader:
             while i > 0:
                 i = i - 1
                 shape.append(dims[i])
-            info = GGUFInfo(1, name, dtype, off, n)
-            info.shape = shape
+            info = GGUFInfo(name, dtype, shape, off, n)
             _ah100_12 = self.tensors
             _ah100_12.append(info)
         self.data_start = self.pos + _imod_gguf((32 - self.pos % 32), 32)

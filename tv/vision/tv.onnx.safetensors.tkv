@@ -151,8 +151,7 @@ def list_tensors(path: 'str') -> 'list[STTensor]':
                 i = _skip_ws(hdr, i)
                 if hdr[i:i + 1] == ",":
                     i = i + 1
-            _st = STTensor(1, key, dtype, bo, eo)
-            _st.shape = shape
+            _st = STTensor(key, dtype, shape, bo, eo)
             out.append(_st)
         i = _skip_ws(hdr, i)
         if hdr[i:i + 1] == ",":

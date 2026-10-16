@@ -432,18 +432,11 @@ def default_server_options() -> 'ServerOptions':
 
 
 # 2026-09-25: factory khoi tao EmbeddedServer.
-# '.ctor' cua record nhan DUNG 1 tham so cho MOI field (khong container),
-# theo THU TU FIELD - nen goi thang 'EmbeddedServer(session, port, opts)'
-# (theo thu tu tham so cua __init__) se khong bien dich duoc. Day la
-# wrapper giong het default_server_options() o tren, va NOI la noi giu phan
-# 'khoi tao' ma __init__ (tao DynamicBatcher, append session vao pool,
-# http_listen) - vi __init__ bi bo qua luc bien dich.
+# Compiler moi PHAI dung thu tu tham so cua `__init__`
+# (`EmbeddedServer(session, port, opts)`), nen goi .ctor truc tiep.
 def new_embedded_server(session: 'InferenceSession', port: 'i64',
                         opts: 'ServerOptions') -> 'EmbeddedServer':
-    _db = new_dynamic_batcher(1, 32, 200, 10000)
-    _pl = _db.pool
-    _pl.append(session)
-    _srv = EmbeddedServer(1, session, _db, port, opts, 0, 0, 0, 0, _db, 0, 0)
+    _srv = EmbeddedServer(session, port, opts)
     http_listen(port)
     return _srv
 
@@ -470,8 +463,8 @@ class TokenBucket:
 
 class EmbeddedServer:
     _ok: "i64"
-    session: "inferred"
-    batcher: "inferred"
+    session: "InferenceSession"
+    batcher: "DynamicBatcher"
     port: "i64"
     opts: "ServerOptions"
     total_requests: "i64"
@@ -479,12 +472,12 @@ class EmbeddedServer:
     errors_total: "i64"
     dropped_total: "i64"
     buckets: "dict[str,TokenBucket]"
-    _tok: "inferred"
+    _tok: "Tokenizer"
     has_tok: "i32"
     _closed: "i32"
     def __init__(self, session: "InferenceSession", port: "i64", opts: "ServerOptions"):
         self.session = session
-        _db = DynamicBatcher(1, 32, 200, 10000)
+        _db = DynamicBatcher(session, 32, 200, 4, 10000)
         self.buckets = {}
         _pl = _db.pool
         _pl.append(session)
@@ -531,7 +524,7 @@ class EmbeddedServer:
         ip = req.remote_ip()
         _bk = self.buckets
         if ip not in _bk:
-            _bk[ip] = TokenBucket(1, _o.rate_limit_rps, 0.0, 0)
+            _bk[ip] = TokenBucket(_o.rate_limit_rps)
         _tb = _bk[ip]
         return _tb.allow()
 
@@ -540,23 +533,23 @@ class EmbeddedServer:
         self.total_requests = self.total_requests + 1
         try:
             if req.method == "GET" and req.path == "/":
-                return HttpResponse(1, 200, _web_ui(), "text/html")
+                return HttpResponse(200, _web_ui(), "text/html")
             if req.method == "GET" and req.path == "/health":
-                return HttpResponse(1, 200, "{\"status\":\"healthy\",\"engine\":\"TokenVector.Inference\"}", "application/json")
+                return HttpResponse(200, "{\"status\":\"healthy\",\"engine\":\"TokenVector.Inference\"}", "application/json")
             if req.method == "GET" and req.path == "/metrics":
-                return HttpResponse(1, 200, self._prometheus(), "text/plain")
+                return HttpResponse(200, self._prometheus(), "text/plain")
             if not self._check_auth(req):
-                return HttpResponse(1, 401, "{\"error\":\"unauthorized\"}", "application/json")
+                return HttpResponse(401, "{\"error\":\"unauthorized\"}", "application/json")
             if not self._check_rate(req):
                 self.dropped_total = self.dropped_total + 1
-                return HttpResponse(1, 429, "{\"error\":\"rate limit exceeded\"}", "application/json")
+                return HttpResponse(429, "{\"error\":\"rate limit exceeded\"}", "application/json")
             _o = self.opts
             if len(req.body) > _o.max_body_bytes:
-                return HttpResponse(1, 413, "{\"error\":\"payload too large\"}", "application/json")
+                return HttpResponse(413, "{\"error\":\"payload too large\"}", "application/json")
             if req.method == "GET" and req.path == "/v1/models":
                 _mid = _o.model_id
                 body = "{\"object\":\"list\",\"data\":[{\"id\":\"" + _mid + "\",\"object\":\"model\"}]}"
-                return HttpResponse(1, 200, body, "application/json")
+                return HttpResponse(200, body, "application/json")
             if req.method == "POST" and req.path == "/predict":
                 return self._predict(req)
             if req.method == "POST" and req.path == "/v1/embeddings":
@@ -565,30 +558,30 @@ class EmbeddedServer:
                 return self._completions(req)
             if req.method == "POST" and req.path == "/v1/rerank":
                 return self._rerank(req)
-            return HttpResponse(1, 404, "{\"error\":\"not found\"}", "application/json")
+            return HttpResponse(404, "{\"error\":\"not found\"}", "application/json")
         except Exception as e:
             self.errors_total = self.errors_total + 1
-            return HttpResponse(1, 500, "{\"error\":\"internal error\"}", "application/json")
+            return HttpResponse(500, "{\"error\":\"internal error\"}", "application/json")
         self.total_lat_us = self.total_lat_us + (_srv_now_us() - t0)
-        return HttpResponse(1, 500, "{\"error\":\"unreachable\"}", "application/json")
+        return HttpResponse(500, "{\"error\":\"unreachable\"}", "application/json")
 
     def _predict(self, req: 'HttpRequest') -> 'HttpResponse':
         arr = json_parse_float_array(req.body)
         if len(arr) == 0:
-            return HttpResponse(1, 400, "{\"error\":\"empty input\"}", "application/json")
+            return HttpResponse(400, "{\"error\":\"empty input\"}", "application/json")
         out = self._infer(arr)
-        return HttpResponse(1, 200, json_stringify_float_array(out), "application/json")
+        return HttpResponse(200, json_stringify_float_array(out), "application/json")
 
     def _embeddings(self, req: 'HttpRequest') -> 'HttpResponse':
         inp = json_field(req.body, "input")
         arr = json_to_float_array(inp)
         if len(arr) == 0:
-            return HttpResponse(1, 400, "{\"error\":\"input must be a numeric array\"}", "application/json")
+            return HttpResponse(400, "{\"error\":\"input must be a numeric array\"}", "application/json")
         out = self._infer(arr)
         _o = self.opts
         _mid = _o.model_id
         body = "{\"object\":\"list\",\"model\":\"" + _mid + "\",\"data\":[{\"object\":\"embedding\",\"index\":0,\"embedding\":" + json_stringify_float_array(out) + "}]}"
-        return HttpResponse(1, 200, body, "application/json")
+        return HttpResponse(200, body, "application/json")
 
     def _completions(self, req: 'HttpRequest') -> 'HttpResponse':
         text_in = self._completion_text(req.body, req.path)
@@ -597,7 +590,7 @@ class EmbeddedServer:
             return self._generate(req, text_in)
         arr = self._completion_input(req.body)
         if len(arr) == 0:
-            return HttpResponse(1, 400, "{\"error\":\"no text prompt (tokenizer not configured?) and no numeric input found\"}", "application/json")
+            return HttpResponse(400, "{\"error\":\"no text prompt (tokenizer not configured?) and no numeric input found\"}", "application/json")
         out = self._infer(arr)
         if json_bool(req.body, "stream", 0):
             return self._stream_chunks(out)
@@ -608,18 +601,18 @@ class EmbeddedServer:
             body = "{\"id\":\"tv-" + _rid + "\",\"object\":\"chat.completion\",\"model\":\"" + _mid + "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":" + json_quote(json_stringify_float_array(out)) + "},\"finish_reason\":\"stop\"}]}"
         else:
             body = "{\"id\":\"tv-" + _rid + "\",\"object\":\"text_completion\",\"model\":\"" + _mid + "\",\"choices\":[{\"index\":0,\"text\":" + json_quote(json_stringify_float_array(out)) + ",\"finish_reason\":\"stop\"}]}"
-        return HttpResponse(1, 200, body, "application/json")
+        return HttpResponse(200, body, "application/json")
 
     def _completion_text(self, body: 'str', path: 'str') -> 'str':
         if path == "/v1/chat/completions":
             flat = json_chat_messages(body)
             if len(flat) >= 2:
                 msgs = []
-                msgs.append(ChatMessage(1, "", ""))
+                msgs.append(ChatMessage("", ""))
                 msgs.pop()
                 i = 0
                 while i + 1 < len(flat):
-                    msgs.append(ChatMessage(1, flat[i], flat[i + 1]))
+                    msgs.append(ChatMessage(flat[i], flat[i + 1]))
                     i = i + 2
                 _o = self.opts
                 return apply_template(msgs, _o.chat_format)
@@ -659,7 +652,7 @@ class EmbeddedServer:
             body = "{\"id\":\"tv-" + _rid + "\",\"object\":\"chat.completion\",\"model\":\"" + _mid + "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":" + content + "},\"finish_reason\":\"stop\"}]," + usage + "}"
         else:
             body = "{\"id\":\"tv-" + _rid + "\",\"object\":\"text_completion\",\"model\":\"" + _mid + "\",\"choices\":[{\"index\":0,\"text\":" + content + ",\"finish_reason\":\"stop\"}]," + usage + "}"
-        return HttpResponse(1, 200, body, "application/json")
+        return HttpResponse(200, body, "application/json")
 
     def _stream_text(self, text: 'str', usage: 'str') -> 'HttpResponse':
         chunks = []
@@ -680,7 +673,7 @@ class EmbeddedServer:
             i = i + step
         chunks.append("data: [DONE]\n\n")
         sep = ""
-        return HttpResponse(1, 200, sep.join(chunks), "text/event-stream")
+        return HttpResponse(200, sep.join(chunks), "text/event-stream")
 
     def _completion_input(self, body: 'str') -> 'list[f32]':
         fields = []
@@ -706,7 +699,7 @@ class EmbeddedServer:
         if self.has_tok and json_is_str_array(req.body, "documents"):
             docs = json_str_array_field(req.body, "documents")
             if len(docs) == 0:
-                return HttpResponse(1, 400, "{\"error\":\"documents must be a non-empty array\"}", "application/json")
+                return HttpResponse(400, "{\"error\":\"documents must be a non-empty array\"}", "application/json")
             q = json_string_field(req.body, "query", "")
             for i in range(len(docs)):
                 pair = _tok.encode(q + " " + docs[i])
@@ -715,7 +708,7 @@ class EmbeddedServer:
         else:
             raws = json_nested_array_field(req.body, "documents")
             if len(raws) == 0:
-                return HttpResponse(1, 400, "{\"error\":\"documents must be a non-empty array\"}", "application/json")
+                return HttpResponse(400, "{\"error\":\"documents must be a non-empty array\"}", "application/json")
             q = json_to_float_array(json_field(req.body, "query"))
             for i in range(len(raws)):
                 d = json_to_float_array(raws[i])
@@ -747,7 +740,7 @@ class EmbeddedServer:
             parts.append("{\"index\":" + str(_sidx[k]) + ",\"relevance_score\":" + str(_sval[k]) + "}")
         sep = ","
         body = "{\"id\":\"tv-" + _rid + "\",\"object\":\"list\",\"model\":\"" + _mid + "\",\"results\":[" + sep.join(parts) + "]}"
-        return HttpResponse(1, 200, body, "application/json")
+        return HttpResponse(200, body, "application/json")
 
     def _score_ids(self, ids: 'list[i64]') -> 'f32':
         _sess = self.session
@@ -813,7 +806,7 @@ class EmbeddedServer:
             i = _j
         chunks.append("data: [DONE]\n\n")
         sep = ""
-        return HttpResponse(1, 200, sep.join(chunks), "text/event-stream")
+        return HttpResponse(200, sep.join(chunks), "text/event-stream")
 
     def _prometheus(self) -> 'str':
         _bt = self.batcher

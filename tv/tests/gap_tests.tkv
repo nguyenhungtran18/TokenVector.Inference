@@ -140,7 +140,7 @@ def test_protobuf_varint() -> 'i32':
 def test_protobuf_float() -> 'i32':
     # Pi float32 LE: 0x40490FDB -> [0xDB, 0x0F, 0x49, 0x40]
     buf = chr(219) + chr(15) + chr(73) + chr(64)
-    r = FastProtobufReader(1, buf, 0, 0)
+    r = FastProtobufReader(buf)
     v = r.read_float()
     assert abs(v - 3.1415927) < 0.000001
     return 0
@@ -148,7 +148,7 @@ def test_protobuf_float() -> 'i32':
 
 def test_protobuf_string() -> 'i32':
     buf = chr(21) + "TokenVector.Inference"
-    r = FastProtobufReader(1, buf, 0, 0)
+    r = FastProtobufReader(buf)
     assert r.read_string() == "TokenVector.Inference"
     return 0
 
@@ -251,10 +251,10 @@ def test_batcher_queue() -> 'i32':
     d2 = _nd_f32(1)
     d2[0] = 2.0
     # (2026-09-27) Code lai cho dung: input la field container, gan explicit.
-    r1w = BatchRequest(1, 0, 0, "")
+    r1w = BatchRequest([])
     r1w.input = d1
     q.write(r1w)
-    r2w = BatchRequest(1, 0, 0, "")
+    r2w = BatchRequest([])
     r2w.input = d2
     q.write(r2w)
     r1 = q.try_read()

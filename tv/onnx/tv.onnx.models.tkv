@@ -74,7 +74,7 @@ class OnnxTensor:
         self.name = name
         self.dtype = TensorDataType_Float
         self.dims = []
-        self.raw = b""
+        self.raw = ""
         self.float_data = []
         self.int32_data = []
         self.int64_data = []

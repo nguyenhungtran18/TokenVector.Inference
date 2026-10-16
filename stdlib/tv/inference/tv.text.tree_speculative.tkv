@@ -28,11 +28,11 @@ class TreeDraft:
     _ok: 'i64'
     nodes: 'list[DraftNode]'
     def __init__(self):
-        self.nodes = [DraftNode(1, -1, -1, 0.0, 0)]
+        self.nodes = [DraftNode(-1, -1, 0.0)]
 
     def add(self, token: 'i64', parent: 'i64', logp: 'f32') -> 'i64':
         _ah22_8 = self.nodes
-        _ah22_8.append(DraftNode(1, token, parent, logp, 0))
+        _ah22_8.append(DraftNode(token, parent, logp))
         idx = len(self.nodes) - 1
         _pn = self.nodes[parent]
         _ah24_8 = _pn.children

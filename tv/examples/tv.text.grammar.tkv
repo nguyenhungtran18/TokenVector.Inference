@@ -65,26 +65,26 @@ class Grammar:
         self.rules = {}
 
 def _new_lit(text: 'str') -> 'GElem':
-    return GElem(1, 0, text, "", 1, 1)
+    return GElem(0, text, "", 1, 1)
 
 
 def _new_class() -> 'GElem':
-    return GElem(1, 1, "", "", 1, 1)
+    return GElem(1, "", "", 1, 1)
 
 
 def _new_ref(ref: 'str') -> 'GElem':
-    return GElem(1, 2, "", ref, 1, 1)
+    return GElem(2, "", ref, 1, 1)
 
 
 def _new_rep(inner: 'GElem', mn: 'i64', mx: 'i64') -> 'GElem':
-    e = GElem(1, 3, "", "", mn, mx)
+    e = GElem(3, "", "", mn, mx)
     _so = e.sub_one
     _so.append(inner)
     return e
 
 
 def _new_group(flat: 'list[GElem]', breaks: 'list[i64]') -> 'GElem':
-    e = GElem(1, 4, "", "", 1, 1)
+    e = GElem(4, "", "", 1, 1)
     e.sub_alts = flat
     e.sub_breaks = breaks
     return e
@@ -131,7 +131,7 @@ def _sorted_ints(xs: 'dict[i64,i32]') -> 'list[i64]':
 
 
 def compile_grammar(text: 'str') -> 'Grammar':
-    g = Grammar(1, "root")
+    g = Grammar("root")
     _ls = _lines(text)
     for line in _ls:
         _ln = line.strip()

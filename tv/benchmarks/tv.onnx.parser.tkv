@@ -24,7 +24,7 @@ def parse_file(path: "str") -> "OnnxModel":
     return parse_bytes(buf)
 
 def parse_bytes(buf: "str") -> "OnnxModel":
-    r = FastProtobufReader(1, buf, 0, 0)
+    r = FastProtobufReader(buf)
     model = onnx_model_new()
     while r.has_more():
         field = r.read_tag_field()
@@ -50,7 +50,7 @@ def parse_bytes(buf: "str") -> "OnnxModel":
     return model
 
 def _parse_graph(buf: "str") -> "OnnxGraph":
-    r = FastProtobufReader(1, buf, 0, 0)
+    r = FastProtobufReader(buf)
     g = onnx_graph_new()
     while r.has_more():
         field = r.read_tag_field()
@@ -79,7 +79,7 @@ def _parse_graph(buf: "str") -> "OnnxGraph":
     return g
 
 def _parse_node(buf: "str") -> "OnnxNode":
-    r = FastProtobufReader(1, buf, 0, 0)
+    r = FastProtobufReader(buf)
     n = onnx_node_new()
     while r.has_more():
         field = r.read_tag_field()
@@ -105,7 +105,7 @@ def _parse_node(buf: "str") -> "OnnxNode":
     return n
 
 def _parse_attr(buf: "str") -> "OnnxAttribute":
-    r = FastProtobufReader(1, buf, 0, 0)
+    r = FastProtobufReader(buf)
     a = onnx_attr_new()
     while r.has_more():
         field = r.read_tag_field()
@@ -152,7 +152,7 @@ def _parse_attr(buf: "str") -> "OnnxAttribute":
     return a
 
 def _parse_tensor(buf: "str") -> "OnnxTensor":
-    r = FastProtobufReader(1, buf, 0, 0)
+    r = FastProtobufReader(buf)
     t = onnx_tensor_new()
     while r.has_more():
         field = r.read_tag_field()
@@ -219,7 +219,7 @@ def _parse_tensor(buf: "str") -> "OnnxTensor":
     return t
 
 def _parse_value_info(buf: "str") -> "OnnxValueInfo":
-    r = FastProtobufReader(1, buf, 0, 0)
+    r = FastProtobufReader(buf)
     vi = onnx_vi_new()
     while r.has_more():
         field = r.read_tag_field()
@@ -235,7 +235,7 @@ def _parse_value_info(buf: "str") -> "OnnxValueInfo":
     return vi
 
 def _parse_type(buf: "str", target: "OnnxValueInfo") -> "i32":
-    r = FastProtobufReader(1, buf, 0, 0)
+    r = FastProtobufReader(buf)
     while r.has_more():
         field = r.read_tag_field()
         wt = r.last_wt
@@ -248,7 +248,7 @@ def _parse_type(buf: "str", target: "OnnxValueInfo") -> "i32":
     return 0
 
 def _parse_tensor_type(buf: "str", target: "OnnxValueInfo") -> "i32":
-    r = FastProtobufReader(1, buf, 0, 0)
+    r = FastProtobufReader(buf)
     while r.has_more():
         field = r.read_tag_field()
         wt = r.last_wt
@@ -263,7 +263,7 @@ def _parse_tensor_type(buf: "str", target: "OnnxValueInfo") -> "i32":
     return 0
 
 def _parse_shape(buf: "str", dims: "list[i64]") -> "i32":
-    r = FastProtobufReader(1, buf, 0, 0)
+    r = FastProtobufReader(buf)
     while r.has_more():
         field = r.read_tag_field()
         wt = r.last_wt
@@ -276,7 +276,7 @@ def _parse_shape(buf: "str", dims: "list[i64]") -> "i32":
     return 0
 
 def _parse_dim(buf: "str") -> "i64":
-    r = FastProtobufReader(1, buf, 0, 0)
+    r = FastProtobufReader(buf)
     val = 1
     while r.has_more():
         field = r.read_tag_field()

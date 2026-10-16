@@ -63,7 +63,7 @@ def create_kv_cache(max_seq: 'i64', hidden_dim: 'i64') -> 'AttentionKvCache':
         raise Arg("max_seq must be > 0")
     if hidden_dim <= 0:
         raise Arg("hidden_dim must be > 0")
-    c = AttentionKvCache(1, max_seq, hidden_dim, 0)
+    c = AttentionKvCache(max_seq, hidden_dim)
     c._kbuf = _nd_f32(max_seq * hidden_dim)
     c._vbuf = _nd_f32(max_seq * hidden_dim)
     for i in range(max_seq * hidden_dim):

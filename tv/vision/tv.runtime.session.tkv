@@ -352,7 +352,7 @@ def dtype_size(dtype: 'i64') -> 'i64':
 def make_tensor_desc(name: 'str', shape: 'list[i64]', dtype: 'i64') -> 'TensorDesc':
     ec = calc_element_count(shape)
     bs = ec * dtype_size(dtype)
-    d = TensorDesc(1, name, dtype, ec, bs, -1, 0, 0, 0, -1, -1)
+    d = TensorDesc(name, shape, dtype)
     d.shape = shape
     return d
 
@@ -2557,9 +2557,9 @@ class ExecutionNode:
                     rem = rf
                     i = len(red) - 1
                     while i > -1:
-                        _rem_r = _imod(rem, sizes)[red[i]]
+                        _rem_r = _imod(rem, sizes[red[i]])
                         val[red[i]] = _rem_r
-                        rem = _idiv(rem, sizes)[red[i]]
+                        rem = _idiv(rem, sizes[red[i]])
                         i = i + -1
                     if b is not None:
                         _c127 = b[_einsum_off(val, bc, batch, sb, cb)]
@@ -3128,7 +3128,7 @@ def _reduce_out_index(n: 'i64', shape: 'list[i64]', src_st: 'list[i64]', axes: '
 F32_MAX = 340282346638528859811704183484516925440.0
 
 def new_node(name: 'str', op: 'i64') -> 'ExecutionNode':
-    n = ExecutionNode(1, -1, name, op, 0, 1.0, 1.0, 0.00001, 0, 0, -1, 1, -340282346638528859811704183484516925440.0, 340282346638528859811704183484516925440.0, 0, 0, 1, 1, 1, 0, 0, 0.25, 0.0, "", 0, 0, 0, 1.0, 1.0, 1.0, 0, 0, 0, 0, 0, 0, 0.0, 0)
+    n = ExecutionNode(name, op)
     n.strides = [1, 1]
     n.pads = [0, 0, 0, 0]
     return n
@@ -3603,42 +3603,28 @@ def _nd_i8(n: "i64") -> "list[i32]":
 
 
 def named_tensor(name: 'str', data: 'list[f32]') -> 'NamedTensor':
-    t = NamedTensor(1, name)
+    t = NamedTensor(name, [], [], [])
     t.data = data
     t.qdata = []
     t.idata = []
     return t
 
 def named_qdata(name: 'str', qdata: 'list[i32]') -> 'NamedTensor':
-    t = NamedTensor(1, name)
+    t = NamedTensor(name, [], [], [])
     t.data = []
     t.qdata = qdata
     t.idata = []
     return t
 
 def named_idata(name: 'str', idata: 'list[i64]') -> 'NamedTensor':
-    t = NamedTensor(1, name)
+    t = NamedTensor(name, [], [], [])
     t.data = []
     t.qdata = []
     t.idata = idata
     return t
 
 def session_from_graph(graph: 'ExecutionGraph', apply_optimizations: 'i32') -> 'InferenceSession':
-    provider = default_cpu()
-    require(provider)
-    if apply_optimizations:
-        p1 = ConstantFoldingPass(1)
-        p1.run(graph)
-        p2 = QdqFoldPass(1)
-        p2.run(graph)
-        p3 = OperatorFusionPass(1)
-        p3.run(graph)
-        p4 = DeadCodeEliminationPass(1)
-        p4.run(graph)
-    graph.analyze_liveness_and_allocate_offsets()
-    arena = arena_create(graph.total_arena_bytes)
-    graph.initialize_weights(arena)
-    return InferenceSession(1, provider, graph, arena, 0)
+    return InferenceSession(graph, apply_optimizations)
 
 # ===== optimization.passes (merged: cycle passes<->session) =====
 class IGraphPass:
@@ -3726,7 +3712,8 @@ class OperatorFusionPass(IGraphPass):
                         _ah3039_24.append(bias)
                         n1.outputs[0] = n2.outputs[0]
                         _ah3041_24 = graph.nodes
-                        _ah3041_24.pop(i + 1)
+                        _pi1 = i + 1
+                        _ah3041_24.pop(_pi1)
                         modified = 1
                         fused = 1
             if not fused:
@@ -3751,7 +3738,8 @@ class OperatorFusionPass(IGraphPass):
                         n1.activation = ActivationFunction_Tanh
                     n1.outputs[0] = n2.outputs[0]
                     _ah3065_20 = graph.nodes
-                    _ah3065_20.pop(i + 1)
+                    _pi2 = i + 1
+                    _ah3065_20.pop(_pi2)
                     modified = 1
                     fused = 1
             if not fused:
@@ -3766,7 +3754,8 @@ class OperatorFusionPass(IGraphPass):
                     n1.op_type = OperatorType_FusedConv2D
                     n1.outputs[0] = n2.outputs[0]
                     _ah3079_20 = graph.nodes
-                    _ah3079_20.pop(i + 1)
+                    _pi3 = i + 1
+                    _ah3079_20.pop(_pi3)
                     modified = 1
                     fused = 1
             if not fused:
@@ -3797,7 +3786,8 @@ class QdqFoldPass(IGraphPass):
                             if graph.outputs[o] == dead:
                                 graph.outputs[o] = orig
                         _ah3109_24 = graph.nodes
-                        _ah3109_24.pop(i + 1)
+                        _pi4 = i + 1
+                        _ah3109_24.pop(_pi4)
                         _ah3110_24 = graph.nodes
                         _ah3110_24.pop(i)
                         modified = 1

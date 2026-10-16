@@ -235,7 +235,7 @@ class MLPClassifier:
 
 
 def lin_head(w: 'list[f32]', b: 'list[f32]', m: 'i64', n: 'i64', k: 'i64') -> 'LinHead':
-    o = LinHead(1, m, n, k)
+    o = LinHead([], [], m, n, k)
     o.w = w
     o.b = b
     o.gw = _nd_f32(n * k)
@@ -244,7 +244,7 @@ def lin_head(w: 'list[f32]', b: 'list[f32]', m: 'i64', n: 'i64', k: 'i64') -> 'L
     return o
 
 def adam_state(size: 'i64', lr: 'f32') -> 'AdamState':
-    o = AdamState(1, 0, lr, 0.9, 0.999, 0.00001)
+    o = AdamState(0, lr, 0.9, 0.999, 0.00001)
     o.m = _nd_f32(size)
     o.v = _nd_f32(size)
     for i in range(size):
@@ -741,10 +741,15 @@ class PretrainMLP:
             else:
                 _c1 = hidden
             d_in = _c1
-            ln = LayerNorm(d_in)
+            # (2026-10-16) Compiler moi: record ctor nhan DUNG mot tham so
+            # cho moi field KHONG phai container, theo thu tu field. LayerNorm
+            # co 6 field nhu vay: dim, eps, _adam_g, _adam_b, _opt_g, _opt_b.
+            # Cu chi truyen `dim` nen bao "can 6 tham so, gap 1". Layer o day
+            # khong dung adam nen trang thai toi uu rong.
+            ln = LayerNorm(d_in, 1e-5, "", "", adam_state(d_in, 0.001), adam_state(d_in, 0.001))
             _ah717_12 = self.lns
             _ah717_12.append(ln)
-        self.head_ln = LayerNorm(hidden)
+        self.head_ln = LayerNorm(hidden, 1e-5, "", "", adam_state(hidden, 0.001), adam_state(hidden, 0.001))
         self.head = classes
         self.ckpt = 0
 

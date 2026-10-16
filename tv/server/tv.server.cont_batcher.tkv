@@ -17,8 +17,8 @@ class GenRequest:
     tokens: "list[i64]"
     done: "i32"
     error: "str"
-    cache: "inferred"
-    paged: "inferred"
+    cache: "AttentionKvCache"
+    paged: "PagedSequence"
     seq_id: "i64"
     def __init__(self, max_tokens: "i64", done: "i32", error: "str", cache: "AttentionKvCache", paged: "PagedSequence", seq_id: "i64"):
         self.max_tokens = max_tokens
@@ -32,8 +32,8 @@ class GenRequest:
 
 def _new_gen_request(prompt: "list[i64]", max_tokens: "i64", max_seq: "i64", hidden_dim: "i64") -> "GenRequest":
     _c = create_kv_cache(max_seq, hidden_dim)
-    _p = PagedSequence(1, -1, 0)
-    req = GenRequest(1, max_tokens, 0, "", _c, _p, -1)
+    _p = PagedSequence(-1)
+    req = GenRequest(max_tokens, 0, "", _c, _p, -1)
     req.prompt = prompt
     _toks = []
     for _t in prompt:
@@ -43,16 +43,16 @@ def _new_gen_request(prompt: "list[i64]", max_tokens: "i64", max_seq: "i64", hid
 
 class ContBatcher:
     _ok: "i64"
-    session: "inferred"
+    session: "InferenceSession"
     hidden_dim: "i64"
     max_seq: "i64"
     max_running: "i64"
-    batcher: "inferred"
-    pool: "inferred"
+    batcher: "DynamicBatcher"
+    pool: "PagedKVPool"
     waiting: "list[GenRequest]"
     running: "list[GenRequest]"
     next_seq: "i64"
-    params: "inferred"
+    params: "SampleParams"
     _closed: "i32"
     def __init__(self, session: "InferenceSession", hidden_dim: "i64", max_seq: "i64" = 2048, max_running: "i64" = 4, pool_pages: "i64" = 256, page_len: "i64" = 16, workers: "i64" = 4):
         self.session = session
@@ -65,11 +65,9 @@ class ContBatcher:
         _wk = workers
         if _wk < 1:
             _wk = 1
-        _db = DynamicBatcher(1, _mr, 200, 10000)
-        _pl = _db.pool
-        _pl.append(session)
+        _db = DynamicBatcher(session, _mr, 200, 4, 10000)
         self.batcher = _db
-        self.pool = PagedKVPool(1, pool_pages, page_len, hidden_dim)
+        self.pool = PagedKVPool(pool_pages, page_len, hidden_dim)
         self.next_seq = 1
         self.params = default_sample_params()
         self._closed = 0
@@ -126,7 +124,7 @@ class ContBatcher:
             req.seq_id = self.next_seq
             self.next_seq = self.next_seq + 1
             req.cache = create_kv_cache(self.max_seq, self.hidden_dim)
-            req.paged = PagedSequence(1, req.seq_id, 0)
+            req.paged = PagedSequence(req.seq_id)
             _ah83_12 = req.paged
             _ah83_12.ensure_capacity(self.pool, len(req.prompt) + req.max_tokens)
             _ah84_12 = self.running

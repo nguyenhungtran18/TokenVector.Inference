@@ -67,20 +67,20 @@ class BackendDispatch:
         raise Arg("backend softmax unavailable: " + c.error)
 
 def cpu_backend() -> 'BackendDispatch':
-    c = BackendCaps(1, "cpu", BackendKind_CPU, 1, 8, 64, 1, 1, 1, "")
-    return BackendDispatch(1, c, "cpu")
+    c = BackendCaps("cpu", BackendKind_CPU, 1, 8, 64, 1, 1, 1, "")
+    return BackendDispatch(c, "cpu")
 
 def simt_backend(lanes: 'i64', tile: 'i64') -> 'BackendDispatch':
     if lanes < 1:
         lanes = 1
     if tile < 1:
         tile = 1
-    c = BackendCaps(1, "tokenvector-simt", BackendKind_SIMT, 1, lanes, tile, 1, 1, 1, "")
-    return BackendDispatch(1, c, "simt")
+    c = BackendCaps("tokenvector-simt", BackendKind_SIMT, 1, lanes, tile, 1, 1, 1, "")
+    return BackendDispatch(c, "simt")
 
 def unavailable_backend(kind: 'i64', name: 'str', error: 'str') -> 'BackendDispatch':
-    c = BackendCaps(1, name, kind, 0, 0, 0, 0, 0, 0, error)
-    return BackendDispatch(1, c, "unavailable")
+    c = BackendCaps(name, kind, 0, 0, 0, 0, 0, 0, error)
+    return BackendDispatch(c, "unavailable")
 
 def simulation_backend(lanes: 'i64', tile: 'i64') -> 'BackendDispatch':
     return simt_backend(lanes, tile)

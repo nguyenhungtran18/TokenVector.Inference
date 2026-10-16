@@ -10,7 +10,7 @@ class GenConfig:
     eos_token: 'i64'
     stop_strings: 'list[str]'
     template: 'str'
-    params: 'inferred'
+    params: 'SampleParams'
 
     def __init__(self):
         self.max_new_tokens = 128
@@ -89,7 +89,7 @@ def generate_text(session: 'InferenceSession', tokenizer: 'Tokenizer', prompt: '
     _n_ids = len(ids)
     _n_gen = len(gen)
     _txt = tokenizer.decode(gen)
-    return GenResult(1, _txt, _n_ids, _n_gen)
+    return GenResult(_txt, _n_ids, _n_gen)
 
 def chat_generate(session: 'InferenceSession', tokenizer: 'Tokenizer', messages: 'list[ChatMessage]', cfg: 'GenConfig') -> 'GenResult':
     _tpl = apply_template(messages, cfg.template)

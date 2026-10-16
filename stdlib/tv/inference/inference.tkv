@@ -35,7 +35,7 @@ class ModelSession:
         g = translate(m)
         sess = session_from_graph(g, 1)
         self.session = sess
-        self.batcher = new_dynamic_batcher(1, 32, 200, 10000)
+        self.batcher = new_dynamic_batcher_with_session(sess, 32, 200, 10000)
         self.server = new_embedded_server(sess, 8080, default_server_options())
 
     def run(self, input_tensor: 'list[f32]') -> 'list[f32]':
@@ -89,7 +89,7 @@ class ModelSession:
         return chat_generate(self.session, tokenizer, messages, cfg)
 
     def enable_batching(self, max_batch: 'i64'=32, timeout_us: 'i64'=200, workers: 'i64'=4, max_queue: 'i64'=10000) -> 'DynamicBatcher':
-        self.batcher = new_dynamic_batcher(1, max_batch, timeout_us, max_queue)
+        self.batcher = new_dynamic_batcher_with_session(self.session, max_batch, timeout_us, max_queue)
         return self.batcher
 
     def make_kv_cache(self, max_seq: 'i64', hidden_dim: 'i64') -> 'AttentionKvCache':
@@ -127,7 +127,7 @@ class ModelSession:
         return 0
 
 def _model_session_new(sess: 'InferenceSession') -> 'ModelSession':
-    b = new_dynamic_batcher(1, 32, 200, 10000)
+    b = new_dynamic_batcher_with_session(sess, 32, 200, 10000)
     sv = new_embedded_server(sess, 8080, default_server_options())
     return ModelSession(1, sess, b, sv)
 

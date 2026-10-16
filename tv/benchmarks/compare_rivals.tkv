@@ -210,7 +210,7 @@ def gc_allocated_bytes() -> "i64":
     return 0
 def gc_counts() -> "str":
     return ""
-def parallel_for(n: "i64", num_workers: "i64", fn: "i64") -> "i32":
+def bench_parallel_for(n: "i64", num_workers: "i64", fn: "i64") -> "i32":
     return 0
 
 

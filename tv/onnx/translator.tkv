@@ -216,7 +216,7 @@ def translate(model: 'OnnxModel') -> 'ExecutionGraph':
     else:
         _c1 = "OnnxExecutionGraph"
     _arena0 = 0
-    g = ExecutionGraph(1, _c1, _arena0)
+    g = ExecutionGraph(1, _c1, 0)
     # Ten cac initializer FLOAT, thu theo THU TU ghi vao g.initializers.
     # Xem ghi chu tai dong '_f32_init_names.append(init.name)' ben duoi.
     _f32_init_names = []

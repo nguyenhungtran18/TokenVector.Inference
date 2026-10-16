@@ -67,7 +67,9 @@ class BatcherQueue:
         if len(self.items) == 0:
             # (2026-09-27) Code lai cho dung: sentinel done=1/cancelled=1
             # (worker bo qua), input rong mac dinh.
-            _empty = BatchRequest(1, 1, 1, "")
+            _empty = BatchRequest([])
+            _empty.done = 1
+            _empty.cancelled = 1
             return _empty
         head = self.items[0]
         rest = []
@@ -105,7 +107,12 @@ class DynamicBatcher:
         self.queued = 0
         self.dropped_total = 0
         self._closed = 0
-        spawn(self._worker)
+# (2026-10-16) `spawn` da bi compiler moi bo; thay bang `thread_spawn`
+        # (tra ve Task<T>). Khong giu handle duoc: compiler khong chap nhan
+        # dtype 'thread' cho field cua record, va lenh goi co gia tri thi
+        # phai gan bien. Worker chay fire-and-forget; `enqueue` van co duong
+        # chay inline nen request van duoc xu ly ke worker co chay hay khong.
+        _worker_task = thread_spawn(_batcher_worker_entry, self)
 
     def enqueue(self, inp: "list[f32]") -> "list[f32]":
         if self._closed:
@@ -113,7 +120,7 @@ class DynamicBatcher:
         if self.queued >= self.max_queue:
             self.dropped_total = self.dropped_total + 1
             raise ServerBusy("batcher queue full. Retry later.")
-        req = BatchRequest(1, 0, 0, "")
+        req = BatchRequest([])
         # (2026-09-27) Code lai cho dung: .ctor record chi nhan field KHONG
         # container theo thu tu (_ok, done, cancelled, error); field container
         # (input, result) tu khoi tao rong, phai gan EXPLICIT (mau _mk_node).
@@ -153,7 +160,7 @@ class DynamicBatcher:
 
     def _worker(self) -> 'i32':
         batch = []
-        batch.append(BatchRequest([], 0, 0, ""))
+        batch.append(BatchRequest([]))
         batch.pop()
         while not self._closed:
             _ah87_20 = self.queue
@@ -177,7 +184,7 @@ class DynamicBatcher:
                     _bch_spin_yield()
             self._exec_batch(batch)
             batch = []
-            batch.append(BatchRequest([], 0, 0, ""))
+            batch.append(BatchRequest([]))
             batch.pop()
         return 0
 
@@ -211,30 +218,18 @@ def _run_one(req: "BatchRequest", session: "InferenceSession") -> "i32":
     return 0
 
 
+# (2026-10-16) `thread_spawn(fn)` chi nhan TEN ham (bien) va toi da 1 tham so;
+# `self._worker` la method nen bi compiler phan giu la field khong ton tai.
+# Voi vay can mot ham bao cap o cap module nham worker.
+def _batcher_worker_entry(b: "DynamicBatcher") -> "i32":
+    return b._worker()
+
+
 # 2026-09-25: factory khoi tao DynamicBatcher.
-# '.ctor' cua record nhan DUNG 1 tham so cho MOI field KHONG container, theo
-# THU TU FIELD - nen goi thang 'DynamicBatcher(session, max_batch, ...)' (theo
-# thu tu __init__) khong bien dich duoc. Day la wrapper giong het
-# default_server_options()/new_embedded_server() o cac module khac.
-# '_db.pool' (field container) duoc khoi tao rong boi chinh .ctor, nen nguoi
-# goi them session vao (xem new_embedded_server).
-def new_dynamic_batcher(ok: "i64", max_batch: "i64", timeout_us: "i64",
-                        max_queue: "i64") -> "DynamicBatcher":
-    _q = BatcherQueue(1)
-    return DynamicBatcher(ok, max_batch, timeout_us, max_queue, _q, 0, 0, 0)
-
-
-# (2026-09-28) Factory co session that.
-#
-# `new_dynamic_batcher(ok, ...)` truyen tham so dau cho truong `_ok`, nen
-# `pool` rong va moi request deu error khi chay.
-#
-# LUU Y: `__init__` BI BO QUA khi bien dich, nen phai gan pool TAY nhu
-# `new_embedded_server` lam (dong 440): goi `pool.append(session)`. Dung
-# 8 tham so positional giong het `new_dynamic_batcher` de khong lech ABI.
+# Compiler moi PHAI dung thu tu tham so cua `__init__`:
+#   DynamicBatcher(session, max_batch, timeout_us, worker_count, max_queue)
+# nen moi lai goi .ctor thay vi truyen 1 tham so cho MOI field.
 def new_dynamic_batcher_with_session(session: "InferenceSession", max_batch: "i64",
                                      timeout_us: "i64", max_queue: "i64") -> "DynamicBatcher":
-    _db = DynamicBatcher(1, max_batch, timeout_us, max_queue, BatcherQueue(1), 0, 0, 0)
-    _pl = _db.pool
-    _pl.append(session)
-    return _db
+    # `__init__` da gan `pool = [session]` va `queue = BatcherQueue(1)`.
+    return DynamicBatcher(session, max_batch, timeout_us, 4, max_queue)
