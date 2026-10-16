@@ -1334,23 +1334,32 @@ def _broadcast(a: 'list[i64]', b: 'list[i64]') -> 'list[i64]':
     return out
 
 def _slice_shape(shape: 'list[i64]', starts: 'list[i64]', ends: 'list[i64]', axes: 'list[i64]', steps: 'list[i64]') -> 'list[i64]':
-    if len(axes) == 0:
-        _qx1021 = []
-        for _qx1064 in range(min(len(starts), len(shape))):
-            _qx1021.append(_qx1064)
-        axes = _qx1021
-    if len(steps) == 0:
-        steps = []
+# (2026-10-16) Compiler moi doc sai gia tri khi mot bien list da duoc gan
+    # mot list khac ([0,1,2] -> [4294967296, 2, 0]). Workaround: KHONG gan lai
+    # bien list - tao mot lan roi `append` truc tiep vao chinh no.
+    _axes = []
+    for _ax0 in axes:
+        _axes.append(_ax0)
+    if len(_axes) == 0:
+        _qx1021 = min(len(starts), len(shape))
+        _zf100 = 0
+        while _zf100 < _qx1021:
+            _axes.append(_zf100)
+            _zf100 = _zf100 + 1
+    _steps = []
+    for _st0 in steps:
+        _steps.append(_st0)
+    if len(_steps) == 0:
         _zf101 = 0
-        while _zf101 < len(axes):
-            steps.append(1)
+        while _zf101 < len(_axes):
+            _steps.append(1)
             _zf101 = _zf101 + 1
     _qx1022 = []
     for _qx1065 in shape:
         _qx1022.append(_qx1065)
     out = _qx1022
-    for k in range(len(axes)):
-        a = _norm(axes[k], len(shape))
+    for k in range(len(_axes)):
+        a = _norm(_axes[k], len(shape))
         if k < len(starts):
             _c61 = starts[k]
         else:
@@ -1369,8 +1378,8 @@ def _slice_shape(shape: 'list[i64]', starts: 'list[i64]', ends: 'list[i64]', axe
             s = 0
         if e > shape[a]:
             e = shape[a]
-        if k < len(steps) and steps[k] != 0:
-            _c63 = steps[k]
+        if k < len(_steps) and _steps[k] != 0:
+            _c63 = _steps[k]
         else:
             _c63 = 1
         st = _c63

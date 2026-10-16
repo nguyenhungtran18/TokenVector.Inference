@@ -235,13 +235,10 @@ class MLPClassifier:
 
 
 def lin_head(w: 'list[f32]', b: 'list[f32]', m: 'i64', n: 'i64', k: 'i64') -> 'LinHead':
-    o = LinHead([], [], m, n, k)
-    o.w = w
-    o.b = b
-    o.gw = _nd_f32(n * k)
-    o.gb = _nd_f32(n)
-    o._x = []
-    return o
+    # (2026-10-16) Compiler moi: `LinHead([], [], ...)` roi gan `o.w = w` sau
+    # cho field `list[f32]` DO DUNG (do dai dung,gia tri sai). Truyen `w`,`b`
+    # ngay trong .ctor.
+    return LinHead(w, b, m, n, k)
 
 def adam_state(size: 'i64', lr: 'f32') -> 'AdamState':
     o = AdamState(0, lr, 0.9, 0.999, 0.00001)
@@ -292,7 +289,11 @@ class LoRALinear:
         s = seed
         inv = 1.0 / sqrt(float(k))
         for i in range(len(self.a)):
-            s = (s * 6364136223846793005 + 1442695040888963407) & 0xFFFFFFFFFFFFFFFF
+            # (2026-10-16) Compiler moi dung checked arithmetic: phep nhan i64
+            # tran se nem OverflowException TRUOC khi `&` mask, nen LCG 64-bit
+            # cu khong con an toan. Dung LCG 31-bit (s < 2^31, a < 2^30) ->
+            # san pham < 2^61, luon vua i64. Phan bo van ngau nhien.
+            s = (s * 1103515245 + 12345) & 0x7FFFFFFF
             self.a[i] = (float(s % 2000) / 1000.0 - 1.0) * inv
         for i in range(len(self.d)):
             self.d[i] = 0.0
@@ -390,24 +391,13 @@ def lora_linear_create(w: "list[f32]", b: "list[f32]", m: "i64", n: "i64", k: "i
     #
     # Vi vay phai khoi tao day cac field adapter, dung LCG 31-bit (an toan
     # trong int64 - xem ghi chu o vit.tkv::_vit_rnd) va zero_grad().
+    # (2026-10-16) Compiler moi PHAI chay `__init__` cua record, nen khong
+    # can (va khong nen) tu gan lai field sau khi khoi tao. Gan `l.a = ...`
+    # vao field `list[f32]` da co gia tri se lam DO DAI dung nhung GIA TRI sai,
+    # va goi ham long nhau trong danh sach tham so `.ctor` lam tham so bien null.
     if rank <= 0 or rank > min(n, k):
         raise Arg("rank must be in [1, min(n,k)]")
-    l = LoRALinear(1, lin_head(w, b, m, n, k), m, n, k, rank, alpha)
-    l.a = _nd_f32(rank * k)
-    l.d = _nd_f32(n * rank)
-    l.ga = _nd_f32(rank * k)
-    l.gd = _nd_f32(n * rank)
-    l._x = None
-    l._h = None
-    s = 13
-    inv = 1.0 / pow(float(k), 0.5)
-    for i in range(len(l.a)):
-        s = (s * 1103515245 + 12345) % 2147483648
-        l.a[i] = (float(s % 2000) / 1000.0 - 1.0) * inv
-    for i in range(len(l.d)):
-        l.d[i] = 0.0
-    l.base.zero_grad()
-    return l
+    return LoRALinear(w, b, m, n, k, rank, alpha, 13)
 
 def lora_train_row(l: "LoRALinear", x: "list[f32]", t: "list[f32]", lr: "f32") -> "f32":
     y = l.forward(x)
