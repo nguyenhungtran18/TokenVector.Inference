@@ -47,12 +47,17 @@ class BatchRequest:
     cancelled: "i32"
     result: "list[f32]"
     error: "str"
+    _claimed: "i32"
     def __init__(self, inp: "list[f32]"):
         self.input = inp
         self.done = 0
         self.cancelled = 0
         self.result = []
         self.error = ""
+        # (2026-10-16) Co the worker thread VA duong inline trong `enqueue`
+        # cung chay mot request tren cung mot session (pool chi co 1 phien tu,
+        # arena dung chung) -> hong mem. `_claimed` dam phai mot ben giu lai.
+        self._claimed = 0
 
 
 class BatcherQueue:
@@ -89,7 +94,7 @@ class DynamicBatcher:
     max_batch: "i64"
     timeout_us: "i64"
     max_queue: "i64"
-    pool: "list[i64]"
+    pool: "list[InferenceSession]"
     queue: "BatcherQueue"
     queued: "i64"
     dropped_total: "i64"
@@ -120,12 +125,10 @@ class DynamicBatcher:
         if self.queued >= self.max_queue:
             self.dropped_total = self.dropped_total + 1
             raise ServerBusy("batcher queue full. Retry later.")
-        req = BatchRequest([])
-        # (2026-09-27) Code lai cho dung: .ctor record chi nhan field KHONG
-        # container theo thu tu (_ok, done, cancelled, error); field container
-        # (input, result) tu khoi tao rong, phai gan EXPLICIT (mau _mk_node).
-        # Cu: BatchRequest(inp, 0, 0, "") dat inp vao _ok, input mai rong.
-        req.input = inp
+        req = BatchRequest(inp)
+        # (2026-10-16) Compiler moi: gan list vao field sau khi tao (`req.input
+        # = inp`) lam field DO DAI dung nhung GIA TRI sai/None. Truyen `inp`
+        # thang cho `.ctor` (`BatchRequest.__init__(self, inp)`).
         self.queued = self.queued + 1
         _ah63_8 = self.queue
         _ah63_8.write(req)
@@ -134,9 +137,16 @@ class DynamicBatcher:
             _spins = _spins + 1
             if _spins >= _BCH_SPIN_LIMIT:
                 # Khong worker nao chay request -> tu chay tai day thay vi treo.
+                # Neu worker DA giu request (`_claimed`), `_run_one` se khong
+                # chay lai; khi do phai CHO no xong chu duoc tra ve ket qua
+                # rong/half-written.
                 if len(self.pool) > 0:
                     _sess_inline = self.pool[0]
                     _run_one(req, _sess_inline)
+                    _wait2 = 0
+                    while not req.done and not req.cancelled and _wait2 < _BCH_SPIN_LIMIT * 8:
+                        _wait2 = _wait2 + 1
+                        _bch_spin_yield()
                 break
             _bch_spin_yield()
         self.queued = self.queued - 1
@@ -209,8 +219,19 @@ class DynamicBatcher:
 def _run_one(req: "BatchRequest", session: "InferenceSession") -> "i32":
     if req.cancelled or req.done:
         return 0
+    # (2026-10-16) Chi mot ben duoc chay request nay: worker thread va duong
+    # fallback inline trong `enqueue` deu goi qua day tren cung mot session
+    # (pool chi co 1 phien tu, arena dung chung) - chay song song se hong mem
+    # va sinh loi "infer failed" rau rac.
+    if req._claimed:
+        return 0
+    req._claimed = 1
     try:
-        req.result = session.run_single(req.input)
+        # (2026-10-16) `req.result = <list>` cung gan list vao field -> gia tri
+        # sai. Copy phan tu vao list rong da khoi tao san trong `.ctor`.
+        _out = session.run_single(req.input)
+        for _oi in range(len(_out)):
+            req.result.append(_out[_oi])
         req.done = 1
     except Exception as e:
         req.error = "infer failed"
