@@ -1,0 +1,180 @@
+﻿import tv.training.tape
+
+# ============================================================================
+#  GRADCHECK TESTS â€” kiem chung backward BANG SAI PHAY (G1.5)
+# ----------------------------------------------------------------------------
+#  KHAC VOI grad_tests.tkv: day KHONG dung fixture PyTorch. Day tu so sanh
+#  gradient tinh bang backward voi DAO PHAN CUA CHINH HAM FORWARD:
+#
+#      dL/dx_i ~= (L(x + h*e_i) - L(x - h*e_i)) / (2h)
+#
+#  NghÄ©a la backward duoc kiem CHUNG DOC LAP â€” khong dua vao PyTorch, khong
+#  dua vao cong thuc backward nao khac.
+#
+#  COT LOAI: h qua lon -> sai so ham forward cat gradient; h qua nho ->
+#  lam tron f32 cat nhau. Da do bang cac gia tri h va lay sai so nho nhat.
+#
+#  BA TEST CUOI KIEM DO NHAY cua bo gradcheck: gradient CO TINH SAI phai bi
+#  BAO. Neu khong co phan nay, bo test co the luon xanh ma khong kiem tra gi.
+#
+#  Chay: tkvc tv\tests\gc_tests.tkv ra.exe main   (tu thu muc goc repo)
+# ============================================================================
+
+FIX_DIR = "tv/tests/fixtures/"
+
+# atol dung chung cho moi so sanh: sai phay trong f32 khong the tot hon ~1e-6
+GC_ATOL = 0.00001
+
+def load_floats(path: 'str') -> "list[f32]":
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        ln = lines[i]
+        if len(ln) < 1:
+            continue
+        if ln[0] == "#":
+            continue
+        toks = ln.split(" ")
+        for j in range(len(toks)):
+            t = toks[j]
+            if len(t) < 1:
+                continue
+            vals.append(float(t))
+    return vals
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+def _abs(v: 'f32') -> 'f32':
+    if v < 0.0:
+        return -v
+    return v
+
+def report(name: 'str', d: 'f32', tol: 'f32') -> 'i32':
+    if d <= tol:
+        print("  [PASS] " + name + "  max_abs_diff=" + str(d) + "  atol=" + str(tol))
+        return 0
+    print("  [FAIL] " + name + "  max_abs_diff=" + str(d) + "  atol=" + str(tol))
+    return 1
+
+# So sanh 2 vecto gradient, dung sai so tuyet doi.
+def diff_atol(a: 'list[f32]', b: 'list[f32]', skip: 'i64', cnt: 'i64') -> 'f32':
+    # `skip` la OFFSET trong vector GOC (a/b dai hon cnt phan). Phai dung
+    # `skip + i`, khong phai `i`.
+    m = 0.0
+    for i in range(cnt):
+        d = _abs(a[skip + i] - b[i])
+        if d > m:
+            m = d
+    return m
+
+def sub(l: 'list[f32]', off: 'i64', cnt: 'i64') -> "list[f32]":
+    out = []
+    for i in range(cnt):
+        out.append(l[off + i])
+    return out
+
+# ---- kiem do nhay: gradient sai co y phai bi bao --------------------------
+
+def _corrupt(v: 'f32') -> 'f32':
+    # phai sai THAT nhiem (>= 1e-3) va khac dau nhau (khong chi doi dau)
+    if v > 0.0:
+        return v * 1.5 + 0.01
+    return v * 0.5 - 0.01
+
+def corrupt(l: 'list[f32]') -> 'list[f32]':
+    out = []
+    for i in range(len(l)):
+        out.append(_corrupt(l[i]))
+    return out
+
+def main() -> 'i32':
+    fails = 0
+    cases = 0
+    print("=== GRADCHECK bang sai phay (khong dung fixture PyTorch) ===")
+
+    # ---------- 1. chuoi don gian: softmax*softmax -> CE ----------
+    n = 8
+    x0 = [1.5, -2.25, 3.0, 0.7, 2.75, -1.3, 2.5, -1.9]
+    w0 = [0.9, 1.4, -1.5, 0.8, 1.9, -0.7, 1.6, 0.4]
+    target = 3
+    hs = [0.01, 0.005, 0.002]
+    ana = gradcheck_simple(x0, w0, target, 0.0001)
+    best_x = -1.0
+    best_w = -1.0
+    for q in range(len(hs)):
+        h = hs[q]
+        nx = gradcheck_numeric_x(x0, w0, target, h)
+        nw = gradcheck_numeric_w(x0, w0, target, h)
+        dx = diff_atol(ana, nx, 0, n)
+        dw = diff_atol(ana, nw, n, n)
+        if best_x < 0.0:
+            best_x = dx
+            best_w = dw
+        else:
+            if dx < best_x:
+                best_x = dx
+            if dw < best_w:
+                best_w = dw
+        print("    h=" + str(h) + "  dx=" + str(dx) + "  dw=" + str(dw))
+    cases = cases + 2
+    fails = fails + report("gradcheck_simple x", best_x, GC_ATOL)
+    fails = fails + report("gradcheck_simple w", best_w, GC_ATOL)
+
+    # ---------- 2. chuoi 6 tang ----------
+    cn = 12
+    cx = load_floats(FIX_DIR + "c_x.txt")
+    cw1 = load_floats(FIX_DIR + "c_w1.txt")
+    cb1 = load_floats(FIX_DIR + "c_b1.txt")
+    cmask = load_ints(FIX_DIR + "c_mask.txt")
+    ctgt = 3
+    cres = gradcheck_chain(cx, cw1, cb1, ctgt, cmask, 0.01)
+    cx_ana = sub(cres, 0, cn)
+    cx_num = sub(cres, cn, cn)
+    cw_ana = sub(cres, 2 * cn, cn)
+    cw_num = sub(cres, 3 * cn, cn)
+    cb_ana = sub(cres, 4 * cn, cn)
+    cb_num = sub(cres, 5 * cn, cn)
+    cases = cases + 3
+    fails = fails + report("gradcheck_chain gx", diff_atol(cx_ana, cx_num, 0, cn), GC_ATOL)
+    fails = fails + report("gradcheck_chain gw1", diff_atol(cw_ana, cw_num, 0, cn), GC_ATOL)
+    fails = fails + report("gradcheck_chain gb1", diff_atol(cb_ana, cb_num, 0, cn), GC_ATOL)
+
+    # ---------- 3. DO NHAY: gradient sai co y phai bi bao ----------
+    # Neu phan nay khong bat duoc, bo gradcheck chi la "luon xanh".
+    bad_x = corrupt(cx_num)
+    bad_d = diff_atol(cx_ana, bad_x, 0, cn)
+    caught_x = 0
+    if bad_d > GC_ATOL:
+        caught_x = 1
+    print("    gradient x CORRUPTED: max_abs_diff=" + str(bad_d) + " -> " + ("bat duoc" if caught_x == 1 else "KHONG BAT"))
+    cases = cases + 1
+    if caught_x == 0:
+        print("  [FAIL] gradcheck KHONG phat hien gradient sai co y")
+        fails = fails + 1
+    else:
+        print("  [PASS] gradcheck phat hien gradient sai co y")
+        # phai "bat" ca truong hop sai rat nho (thay 1 phan tu lech 1%)
+    slight = []
+    for i in range(cn):
+        slight.append(cx_num[i] * 1.01)
+    slight[4] = cx_num[4] + 0.0001
+    sd = diff_atol(cx_ana, slight, 0, cn)
+    caught_s = 0
+    if sd > GC_ATOL:
+        caught_s = 1
+    cases = cases + 1
+    if caught_s == 0:
+        print("  [FAIL] gradcheck KHONG phat hien lech nho (1%)")
+        fails = fails + 1
+    else:
+        print("  [PASS] gradcheck phat hien lech nho (1%): " + str(sd))
+
+    print("=== GC cases=" + str(cases) + " fails=" + str(fails) + " ===")
+    return fails
+

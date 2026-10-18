@@ -1,0 +1,113 @@
+import tv.training.tape
+
+# ============================================================================
+#  TAPE TESTS — kiem tra backward TONG HOP qua chuoi op nhieu tang (G1.3)
+# ----------------------------------------------------------------------------
+#  ops.tkv cho backward rời (goi tay). Tape ghi lai chuoi op theo thu tu tinh
+#  tien roi chay nguoc lai. Test nay chung minh gradient chay qua 6 tang
+#  (rms_norm -> mul -> gelu_erf -> add -> layernorm -> silu -> CE) van khop
+#  PyTorch — thu ma forward rời KHONG lam duoc.
+#
+#  Chay: tkvc tv\tests\tape_tests.tkv ra.exe main   (tu thu muc goc repo)
+# ============================================================================
+
+FIX_DIR = "tv/tests/fixtures/"
+TOL = 1e-5
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> "list[f32]":
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        ln = lines[i]
+        if _is_comment(ln) == 1:
+            continue
+        toks = ln.split(" ")
+        for j in range(len(toks)):
+            t = toks[j]
+            if len(t) < 1:
+                continue
+            vals.append(float(t))
+    return vals
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+def diff(a: 'list[f32]', b: 'list[f32]') -> 'f32':
+    n = len(a)
+    if len(b) < n:
+        n = len(b)
+    m = 0.0
+    for i in range(n):
+        d = a[i] - b[i]
+        if d < 0.0:
+            d = -d
+        if d > m:
+            m = d
+    return m
+
+def report(name: 'str', d: 'f32', tol: 'f32') -> 'i32':
+    if d <= tol:
+        print("  [PASS] " + name + "  diff=" + str(d))
+        return 0
+    print("  [FAIL] " + name + "  diff=" + str(d) + "  tol=" + str(tol))
+    return 1
+
+def main() -> 'i32':
+    fails = 0
+    cases = 0
+    print("=== TAPE: chuoi 6 tang, backward tong hop ===")
+
+    n = 12
+    eps = 0.000001
+    x0 = load_floats(FIX_DIR + "c_x.txt")
+    w10 = load_floats(FIX_DIR + "c_w1.txt")
+    b10 = load_floats(FIX_DIR + "c_b1.txt")
+    mask_l = load_ints(FIX_DIR + "c_mask.txt")
+    target = 3
+
+    x = t_new(x0, [n])
+    w1 = t_new(w10, [n])
+    b1 = t_new(b10, [n])
+    t_require_grad(x)
+    t_require_grad(w1)
+    t_require_grad(b1)
+
+    t = tape_new()
+    # 6 tang: rms_norm -> mul -> gelu(erf) -> add -> layernorm -> silu -> CE
+    h1 = tape_rmsnorm(t, x, eps)
+    h1s = tape_mul(t, h1, w1)
+    h2 = tape_gelu_erf(t, h1s)
+    h3 = tape_add(t, h2, b1)
+    h4 = tape_layernorm(t, h3, eps)
+    h5 = tape_silu(t, h4)
+    loss = tape_ce(t, h5, target, mask_l, 1.0)
+
+    cases = cases + 1
+    fails = fails + report("tape nodes", float(abs(tape_size(t) - 7)), TOL)
+    cases = cases + 4
+    fails = fails + report("chain h1 (rms_norm*w1)", diff(h1s.data, load_floats(FIX_DIR + "c_h1.txt")), TOL)
+    fails = fails + report("chain h2 (gelu_erf)", diff(h2.data, load_floats(FIX_DIR + "c_h2.txt")), TOL)
+    fails = fails + report("chain h5 (silu)", diff(h5.data, load_floats(FIX_DIR + "c_h5.txt")), TOL)
+    fails = fails + report("loss", abs(loss.data[0] - load_floats(FIX_DIR + "c_loss.txt")[0]), TOL)
+
+    tapebackward(t, loss)
+
+    cases = cases + 3
+    fails = fails + report("tape gx  (qua 6 tang)", diff(x.grad, load_floats(FIX_DIR + "c_gx.txt")), TOL)
+    fails = fails + report("tape gw1", diff(w1.grad, load_floats(FIX_DIR + "c_gw1.txt")), TOL)
+    fails = fails + report("tape gb1", diff(b1.grad, load_floats(FIX_DIR + "c_gb1.txt")), TOL)
+
+    print("=== TAPE cases=" + str(cases) + " fails=" + str(fails) + " ===")
+    return fails

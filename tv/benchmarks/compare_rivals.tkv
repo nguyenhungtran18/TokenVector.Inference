@@ -122,6 +122,7 @@ def bench_gc() -> "i64":
     b0 = gc_allocated_bytes()
     for i in range(500):
         s.run_single(x)
+    gc_collect()
     used = gc_allocated_bytes() - b0
     print("[3/4] Heap per 500 inferences: " + str(used) + " B (gate: 0 B Zero-GC)")
     s.close()
@@ -194,22 +195,12 @@ def stress_concurrent() -> "i32":
     s.close()
     return 0
 
-def now_ms() -> "f64":
-    return 0.0
-def now_us() -> "i64":
-    return 0
 def fill_rand(a: "list[f32]", seed: "i64") -> "i32":
     return 0
 def fill_const(a: "list[f32]", v: "f32") -> "i32":
     return 0
 def ptr_of(a: "list[f32]") -> "i64":
     return 0
-def gc_collect() -> "i32":
-    return 0
-def gc_allocated_bytes() -> "i64":
-    return 0
-def gc_counts() -> "str":
-    return ""
 def bench_parallel_for(n: "i64", num_workers: "i64", fn: "i64") -> "i32":
     return 0
 

@@ -1,0 +1,143 @@
+import tv.training.ops
+
+# ============================================================================
+#  GRAD TESTS — doi chieu BACKWARD cua tung op voi PyTorch autograd
+# ----------------------------------------------------------------------------
+#  G1 (ROADMAP_TRAIN.md): fixture do tools\gen_fixtures.py sinh (torch autograd,
+#  fp32, CPU, seed 1). Moi op co: dau vao, gradient tai dau ra (gy), va gradient
+#  mong doi cho tham so vao.
+#
+#  Chay: tkvc tv\tests\grad_tests.tkv ra.exe main   (tu thu muc goc repo)
+# ============================================================================
+
+FIX_DIR = "tv/tests/fixtures/"
+TOL = 1e-5
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> "list[f32]":
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        ln = lines[i]
+        if _is_comment(ln) == 1:
+            continue
+        toks = ln.split(" ")
+        for j in range(len(toks)):
+            t = toks[j]
+            if len(t) < 1:
+                continue
+            vals.append(float(t))
+    return vals
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+def diff(a: 'list[f32]', b: 'list[f32]') -> 'f32':
+    n = len(a)
+    if len(b) < n:
+        n = len(b)
+    m = 0.0
+    for i in range(n):
+        d = a[i] - b[i]
+        if d < 0.0:
+            d = -d
+        if d > m:
+            m = d
+    return m
+
+def report(name: 'str', d: 'f32', tol: 'f32') -> 'i32':
+    if d <= tol:
+        print("  [PASS] " + name + "  diff=" + str(d))
+        return 0
+    print("  [FAIL] " + name + "  diff=" + str(d) + "  tol=" + str(tol))
+    return 1
+
+def from_list(vals: 'list[f32]') -> "Tensor":
+    return t_new(vals, [len(vals)])
+
+def main() -> 'i32':
+    fails = 0
+    cases = 0
+    print("=== GRADIENT PARITY vs PyTorch autograd ===")
+
+    # ---- matmul A(3x4) @ B(5x4)^T -> C(3x5) ----
+    m = 3
+    n = 5
+    k = 4
+    A = t_new(load_floats(FIX_DIR + "g_mm_A.txt"), [m, k])
+    B = t_new(load_floats(FIX_DIR + "g_mm_B.txt"), [n, k])
+    gy = t_new(load_floats(FIX_DIR + "g_mm_GY.txt"), [m, n])
+    C = op_matmul_fwd(A, B, m, n, k)
+    cases = cases + 1
+    fails = fails + report("matmul forward", diff(C.data, load_floats(FIX_DIR + "g_mm_C.txt")), TOL)
+    gs = op_matmul_bwd(A, B, gy, m, n, k)
+    cases = cases + 2
+    fails = fails + report("matmul dA", diff(gs[0].data, load_floats(FIX_DIR + "g_mm_dA.txt")), TOL)
+    fails = fails + report("matmul dB", diff(gs[1].data, load_floats(FIX_DIR + "g_mm_dB.txt")), TOL)
+
+    # ---- activation (cung x, gy) ----
+    xa = from_list(load_floats(FIX_DIR + "g_act_x.txt"))
+    ga = t_new(load_floats(FIX_DIR + "g_act_gy.txt"), [16])
+    cases = cases + 4
+    fails = fails + report("gelu_erf bwd", diff(op_gelu_erf_bwd(xa, ga).data, load_floats(FIX_DIR + "g_act_dgelu_erf.txt")), TOL)
+    fails = fails + report("gelu_tanh bwd", diff(op_gelu_tanh_bwd(xa, ga).data, load_floats(FIX_DIR + "g_act_dgelu_tanh.txt")), TOL)
+    fails = fails + report("silu bwd", diff(op_silu_bwd(xa, ga).data, load_floats(FIX_DIR + "g_act_dsilu.txt")), TOL)
+    fails = fails + report("relu bwd", diff(op_relu_bwd(xa, ga).data, load_floats(FIX_DIR + "g_act_drelu.txt")), TOL)
+
+    # ---- norm ----
+    xn = from_list(load_floats(FIX_DIR + "g_norm_x.txt"))
+    gn = t_new(load_floats(FIX_DIR + "g_norm_gy.txt"), [8])
+    cases = cases + 4
+    fails = fails + report("rmsnorm fwd", diff(op_rmsnorm_fwd(xn, 0.000001).data, load_floats(FIX_DIR + "g_yrms.txt")), TOL)
+    fails = fails + report("rmsnorm bwd", diff(op_rmsnorm_bwd(xn, gn, 0.000001).data, load_floats(FIX_DIR + "g_drms.txt")), TOL)
+    fails = fails + report("layernorm fwd", diff(op_layernorm_fwd(xn, 0.000001).data, load_floats(FIX_DIR + "g_yln.txt")), TOL)
+    fails = fails + report("layernorm bwd", diff(op_layernorm_bwd(xn, gn, 0.000001).data, load_floats(FIX_DIR + "g_dln.txt")), TOL)
+
+    # ---- softmax ----
+    sx = t_new(load_floats(FIX_DIR + "g_sm_x.txt"), [2, 5])
+    sgy = t_new(load_floats(FIX_DIR + "g_sm_gy.txt"), [2, 5])
+    sy = op_softmax_fwd(sx, 2, 5)
+    cases = cases + 2
+    fails = fails + report("softmax fwd", diff(sy.data, load_floats(FIX_DIR + "g_sm_y.txt")), TOL)
+    fails = fails + report("softmax bwd", diff(op_softmax_bwd(sy, sgy, 2, 5).data, load_floats(FIX_DIR + "g_sm_g.txt")), TOL)
+
+    # ---- cross entropy co mask (target = 1, la vi tri KHONG bi mask) ----
+    cl = from_list(load_floats(FIX_DIR + "g_ce_glogits.txt"))
+    cm = load_ints(FIX_DIR + "g_ce_gmask.txt")
+    cases = cases + 2
+    my_loss = op_ce_fwd(cl, 1, cm)
+    fails = fails + report("cross_entropy(mask) loss", abs(my_loss - load_floats(FIX_DIR + "g_ce_gloss.txt")[0]), TOL)
+    fails = fails + report("cross_entropy(mask) bwd", diff(op_ce_bwd(cl, 1.0, 1, cm).data, load_floats(FIX_DIR + "g_ce_gx.txt")), TOL)
+
+    # ---- add / mul voi broadcast ----
+    aa = from_list(load_floats(FIX_DIR + "g_add_a.txt"))
+    bb = from_list(load_floats(FIX_DIR + "g_add_b.txt"))
+    agy = t_new(load_floats(FIX_DIR + "g_add_gy.txt"), [8])
+    cases = cases + 4
+    ga2 = op_add_bwd(agy, 8, 3)
+    fails = fails + report("add bwd dA", diff(ga2[0].data, load_floats(FIX_DIR + "g_add_da.txt")), TOL)
+    fails = fails + report("add bwd dB", diff(ga2[1].data, load_floats(FIX_DIR + "g_add_db.txt")), TOL)
+    gmu = op_mul_bwd(aa, bb, agy, 8, 3)
+    fails = fails + report("mul bwd dA", diff(gmu[0].data, load_floats(FIX_DIR + "g_mul_da.txt")), TOL)
+    fails = fails + report("mul bwd dB", diff(gmu[1].data, load_floats(FIX_DIR + "g_mul_db.txt")), TOL)
+
+    # ---- embedding voi chi so lap lai ----
+    W = t_new(load_floats(FIX_DIR + "g_emb_W.txt"), [6, 3])
+    idx = load_ints(FIX_DIR + "g_emb_idx.txt")
+    egy = t_new(load_floats(FIX_DIR + "g_emb_gy.txt"), [5, 3])
+    cases = cases + 1
+    fails = fails + report("embed bwd (index-add co lap)", diff(op_embed_bwd(W, idx, 3, egy).data, load_floats(FIX_DIR + "g_emb_gW.txt")), TOL)
+
+    print("=== GRAD cases=" + str(cases) + " fails=" + str(fails) + " ===")
+    return fails

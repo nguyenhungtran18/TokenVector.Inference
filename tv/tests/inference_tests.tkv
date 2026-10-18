@@ -207,12 +207,6 @@ def fill_const(a: 'list[f32]', v: 'f32') -> 'i32':
         a[i] = v
     return 0
 
-def gc_collect() -> 'i32':
-    return 0
-
-def gc_allocated_bytes() -> 'i64':
-    return 0
-
 def _const_graph(op: 'i64', shapes: 'list[list[i64]]', out_shape: 'list[i64]') -> 'ExecutionGraph':
     g = ExecutionGraph(1, "const_test", 0)
     names = []

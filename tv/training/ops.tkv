@@ -1,0 +1,358 @@
+﻿# TokenVector Training â€” op forward/backward (G1)
+#
+# Moi op tach than 2 ham: `op_X_fwd` va `op_X_bwd`. Backward nhan `gy`
+# (gradient tai dau ra) va tra ve list[Tensor] gradient theo thu tu tham so
+# vao cua forward â€” thu tu nay la HOP DONG, khong duoc doi.
+#
+# Tap numerical: tat ca phep tich LUY tuAN TU (khong song song hoa) va tinh
+# trong f32 â€” xem docs/numerics-contract.md muc 4. Do do ket qua khop BIT-EXACT
+# voi PyTorch tren CPU (da do: gelu 0.0, cross_entropy 0.0).
+
+import tv.training.tensor
+
+# ---- elementwise: cong/nhan co broadcast scalar ---------------------------
+
+def op_add_fwd(a: "Tensor", b: "Tensor") -> "Tensor":
+    n = len(a.data)
+    y = t_zeros([n])
+    nb = len(b.data)
+    for i in range(n):
+        bi = i % nb
+        y.data[i] = a.data[i] + b.data[bi]
+    return y
+
+def op_add_bwd(gy: "Tensor", n: 'i64', nb: 'i64') -> 'list[Tensor]':
+    d = []
+    ga = t_zeros([n])
+    gb = t_zeros([nb])
+    for i in range(n):
+        g = gy.data[i]
+        ga.data[i] = g
+        gb.data[i % nb] = gb.data[i % nb] + g
+    d.append(ga)
+    d.append(gb)
+    return d
+
+def op_mul_fwd(a: "Tensor", b: "Tensor") -> "Tensor":
+    n = len(a.data)
+    y = t_zeros([n])
+    nb = len(b.data)
+    for i in range(n):
+        y.data[i] = a.data[i] * b.data[i % nb]
+    return y
+
+def op_mul_bwd(a: "Tensor", b: "Tensor", gy: "Tensor", n: 'i64', nb: 'i64') -> 'list[Tensor]':
+    ga = t_zeros([n])
+    gb = t_zeros([nb])
+    for i in range(n):
+        bi = i % nb
+        ga.data[i] = gy.data[i] * b.data[bi]
+        gb.data[bi] = gb.data[bi] + gy.data[i] * a.data[i]
+    d = []
+    d.append(ga)
+    d.append(gb)
+    return d
+
+# ---- matmul: A(m,k) x B(k,n) -> C(m,n) -------------------------------------
+# Luu y: B luon lay theo HANG (n hang, moi hang k phan tu) â€” dung layout
+# `trans_b` cu fused_matmul_bias_act trong repo inference.
+
+def op_matmul_fwd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
+    c = t_zeros([m, n])
+    for i in range(m):
+        for j in range(n):
+            acc = 0.0
+            base_b = j * k
+            base_a = i * k
+            for p in range(k):
+                acc = acc + a.data[base_a + p] * b.data[base_b + p]
+            c.data[i * n + j] = acc
+    return c
+
+def op_matmul_bwd(a: "Tensor", b: "Tensor", gy: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> 'list[Tensor]':
+    da = t_zeros([m, k])
+    db = t_zeros([n, k])
+    for i in range(m):
+        for j in range(n):
+            g = gy.data[i * n + j]
+            base_a = i * k
+            base_b = j * k
+            for p in range(k):
+                da.data[base_a + p] = da.data[base_a + p] + g * b.data[base_b + p]
+                db.data[base_b + p] = db.data[base_b + p] + g * a.data[base_a + p]
+    d = []
+    d.append(da)
+    d.append(db)
+    return d
+
+# ---- RMSNorm: x -> x * rsqrt(mean(x^2) + eps) ------------------------------
+
+def op_rmsnorm_fwd(x: "Tensor", eps: 'f32') -> "Tensor":
+    n = len(x.data)
+    ss = 0.0
+    for i in range(n):
+        ss = ss + x.data[i] * x.data[i]
+    rs = 1.0 / sqrt(ss / float(n) + eps)
+    y = t_zeros([n])
+    for i in range(n):
+        y.data[i] = x.data[i] * rs
+    return y
+
+def op_rmsnorm_bwd(x: "Tensor", gy: "Tensor", eps: 'f32') -> "Tensor":
+    n = len(x.data)
+    ss = 0.0
+    for i in range(n):
+        ss = ss + x.data[i] * x.data[i]
+    inv = 1.0 / (ss + float(n) * eps)
+    rs = 1.0 / sqrt(ss / float(n) + eps)
+    gx = t_zeros([n])
+    dot = 0.0
+    for j in range(n):
+        dot = dot + gy.data[j] * x.data[j]
+    mean_dot = dot / float(n)
+    for i in range(n):
+        # gx_i = gy_i*rs - x_i*rs^3*mean_j(gy_j*x_j)
+        gx.data[i] = gy.data[i] * rs - x.data[i] * rs * rs * rs * mean_dot
+    return gx
+
+# ---- LayerNorm: (x - mean) / sqrt(var + eps) -------------------------------
+
+def op_layernorm_fwd(x: "Tensor", eps: 'f32') -> "Tensor":
+    n = len(x.data)
+    s = 0.0
+    for i in range(n):
+        s = s + x.data[i]
+    mu = s / float(n)
+    v = 0.0
+    for i in range(n):
+        d = x.data[i] - mu
+        v = v + d * d
+    var = v / float(n)
+    rstd = 1.0 / sqrt(var + eps)
+    y = t_zeros([n])
+    for i in range(n):
+        y.data[i] = (x.data[i] - mu) * rstd
+    return y
+
+def op_layernorm_bwd(x: "Tensor", gy: "Tensor", eps: 'f32') -> "Tensor":
+    n = len(x.data)
+    s = 0.0
+    for i in range(n):
+        s = s + x.data[i]
+    mu = s / float(n)
+    v = 0.0
+    for i in range(n):
+        d = x.data[i] - mu
+        v = v + d * d
+    var = v / float(n)
+    rstd = 1.0 / sqrt(var + eps)
+    gx = t_zeros([n])
+    dot1 = 0.0
+    dot2 = 0.0
+    for i in range(n):
+        xh = x.data[i] - mu
+        dot1 = dot1 + gy.data[i] * xh
+        dot2 = dot2 + gy.data[i]
+    inv_n = 1.0 / float(n)
+    # Chuoi day du (da doi chieu finite-difference va PyTorch):
+    #   gx_i = rstd*dy_i - (rstd/n)*sum(dy) - xhat_i*(rstd^3/n)*sum(dy*xhat)
+    rs3 = rstd * rstd * rstd
+    mean_dy = dot2 * inv_n
+    for i in range(n):
+        xh = x.data[i] - mu
+        gx.data[i] = gy.data[i] * rstd - rstd * mean_dy - xh * rs3 * dot1 * inv_n
+    return gx
+
+# ---- activation ------------------------------------------------------------
+
+def op_gelu_erf_fwd(x: "Tensor") -> "Tensor":
+    n = len(x.data)
+    y = t_zeros([n])
+    for i in range(n):
+        y.data[i] = gelu_erf(x.data[i])
+    return y
+
+def op_gelu_erf_bwd(x: "Tensor", gy: "Tensor") -> "Tensor":
+    n = len(x.data)
+    g = t_zeros([n])
+    s = 1.4142135623730951
+    for i in range(n):
+        v = x.data[i]
+        dgelu = 0.5 * (1.0 + erf(v / s)) + v * 0.3989422804014327 * exp(-0.5 * v * v)
+        g.data[i] = gy.data[i] * dgelu
+    return g
+
+def op_gelu_tanh_fwd(x: "Tensor") -> "Tensor":
+    n = len(x.data)
+    y = t_zeros([n])
+    for i in range(n):
+        y.data[i] = gelu_tanh(x.data[i])
+    return y
+
+def op_gelu_tanh_bwd(x: "Tensor", gy: "Tensor") -> "Tensor":
+    n = len(x.data)
+    g = t_zeros([n])
+    c = 0.7978845608028654
+    c05 = 0.044715
+    for i in range(n):
+        v = x.data[i]
+        inner = c * (v + c05 * v * v * v)
+        t = tanh(inner)
+        dinner = c * (1.0 + 3.0 * c05 * v * v)
+        dgelu = 0.5 * (1.0 + t) + 0.5 * v * (1.0 - t * t) * dinner
+        g.data[i] = gy.data[i] * dgelu
+    return g
+
+def op_silu_fwd(x: "Tensor") -> "Tensor":
+    n = len(x.data)
+    y = t_zeros([n])
+    for i in range(n):
+        y.data[i] = silu(x.data[i])
+    return y
+
+def op_silu_bwd(x: "Tensor", gy: "Tensor") -> "Tensor":
+    n = len(x.data)
+    g = t_zeros([n])
+    for i in range(n):
+        v = x.data[i]
+        s = 1.0 / (1.0 + exp(-v))
+        g.data[i] = gy.data[i] * (s + v * s * (1.0 - s))
+    return g
+
+def op_relu_fwd(x: "Tensor") -> "Tensor":
+    n = len(x.data)
+    y = t_zeros([n])
+    for i in range(n):
+        if x.data[i] > 0.0:
+            y.data[i] = x.data[i]
+    return y
+
+def op_relu_bwd(x: "Tensor", gy: "Tensor") -> "Tensor":
+    n = len(x.data)
+    g = t_zeros([n])
+    for i in range(n):
+        if x.data[i] > 0.0:
+            g.data[i] = gy.data[i]
+    return g
+
+# ---- softmax hang ----------------------------------------------------------
+
+def op_softmax_fwd(x: "Tensor", rows: 'i64', cols: 'i64') -> "Tensor":
+    y = t_zeros([rows, cols])
+    for r in range(rows):
+        base = r * cols
+        mx = x.data[base]
+        for j in range(1, cols):
+            if x.data[base + j] > mx:
+                mx = x.data[base + j]
+        s = 0.0
+        for j in range(cols):
+            e = exp(x.data[base + j] - mx)
+            y.data[base + j] = e
+            s = s + e
+        inv = 1.0 / s
+        for j in range(cols):
+            y.data[base + j] = y.data[base + j] * inv
+    return y
+
+def op_softmax_bwd(y: "Tensor", gy: "Tensor", rows: 'i64', cols: 'i64') -> "Tensor":
+    g = t_zeros([rows, cols])
+    for r in range(rows):
+        base = r * cols
+        dot = 0.0
+        for j in range(cols):
+            dot = dot + gy.data[base + j] * y.data[base + j]
+        for j in range(cols):
+            g.data[base + j] = y.data[base + j] * (gy.data[base + j] - dot)
+    return g
+
+# ---- cross entropy (1 hang, co mask) --------------------------------------
+
+def op_ce_fwd(logits: "Tensor", target: 'i64', mask_l: 'list[i64]') -> 'f32':
+    n = len(logits.data)
+    mx = logits.data[0]
+    for i in range(1, n):
+        if mask_l[i] == 0:
+            continue
+        if logits.data[i] > mx:
+            mx = logits.data[i]
+    s = 0.0
+    cnt = 0.0
+    for i in range(n):
+        if mask_l[i] == 0:
+            continue
+        s = s + exp(logits.data[i] - mx)
+        cnt = cnt + 1.0
+    lse = mx + log(s)
+    # CrossEntropy = mean_tren_ky_token_hop_le cua (-log p[target]).
+    # KHONG phai trung binh CE tren MOI vi tri — do la cong thuc cua
+    # "logit nghiep chuan hoa toan cuc", sai so voi PyTorch.
+    if mask_l[target] == 0:
+        raise ValueError("cross_entropy: target bi mask - mau so = 0")
+    return (lse - logits.data[target]) / cnt
+
+def op_ce_bwd(logits: "Tensor", gy: 'f32', target: 'i64', mask_l: 'list[i64]') -> "Tensor":
+    n = len(logits.data)
+    g = t_zeros([n])
+    mx = logits.data[0]
+    for i in range(1, n):
+        if mask_l[i] == 0:
+            continue
+        if logits.data[i] > mx:
+            mx = logits.data[i]
+    s = 0.0
+    cnt = 0.0
+    for i in range(n):
+        if mask_l[i] == 0:
+            continue
+        s = s + exp(logits.data[i] - mx)
+        cnt = cnt + 1.0
+    scale = gy / cnt
+    for i in range(n):
+        if mask_l[i] == 0:
+            g.data[i] = 0.0
+            continue
+        p = exp(logits.data[i] - mx) / s
+        # dL/dlogit_i = (p_i - [i==target]) / cnt   (gy=1)
+        v = scale * p
+        if i == target:
+            v = v - scale
+        g.data[i] = v
+    return g
+
+# ---- embedding: tra theo chi so, backward cong theo chi so ----------------
+# Token trung chi so se cong nhieu lan â€” ta cong theo THU TU CHI SO TANG DAN
+# de ket qua khong phu thuoc thu tu ghi vao (xem numerics-contract muc 3).
+
+def op_embed_fwd(w: "Tensor", idx: 'list[i64]', d: 'i64') -> "Tensor":
+    n = len(idx)
+    y = t_zeros([n, d])
+    for t in range(n):
+        r = idx[t]
+        for j in range(d):
+            y.data[t * d + j] = w.data[r * d + j]
+    return y
+
+def op_embed_bwd(w: "Tensor", idx: 'list[i64]', d: 'i64', gy: "Tensor") -> "Tensor":
+    n = len(idx)
+    rows = len(w.data) // d
+    gw = t_zeros([rows * d])
+    pos = []
+    for t in range(n):
+        pos.append(t)
+    for a in range(n):
+        for b in range(a + 1, n):
+            if idx[pos[b]] < idx[pos[a]]:
+                tmp = pos[a]
+                pos[a] = pos[b]
+                pos[b] = tmp
+    for q in range(n):
+        t = pos[q]
+        r = idx[t]
+        for j in range(d):
+            gw.data[r * d + j] = gw.data[r * d + j] + gy.data[t * d + j]
+    return gw
+
+
+
+

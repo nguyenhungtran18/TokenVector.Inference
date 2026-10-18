@@ -159,9 +159,6 @@ def argv() -> 'list[str]':
 def wait_forever() -> 'i32':
     return 0
 
-def now_us() -> 'i64':
-    return 0
-
 def _cli_file_read_all_bytes(path: 'str') -> 'str':
     return ""
 

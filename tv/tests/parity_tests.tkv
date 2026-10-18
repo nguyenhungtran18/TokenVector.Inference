@@ -1,0 +1,161 @@
+﻿import tv.numerics.tensor
+
+# ============================================================================
+#  PARITY TESTS â€” doi chieu thuat toan TokenVector voi PyTorch
+# ----------------------------------------------------------------------------
+#  G0-spike-2 (ROADMAP_TRAIN.md): chung minh duong "fixture -> .tkv -> so sanh"
+#  chay duoc TRUOC khi xay G1. Fixture sinh boi tools\gen_fixtures.py (PyTorch).
+#
+#  Dinh dang fixture (xem tools/gen_fixtures.py):
+#     dong 1: "# n=<so phan tu>  <mo ta>"
+#     dong 2: cac gia tri cach nhau 1 dau cach
+#
+#  Chay: tkvc tv\tests\parity_tests.tkv ra.exe main   (chay tu thu muc goc repo)
+# ============================================================================
+
+FIX_DIR = "tv/tests/fixtures/"
+
+# Nhay do tuy thuat toan, dung de BAO LOI chu KHONG phai do doc/chinh khac.
+# Tu gan, khong dung khi so sanh nghiem ngat.
+TOL_HARD = 1e-5
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> "list[f32]":
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        ln = lines[i]
+        if _is_comment(ln) == 1:
+            continue
+        toks = ln.split(" ")
+        for j in range(len(toks)):
+            t = toks[j]
+            if len(t) < 1:
+                continue
+            vals.append(float(t))
+    return vals
+
+def max_abs_diff(a: 'list[f32]', b: 'list[f32]') -> 'f32':
+    n = len(a)
+    if len(b) < n:
+        n = len(b)
+    m = 0.0
+    for i in range(n):
+        d = a[i] - b[i]
+        if d < 0.0:
+            d = -d
+        if d > m:
+            m = d
+    return m
+
+# ---- cac ham thuat toan can doi chieu ---------------------------------------
+
+def gelu_tanh(v: 'f32') -> 'f32':
+    # Bien the xap xi tanh (dung ben trong TokenVector hien tai).
+    c = 0.7978845608
+    return 0.5 * v * (1.0 + tanh(c * (v + 0.044715 * v * v * v)))
+
+def softmax_row(x: 'list[f32]') -> "list[f32]":
+    n = len(x)
+    y = []
+    for i in range(n):
+        y.append(0.0)
+    mx = x[0]
+    for i in range(1, n):
+        if x[i] > mx:
+            mx = x[i]
+    s = 0.0
+    for i in range(n):
+        e = exp(x[i] - mx)
+        y[i] = e
+        s = s + e
+    inv = 1.0 / s
+    for i in range(n):
+        y[i] = y[i] * inv
+    return y
+
+def rmsnorm(x: 'list[f32]', eps: 'f32') -> "list[f32]":
+    n = len(x)
+    ss = 0.0
+    for i in range(n):
+        ss = ss + x[i] * x[i]
+    rs = 1.0 / sqrt(ss / float(n) + eps)
+    y = []
+    for i in range(n):
+        y.append(x[i] * rs)
+    return y
+
+def cross_entropy(logits: 'list[f32]', target: 'i64') -> 'f32':
+    n = len(logits)
+    mx = logits[0]
+    for i in range(1, n):
+        if logits[i] > mx:
+            mx = logits[i]
+    s = 0.0
+    for i in range(n):
+        s = s + exp(logits[i] - mx)
+    lse = mx + log(s)
+    return lse - logits[target]
+
+# ---- bao cao ---------------------------------------------------------------
+
+def report(name: 'str', diff: 'f32', tol: 'f32') -> 'i32':
+    if diff <= tol:
+        print("  [PASS] " + name + "  max_abs_diff=" + str(diff) + "  tol=" + str(tol))
+        return 0
+    print("  [FAIL] " + name + "  max_abs_diff=" + str(diff) + "  tol=" + str(tol))
+    return 1
+
+def main() -> 'i32':
+    fails = 0
+    cases = 0
+    print("=== PARITY vs PyTorch (fixture: tv/tests/fixtures) ===")
+
+    # 1. GELU tanh-approx: phai khop PyTorch 'tanh'
+    gx = load_floats(FIX_DIR + "gelu_x.txt")
+    gt = load_floats(FIX_DIR + "gelu_y_tanh.txt")
+    mine_tanh = []
+    for i in range(len(gx)):
+        mine_tanh.append(gelu_tanh(gx[i]))
+    cases = cases + 1
+    fails = fails + report("gelu(approximate='tanh')", max_abs_diff(mine_tanh, gt), TOL_HARD)
+
+    # 2. GELU: ap dung bien the tanh len kieu PyTorch mac dinh ('none'/erf).
+    #    Day la CAI BAY duoc mo ta o ROADMAP_TRAIN.md muc 4: repo hien dung
+    #    tanh-approx nen lech ~1e-3 voi PyTorch mac dinh.
+    ge = load_floats(FIX_DIR + "gelu_y_erf.txt")
+    d_erf = max_abs_diff(mine_tanh, ge)
+    print("  [INFO] gelu tanh-approx vs PyTorch 'none'(erf): max_abs_diff=" + str(d_erf))
+    if d_erf > 0.001:
+        print("  [WARN] TokenVector hien CHUA co GELU erf chinh xac - lech nay la ky vong.")
+
+    # 3. Softmax hang
+    sx = load_floats(FIX_DIR + "softmax_row_x.txt")
+    sy = load_floats(FIX_DIR + "softmax_row_y.txt")
+    cases = cases + 1
+    fails = fails + report("softmax(dim=-1)", max_abs_diff(softmax_row(sx), sy), TOL_HARD)
+
+    # 4. RMSNorm (eps 1e-6)
+    rx = load_floats(FIX_DIR + "rmsnorm_x.txt")
+    ry = load_floats(FIX_DIR + "rmsnorm_y.txt")
+    cases = cases + 1
+    fails = fails + report("rmsnorm", max_abs_diff(rmsnorm(rx, 0.000001), ry), TOL_HARD)
+
+    # 5. Cross entropy (1 chuoi, reduction=mean -> bang chinh 1 mau)
+    cl = load_floats(FIX_DIR + "ce_logits.txt")
+    cy = load_floats(FIX_DIR + "ce_loss.txt")
+    my_ce = cross_entropy(cl, 2)
+    cases = cases + 1
+    fails = fails + report("cross_entropy", abs(my_ce - cy[0]), TOL_HARD)
+
+    print("=== cases=" + str(cases) + " fails=" + str(fails) + " ===")
+    return fails
+
+

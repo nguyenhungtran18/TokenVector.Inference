@@ -1,0 +1,56 @@
+# GPT-2 124M reference — G2 (ROADMAP_TRAIN.md)
+# ---------------------------------------------------
+# Kien truc chuan: HuggingFace `gpt2` (vocab 50257, hidden 768, 12 heads,
+# 12 blocks, max_pos 1024, weight tying LM head <-> embedding).
+#
+# LUU Y: `numerics-contract.md` da duyet: fp32, GELU erf, dropout=0 cho parity.
+# LUU Y: SIMT khong duoc bat cho parity (simd khong bit-exact). Kernel
+# registry chuyen backend='cpu' cho duong parity.
+# ---------------------------------------------------
+
+import tv.training.ops
+
+# ---- thong so GPT-2 chuan --------------------------------------------------
+VocabSize = 50257
+HiddenSize = 768
+NHeads = 12
+HeadDim = 64
+NLayers = 12
+MaxPos = 1024
+EPS = 1e-6
+
+# ---- Embedding (wte + wpe) + position -----------------------
+
+class EmbeddingWte:
+    _ok: 'i64'
+    wte: 'list[f32]'
+    wpe: 'list[f32]'
+    vocab: 'i64'
+    hidden: 'i64'
+    max_pos: 'i64'
+    d: 'i64'
+
+    def __init__(self, vocab: 'i64', hidden: 'i64', max_pos: 'i64'):
+        self.vocab = vocab
+        self.hidden = hidden
+        self.max_pos = max_pos
+        self.d = hidden
+        # init binh thuong; trong thuc te can init theo thu tu co dinh (normal(0,0.02))
+        # de parity; o G2 ta se dung weight init co dinh.
+        self.wte = []
+        self.wpe = []
+
+    def lookup(self, token_ids: 'list[i64]', d: 'i64') -> "Tensor":
+        n = len(token_ids)
+        t = t_new(x)  # placeholder for embedding lookup
+        # Trong G2: lookup tra ve Tensor co `data` dai `n*d`, moi hang la
+        # vecto hidden tu vong trong `wte` theo token_ids.
+        # Backward: index-add voi chi so (da co `op_embed_bwd`).
+        return t
+
+# ---- Norm layer (LayerNorm/RMSNorm) dung lai op core -------------------
+
+def _norm_zeros_like(t: "Tensor") -> "Tensor":
+    # Khoi tao zero cung kich thuoc
+    # (dung cho gradient buffer, loss seed, etc.)
+    return tv.training.ops.t_zeros(t)

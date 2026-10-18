@@ -1,4 +1,4 @@
-# Chay tung test case trong MOT process rieng.
+﻿# Chay tung test case trong MOT process rieng.
 #
 # LY DO (2026-09-26): co case nem AccessViolationException. TokenVector
 # KHONG bat duoc loai nay bang 'except Exception' (chi bat duoc Exception),
@@ -97,3 +97,78 @@ if ($gapOut -match "gap tests: PASS") {
     Write-Host ($gapOut -replace "\s+", " ").Trim()
     exit 1
 }
+
+# [4/4] parity_tests: doi chieu thuat toan voi PyTorch bang fixture tinh san.
+# Fixture sinh boi tools\gen_fixtures.py (chay tren may co torch), check-in san
+# vao tv\tests\fixtures\ nen test khong can torch. Xem ROADMAP_TRAIN.md muc 5.
+$parSrc = Join-Path $root "tv\tests\parity_tests.tkv"
+$parExe = Join-Path $WorkDir "parity_cases.exe"
+Write-Host ""
+Write-Host "[4/4] Bien dich + chay parity_tests (doi chieu PyTorch) ..."
+& $Compiler $parSrc $parExe | Out-Null
+if (-not (Test-Path -LiteralPath $parExe)) {
+    Write-Host "LOI: bien dich parity_tests that bai."
+    exit 1
+}
+$parOut = (& $parExe 2>&1 | Out-String)
+Write-Host ($parOut -replace "\s+", " ").Trim()
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "parity tests: FAIL"
+    exit 1
+}
+
+# [5/5] grad_tests: doi chieu BACKWARD tung op voi PyTorch autograd (fixture
+# tinh san). Xem ROADMAP_TRAIN.md G1.
+$grSrc = Join-Path $root "tv\tests\grad_tests.tkv"
+$grExe = Join-Path $WorkDir "grad_cases.exe"
+Write-Host ""
+Write-Host "[5/5] Bien dich + chay grad_tests (gradient vs PyTorch) ..."
+& $Compiler $grSrc $grExe | Out-Null
+if (-not (Test-Path -LiteralPath $grExe)) {
+    Write-Host "LOI: bien dich grad_tests that bai."
+    exit 1
+}
+$grOut = (& $grExe 2>&1 | Out-String)
+Write-Host ($grOut -replace "\s+", " ").Trim()
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "grad tests: FAIL"
+    exit 1
+}
+
+# [6/6] tape_tests: backward TONG HOP qua chuoi op nhieu tang.
+$tpSrc = Join-Path $root "tv\tests\tape_tests.tkv"
+$tpExe = Join-Path $WorkDir "tape_cases.exe"
+Write-Host ""
+Write-Host "[6/6] Bien dich + chay tape_tests (backward tong hop) ..."
+& $Compiler $tpSrc $tpExe | Out-Null
+if (-not (Test-Path -LiteralPath $tpExe)) {
+    Write-Host "LOI: bien dich tape_tests that bai."
+    exit 1
+}
+$tpOut = (& $tpExe 2>&1 | Out-String)
+Write-Host ($tpOut -replace "\s+", " ").Trim()
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "tape tests: FAIL"
+    exit 1
+}
+
+# [7/7] gc_tests: gradcheck bang SAI PHAY — kiem chung backward doc lap
+# voi PyTorch (so voi dao phan cua chinh ham forward).
+$gcSrc = Join-Path $root "tv\tests\gc_tests.tkv"
+$gcExe = Join-Path $WorkDir "gc_cases.exe"
+Write-Host ""
+Write-Host "[7/7] Bien dich + chay gc_tests (gradcheck sai phay) ..."
+& $Compiler $gcSrc $gcExe | Out-Null
+if (-not (Test-Path -LiteralPath $gcExe)) {
+    Write-Host "LOI: bien dich gc_tests that bai."
+    exit 1
+}
+$gcOut = (& $gcExe 2>&1 | Out-String)
+Write-Host ($gcOut -replace "\s+", " ").Trim()
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "gc tests: FAIL"
+    exit 1
+}
+
+
+
