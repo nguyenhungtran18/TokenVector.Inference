@@ -1,0 +1,250 @@
+# G3 data pipeline - packing chuoi dai T + shard reader (ROADMAP_TRAIN G3).
+#
+# Spec chot 2026-10-18 (reference impl: tools\gen_pack_fixture.py - chay
+# cung thuat toan, cung hang so, doi xung tung buoc):
+#  - Packing: concat cac doc theo thu tu; moi doc ket thuc bang eos_id
+#    (eos THUOC doc dang ket thuc); cat thanh chunk T cu phay;
+#    chunk cuoi KHONG duoc day -> BO (khong pad, khong lech thu tu).
+#  - Mask: causal (j<=i) va block-diagonal theo doc id
+#    (j<=i va doc[j]==doc[i]) - trainer G4 chon kieu mask.
+#    Mask tra ve FLAT row-major: m[i*t + j].
+#  - Shard: text file, moi dong so token cach dau cach; stream = shard
+#    xep theo order(seed); sample = seq_len token tiep tuyen qua ranh
+#    shard; chunk cuoi khong day bi BO. Prefetch = doc truoc shard
+#    tiep theo vao nxt (double buffer).
+#  - RNG chi dinh (LGC 31-bit, KHONG tran i64 checked):
+#        state' = (state * 1103515245 + 12345) % 2^31
+#    Fisher-Yates: i = n-1..1: j = state' % (i+1); swap(xs[i], xs[j]).
+#    -> cung seed -> cung thu tu mau -> cung checksum (gate G3).
+#
+# BUG COMPILER 2026-10-18 (workaround toan file, xem HANDOFF 5.7):
+#   1) `list[list[i64]]` qua function RETURN hoac class FIELD boundary bi
+#      type-confusion: noi dung thanh rác (dia chi stack) hoac crash
+#      ArrayTypeMismatchException. Cung code, nested locals thi DUNG.
+#   2) Trong pack_sequences ban dau, list PHANG thu 2 (`flatd = []`) duoc
+#      cap backing i32[] (doc dung, doc i64 thi rác: 4294967297 = 1|1<<32);
+#      copy qua field list[i64] -> rác. Chua khoanh duoc co che — workaround:
+#      moi function chi MOT list phang, return truc tiep.
+#   -> Moi boundary chi qua list[i64] PHANG; pack luu interleaved pairs
+#      (token, docid); mask tra ve flat row-major.
+
+def rng_step(state: 'i64') -> 'i64':
+    return (state * 1103515245 + 12345) % 2147483648
+
+def shard_order(n: 'i64', seed: 'i64') -> 'list[i64]':
+    state = seed % 2147483648
+    xs = []
+    for i in range(n):
+        xs.append(i)
+    i = n - 1
+    while i > 0:
+        state = rng_step(state)
+        j = state % (i + 1)
+        tmp = xs[i]
+        xs[i] = xs[j]
+        xs[j] = tmp
+        i = i - 1
+    return xs
+
+def checksum(xs: 'list[i64]') -> 'i64':
+    # h = (h*31 + x) mod 2^31 - tran i64, phu thuoc toan bo chuoi
+    h = 0
+    for x in xs:
+        h = (h * 31 + x) % 2147483648
+    return h
+
+def pack_sequences(docs: 'list[list[i64]]', seq_len: 'i64', eos_id: 'i64') -> 'list[i64]':
+    # Tra ve 1 list PHANG interleaved pairs (token, docid):
+    #   pk[2*p] = token cua pair p, pk[2*p+1] = doc id cua pair p.
+    # Cat het duong: so pair su dung = boi cua seq_len (tail bi BO).
+    # Moi function chi MOT list phang + return truc tiep (workaround
+    # bug compiler, xem header + pk_n_chunks/pk_seq_at/pk_docs_at).
+    pk = []
+    for k in range(len(docs)):
+        d = docs[k]
+        for ti in range(len(d)):
+            pk.append(d[ti])
+            pk.append(k)
+        pk.append(eos_id)
+        pk.append(k)
+    n_use = len(pk) - len(pk) % (2 * seq_len)
+    if n_use < len(pk):
+        pk2 = []
+        for i in range(n_use):
+            pk2.append(pk[i])
+        return pk2
+    return pk
+
+def pk_n_chunks(pk: 'list[i64]', seq_len: 'i64') -> 'i64':
+    n = 0
+    i = 0
+    while i + 2 * seq_len <= len(pk):
+        n = n + 1
+        i = i + 2 * seq_len
+    return n
+
+def pk_seq_at(pk: 'list[i64]', ci: 'i64', seq_len: 'i64') -> 'list[i64]':
+    out = []
+    b = ci * 2 * seq_len
+    for j in range(seq_len):
+        out.append(pk[b + 2 * j])
+    return out
+
+def pk_docs_at(pk: 'list[i64]', ci: 'i64', seq_len: 'i64') -> 'list[i64]':
+    out = []
+    b = ci * 2 * seq_len
+    for j in range(seq_len):
+        out.append(pk[b + 2 * j + 1])
+    return out
+
+def causal_mask(t: 'i64') -> 'list[i64]':
+    # flat row-major: m[i*t + j] = (j <= i)
+    m = []
+    for i in range(t):
+        for j in range(t):
+            if j <= i:
+                m.append(1)
+            else:
+                m.append(0)
+    return m
+
+def block_causal_mask(doc_ids: 'list[i64]') -> 'list[i64]':
+    # flat row-major: m[i*t + j] = (j <= i va doc_ids[j] == doc_ids[i])
+    t = len(doc_ids)
+    m = []
+    for i in range(t):
+        di = doc_ids[i]
+        for j in range(t):
+            ok = 0
+            if j <= i:
+                if doc_ids[j] == di:
+                    ok = 1
+            m.append(ok)
+    return m
+
+def _padded3(i: 'i64') -> 'str':
+    s = str(i)
+    if i < 10:
+        s = "00" + s
+    elif i < 100:
+        s = "0" + s
+    return s
+
+def shard_path(dir: 'str', prefix: 'str', idx: 'i64') -> 'str':
+    return dir + "/" + prefix + "_" + _padded3(idx) + ".txt"
+
+def shard_write(dir: 'str', prefix: 'str', tokens: 'list[i64]', shard_size: 'i64') -> 'i64':
+    # ghi token thanh cac shard text; tra ve so shard da ghi
+    os_mkdir(dir)
+    n = len(tokens)
+    idx = 0
+    start = 0
+    while start < n:
+        stop = start + shard_size
+        if stop > n:
+            stop = n
+        parts = []
+        k = start
+        while k < stop:
+            parts.append(str(tokens[k]))
+            k = k + 1
+        sp = " "
+        txt = sp.join(parts) + "\n"
+        _wr = path_write_text(shard_path(dir, prefix, idx), txt)
+        idx = idx + 1
+        start = stop
+    return idx
+
+def shard_read(dir: 'str', prefix: 'str', idx: 'i64') -> 'list[i64]':
+    out = []
+    txt = path_read_text(shard_path(dir, prefix, idx))
+    if len(txt) == 0:
+        return out
+    lines = txt.split("\n")
+    for li in range(len(lines)):
+        ln = lines[li]
+        if len(ln) > 0:
+            toks = ln.split(" ")
+            for ti in range(len(toks)):
+                tk = toks[ti]
+                if len(tk) > 0:
+                    v = 0
+                    for ci in range(len(tk)):
+                        d = ord(tk[ci]) - 48
+                        v = v * 10 + d
+                    out.append(v)
+    return out
+
+class ShardStream:
+    dir: 'str'
+    prefix: 'str'
+    n_shards: 'i64'
+    order: 'list[i64]'
+    pos: 'i64'
+    cur: 'i64'
+    buf: 'list[i64]'
+    nxt: 'list[i64]'
+    finished: 'i64'
+
+    def __init__(self):
+        self.dir = ""
+        self.prefix = ""
+        self.n_shards = 0
+        self.order = []
+        self.pos = 0
+        self.cur = 0
+        self.buf = []
+        self.nxt = []
+        self.finished = 0
+
+    def next_seq(self, seq_len: 'i64') -> 'list[i64]':
+        # lay tiep tuyen seq_len token dau tien tu vi tri hien tai; qua ranh
+        # shard -> tiep noi; het du lieu hoac con thieu -> tra [] (bo duong cuoi)
+        out = []
+        while len(out) < seq_len and self.finished == 0:
+            room = len(self.buf) - self.cur
+            take = seq_len - len(out)
+            if take > room:
+                take = room
+            k = 0
+            while k < take:
+                _v = self.buf[self.cur + k]
+                out.append(_v)
+                k = k + 1
+            self.cur = self.cur + take
+            if self.cur >= len(self.buf):
+                self.pos = self.pos + 1
+                if self.pos >= self.n_shards:
+                    self.finished = 1
+                else:
+                    self.buf = self.nxt
+                    self.cur = 0
+                    if self.pos + 1 < self.n_shards:
+                        _nx = shard_read(self.dir, self.prefix, self.order[self.pos + 1])
+                        self.nxt = _nx
+                    else:
+                        self.nxt = []
+        if len(out) < seq_len:
+            return []
+        return out
+
+def shard_stream_create(dir: 'str', prefix: 'str', n_shards: 'i64', seed: 'i64') -> "ShardStream":
+    s = ShardStream()
+    s.dir = dir
+    s.prefix = prefix
+    s.n_shards = n_shards
+    s.order = shard_order(n_shards, seed)
+    s.pos = 0
+    s.cur = 0
+    if n_shards <= 0:
+        s.finished = 1
+        return s
+    s.finished = 0
+    _b0 = shard_read(dir, prefix, s.order[0])
+    s.buf = _b0
+    if n_shards > 1:
+        _n1 = shard_read(dir, prefix, s.order[1])
+        s.nxt = _n1
+    else:
+        s.nxt = []
+    return s

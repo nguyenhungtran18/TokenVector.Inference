@@ -1,0 +1,274 @@
+import tv.data.dataset
+
+# ============================================================================
+#  G3 PACKING + SHARD TESTS (ROADMAP_TRAIN G3).
+#  ----------------------------------------------------------------------------
+#  Fixture: tools\gen_pack_fixture.py — implementation tham chieu Python
+#  (cung thuat toan, cung hang so voi tv/data/dataset.tkv): packing T cu
+#  phay + eos, mask causal/block, shard text, LGC 31-bit Fisher-Yates.
+#
+#  Gate ROADMAP: cung seed -> cung thu tu mau, cung checksum.
+#
+#  Chay: tkvc tv\tests\pack_tests.tkv ra.exe main  (tu goc repo)
+# ============================================================================
+
+FIX = "tv/tests/fixtures/pack_cases.txt"
+TMP = "tv/tests/_tmp_pack_out"
+PREFIX = "pk"
+
+def _i64(t: 'str') -> 'i64':
+    v = 0
+    for k in range(len(t)):
+        d = ord(t[k]) - 48
+        v = v * 10 + d
+    return v
+
+def _ints(ln: 'str') -> 'list[i64]':
+    out = []
+    toks = ln.split(" ")
+    for j in range(len(toks)):
+        t = toks[j]
+        if len(t) > 0:
+            out.append(_i64(t))
+    return out
+
+def _sec_lines(lines: 'list[str]', name: 'str') -> 'list[str]':
+    out = []
+    on = 0
+    for i in range(len(lines)):
+        ln = lines[i]
+        if len(ln) >= 5 and ln[0:5] == "#sec ":
+            nm = ln[5:]
+            if nm == name:
+                on = 1
+            else:
+                on = 0
+        elif on == 1:
+            out.append(ln)
+    return out
+
+def _sec_first(lines: 'list[str]', name: 'str') -> 'str':
+    xs = _sec_lines(lines, name)
+    if len(xs) > 0:
+        _f = xs[0]
+        return _f
+    return ""
+
+def _kv(line: 'str', key: 'str') -> 'i64':
+    parts = line.split(" ")
+    for i in range(len(parts)):
+        p = parts[i]
+        kv = p.split("=")
+        if len(kv) == 2:
+            _n = kv[0]
+            if _n == key:
+                _v = kv[1]
+                return _i64(_v)
+    return -1
+
+def _eq_ints(a: 'list[i64]', b: 'list[i64]') -> 'i32':
+    if len(a) != len(b):
+        return 0
+    for i in range(len(a)):
+        _x = a[i]
+        _y = b[i]
+        if _x != _y:
+            return 0
+    return 1
+
+def main() -> 'i32':
+    fails = 0
+    print("=== G3: packing + shard reader ===")
+    t0 = now_ms()
+
+    txt = read_file(FIX)
+    lines = txt.split("\n")
+
+    # --- params ------------------------------------------------------------
+    pl = _sec_lines(lines, "params")
+    _p0 = pl[0]
+    seq_len = _kv(_p0, "seq_len")
+    eos = _kv(_p0, "eos")
+    shard_size = _kv(_p0, "shard_size")
+    n_shards = _kv(_p0, "n_shards")
+    seed_a = _kv(_p0, "seed_a")
+    seed_b = _kv(_p0, "seed_b")
+    s_sample_len = _kv(_p0, "sample_seq_len")
+
+    dl = _sec_lines(lines, "docs")
+    docs = []
+    for i in range(len(dl)):
+        _dln = dl[i]
+        docs.append(_ints(_dln))
+
+    # --- [1] packing: seqs + doc_ids tung phan khop reference ---------------
+    pk = pack_sequences(docs, seq_len, eos)
+    es = _sec_lines(lines, "pack_seqs")
+    ed = _sec_lines(lines, "pack_docids")
+    ok = 1
+    if pk_n_chunks(pk, seq_len) != len(es) or pk_n_chunks(pk, seq_len) != len(ed):
+        ok = 0
+    if ok == 1:
+        for i in range(len(es)):
+            _row = pk_seq_at(pk, i, seq_len)
+            _erow = _ints(es[i])
+            if _eq_ints(_row, _erow) == 0:
+                ok = 0
+            _drow = pk_docs_at(pk, i, seq_len)
+            _edrow = _ints(ed[i])
+            if _eq_ints(_drow, _edrow) == 0:
+                ok = 0
+    if ok == 1:
+        print("  [PASS] pack " + str(pk_n_chunks(pk, seq_len)) + " seqs x " + str(seq_len))
+    else:
+        print("  [FAIL] pack")
+        fails = fails + 1
+
+    # --- [2] masks: block-diagonal seq0 + causal 4x4 (flat row-major) ------
+    ok2 = 1
+    _d0 = pk_docs_at(pk, 0, seq_len)
+    t0 = len(_d0)
+    mb = block_causal_mask(_d0)
+    mrows = _sec_lines(lines, "mask_block_seq0")
+    if len(mb) != t0 * t0 or len(mrows) != t0:
+        ok2 = 0
+    else:
+        for i in range(t0):
+            _er = _ints(mrows[i])
+            for j in range(t0):
+                if mb[i * t0 + j] != _er[j]:
+                    ok2 = 0
+    m4 = causal_mask(4)
+    c4 = _sec_lines(lines, "mask_causal_4")
+    if len(m4) != 16 or len(c4) != 4:
+        ok2 = 0
+    else:
+        for i in range(4):
+            _er = _ints(c4[i])
+            for j in range(4):
+                if m4[i * 4 + j] != _er[j]:
+                    ok2 = 0
+    if ok2 == 1:
+        print("  [PASS] masks (block_seq0 " + str(t0) + "x" + str(t0) + " + causal4)")
+    else:
+        print("  [FAIL] masks")
+        fails = fails + 1
+
+    # --- [3] shard write + read roundtrip -----------------------------------
+    # chi lay phan duong cac chunk (tail cuoi khong day bi BO - dung spec)
+    flat = []
+    _np = 0
+    while _np + 2 * seq_len <= len(pk):
+        flat.append(pk[_np])
+        _np = _np + 2 * seq_len
+    nw = shard_write(TMP, PREFIX, flat, shard_size)
+    ok3 = 1
+    if nw != n_shards:
+        print("  [FAIL] shard_write n=" + str(nw) + " want=" + str(n_shards))
+        ok3 = 0
+    si = 0
+    while si < n_shards and ok3 == 1:
+        got = shard_read(TMP, PREFIX, si)
+        want = []
+        k = si * shard_size
+        stop = k + shard_size
+        if stop > len(flat):
+            stop = len(flat)
+        while k < stop:
+            _v = flat[k]
+            want.append(_v)
+            k = k + 1
+        if _eq_ints(got, want) == 0:
+            ok3 = 0
+        si = si + 1
+    if ok3 == 1:
+        print("  [PASS] shard write/read " + str(nw) + " shards, " + str(len(flat)) + " tokens")
+    else:
+        print("  [FAIL] shard roundtrip")
+        fails = fails + 1
+
+    # --- [4] stream seed42: mau dau + toan bo checksum khop reference -------
+    s1 = shard_stream_create(TMP, PREFIX, n_shards, seed_a)
+    got_samples = []
+    while 1 == 1:
+        s = s1.next_seq(s_sample_len)
+        if len(s) == 0:
+            break
+        got_samples.append(s)
+    ok4 = 1
+    f42 = _sec_lines(lines, "stream_samples_seed42")
+    if len(f42) > len(got_samples):
+        ok4 = 0
+    else:
+        for i in range(len(f42)):
+            _g = got_samples[i]
+            _e = _ints(f42[i])
+            if _eq_ints(_g, _e) == 0:
+                ok4 = 0
+    sflat = []
+    for i in range(len(got_samples)):
+        _r = got_samples[i]
+        for t in _r:
+            sflat.append(t)
+    cs = checksum(sflat)
+    fcs = _sec_lines(lines, "stream_checksum_seed42")
+    _fcs0 = fcs[0]
+    want_cs = _i64(_fcs0)
+    if cs != want_cs:
+        ok4 = 0
+    if ok4 == 1:
+        print("  [PASS] stream seed42: " + str(len(got_samples)) + " samples, checksum " + str(cs))
+    else:
+        print("  [FAIL] stream seed42 cs=" + str(cs) + " want=" + str(want_cs))
+        fails = fails + 1
+
+    # --- [5] determinism gate (ROADMAP G3) ----------------------------------
+    ok5 = 1
+    o42 = shard_order(n_shards, seed_a)
+    o43 = shard_order(n_shards, seed_b)
+    _fo42l = _sec_first(lines, "order_seed42")
+    fo42 = _ints(_fo42l)
+    _fo43l = _sec_first(lines, "order_seed43")
+    fo43 = _ints(_fo43l)
+    if _eq_ints(o42, fo42) == 0:
+        ok5 = 0
+    if _eq_ints(o43, fo43) == 0:
+        ok5 = 0
+    if _eq_ints(o42, o43) == 1:
+        ok5 = 0
+    # stream thu 2 cung seed -> cung checksum
+    s2 = shard_stream_create(TMP, PREFIX, n_shards, seed_a)
+    sflat2 = []
+    while 1 == 1:
+        s = s2.next_seq(s_sample_len)
+        if len(s) == 0:
+            break
+        for t in s:
+            sflat2.append(t)
+    if checksum(sflat2) != cs:
+        ok5 = 0
+    # stream seed43: checksum khop reference VA khac seed42
+    s3 = shard_stream_create(TMP, PREFIX, n_shards, seed_b)
+    sflat3 = []
+    while 1 == 1:
+        s = s3.next_seq(s_sample_len)
+        if len(s) == 0:
+            break
+        for t in s:
+            sflat3.append(t)
+    cs3 = checksum(sflat3)
+    _fcs43l = _sec_first(lines, "stream_checksum_seed43")
+    fcs43 = _ints(_fcs43l)
+    if _eq_ints([cs3], fcs43) == 0:
+        ok5 = 0
+    if cs3 == cs:
+        ok5 = 0
+    if ok5 == 1:
+        print("  [PASS] determinism: cung seed -> cung checksum; seed 42/43 khac thu tu")
+    else:
+        print("  [FAIL] determinism (o42/43 khop? cs3=" + str(cs3) + ")")
+        fails = fails + 1
+
+    dt = now_ms() - t0
+    print("=== G3 pack cases=" + str(5) + " fails=" + str(fails) + " (" + str(dt) + " ms) ===")
+    return fails
