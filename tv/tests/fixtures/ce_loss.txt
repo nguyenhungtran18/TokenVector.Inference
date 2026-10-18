@@ -1,0 +1,2 @@
+# n=1  F.cross_entropy(reduction='mean')
+3.01845145

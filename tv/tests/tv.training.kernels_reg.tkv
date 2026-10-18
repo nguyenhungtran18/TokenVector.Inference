@@ -1,0 +1,53 @@
+# Kernel Registry — backend-agnostic (G1.5, ROADMAP_TRAIN.md)
+#
+# Moi op dang ky ten -> backend (mac dinh: 'cpu'). Khi chuyen sang GPU
+# (G6 hoac test Colab), chi can doi `backend` trong `default_reg` ma
+# KHONG can sua bat ky op_fwd/op_bwd nao.
+#
+# Danh sach op hien tai duoc dang ky (tu tv/training/ops.tkv):
+#   matmul, rmsnorm, layernorm, gelu_erf, gelu_tanh, silu, relu,
+#   softmax, cross_entropy, embed, add, mul
+#
+# Quy tac: registry phai duoc doc tai build time; moi lan chay `run_cases`
+# va `grad_tests` phai giu backend = 'cpu' de dam bao bit-exact parity.
+
+class KernelReg:
+    _ok: 'i64'
+    backend: 'str'
+    ops: 'dict[str,str]'
+
+    def __init__(self, backend: 'str'):
+        self.backend = backend
+        self.ops = {}
+
+    def register(self, op: 'str', kernel: 'str') -> 'i32':
+        self.ops[op] = kernel
+        return 0
+
+    def get(self, op: 'str') -> 'str':
+        if op not in self.ops:
+            raise ValueError("op '%s' not registered (backend=%s)" % (op, self.backend))
+        return self.ops[op]
+
+def default_reg() -> "KernelReg":
+    # CPU default: dung ten kernel trong tv/runtime/hal.tkv / tv/optimization/kernels.tkv
+    r = KernelReg("cpu")
+    r.register("matmul", "hal_matmul")
+    r.register("relu", "hal_relu")
+    r.register("softmax_rows", "hal_softmax_rows")
+    r.register("add", "simd_add")
+    r.register("sub", "simd_sub")
+    r.register("mul", "simd_mul")
+    r.register("scale", "simd_scale")
+    r.register("axpy", "simd_axpy")
+    r.register("gemm", "simd_gemm")
+    r.register("dot", "simd_dot")
+    r.register("sum", "simd_sum")
+    r.register("max", "simd_max")
+    r.register("min", "simd_min")
+    return r
+
+def backend_from_env() -> 'str':
+    # De mo rong: neu co bien moi truong `TKV_BACKEND=simd` hoac `TKV_BACKEND=gpu_cuda`
+    # thi doc. Hien chua co, mac dinh la `cpu`.
+    return "cpu"

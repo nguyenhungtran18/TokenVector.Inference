@@ -1,0 +1,2 @@
+# n=1  cross_entropy mean
+4.93894339

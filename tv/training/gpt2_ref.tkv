@@ -1,93 +1,488 @@
-# GPT-2 124M reference — G2 (ROADMAP_TRAIN.md)
+﻿# GPT-2 reference — G2 (ROADMAP_TRAIN.md)
 # ---------------------------------------------------
-# Kien truc chuan: HuggingFace `gpt2` (vocab 50257, hidden 768, 12 heads,
-# 12 blocks, max_pos 1024, weight tying LM head <-> embedding).
+# Kien truc GIONG HF `gpt2`, thu nho de chung minh thuat toan:
+#   vocab 256, n_embd 64, n_head 4, n_layer 2, max_pos 32
 #
-# LUU Y: `numerics-contract.md` da duyet: fp32, GELU erf, dropout=0 cho parity.
-# LUU Y: SIMT khong duoc bat cho parity (simd khong bit-exact). Kernel
-# registry chuyen backend='cpu' cho duong parity.
+# Moi block: ln -> attn(QKV + causal mask + softmax) -> residual
+#            -> ln -> mlp(linear -> gelu erf -> linear) -> residual
+# Sau block: ln_f -> LM head TIE weight voi wte
+#
+# LUU Y (numerics-contract.md da duyet):
+#   - fp32, GELU erf, dropout = 0 (parity ban dau)
+#   - HF dung Conv1D: weight [in, out] (nguoc chieu Linear)
+#   - scale attention = 1/sqrt(head_dim), KHONG scale theo tang
+#   - softmax attention tinh o fp32
+#   - LayerNorm theo MOI ROW (dim = -1), co gain/bias; op core
+#     op_layernorm_fwd chi normalize KHONG co g/b nen phai dung
+#     gpt2_layernorm rieng duoi day.
+#   - QKV layout cua HF: cot [0,h) = Q, [h,2h) = K, [2h,3h) = V;
+#     ben trong moi chuong la cac head lien tiep (head*HeadDim).
+#
+# Cac op deu goi ten PHANG (import da nhap vao pham vi).
+# `t.shape[0]` phai qua bien trung gian (quirk cua TokenVector).
 # ---------------------------------------------------
 
 import tv.training.ops
 
-# ---- thong so GPT-2 chuan --------------------------------------------------
-VocabSize = 50257
-HiddenSize = 768
-NHeads = 12
-HeadDim = 64
-NLayers = 12
-MaxPos = 1024
+# ---- thong so (khop fixture g2_*) -----------------------------------------
+VocabSize = 256
+HiddenSize = 64
+NHeads = 4
+HeadDim = 16
+NLayers = 2
+MaxPos = 32
 EPS = 1e-6
 
-# ---- Embedding (wte + wpe) + position -----------------------
+# ---- helpers --------------------------------------------------------------
+def _sh0(t: "Tensor") -> 'i64':
+    s = t.shape
+    return s[0]
 
-class EmbeddingWte:
-    _ok: 'i64'
-    wte: 'list[f32]'
-    wpe: 'list[f32]'
-    vocab: 'i64'
-    hidden: 'i64'
-    max_pos: 'i64'
-    d: 'i64'
+def _sh1(t: "Tensor") -> 'i64':
+    s = t.shape
+    return s[1]
 
-    def __init__(self, vocab: 'i64', hidden: 'i64', max_pos: 'i64'):
-        self.vocab = vocab
-        self.hidden = hidden
-        self.max_pos = max_pos
-        self.d = hidden
-        # init binh thuong; trong thuc te can init theo thu tu co dinh (normal(0,0.02))
-        # de parity; o G2 ta se dung weight init co dinh.
-        self.wte = []
-        self.wpe = []
+def _zeros2(n: 'i64', d: 'i64') -> "Tensor":
+    return t_zeros([n, d])
 
-    def lookup(self, token_ids: 'list[i64]', d: 'i64') -> "Tensor":
-        # G2: lookup su dung `op_embed_fwd` (index-add co sap xep chi so).
-        # KET QUA: Tensor co `data` dai `len(token_ids)*self.hidden`.
-        wt = tv.training.ops.t_new(self.wte, [self.vocab, self.hidden], 0)
-        out = tv.training.ops.op_embed_fwd(wt, token_ids, self.hidden)
-        out = Tensor(out.data, [len(token_ids), d], 0)
-        return out
-
-# ---- Block skeleton: Norm -> Attention -> Residual -> MLP -> Residual ----
-
-def gpt2_block_skeleton(x: "Tensor", w_attn: "Tensor", w_mlp: "Tensor",
-                         b_attn: "Tensor", b_mlp: "Tensor",
-                         mask: 'list[i64]', target: 'i64') -> 'f32':
-    # G2 skeleton: chung minh 6-tang op chain chay qua block tong quat
-    # (norm -> attention -> add -> norm -> mlp -> ce).
-    # Hien chi tra ve 0 de bien dich, chua tinh that. G2 se hoan thien.
-    return 0.0
-
-# ---- Attention MHA (manual) ---------------------------------------------
-
-def gpt2_attn_skeleton(x: "Tensor", w_attn: "Tensor", b_attn: "Tensor",
-                       mask: 'list[i64]', heads: 'i64', d_head: 'i64') -> "Tensor":
-    # G2: MHA su dung matmul/softmax/mask. Chi tra ve Tensor zero cung
-    # kich thuoc dau ra (n, hidden) de bi dich; tinh that de sau.
-    n = x.shape[0]
-    hidden = x.shape[1]
-    out = tv.training.ops.t_zeros([n, hidden])
+# ---- LayerNorm theo row, co gain/bias (giong nn.LayerNorm cua HF) ---------
+def gpt2_layernorm(x: "Tensor", g: "Tensor", b: "Tensor") -> "Tensor":
+    n = _sh0(x)
+    h = _sh1(x)
+    out = t_zeros([n, h])
+    for i in range(n):
+        base = i * h
+        mu = 0.0
+        for j in range(h):
+            mu = mu + x.data[base + j]
+        mu = mu / float(h)
+        v = 0.0
+        for j in range(h):
+            d = x.data[base + j] - mu
+            v = v + d * d
+        v = v / float(h)
+        rstd = 1.0 / sqrt(v + EPS)
+        for j in range(h):
+            out.data[base + j] = (x.data[base + j] - mu) * rstd * g.data[j] + b.data[j]
     return out
 
-# ---- MLP skeleton (norm -> linear -> GELU -> linear -> add) -------------------
-
-def gpt2_mlp_skeleton(x: "Tensor", w_mlp: "Tensor", b_mlp: "Tensor") -> "Tensor":
-    # G2: MLP su dung matmul, relu/gelu, add. Chi tra ve Tensor zero.
-    n = x.shape[0]
-    hidden = x.shape[1]
-    out = tv.training.ops.t_zeros([n, hidden])
+# ---- Embedding: wte + wpe -------------------------------------------------
+def gpt2_embed(ids: 'list[i64]', pos: 'list[i64]', wte: "Tensor", wpe: "Tensor") -> "Tensor":
+    n = len(ids)
+    tok = op_embed_fwd(wte, ids, HiddenSize)
+    p = op_embed_fwd(wpe, pos, HiddenSize)
+    out = t_zeros([n, HiddenSize])
+    for i in range(n):
+        for j in range(HiddenSize):
+            out.data[i * HiddenSize + j] = tok.data[i * HiddenSize + j] + p.data[i * HiddenSize + j]
     return out
 
-# ---- LM head skeleton (tie embedding weights) -----------------------------
+# ---- Linear (HF Conv1D: weight [in, out]) ---------------------------------
+def gpt2_linear(x: "Tensor", w: "Tensor", b: "Tensor", n: 'i64', in_d: 'i64', out_d: 'i64') -> "Tensor":
+    y = t_zeros([n, out_d])
+    for i in range(n):
+        for o in range(out_d):
+            acc = b.data[o]
+            for k in range(in_d):
+                acc = acc + x.data[i * in_d + k] * w.data[k * out_d + o]
+            y.data[i * out_d + o] = acc
+    return y
 
-def gpt2_lm_head_skeleton(logits: "Tensor", emb_w: "Tensor") -> 'f32':
-    # G2 skeleton: LM head su dung weight tying voi embedding.
-    # Hien chi tra ve 0 de bien dich.
-    return 0.0
+# ---- Attention: multi-head, causal mask, softmax fp32, proj ---------------
+# QKV layout: qkv[t, 0:h)=Q, [h,2h)=K, [2h,3h)=V; moi head lien tiep HeadDim.
+def gpt2_attention(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
+                   w_proj: "Tensor", b_proj: "Tensor", n: 'i64') -> "Tensor":
+    h = HiddenSize
+    hd = HeadDim
+    qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h)
+    out = t_zeros([n, h])
+    inv = 1.0 / sqrt(float(hd))
+    for t in range(n):
+        # ctx luu ket qua attention cua TAT CA head truoc khi proj
+        ctx = []
+        for d in range(h):
+            ctx.append(0.0)
+        for head in range(NHeads):
+            ho = head * hd
+            # q cua token t tren head nay
+            qv = []
+            for d in range(hd):
+                qv.append(qkv.data[t * 3 * h + ho + d])
+            # causal: token t chi thay token u <= t; score theo head_dim
+            scores = []
+            for u in range(t + 1):
+                s = 0.0
+                for d in range(hd):
+                    s = s + qv[d] * qkv.data[u * 3 * h + h + ho + d]
+                scores.append(s * inv)
+            mx = scores[0]
+            for u in range(1, t + 1):
+                if scores[u] > mx:
+                    mx = scores[u]
+            tot = 0.0
+            for u in range(t + 1):
+                e = exp(scores[u] - mx)
+                scores[u] = e
+                tot = tot + e
+            inv_tot = 1.0 / tot
+            # context = sum_u p[t,u] * v_u (V cua token u, khong phai token t)
+            for d in range(hd):
+                acc = 0.0
+                for u in range(t + 1):
+                    acc = acc + scores[u] * qkv.data[u * 3 * h + 2 * h + ho + d]
+                ctx[ho + d] = acc * inv_tot
+        # project: ctx @ Wproj + bproj (Wproj [h, h])
+        for o in range(h):
+            acc = b_proj.data[o]
+            for r in range(h):
+                acc = acc + ctx[r] * w_proj.data[r * h + o]
+            out.data[t * h + o] = acc
+    return out
 
-# ---- Norm layer (LayerNorm/RMSNorm) dung lai op core -------------------
+# ---- MLP: linear -> gelu(erf) -> linear ------------------------------------
+def gpt2_mlp(x: "Tensor", w1: "Tensor", b1: "Tensor",
+             w2: "Tensor", b2: "Tensor", n: 'i64') -> "Tensor":
+    h = HiddenSize
+    inner = gpt2_linear(x, w1, b1, n, h, 4 * h)
+    for i in range(n * 4 * h):
+        inner.data[i] = gelu_erf(inner.data[i])
+    return gpt2_linear(inner, w2, b2, n, 4 * h, h)
 
-def _norm_zeros_like(t: "Tensor") -> "Tensor":
-    # Khoi tao zero cung kich thuoc
-    # (dung cho gradient buffer, loss seed, etc.)
-    return tv.training.ops.t_zeros(t)
+# ---- Block: ln -> attn -> add -> ln -> mlp -> add -------------------------
+def gpt2_block(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
+               w_qkv: "Tensor", b_qkv: "Tensor", w_proj: "Tensor", b_proj: "Tensor",
+               ln2_g: "Tensor", ln2_b: "Tensor",
+               w1: "Tensor", b1: "Tensor", w2: "Tensor", b2: "Tensor") -> "Tensor":
+    n = _sh0(x)
+    h = _sh1(x)
+    a = gpt2_layernorm(x, ln1_g, ln1_b)
+    a = gpt2_attention(a, w_qkv, b_qkv, w_proj, b_proj, n)
+    r = t_zeros([n, h])
+    for i in range(n * h):
+        r.data[i] = x.data[i] + a.data[i]
+    m = gpt2_layernorm(r, ln2_g, ln2_b)
+    m = gpt2_mlp(m, w1, b1, w2, b2, n)
+    out = t_zeros([n, h])
+    for i in range(n * h):
+        out.data[i] = r.data[i] + m.data[i]
+    return out
+
+# ---- Full forward: embed -> N block -> ln_f -> LM head (tie wte) ----------
+def gpt2_forward(ids: 'list[i64]', pos: 'list[i64]',
+                 wte: "Tensor", wpe: "Tensor",
+                 ln1_g: 'list[Tensor]', ln1_b: 'list[Tensor]',
+                 w_qkv: 'list[Tensor]', b_qkv: 'list[Tensor]',
+                 w_proj: 'list[Tensor]', b_proj: 'list[Tensor]',
+                 ln2_g: 'list[Tensor]', ln2_b: 'list[Tensor]',
+                 w1: 'list[Tensor]', b1: 'list[Tensor]',
+                 w2: 'list[Tensor]', b2: 'list[Tensor]',
+                 lnf_g: "Tensor", lnf_b: "Tensor") -> "Tensor":
+    n = len(ids)
+    h = HiddenSize
+    x = gpt2_embed(ids, pos, wte, wpe)
+    for i in range(NLayers):
+        x = gpt2_block(x, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
+                       ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i])
+    x = gpt2_layernorm(x, lnf_g, lnf_b)
+    # LM head: tie weight voi wte -> logits = x @ wte^T  (wte [vocab, h])
+    logits = t_zeros([n, VocabSize])
+    for i in range(n):
+        for o in range(VocabSize):
+            acc = 0.0
+            for k in range(h):
+                acc = acc + x.data[i * h + k] * wte.data[o * h + k]
+            logits.data[i * VocabSize + o] = acc
+    return logits
+
+# ---- Cross entropy (F.cross_entropy mean = mean_i(lse_i - logit[i, y_i]))
+# NOT op_ce_fwd: op do mask theo TRUC LOAI va chia /cnt — dung cho parity op,
+# khong phai cong thuc mean toan bo token cua PyTorch.
+def gpt2_loss(logits: "Tensor", ids: 'list[i64]') -> 'f32':
+    n = _sh0(logits)
+    tot = 0.0
+    for i in range(n):
+        base = i * VocabSize
+        mx = logits.data[base]
+        for o in range(1, VocabSize):
+            if logits.data[base + o] > mx:
+                mx = logits.data[base + o]
+        s = 0.0
+        for o in range(VocabSize):
+            s = s + exp(logits.data[base + o] - mx)
+        lse = mx + log(s)
+        tot = tot + (lse - logits.data[base + ids[i]])
+    return tot / float(n)
+
+# ============================================================================
+#  BACKWARD (G2 gate 2: grad parity so voi torch.autograd)
+# ----------------------------------------------------------------------------
+#  Nguyen tac: moi ham *_bwd tu TINH LAI forward (recompute) tu dau vao de
+#  khong phai luu trung gian — so nho (n=8), dung la quan trong, toc do khong.
+#  Cong don gradient theo thu tu co dinh (numerics-contract).
+# ----------------------------------------------------------------------------
+
+# [dx, dg, db] — LayerNorm theo row co g/b
+def gpt2_layernorm_bwd(x: "Tensor", g: "Tensor", b: "Tensor", gy: "Tensor") -> 'list[Tensor]':
+    n = _sh0(x)
+    h = _sh1(x)
+    dx = t_zeros([n, h])
+    dg = t_zeros([h])
+    db = t_zeros([h])
+    for i in range(n):
+        base = i * h
+        mu = 0.0
+        for j in range(h):
+            mu = mu + x.data[base + j]
+        mu = mu / float(h)
+        v = 0.0
+        for j in range(h):
+            d = x.data[base + j] - mu
+            v = v + d * d
+        v = v / float(h)
+        rstd = 1.0 / sqrt(v + EPS)
+        s1 = 0.0
+        s2 = 0.0
+        for j in range(h):
+            xh = (x.data[base + j] - mu) * rstd
+            gg = gy.data[base + j] * g.data[j]
+            s1 = s1 + gg
+            s2 = s2 + gg * xh
+        m1 = s1 / float(h)
+        m2 = s2 / float(h)
+        for j in range(h):
+            xh = (x.data[base + j] - mu) * rstd
+            gg = gy.data[base + j] * g.data[j]
+            dx.data[base + j] = rstd * (gg - m1 - xh * m2)
+            dg.data[j] = dg.data[j] + gy.data[base + j] * xh
+            db.data[j] = db.data[j] + gy.data[base + j]
+    return [dx, dg, db]
+
+# [dx, dw, db] — linear Conv1D: w[in, out]
+def gpt2_linear_bwd(x: "Tensor", w: "Tensor", gy: "Tensor", n: 'i64', in_d: 'i64', out_d: 'i64') -> 'list[Tensor]':
+    dx = t_zeros([n, in_d])
+    dw = t_zeros([in_d, out_d])
+    db = t_zeros([out_d])
+    for i in range(n):
+        for o in range(out_d):
+            gg = gy.data[i * out_d + o]
+            db.data[o] = db.data[o] + gg
+            for k in range(in_d):
+                dw.data[k * out_d + o] = dw.data[k * out_d + o] + x.data[i * in_d + k] * gg
+                dx.data[i * in_d + k] = dx.data[i * in_d + k] + gg * w.data[k * out_d + o]
+    return [dx, dw, db]
+
+# [dx, dw_qkv, db_qkv, dw_proj, db_proj] — MHA causal (recompute softmax)
+def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
+                       w_proj: "Tensor", b_proj: "Tensor", n: 'i64', gout: "Tensor") -> 'list[Tensor]':
+    h = HiddenSize
+    hd = HeadDim
+    qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h)
+    inv = 1.0 / sqrt(float(hd))
+    dqkv = t_zeros([n, 3 * h])
+    dw_proj = t_zeros([h, h])
+    db_proj = t_zeros([h])
+    for t in range(n):
+        # dctx[r] = sum_o gout[t,o] * w_proj[r,o]
+        dctx = []
+        for r in range(h):
+            acc = 0.0
+            for o in range(h):
+                acc = acc + gout.data[t * h + o] * w_proj.data[r * h + o]
+            dctx.append(acc)
+        # tinh lai ctx (cung head) can cho dw_proj
+        ctx = []
+        for r in range(h):
+            ctx.append(0.0)
+        for head in range(NHeads):
+            ho = head * hd
+            qv = []
+            for d in range(hd):
+                qv.append(qkv.data[t * 3 * h + ho + d])
+            sc = []
+            for u in range(t + 1):
+                s = 0.0
+                for d in range(hd):
+                    s = s + qv[d] * qkv.data[u * 3 * h + h + ho + d]
+                sc.append(s * inv)
+            mx = sc[0]
+            for u in range(1, t + 1):
+                if sc[u] > mx:
+                    mx = sc[u]
+            tot = 0.0
+            for u in range(t + 1):
+                e = exp(sc[u] - mx)
+                sc[u] = e
+                tot = tot + e
+            inv_tot = 1.0 / tot
+            for u in range(t + 1):
+                sc[u] = sc[u] * inv_tot
+            for d in range(hd):
+                acc = 0.0
+                for u in range(t + 1):
+                    acc = acc + sc[u] * qkv.data[u * 3 * h + 2 * h + ho + d]
+                ctx[ho + d] = acc
+            # dp[u] = sum_d dctx[ho+d] * v_u[d]
+            dp = []
+            for u in range(t + 1):
+                acc = 0.0
+                for d in range(hd):
+                    acc = acc + dctx[ho + d] * qkv.data[u * 3 * h + 2 * h + ho + d]
+                dp.append(acc)
+            dot = 0.0
+            for u in range(t + 1):
+                dot = dot + sc[u] * dp[u]
+            for u in range(t + 1):
+                ds = sc[u] * (dp[u] - dot)
+                for d in range(hd):
+                    dqkv.data[t * 3 * h + ho + d] = dqkv.data[t * 3 * h + ho + d] + ds * inv * qkv.data[u * 3 * h + h + ho + d]
+                    dqkv.data[u * 3 * h + h + ho + d] = dqkv.data[u * 3 * h + h + ho + d] + ds * inv * qv[d]
+                    dqkv.data[u * 3 * h + 2 * h + ho + d] = dqkv.data[u * 3 * h + 2 * h + ho + d] + sc[u] * dctx[ho + d]
+        # dw_proj / db_proj tu ctx va gout
+        for o in range(h):
+            gg = gout.data[t * h + o]
+            db_proj.data[o] = db_proj.data[o] + gg
+            for r in range(h):
+                dw_proj.data[r * h + o] = dw_proj.data[r * h + o] + ctx[r] * gg
+    rq = gpt2_linear_bwd(x, w_qkv, dqkv, n, h, 3 * h)
+    return [rq[0], rq[1], rq[2], dw_proj, db_proj]
+
+# [dx, dw1, db1, dw2, db2] — MLP gelu erf
+def gpt2_mlp_bwd(x: "Tensor", w1: "Tensor", b1: "Tensor",
+                 w2: "Tensor", b2: "Tensor", n: 'i64', gout: "Tensor") -> 'list[Tensor]':
+    h = HiddenSize
+    inner = gpt2_linear(x, w1, b1, n, h, 4 * h)
+    a = t_zeros([n * 4 * h])
+    for i in range(n * 4 * h):
+        a.data[i] = gelu_erf(inner.data[i])
+    r2 = gpt2_linear_bwd(a, w2, gout, n, 4 * h, h)
+    # dA cung shape voi inner [n, 4h] — khong truc tiep gout [n, h]
+    d_inner = op_gelu_erf_bwd(inner, r2[0])
+    r1 = gpt2_linear_bwd(x, w1, d_inner, n, h, 4 * h)
+    return [r1[0], r1[1], r1[2], r2[1], r2[2]]
+
+# [dx, dln1_g, dln1_b, dw_qkv, db_qkv, dw_proj, db_proj,
+#  dln2_g, dln2_b, dw1, db1, dw2, db2]
+def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
+                   w_qkv: "Tensor", b_qkv: "Tensor", w_proj: "Tensor", b_proj: "Tensor",
+                   ln2_g: "Tensor", ln2_b: "Tensor",
+                   w1: "Tensor", b1: "Tensor", w2: "Tensor", b2: "Tensor",
+                   gout: "Tensor") -> 'list[Tensor]':
+    n = _sh0(x)
+    h = _sh1(x)
+    a = gpt2_layernorm(x, ln1_g, ln1_b)
+    attn_out = gpt2_attention(a, w_qkv, b_qkv, w_proj, b_proj, n)
+    r = t_zeros([n, h])
+    for i in range(n * h):
+        r.data[i] = x.data[i] + attn_out.data[i]
+    m = gpt2_layernorm(r, ln2_g, ln2_b)
+    # out = r + mlp(m)
+    rmlp = gpt2_mlp_bwd(m, w1, b1, w2, b2, n, gout)
+    dr = t_zeros([n, h])
+    for i in range(n * h):
+        dr.data[i] = gout.data[i]
+    rl2 = gpt2_layernorm_bwd(r, ln2_g, ln2_b, rmlp[0])
+    # quirk: khong duoc `rl2[0].data[i]` — gan ra bien truoc
+    drl2 = rl2[0]
+    for i in range(n * h):
+        dr.data[i] = dr.data[i] + drl2.data[i]
+    # r = x + attn_out
+    r_att = gpt2_attention_bwd(a, w_qkv, b_qkv, w_proj, b_proj, n, dr)
+    rl1 = gpt2_layernorm_bwd(x, ln1_g, ln1_b, r_att[0])
+    drl1 = rl1[0]
+    dx = t_zeros([n, h])
+    for i in range(n * h):
+        # r = x + attn_out -> x nhan grad TU 2 duong: truc tiep (dr) + qua LN1
+        dx.data[i] = drl1.data[i] + dr.data[i]
+    return [dx, rl1[1], rl1[2],
+            r_att[1], r_att[2], r_att[3], r_att[4],
+            rl2[1], rl2[2],
+            rmlp[1], rmlp[2], rmlp[3], rmlp[4]]
+
+# Gradient ve TAT CA tham so — layout cua ket qua tra ve:
+#   [0] dwte (gồm 2 duong: embedding + LM head TIE)
+#   [1] dwpe
+#   [2] dlnf_g   [3] dlnf_b
+#   layer i (base = 4 + i*12):
+#     0 ln1_g  1 ln1_b  2 w_qkv  3 b_qkv  4 w_proj  5 b_proj
+#     6 ln2_g  7 ln2_b  8 w1     9 b1    10 w2     11 b2
+#
+# dLoss/dlogits = (softmax - onehot) / n (mean CE giong gpt2_loss).
+def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
+                  wte: "Tensor", wpe: "Tensor",
+                  ln1_g: 'list[Tensor]', ln1_b: 'list[Tensor]',
+                  w_qkv: 'list[Tensor]', b_qkv: 'list[Tensor]',
+                  w_proj: 'list[Tensor]', b_proj: 'list[Tensor]',
+                  ln2_g: 'list[Tensor]', ln2_b: 'list[Tensor]',
+                  w1: 'list[Tensor]', b1: 'list[Tensor]',
+                  w2: 'list[Tensor]', b2: 'list[Tensor]',
+                  lnf_g: "Tensor", lnf_b: "Tensor") -> 'list[Tensor]':
+    n = len(ids)
+    h = HiddenSize
+    # forward (giu lai dau vao cua moi block)
+    x = gpt2_embed(ids, pos, wte, wpe)
+    xins = []
+    for i in range(NLayers):
+        xins.append(x)
+        x = gpt2_block(x, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
+                       ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i])
+    xf_in = x
+    xf = gpt2_layernorm(x, lnf_g, lnf_b)
+    # duong lm head (tie weight): g_logits = (p - onehot)/n
+    dxf = t_zeros([n, h])
+    dwte = t_zeros([VocabSize, h])
+    for i in range(n):
+        row = []
+        mxf = 0.0
+        for o in range(VocabSize):
+            acc = 0.0
+            for k in range(h):
+                acc = acc + xf.data[i * h + k] * wte.data[o * h + k]
+            row.append(acc)
+            if o == 0:
+                mxf = acc
+            if acc > mxf:
+                mxf = acc
+        tot = 0.0
+        for o in range(VocabSize):
+            e = exp(row[o] - mxf)
+            row[o] = e
+            tot = tot + e
+        inv_tot = 1.0 / tot
+        inv_n = 1.0 / float(n)
+        for o in range(VocabSize):
+            gg = row[o] * inv_tot * inv_n
+            if o == ids[i]:
+                gg = gg - inv_n
+            for k in range(h):
+                dxf.data[i * h + k] = dxf.data[i * h + k] + gg * wte.data[o * h + k]
+                dwte.data[o * h + k] = dwte.data[o * h + k] + gg * xf.data[i * h + k]
+    # ln_f
+    rl = gpt2_layernorm_bwd(xf_in, lnf_g, lnf_b, dxf)
+    # backward qua cac block (tu cuoi ve dau), luu phang theo thu tu backward
+    rblocks = []
+    gx = rl[0]
+    for i in range(NLayers):
+        li = NLayers - 1 - i
+        rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
+                            w_qkv[li], b_qkv[li], w_proj[li], b_proj[li],
+                            ln2_g[li], ln2_b[li],
+                            w1[li], b1[li], w2[li], b2[li], gx)
+        gx = rb[0]
+        for j in range(1, 13):
+            rblocks.append(rb[j])
+    # embedding bwd: wte nhan grad tu 2 duong (tie)
+    gwte_e = op_embed_bwd(wte, ids, h, gx)
+    gwpe = op_embed_bwd(wpe, pos, h, gx)
+    for k in range(VocabSize * h):
+        dwte.data[k] = dwte.data[k] + gwte_e.data[k]
+    # xep theo layout: layer 0 truoc
+    out = []
+    out.append(dwte)
+    out.append(gwpe)
+    out.append(rl[1])
+    out.append(rl[2])
+    for li in range(NLayers):
+        base = (NLayers - 1 - li) * 12
+        for j in range(12):
+            out.append(rblocks[base + j])
+    return out

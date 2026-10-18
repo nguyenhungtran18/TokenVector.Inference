@@ -15,9 +15,19 @@ Cập nhật sau khi compiler self-host `D:\TokenVector\Release\dist\tkvc-tv.exe
 | `build_inference.ps1` (đủ benchmark) | Completed Successfully |
 | 48/48 module biên dịch được | probe gộp toàn bộ module: `ALL_MODULES_IMPORTED: 48` |
 | 5/5 entry point biên dịch + chạy | `inference_tests`, `gap_tests`, `quickstart`, `compare_rivals`, `cli` |
-| Ép biên dịch thân hàm | 46/48 module sạch, **366 hàm** được gọi trong probe |
+| **Toàn bộ thân hàm type-check** | `--verify-all` **PASS cả 5/5 entry** (compiler 17:13 17-10-2026) |
 | Benchmark stress | `ok=500 err=0` (ổn định 4/4 lần chạy) |
 | `quickstart` | `Y[0] = 2.25` |
+
+### Số đo thật (B-05 đã đóng, trước đây mọi thời gian đều là `0`)
+
+```
+Cold-start parse+arena : 78.0 ms
+Single-sample FusedLinear 64x128 GELU : 32.0 us
+Heap per 500 inferences : -728 B   <-- Zero-GC đạt, đo thật
+FP32 641.0 ms | INT8 1797.0 ms | speedup 0.357x
+Hot-path endurance : 64.5k req/s | Concurrent 32T/500 : ok=500 err=0
+```
 
 Không còn lỗi biên dịch nào trong repo.
 
@@ -77,19 +87,41 @@ thật thì lỗi trong thân hàm mới lộ. Đừng tin vào "N/N module PASS
 
 ---
 
-## 4. Lỗi compiler CÒN LẠI (đã tự kiểm chứng lại 2026-10-17)
+## 4. Trạng thái lỗi compiler
 
-| # | Vấn đề | Triệu chứng | Workaround trong repo |
-|---|---|---|---|
-| 1 | Truyền `list[f64]` (suy ra từ `[]` + `.append(1.0)`) vào tham số `list[f32]` | `len()` đúng, **phần tử sai**, không báo lỗi | copy từng phần tử: `for e in src: dst.append(e)` |
-| 2 | `*`/`+` i64 dùng checked arithmetic | `OverflowException` | LCG 31-bit: `(s * 1103515245 + 12345) & 0x7FFFFFFF` |
-| 3 | `argv()` | trả `[]`, CLI không nhận tham số | `cli.tkv` luôn in usage |
-| 4 | `simd_*` | biên dịch được, chạy lỗi `FileNotFoundException: System.Numerics.Vectors` | chưa có |
-| 5 | `now_ms`/`now_us`/`gc_*` | stub trả `0` → benchmark in `0.0 ms`, tỷ lệ so sánh ra `infx` | coi là smoke test, **không dùng làm số đo** |
+### 4.1 Đã được compiler đóng (17-10-2026)
 
-Lưu ý: workaround "khai báo biến đúng kiểu" (`_src: 'list[f32]'`) trong thông
-báo của phía compiler **chưa biên dịch được**:
-`il_codegen: khong dich duoc dong: "_a: 'list[f32]' = []"`.
+| Mục | Trạng thái |
+|---|---|
+| B-01 `list[f64]` → `list[f32]` | đã kiểm tra mismatch tại call site |
+| B-02 `*`/`+` i64 unchecked | đã sửa |
+| B-05 `now_ms`/`now_us`/`gc_*` | đã có, số đo chạy thật |
+| B-06 chẩn đoán record ctor | in cả 2 khả năng |
+| B-07 `--verify-all` | đã có, PASS 5/5 entry |
+
+### 4.2 Còn lại (đề nghị đã gửi `D:\TokenVector\Release\docs\e_handoff\2026-10-17-inference-repo-verify-after-b01-b07.md`)
+
+| Mức | Vấn đề | Workaround trong repo |
+|---|---|---|
+| P1 | `gc_collect()` gọi dạng lệnh độc lập bị từ chối (thiếu trong `_BUILTIN_LENH_DOC_LAP`, `file_io.tkv:190`) | **đã đóng** |
+| P1 | `gc_counts()` luôn trả `""` → gate `0/0/0` không bao giờ xanh | **đã đóng** (trả `2/2/2`) |
+| P2 | `simd_*` từ chối `list[f32]` (`shape=list`) | **đã đóng** — `simd_add` chạy đúng |
+| P2 | `--verify-all` bắt buộc có entry `main` → không kiểm được module thư viện | **đã đóng** — verify được cả 48 module |
+| P3 | Thông báo lỗi annotated local không nhắc quy tắc **nháy kép** | dùng `"list[f32]"` |
+| — | `sys_argv()` vẫn trả `[]` | `cli.tkv` luôn in usage |
+
+> **Đính chính:** "annotated local không biên dịch được" **không phải bug compiler**.
+> TokenVector yêu cầu annotation dùng **nháy kép**; với nháy kép cả 3 dạng đều đúng.
+> Nháy đơn vẫn hợp lệ trong chữ ký hàm (repo dùng nháy đơn ở mọi chữ ký).
+
+### 4.3 Workaround đã có thể gỡ (B-01/B-02 đã đóng)
+
+| Workaround | Vị trí | Gỡ thử |
+|---|---|---|
+| copy phần tử thay vì truyền thẳng `list` | `tv/onnx/translator.tkv` | `_slice_shape` |
+| LCG 31-bit thay vì `i64` | `tv/training/autograd.tkv` | `lora_forward_and_step` |
+
+Gỡ **từng cái một**, chạy lại `tools\run_cases.ps1` sau mỗi lần.
 
 Ghi chú compiler (file ở repo compiler, chưa commit):
 - `D:\TokenVector\Release\docs\e_handoff\2026-10-16-inference-repo-list-alias-and-overflow-bugs.md`
@@ -119,19 +151,21 @@ Ghi chú compiler (file ở repo compiler, chưa commit):
 
 | Việc | Ghi chú |
 |---|---|
-| Commit `COMPILER-NOTES-2026-10-16.md` | quyết định của bạn |
+| **G2 backward**: `gpt2_ref.tkv` co day du `attention_bwd`/`block_bwd`/`gpt2_backward` (recompute, khong luu trung gian); `gpt2_tests` **10/10 PASS** (forward 5 + grad 5 so `g2_grad_*`, wte 1.79e-07) | bug da fix: `block_bwd` thieu **term residual** cua `dx` (r = x + attn) — dang `dln1_g` PASS nhung grad tang duoi sai; quirk: khong duoc `list[i].data[j]` (gan ra bien) |
+| **G3 — Data pipeline**: tokenizer parity (GPT-2 BPE HF) + packing + shard | `tokenizer.tkv` đã có; fixture token id bắt buộc |
+| **G4 — Trainer**: AdamW + schedule + grad accumulation + checkpoint + CLI `train` | `autograd.tkv` đã có Adam, `lora_forward_and_step`; cần `grad_tests` mở rộng cho chuỗi kiến trúc |
+| **G5 — Harness**: Colab reference script (`compare_rivals` + GPU) | `docs/linux-portability-spike.md`: `.tkv` chạy được, compiler chưa; `simd_gemm` 14.6x (vuông); `simd_*` 3-arg chưa dùng được |
+| **G6 — Phân tán**: DDP/ZeRO-1/2 (tùy chọn) | `atomic_add`, `thread_spawn` đã có; `simd_*` chưa dùng cho parity |
 | Số đo benchmark thật | cần timing thật thay stub; hiện **không dùng được** |
-| SIMD | cần `System.Numerics.Vectors.dll` cạnh exe |
-| Xác minh 2 module chưa sạch | `tv/onnx/translator.tkv`, `tv/server/embedded_server.tkv` — lỗi của **probe harness** (thiếu số đối số record), chưa phải lỗi repo; cần probe vòng thích ứng nhiều hơn |
-| Phủ nốt 82 hàm chưa ép biên dịch | 448 hàm cấp module, 366 đã sạch; phần còn lại có tham số kiểu record phức tạp |
+| SIMD | cần `System.Numerics.Vectors.dll` cạnh exe (B-04 đã đóng); `simd_gemm` 14.6x vuông, không áp dụng cho M=16 K=256 N=256; `simd_*` 3-arg chậm 2.4x + cấp phát 16 B/phần tử |
+| Ghi note compiler | `docs/e_handoff/` đã có 4 note `2026-10-16-*`; `COMPILER-NOTES` chưa stage |
 
 ---
 
 ## 7. Lệnh kiểm tra nhanh
 
 ```powershell
-cd D:\TokenVector.Inference
-powershell -File tools\run_cases.ps1          # 26 case + gap 16
+powershell -File tools\run_cases.ps1          # 26 case + gap 16 + parity 4 + grad 20 + tape 8 + gc 7 + gpt2 5
 powershell -File build_inference.ps1          # đầy đủ, gồm benchmark
 ```
 

@@ -1,0 +1,2 @@
+# n=1  gradient case
+0.50145942

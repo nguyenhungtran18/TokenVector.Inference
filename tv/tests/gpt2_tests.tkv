@@ -1,0 +1,172 @@
+import tv.training.gpt2_ref
+
+# ============================================================================
+#  GPT-2 TESTS — doi chieu kien truc voi PyTorch (G2)
+# ----------------------------------------------------------------------------
+#  Fixture sinh boi tools\gen_gpt2_fixture.py tu HF `gpt2` (cau truc giong het,
+#  chi thu nho: vocab 256, n_embd 64, n_head 4, n_layer 2).
+#
+#  Chay: tkvc tv\tests\gpt2_tests.tkv ra.exe main   (tu thu muc goc repo)
+# ============================================================================
+
+FIX_DIR = "tv/tests/fixtures/"
+TOL = 1e-5
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> "list[f32]":
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        ln = lines[i]
+        if _is_comment(ln) == 1:
+            continue
+        toks = ln.split(" ")
+        for j in range(len(toks)):
+            t = toks[j]
+            if len(t) < 1:
+                continue
+            vals.append(float(t))
+    return vals
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+def _abs(v: 'f32') -> 'f32':
+    if v < 0.0:
+        return -v
+    return v
+
+def diff(a: 'list[f32]', b: 'list[f32]') -> 'f32':
+    n = len(a)
+    if len(b) < n:
+        n = len(b)
+    m = 0.0
+    for i in range(n):
+        d = _abs(a[i] - b[i])
+        if d > m:
+            m = d
+    return m
+
+def report(name: 'str', d: 'f32', tol: 'f32') -> 'i32':
+    if d <= tol:
+        print("  [PASS] " + name + "  max_abs_diff=" + str(d))
+        return 0
+    print("  [FAIL] " + name + "  max_abs_diff=" + str(d) + "  tol=" + str(tol))
+    return 1
+
+def main() -> 'i32':
+    fails = 0
+    cases = 0
+    print("=== GPT-2 (vocab 256, embd 64, head 4, layer 2) vs PyTorch ===")
+
+    # Ten import la PHANG (khong qualify `gpt2_ref.`) — quy tac compiler (HANDOFF 3).
+    VOCAB = VocabSize
+    H = HiddenSize
+    NL = NLayers
+
+    ids = load_ints(FIX_DIR + "g2_ids.txt")
+    pos = load_ints(FIX_DIR + "g2_pos.txt")
+    T = len(ids)
+
+    def tw(name: 'str') -> "Tensor":
+        return t_new(load_floats(FIX_DIR + "g2_w_" + name + ".txt"), [1])
+
+    # ---- doc weights ----
+    wte = t_new(load_floats(FIX_DIR + "g2_w_wte.txt"), [VOCAB, H])
+    wpe = t_new(load_floats(FIX_DIR + "g2_w_wpe.txt"), [MaxPos, H])
+
+    ln1_g = []
+    ln1_b = []
+    w_qkv = []
+    b_qkv = []
+    w_proj = []
+    b_proj = []
+    ln2_g = []
+    ln2_b = []
+    w1 = []
+    b1 = []
+    w2 = []
+    b2 = []
+    for i in range(NL):
+        ln1_g.append(tw("ln1_g%d" % i))
+        ln1_b.append(tw("ln1_b%d" % i))
+        w_qkv.append(tw("attn_w%d" % i))
+        b_qkv.append(tw("attn_b%d" % i))
+        w_proj.append(tw("proj_w%d" % i))
+        b_proj.append(tw("proj_b%d" % i))
+        ln2_g.append(tw("ln2_g%d" % i))
+        ln2_b.append(tw("ln2_b%d" % i))
+        w1.append(tw("mlp_w1%d" % i))
+        b1.append(tw("mlp_b1%d" % i))
+        w2.append(tw("mlp_w2%d" % i))
+        b2.append(tw("mlp_b2%d" % i))
+    lnf_g = tw("lnf_g")
+    lnf_b = tw("lnf_b")
+
+    # ---- hidden-state tung tang (khoanh vung loi theo G2 gate) ----
+    hx = gpt2_embed(ids, pos, wte, wpe)
+    cases = cases + 1
+    fails = fails + report("hidden h0 (embed)", diff(hx.data, load_floats(FIX_DIR + "g2_h0.txt")), TOL)
+    for i in range(NL):
+        hx = gpt2_block(hx, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
+                        ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i])
+        cases = cases + 1
+        fails = fails + report("hidden h" + str(i + 1) + " (block " + str(i) + ")",
+                               diff(hx.data, load_floats(FIX_DIR + "g2_h" + str(i + 1) + ".txt")), TOL)
+
+    # ---- forward ----
+    logits = gpt2_forward(ids, pos, wte, wpe,
+                                   ln1_g, ln1_b, w_qkv, b_qkv, w_proj, b_proj,
+                                   ln2_g, ln2_b, w1, b1, w2, b2, lnf_g, lnf_b)
+
+    cases = cases + 1
+    fails = fails + report("logits", diff(logits.data, load_floats(FIX_DIR + "g2_logits.txt")), TOL)
+
+    # ---- loss ----
+    my_loss = gpt2_loss(logits, ids)
+    cases = cases + 1
+    fails = fails + report("loss", _abs(my_loss - load_floats(FIX_DIR + "g2_loss.txt")[0]), TOL)
+
+    # ---- backward: gradient vs torch.autograd (G2 gate 2) ----
+    # layout cua gpt2_backward: [0]dwte [1]dwpe [2]dlnf_g [3]dlnf_b
+    #   layer i base = 4 + i*12: ln1_g(0) ln1_b(1) w_qkv(2) b_qkv(3)
+    #   w_proj(4) b_proj(5) ln2_g(6) ln2_b(7) w1(8) b1(9) w2(10) b2(11)
+    grads = gpt2_backward(ids, pos, wte, wpe,
+                          ln1_g, ln1_b, w_qkv, b_qkv, w_proj, b_proj,
+                          ln2_g, ln2_b, w1, b1, w2, b2, lnf_g, lnf_b)
+    # quirk: khong duoc `grads[0].data` — phai gan ra bien truoc
+    gwte = grads[0]
+    dlnf_g = grads[2]
+    dln1_g0 = grads[4]
+    dattn_w0 = grads[6]
+    dmlp_w1_0 = grads[12]
+
+    cases = cases + 1
+    fails = fails + report("grad wte (embed + lmhead tie)",
+                           diff(gwte.data, load_floats(FIX_DIR + "g2_grad_wte.txt")), TOL)
+    cases = cases + 1
+    fails = fails + report("grad ln1_g[0]",
+                           diff(dln1_g0.data, load_floats(FIX_DIR + "g2_grad_ln1_g0.txt")), TOL)
+    cases = cases + 1
+    fails = fails + report("grad attn_w[0] (c_attn)",
+                           diff(dattn_w0.data, load_floats(FIX_DIR + "g2_grad_attn_w0.txt")), TOL)
+    cases = cases + 1
+    fails = fails + report("grad mlp_w1[0] (c_fc)",
+                           diff(dmlp_w1_0.data, load_floats(FIX_DIR + "g2_grad_mlp_w1_0.txt")), TOL)
+    cases = cases + 1
+    fails = fails + report("grad lnf_g",
+                           diff(dlnf_g.data, load_floats(FIX_DIR + "g2_grad_lnf_g.txt")), TOL)
+
+    print("=== GPT-2 cases=" + str(cases) + " fails=" + str(fails) + " ===")
+    return fails

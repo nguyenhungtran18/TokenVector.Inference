@@ -170,5 +170,23 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+# [8/8] gpt2_tests: doi chieu KIEN TRUC GPT-2 (forward + hidden tung tang +
+# loss) voi fixture sinh boi tools\gen_gpt2_fixture.py tu HF `gpt2` (G2).
+$g2Src = Join-Path $root "tv\tests\gpt2_tests.tkv"
+$g2Exe = Join-Path $WorkDir "gpt2_cases.exe"
+Write-Host ""
+Write-Host "[8/8] Bien dich + chay gpt2_tests (GPT-2 vs HF) ..."
+& $Compiler $g2Src $g2Exe | Out-Null
+if (-not (Test-Path -LiteralPath $g2Exe)) {
+    Write-Host "LOI: bien dich gpt2_tests that bai."
+    exit 1
+}
+$g2Out = (& $g2Exe 2>&1 | Out-String)
+Write-Host ($g2Out -replace "\s+", " ").Trim()
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "gpt2 tests: FAIL"
+    exit 1
+}
+
 
 

@@ -1,0 +1,2 @@
+# n=5  gradient case
+0 2 2 5 0

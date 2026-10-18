@@ -1,0 +1,196 @@
+# TokenVector Training — Tensor core (G1)
+#
+# Vi sao la `Tensor` rieng ma khong dung thang `list[f32]`:
+#   - phai giu `shape` de biet (m, n, k) khi tinh gradient
+#   - phai co `.grad` cung kich thuoc de backward cong don
+#   - phai co `view` KHONG COPY (cung tham chieu `data`, doi `offset`) neu
+#     muon giu Zero-GC: copy se cap phat, va moi copy la mot lan phat bo nho.
+#
+# Quy uoc: moi phan tu trong `data` la `f32`. `shape` la kich thuc day du,
+# `offset` la vi tri bat dau trong `data` (cho phep cat tensor ma khong copy).
+# So phan tu cua tensor = tich cac phan tu cua `shape`.
+
+class Tensor:
+    _ok: 'i64'
+    data: 'list[f32]'
+    shape: 'list[i64]'
+    offset: 'i64'
+    requires_grad: 'i32'
+    grad: 'list[f32]'
+    name: 'str'
+
+    def __init__(self, data: 'list[f32]', shape: 'list[i64]', requires_grad: 'i32'=0):
+        self.data = data
+        self.shape = shape
+        self.offset = 0
+        self.requires_grad = requires_grad
+        self.grad = []
+        self.name = ""
+
+def t_numel(shape: 'list[i64]') -> 'i64':
+    n = 1
+    for i in range(len(shape)):
+        n = n * shape[i]
+    return n
+
+def t_shape_is_valid(shape: 'list[i64]') -> 'i32':
+    for i in range(len(shape)):
+        if shape[i] < 0:
+            return 0
+    return 1
+
+def t_data_len(t: "Tensor") -> 'i64':
+    return len(t.data)
+
+def t_dim(t: "Tensor") -> 'i64':
+    return len(t.shape)
+
+def t_at(t: "Tensor", i: 'i64') -> 'f32':
+    return t.data[t.offset + i]
+
+def t_set(t: "Tensor", i: 'i64', v: 'f32') -> 'i32':
+    t.data[t.offset + i] = v
+    return 0
+
+def t_new(data: 'list[f32]', shape: 'list[i64]') -> "Tensor":
+    if t_shape_is_valid(shape) == 0:
+        raise ValueError("shape khong hop le (co so am)")
+    n = t_numel(shape)
+    if len(data) < n:
+        raise ValueError("data it hon shape yeu cau")
+    return Tensor(data, shape, 0)
+
+def t_zeros(shape: 'list[i64]') -> "Tensor":
+    n = t_numel(shape)
+    data = []
+    for i in range(n):
+        data.append(0.0)
+    return Tensor(data, shape, 0)
+
+def t_zeros_like(t: "Tensor") -> "Tensor":
+    return t_zeros(t.shape)
+
+# ---- view KHONG COPY -------------------------------------------------------
+# `view` chi doi shape (va offset), van tro cung `data`. Day la dieu kien de
+# Zero-GC: dung `slice_copy` se cap phat.
+
+def t_view(t: "Tensor", shape: 'list[i64]') -> "Tensor":
+    n = t_numel(shape)
+    if n != t_numel(t.shape):
+        raise ValueError("view khong doi duoc so phan tu")
+    out = Tensor(t.data, shape, t.requires_grad)
+    out.offset = t.offset
+    out.name = t.name
+    return out
+
+def t_reshape(t: "Tensor", shape: 'list[i64]') -> "Tensor":
+    return t_view(t, shape)
+
+def t_row(t: "Tensor", r: 'i64') -> "Tensor":
+    # 1 hang 2D -> vector 1D, van tro cung data
+    sh = t.shape
+    if len(sh) != 2:
+        raise ValueError("t_row chi ap dung cho tensor 2D")
+    cols = sh[1]
+    out = Tensor(t.data, [cols], t.requires_grad)
+    out.offset = t.offset + r * cols
+    out.name = t.name
+    return out
+
+def t_slice_rows(t: "Tensor", r0: 'i64', nr: 'i64') -> "Tensor":
+    sh = t.shape
+    if len(sh) != 2:
+        raise ValueError("t_slice_rows chi ap dung cho tensor 2D")
+    cols = sh[1]
+    out = Tensor(t.data, [nr, cols], t.requires_grad)
+    out.offset = t.offset + r0 * cols
+    out.name = t.name
+    return out
+
+# ---- gradient buffer -------------------------------------------------------
+
+def t_require_grad(t: "Tensor") -> 'i32':
+    t.requires_grad = 1
+    return t_alloc_grad(t)
+
+def t_alloc_grad(t: "Tensor") -> 'i32':
+    # Cap phat `grad` ma KHONG doi `requires_grad` — dung cho tensor trung gian
+    # (output cua op), backward can ghi vao chung nhung chung khong phai tham
+    # so de toi uoc.
+    n = t_numel(t.shape)
+    if len(t.grad) < n:
+        g = []
+        for i in range(n):
+            g.append(0.0)
+        t.grad = g
+    return 0
+
+def t_grad_add(t: "Tensor", i: 'i64', v: 'f32') -> 'i32':
+    t.grad[t.offset + i] = t.grad[t.offset + i] + v
+    return 0
+
+def t_zero_grad(t: "Tensor") -> 'i32':
+    n = t_numel(t.shape)
+    for i in range(n):
+        t.grad[t.offset + i] = 0.0
+    return 0
+
+# ---- so lieu hoc ------------------------------------------------------------
+
+def t_sum(t: "Tensor") -> 'f32':
+    n = t_numel(t.shape)
+    s = 0.0
+    for i in range(n):
+        s = s + t_at(t, i)
+    return s
+
+def t_max(t: "Tensor") -> 'f32':
+    n = t_numel(t.shape)
+    m = t_at(t, 0)
+    for i in range(1, n):
+        if t_at(t, i) > m:
+            m = t_at(t, i)
+    return m
+
+# ---- ham toan hoc can cho GELU chinh xac ------------------------------------
+# TokenVector khong co `erf` nen phai tu Viet. Cong thuc:
+#   erf(x) = 1 - exp(-x^2) * P(t)/Q(t)   voi t = 1/(1 + p*x), p = 0.3275911
+# Sai so tuyet doi < 1.5e-7 (Abramowitz & Stegun 7.1.26) — du cho f32.
+# Chung ta CHON cong thuc nay va ghi lai trong docs/numerics-contract.md;
+# backward cua GELU se dung CHINH cong thuc nay de khop.
+
+_ERF_A1 = 0.254829592
+_ERF_A2 = -0.284496736
+_ERF_A3 = 1.421413741
+_ERF_A4 = -1.453152027
+_ERF_A5 = 1.061405429
+_ERF_P = 0.3275911
+
+def erf(x: 'f32') -> 'f32':
+    sg = 1.0
+    if x < 0.0:
+        sg = -1.0
+    ax = abs(x)
+    t = 1.0 / (1.0 + _ERF_P * ax)
+    # Horner: a1*t + a2*t^2 + a3*t^3 + a4*t^4 + a5*t^5
+    poly = _ERF_A5
+    poly = poly * t + _ERF_A4
+    poly = poly * t + _ERF_A3
+    poly = poly * t + _ERF_A2
+    poly = poly * t + _ERF_A1
+    poly = poly * t
+    return sg * (1.0 - exp(-ax * ax) * poly)
+
+def erf_backward(x: 'f32') -> 'f32':
+    # d/dx erf(x) = 2/sqrt(pi) * exp(-x^2)
+    return 1.1283791670955126 * exp(-x * x)
+
+def gelu_erf(v: 'f32') -> 'f32':
+    return 0.5 * v * (1.0 + erf(v / 1.4142135623730951))
+
+def gelu_tanh(v: 'f32') -> 'f32':
+    c = 0.7978845608028654
+    return 0.5 * v * (1.0 + tanh(c * (v + 0.044715 * v * v * v)))
+
+def silu(v: 'f32') -> 'f32':
+    return v / (1.0 + exp(-v))

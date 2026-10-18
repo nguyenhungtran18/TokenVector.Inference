@@ -11,8 +11,7 @@ sẽ diễn ra sau trên GPU Google. Ưu tiên số tuyệt đối với PyTorch
 |---|---|
 | **G0** | ✅ **XONG** (17-10-2027) — xem bên dưới |
 | **G1** tensor core + autodiff thật | **XONG** (2026-10-17): `tensor.tkv`; `ops.tkv` (12 op fwd); fixture 47; `grad_tests.tkv` 20/20; `tape.tkv` 8/8; `parity_tests.tkv` 4/4; `kernels_reg.tkv` co mau |
-| **G2** GPT-2 124M | chua bat dau — cho duyet `numerics-contract.md` |
-| G2 GPT-2 124M | chưa bắt đầu |
+| **G2** GPT-2 thu nho (256/64/4/2) | **FORWARD + BACKWARD XONG** (2026-10-18): `gpt2_ref.tkv` day du embed/LN row/MHA causal/MLP/tie head + `attention_bwd`/`block_bwd`/`gpt2_backward`; `gpt2_tests` **10/10 PASS** (hidden h0-h2, logits 2.68e-07, loss 0.0; grad wte 1.79e-07, ln1_g0 3.3e-09, attn_w0 3.4e-08, mlp_w1_0 2.5e-08, lnf_g 9.3e-09) vs `torch.autograd`; `run_cases` [8/8] + `--verify-all` xanh. Gate con lai: grad bit-exact (dang dung tol 1e-5 nhu grad_tests) |
 | G3 data pipeline | chưa bắt đầu |
 | G4 trainer | chưa bắt đầu |
 | G5 harness + seam GPU | chưa bắt đầu |

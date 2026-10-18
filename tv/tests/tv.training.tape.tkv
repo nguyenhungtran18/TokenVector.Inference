@@ -1,0 +1,471 @@
+﻿import tv.training.tensor
+import tv.training.ops
+
+# ============================================================================
+#  Tape â€” do thi tinh tien + backward tong hop (G1.3)
+# ----------------------------------------------------------------------------
+#  Van cua ops.tkv: backward phai GOI TAY. Tape ghi lai tung op theo thu tu
+#  tinh tien, roi quay nguoi lai chay backward â€” nho do khong phai viet tay
+#  gradient cho tung op khi ghep chung.
+#
+#  VAN PHONG:
+#    t = tape_new()
+#    h1 = tapeline(x, w)            # forward co ghi vao tape
+#    h2 = tapegelu(h1)
+#    loss = tapoce(h2, target, mask)
+#    tapebackward(t, loss)          # quay nguoi, chay backward tung node
+#
+#  RANG BUOC cua TokenVector da biet (xem docs/numerics-contract.md):
+#    - `list[TenClass]` chi hop le khi class do khai bao/import trong file.
+#    - `x.field[i]` khong luon suy duoc -> gan vao bien truoc.
+#  Hai dieu tren da dinh nghia shape cua Node/Tensor cho phu hop.
+# ============================================================================
+
+class Node:
+    _ok: 'i64'
+    tag: 'str'
+    ins: 'list[Tensor]'
+    outs: 'list[Tensor]'
+    cache: 'list[f32]'
+    idx: 'list[i64]'
+    a: 'i64'
+    b: 'i64'
+    c: 'i64'
+
+    def __init__(self, tag: 'str'):
+        self.tag = tag
+        self.ins = []
+        self.outs = []
+        self.cache = []
+        self.idx = []
+        self.a = 0
+        self.b = 0
+        self.c = 0
+
+def tape_new() -> 'list[Node]':
+    return []
+
+def tape_size(t: 'list[Node]') -> 'i64':
+    return len(t)
+
+# ---- helpers noi bo --------------------------------------------------------
+
+def _push(t: 'list[Node]', tag: 'str', ins: 'list[Tensor]', out: "Tensor") -> 'i32':
+    nd = Node(tag)
+    nd.ins.append(ins[0])
+    nd.outs.append(out)
+    t.append(nd)
+    return 0
+
+def _push2(t: 'list[Node]', tag: 'str', a: "Tensor", b: "Tensor", out: "Tensor") -> 'i32':
+    nd = Node(tag)
+    nd.ins.append(a)
+    nd.ins.append(b)
+    nd.outs.append(out)
+    t.append(nd)
+    return 0
+
+def _clear_grad(t: 'list[Node]') -> 'i32':
+    # CHI zero cho tensor da cap phat gradient. `t_zero_grad` ghi truc tiep vao
+    # `t.grad` nen se loi IndexOutOfRange neu gradient chua duoc cap phat â€”
+    # va khong phai moi tensor trong do thi deu co requires_grad.
+    for i in range(len(t)):
+        nd = t[i]
+        for k in range(len(nd.ins)):
+            g = nd.ins[k]
+            _zero_if_alloc(g)
+        for k in range(len(nd.outs)):
+            o = nd.outs[k]
+            _zero_if_alloc(o)
+    return 0
+
+def _zero_if_alloc(x: "Tensor") -> 'i32':
+    if len(x.grad) < t_numel(x.shape):
+        return 0
+    return t_zero_grad(x)
+
+# ---- forward co ghi vao tape ----------------------------------------------
+
+def tape_add(t: 'list[Node]', a: "Tensor", b: "Tensor") -> "Tensor":
+    y = op_add_fwd(a, b)
+    _push2(t, "add", a, b, y)
+    return y
+
+def tape_mul(t: 'list[Node]', a: "Tensor", b: "Tensor") -> "Tensor":
+    y = op_mul_fwd(a, b)
+    _push2(t, "mul", a, b, y)
+    return y
+
+def tape_matmul(t: 'list[Node]', a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
+    y = op_matmul_fwd(a, b, m, n, k)
+    nd = Node("matmul")
+    nd.ins.append(a)
+    nd.ins.append(b)
+    nd.outs.append(y)
+    nd.a = m
+    nd.b = n
+    nd.c = k
+    t.append(nd)
+    return y
+
+def tape_rmsnorm(t: 'list[Node]', x: "Tensor", eps: 'f32') -> "Tensor":
+    y = op_rmsnorm_fwd(x, eps)
+    nd = Node("rmsnorm")
+    nd.ins.append(x)
+    nd.outs.append(y)
+    nd.cache.append(eps)
+    t.append(nd)
+    return y
+
+def tape_layernorm(t: 'list[Node]', x: "Tensor", eps: 'f32') -> "Tensor":
+    y = op_layernorm_fwd(x, eps)
+    nd = Node("layernorm")
+    nd.ins.append(x)
+    nd.outs.append(y)
+    nd.cache.append(eps)
+    t.append(nd)
+    return y
+
+def tape_gelu_erf(t: 'list[Node]', x: "Tensor") -> "Tensor":
+    y = op_gelu_erf_fwd(x)
+    _push(t, "gelu_erf", _one(x), y)
+    return y
+
+def tape_gelu_tanh(t: 'list[Node]', x: "Tensor") -> "Tensor":
+    y = op_gelu_tanh_fwd(x)
+    _push(t, "gelu_tanh", _one(x), y)
+    return y
+
+def tape_silu(t: 'list[Node]', x: "Tensor") -> "Tensor":
+    y = op_silu_fwd(x)
+    _push(t, "silu", _one(x), y)
+    return y
+
+def tape_relu(t: 'list[Node]', x: "Tensor") -> "Tensor":
+    y = op_relu_fwd(x)
+    _push(t, "relu", _one(x), y)
+    return y
+
+def _one(x: "Tensor") -> 'list[Tensor]':
+    l = []
+    l.append(x)
+    return l
+
+def tape_softmax(t: 'list[Node]', x: "Tensor", rows: 'i64', cols: 'i64') -> "Tensor":
+    y = op_softmax_fwd(x, rows, cols)
+    nd = Node("softmax")
+    nd.ins.append(x)
+    nd.outs.append(y)
+    nd.a = rows
+    nd.b = cols
+    t.append(nd)
+    return y
+
+def tape_embed(t: 'list[Node]', w: "Tensor", idx: 'list[i64]', d: 'i64') -> "Tensor":
+    y = op_embed_fwd(w, idx, d)
+    nd = Node("embed")
+    nd.ins.append(w)
+    nd.outs.append(y)
+    for i in range(len(idx)):
+        nd.idx.append(idx[i])
+    nd.a = d
+    t.append(nd)
+    return y
+
+def tape_ce(t: 'list[Node]', logits: "Tensor", target: 'i64', mask_l: 'list[i64]', gy: 'f32') -> "Tensor":
+    # CE tra ve MOT scalar; de dua vao tape ta gan no vao tensor 1 phan tu.
+    loss = op_ce_fwd(logits, target, mask_l)
+    y = t_zeros([1])
+    y.data[0] = loss
+    nd = Node("ce")
+    nd.ins.append(logits)
+    nd.outs.append(y)
+    nd.a = target
+    nd.cache.append(gy)
+    for i in range(len(mask_l)):
+        nd.idx.append(mask_l[i])
+    t.append(nd)
+    return y
+
+# ---- backward tong hop -----------------------------------------------------
+# Quay nguoi danh sach node, chay backward tung node, cong gradient vao
+# `ins[k].grad`. Thu tu quay nguoi = thu tu tinh tien, nen gradient chay
+# DUNG thu tu ma PyTorch chay (quan trong cho bit-exact).
+
+def _grad_buf(x: "Tensor") -> "Tensor":
+    # `.grad` la list; backward can MOT Tensor de doc. Dung `Tensor(list, [n])`
+    # de tranh shape cua x (co the la shape cua OUTPUT, khac input).
+    g = x.grad
+    return Tensor(g, [len(g)], 0)
+
+def tapebackward(t: 'list[Node]', loss: "Tensor") -> 'i32':
+    # THU TU QUAN TRONG:
+    #   1. cap phat `grad` cho MOI tensor trong do thi (ke ca trung gian)
+    #   2. moi zero - neu zero truoc, bien tham chieu se tro vao list cu
+    #      da bi thay the, backward se ghi vao nhung vong dem ma khong ai doc.
+    for i in range(len(t)):
+        nd = t[i]
+        # MOI lan doc/ghi phai gan ra bien rieng: `nd.ins[k]` trong bieu thuc
+        # la bien tam cu .NET, khong dung chua, nen thay doi khong nhin thay
+        # duoc tu cho ben ngoai.
+        for k in range(len(nd.ins)):
+            _g = nd.ins[k]
+            t_alloc_grad(_g)
+        for k in range(len(nd.outs)):
+            _o = nd.outs[k]
+            t_alloc_grad(_o)
+    t_alloc_grad(loss)
+    _clear_grad(t)
+    # seed: d(loss)/d(loss) = 1
+    t_zero_grad(loss)
+    loss.grad[0] = 1.0
+    for q in range(len(t) - 1, -1, -1):
+        nd = t[q]
+        # MOI lan doc phai gan ra bien rieng. Chuoi truy cap `nd.outs[0].grad`
+        # Bien .NET thanh bien tam KHONG dung chua, nen chuoi do doc
+        # mot thuoc tinh rong -> backward nhan gy = null.
+        _out = nd.outs[0]
+        gy = _grad_buf(_out)
+        tag = nd.tag
+        if tag == "add":
+            x0 = nd.ins[0]
+            x1 = nd.ins[1]
+            gs = op_add_bwd(gy, len(x0.data), len(x1.data))
+            _acc(x0, gs[0])
+            _acc(x1, gs[1])
+        elif tag == "mul":
+            x0 = nd.ins[0]
+            x1 = nd.ins[1]
+            gs = op_mul_bwd(x0, x1, gy, len(x0.data), len(x1.data))
+            _acc(x0, gs[0])
+            _acc(x1, gs[1])
+        elif tag == "matmul":
+            x0 = nd.ins[0]
+            x1 = nd.ins[1]
+            gs = op_matmul_bwd(x0, x1, gy, nd.a, nd.b, nd.c)
+            _acc(x0, gs[0])
+            _acc(x1, gs[1])
+        elif tag == "rmsnorm":
+            x0 = nd.ins[0]
+            eps = nd.cache[0]
+            _acc(x0, op_rmsnorm_bwd(x0, gy, eps))
+        elif tag == "layernorm":
+            x0 = nd.ins[0]
+            eps = nd.cache[0]
+            if len(x0.data) != len(gy.data):
+                raise ValueError("tape/layernorm: kich thuoc x(" + str(len(x0.data)) + ") != gy(" + str(len(gy.data)) + ")")
+            _acc(x0, op_layernorm_bwd(x0, gy, eps))
+        elif tag == "gelu_erf":
+            x0 = nd.ins[0]
+            _acc(x0, op_gelu_erf_bwd(x0, gy))
+        elif tag == "gelu_tanh":
+            x0 = nd.ins[0]
+            _acc(x0, op_gelu_tanh_bwd(x0, gy))
+        elif tag == "silu":
+            x0 = nd.ins[0]
+            _acc(x0, op_silu_bwd(x0, gy))
+        elif tag == "relu":
+            x0 = nd.ins[0]
+            _acc(x0, op_relu_bwd(x0, gy))
+        elif tag == "softmax":
+            x0 = nd.ins[0]
+            _acc(x0, op_softmax_bwd(_out, gy, nd.a, nd.b))
+        elif tag == "embed":
+            x0 = nd.ins[0]
+            _acc(x0, op_embed_bwd(x0, nd.idx, nd.a, gy))
+        elif tag == "ce":
+            x0 = nd.ins[0]
+            gseed = nd.cache[0]
+            _acc(x0, op_ce_bwd(x0, gseed, nd.a, nd.idx))
+    return 0
+
+def _acc(dst: "Tensor", g: "Tensor") -> 'i32':
+    # g la gradient TUYET DOI (khong phai view) -> cong thang vao dst.grad.
+    # Phai kiem tra kich thuoc: mot Tensor trung gian co the chua cap phat
+    # `grad` (buffer rong), va ghi vao do se loi IndexOutOfRange.
+    gd = g.data
+    for i in range(len(gd)):
+        _i = i + dst.offset
+        if _i >= len(dst.grad):
+            return 0
+        dst.grad[_i] = dst.grad[_i] + gd[i]
+    return 0
+
+# ---- gradcheck bang sai phay ----------------------------------------------
+# Doc lap fixture PyTorch: kiem tra |(L(x+h)-L(x-h))/(2h) - g| < tol.
+
+def loss_softmax_ce(x: "Tensor", target: 'i64', mask_l: 'list[i64]') -> 'f32':
+    return op_ce_fwd(x, target, mask_l)
+
+def _mask_all(n: 'i64') -> 'list[i64]':
+    m = []
+    for i in range(n):
+        m.append(1)
+    return m
+
+def gradcheck_softmax_ce(x0: 'list[f32]', target: 'i64', h: 'f32') -> 'list[f32]':
+    n = len(x0)
+    mask_l = _mask_all(n)
+    t = tape_new()
+    x = t_new(x0, [n])
+    t_require_grad(x)
+    lg = tape_softmax(t, x, 1, n)
+    loss = tape_ce(t, lg, target, mask_l, 1.0)
+    tapebackward(t, loss)
+    g = []
+    for i in range(n):
+        g.append(x.grad[i])
+    return g
+
+# ============================================================================
+#  GRADCHECK bang SAI PHAY
+# ----------------------------------------------------------------------------
+#  YEU CAU: dung tai mot noi — KHONG dung fixture PyTorch, KHONG reference
+#  cong thuc backward nao. Cach duy nhat de chung minh backward TU DUNG la
+#  so sanh voi dao phan cua chinh ham forward, tinh bang chinh do chinh do.
+#
+#    dL/dx_i ~= (L(x + h*e_i) - L(x - h*e_i)) / (2h)
+#
+#  KHUYEN CANH CUA PHAY TRONG f32:
+#    - h qua lon  -> sai so cua ham forward (float) an cat gradient that
+#    - h qua nho  -> cat nhau do lam tron f32
+#    - chon h = cbrt(f32_eps) * max|x| ~= 6e-4 * max|x|
+#    - dung CENTRAL difference (hieu chinh O(h^2)) chu khong dung forward
+# ============================================================================
+
+def _gp_default_h(scale: 'f32') -> 'f32':
+    # cbrt(1.19e-7) ~= 4.92e-3; nho lai de cat nhau it nhat trong f32
+    h = 0.0001 * scale
+    if h < 0.000001:
+        h = 0.000001
+    return h
+
+def _copy_with(x0: 'list[f32]', idx: 'i64', delta: 'f32') -> 'list[f32]':
+    out = []
+    for i in range(len(x0)):
+        out.append(x0[i])
+    out[idx] = x0[idx] + delta
+    return out
+
+# ---- loss don gian: matmul -> rmsnorm -> gelu -> CE ------------------------
+# Mot chuoi "nho" nhung du op thuoc tang vai chuc nhiem va co gradient
+# khac nhau (tuy tinh, chuan hoa, phi tuyet). Neu backward sai o bat ky
+# tang nao, sai so se lo ra ngay.
+
+def gc_loss(x: 'list[f32]', w: 'list[f32]', target: 'i64', n: 'i64') -> 'f32':
+    xt = t_new(x, [n])
+    wt = t_new(w, [n])
+    lg = tape_softmax(tape_new(), xt, 1, n)
+    lg2 = tape_softmax(tape_new(), wt, 1, n)
+    y = []
+    for i in range(n):
+        y.append(lg.data[i] * lg2.data[i])
+    return op_ce_fwd(t_new(y, [n]), target, _mask_all(n))
+
+def gradcheck_simple(x0: 'list[f32]', w0: 'list[f32]', target: 'i64', h: 'f32') -> 'list[f32]':
+    # tra ve [analytic_x, numeric_x, analytic_w, numeric_w]
+    n = len(x0)
+    t = tape_new()
+    x = t_new(x0, [n])
+    w = t_new(w0, [n])
+    t_require_grad(x)
+    t_require_grad(w)
+    lg = tape_softmax(t, x, 1, n)
+    lg2 = tape_softmax(t, w, 1, n)
+    y = tape_mul(t, lg, lg2)
+    loss = tape_ce(t, y, target, _mask_all(n), 1.0)
+    tapebackward(t, loss)
+    out = []
+    for i in range(n):
+        out.append(x.grad[i])
+    for i in range(n):
+        out.append(w.grad[i])
+    return out
+
+def gradcheck_numeric_x(x0: 'list[f32]', w0: 'list[f32]', target: 'i64', h: 'f32') -> 'list[f32]':
+    n = len(x0)
+    out = []
+    for i in range(n):
+        xp = _copy_with(x0, i, h)
+        xm = _copy_with(x0, i, -h)
+        lp = gc_loss(xp, w0, target, n)
+        lm = gc_loss(xm, w0, target, n)
+        out.append((lp - lm) / (2.0 * h))
+    return out
+
+def gradcheck_numeric_w(x0: 'list[f32]', w0: 'list[f32]', target: 'i64', h: 'f32') -> 'list[f32]':
+    n = len(x0)
+    out = []
+    for i in range(n):
+        wp = _copy_with(w0, i, h)
+        wm = _copy_with(w0, i, -h)
+        lp = gc_loss(x0, wp, target, n)
+        lm = gc_loss(x0, wm, target, n)
+        out.append((lp - lm) / (2.0 * h))
+    return out
+
+# ---- gradcheck cho chuoi 6 tang (dung chinh do thi da dung o tape_tests) ----
+
+def chain_loss(x: 'list[f32]', w1: 'list[f32]', b1: 'list[f32]', target: 'i64', mask_l: 'list[i64]') -> 'f32':
+    # Dung CHUNG forward voi tape_tests, nhung bo qua do thi (tape rong) —
+    # ham nay chi dung de tinh gia tri L(x) cho sai phay.
+    n = len(x)
+    t = tape_new()
+    xa = t_new(x, [n])
+    wa = t_new(w1, [n])
+    ba = t_new(b1, [n])
+    h1 = tape_rmsnorm(t, xa, 0.000001)
+    h1s = tape_mul(t, h1, wa)
+    h2 = tape_gelu_erf(t, h1s)
+    h3 = tape_add(t, h2, ba)
+    h4 = tape_layernorm(t, h3, 0.000001)
+    h5 = tape_silu(t, h4)
+    loss = tape_ce(t, h5, target, mask_l, 1.0)
+    return loss.data[0]
+
+def gradcheck_chain(x0: 'list[f32]', w10: 'list[f32]', b10: 'list[f32]', target: 'i64', mask_l: 'list[i64]', h: 'f32') -> 'list[f32]':
+    # tra ve [analytic_x, numeric_x, analytic_w1, numeric_w1, analytic_b1, numeric_b1]
+    n = len(x0)
+    t = tape_new()
+    x = t_new(x0, [n])
+    w1 = t_new(w10, [n])
+    b1 = t_new(b10, [n])
+    t_require_grad(x)
+    t_require_grad(w1)
+    t_require_grad(b1)
+    h1 = tape_rmsnorm(t, x, 0.000001)
+    h1s = tape_mul(t, h1, w1)
+    h2 = tape_gelu_erf(t, h1s)
+    h3 = tape_add(t, h2, b1)
+    h4 = tape_layernorm(t, h3, 0.000001)
+    h5 = tape_silu(t, h4)
+    loss = tape_ce(t, h5, target, mask_l, 1.0)
+    tapebackward(t, loss)
+    out = []
+    for i in range(n):
+        out.append(x.grad[i])
+    for i in range(n):
+        xp = _copy_with(x0, i, h)
+        xm = _copy_with(x0, i, -h)
+        lp = chain_loss(xp, w10, b10, target, mask_l)
+        lm = chain_loss(xm, w10, b10, target, mask_l)
+        out.append((lp - lm) / (2.0 * h))
+    for i in range(n):
+        out.append(w1.grad[i])
+    for i in range(n):
+        wp = _copy_with(w10, i, h)
+        wm = _copy_with(w10, i, -h)
+        lp = chain_loss(x0, wp, b10, target, mask_l)
+        lm = chain_loss(x0, wm, b10, target, mask_l)
+        out.append((lp - lm) / (2.0 * h))
+    for i in range(n):
+        out.append(b1.grad[i])
+    for i in range(n):
+        bp = _copy_with(b10, i, h)
+        bm = _copy_with(b10, i, -h)
+        lp = chain_loss(x0, w10, bp, target, mask_l)
+        lm = chain_loss(x0, w10, bm, target, mask_l)
+        out.append((lp - lm) / (2.0 * h))
+    return out
+
+
