@@ -59,20 +59,26 @@ def pack_sequences(docs: 'list[list[i64]]', seq_len: 'i64', eos_id: 'i64') -> 'l
     # Cat het duong: so pair su dung = boi cua seq_len (tail bi BO).
     # Moi function chi MOT list phang + return truc tiep (workaround
     # bug compiler, xem header + pk_n_chunks/pk_seq_at/pk_docs_at).
+    # Dem truoc tong so pair de biet cat o dau -> chi append phan day du
+    # ngay tu dau (KHONG tao list phang thu 2 trong cung ham: bug compiler,
+    # list thu 2 bi cap backing i32[] -> token bi corrupt, xem header).
+    total = 0
+    for k in range(len(docs)):
+        total = total + len(docs[k]) + 1
+    n_use = total - total % seq_len
     pk = []
+    p = 0
     for k in range(len(docs)):
         d = docs[k]
         for ti in range(len(d)):
-            pk.append(d[ti])
+            if p < n_use:
+                pk.append(d[ti])
+                pk.append(k)
+                p = p + 1
+        if p < n_use:
+            pk.append(eos_id)
             pk.append(k)
-        pk.append(eos_id)
-        pk.append(k)
-    n_use = len(pk) - len(pk) % (2 * seq_len)
-    if n_use < len(pk):
-        pk2 = []
-        for i in range(n_use):
-            pk2.append(pk[i])
-        return pk2
+            p = p + 1
     return pk
 
 def pk_n_chunks(pk: 'list[i64]', seq_len: 'i64') -> 'i64':
@@ -95,6 +101,17 @@ def pk_docs_at(pk: 'list[i64]', ci: 'i64', seq_len: 'i64') -> 'list[i64]':
     b = ci * 2 * seq_len
     for j in range(seq_len):
         out.append(pk[b + 2 * j + 1])
+    return out
+
+def flat_tokens(pk: 'list[i64]') -> 'list[i64]':
+    # token cua toan bo chunk day du, theo dung thu tu pack (bo doc id).
+    # pk da bi cat con boi so seq_len pair -> moi token o day deu thuoc
+    # chunk day du. MOT list phang, return truc tiep (workaround compiler).
+    out = []
+    p = 0
+    while 2 * p < len(pk):
+        out.append(pk[2 * p])
+        p = p + 1
     return out
 
 def causal_mask(t: 'i64') -> 'list[i64]':

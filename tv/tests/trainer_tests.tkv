@@ -1,0 +1,338 @@
+import tv.training.trainer
+import tv.runtime.f32_bits
+
+# ============================================================================
+#  G4 TRAINER TESTS (ROADMAP_TRAIN G4)
+# ----------------------------------------------------------------------------
+#  Fixture: tools\gen_trainer_fixture.py (PyTorch reference, cung cong thuc
+#  AdamW + warmup/cosine + clip + grad accumulation, MLP 4-8-3, 20 mau).
+#
+#  Gate:
+#    [1] 1 buoc train khop PyTorch (loss, grad norm, lr, trong so)
+#    [2] lich lr warmup + cosine khop tung buoc
+#    [3] clip norm: vuot nguong -> scale dung; duoi nguong -> khong doi
+#    [4] overfit 20 mau -> loss gan 0, acc 1.0, trong so khop PyTorch
+#    [5] resume bit-exact: 3 + save/load + 3 == 6 lien, == PyTorch
+#    [6] eval/ppl/throughput in ra duoc
+#
+#  Chay: tkvc tv\tests\trainer_tests.tkv ra.exe main   (tu goc repo)
+# ============================================================================
+
+FIX = "tv/tests/fixtures/train_cases.txt"
+TMP = "tv/tests/_tmp_train_out"
+TOL = 1e-5
+
+def _i64(t: 'str') -> 'i64':
+    v = 0
+    for k in range(len(t)):
+        v = v * 10 + (ord(t[k]) - 48)
+    return v
+
+def _ints(ln: 'str') -> 'list[i64]':
+    out = []
+    toks = ln.split(" ")
+    for j in range(len(toks)):
+        if len(toks[j]) > 0:
+            out.append(_i64(toks[j]))
+    return out
+
+def _floats(ln: 'str') -> 'list[f32]':
+    out = []
+    toks = ln.split(" ")
+    for j in range(len(toks)):
+        if len(toks[j]) > 0:
+            out.append(float(toks[j]))
+    return out
+
+def _sec_lines(lines: 'list[str]', name: 'str') -> 'list[str]':
+    out = []
+    on = 0
+    for i in range(len(lines)):
+        ln = lines[i]
+        if len(ln) >= 5 and ln[0:5] == "#sec ":
+            if ln[5:] == name:
+                on = 1
+            else:
+                on = 0
+        elif on == 1:
+            out.append(ln)
+    return out
+
+def _sec_first(lines: 'list[str]', name: 'str') -> 'str':
+    xs = _sec_lines(lines, name)
+    if len(xs) > 0:
+        _f = xs[0]
+        return _f
+    return ""
+
+def _kv(ln: 'str', key: 'str') -> 'i64':
+    parts = ln.split(" ")
+    for i in range(len(parts)):
+        kv = parts[i].split("=")
+        if len(kv) == 2:
+            if kv[0] == key:
+                return _i64(kv[1])
+    return -1
+
+def _kvf(ln: 'str', key: 'str') -> 'f32':
+    parts = ln.split(" ")
+    for i in range(len(parts)):
+        kv = parts[i].split("=")
+        if len(kv) == 2:
+            if kv[0] == key:
+                return float(kv[1])
+    return 0.0
+
+def _flat_rows(rows: 'list[str]') -> 'list[f32]':
+    # noi nhieu dong so thanh MOT list phang (mot list duy nhat)
+    out = []
+    for i in range(len(rows)):
+        vals = _floats(rows[i])
+        for j in range(len(vals)):
+            out.append(vals[j])
+    return out
+
+def _concat4(a: 'list[f32]', b: 'list[f32]', c: 'list[f32]', d: 'list[f32]') -> 'list[f32]':
+    out = []
+    for i in range(len(a)):
+        out.append(a[i])
+    for i in range(len(b)):
+        out.append(b[i])
+    for i in range(len(c)):
+        out.append(c[i])
+    for i in range(len(d)):
+        out.append(d[i])
+    return out
+
+def _maxdiff(a: 'list[f32]', b: 'list[f32]') -> 'f32':
+    n = len(a)
+    if len(b) < n:
+        n = len(b)
+    m = 0.0
+    for i in range(n):
+        d = a[i] - b[i]
+        if d < 0.0:
+            d = 0.0 - d
+        if d > m:
+            m = d
+    if len(a) != len(b):
+        return 1000000.0
+    return m
+
+def _bits_equal(a: 'list[f32]', b: 'list[f32]') -> 'i32':
+    if len(a) != len(b):
+        return 0
+    for i in range(len(a)):
+        if f64_to_f32_bits(float(a[i])) != f64_to_f32_bits(float(b[i])):
+            return 0
+    return 1
+
+def _copy_into(dst: 'list[f32]', src: 'list[f32]') -> 'i32':
+    for i in range(len(src)):
+        dst[i] = src[i]
+    return 0
+
+def _slice_x(xs: 'list[f32]', idx: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(4):
+        out.append(xs[idx * 4 + i])
+    return out
+
+def _fabs(v: 'f32') -> 'f32':
+    if v < 0.0:
+        return 0.0 - v
+    return v
+
+def report(name: 'str', d: 'f32', tol: 'f32') -> 'i32':
+    if d <= tol:
+        print("  [PASS] " + name + "  max_abs_diff=" + str(d))
+        return 0
+    print("  [FAIL] " + name + "  max_abs_diff=" + str(d) + "  tol=" + str(tol))
+    return 1
+
+def main() -> 'i32':
+    fails = 0
+    cases = 0
+    print("=== G4 trainer: AdamW + warmup/cosine + clip + resume ===")
+    t_start = now_ms()
+
+    txt = read_file(FIX)
+    lines = txt.split("\n")
+    pl = _sec_first(lines, "params")
+    in_d = _kv(pl, "in")
+    hid = _kv(pl, "hid")
+    out_d = _kv(pl, "out")
+    n_param = _kv(pl, "n_param")
+    warmup = _kv(pl, "warmup")
+    total = _kv(pl, "total")
+    lr_max = _kvf(pl, "lr_max")
+    lr_min = _kvf(pl, "lr_min")
+    wd = _kvf(pl, "wd")
+    b1 = _kvf(pl, "b1")
+    b2 = _kvf(pl, "b2")
+    eps = _kvf(pl, "eps")
+    clip = _kvf(pl, "clip")
+    accum = _kv(pl, "accum")
+    n_samples = _kv(pl, "n_samples")
+
+    ini = _sec_lines(lines, "init")
+    p0 = _concat4(_floats(ini[0]), _floats(ini[1]), _floats(ini[2]), _floats(ini[3]))
+    xs = _flat_rows(_sec_lines(lines, "x"))
+    ys = _ints(_sec_first(lines, "y"))
+    fx_lr = _floats(_sec_first(lines, "step_lr"))
+    fx_loss = _floats(_sec_first(lines, "step_loss"))
+    fx_gn = _floats(_sec_first(lines, "step_gnorm"))
+    snap1 = _floats(_sec_first(lines, "snap1"))
+    fx_final = _floats(_sec_first(lines, "final"))
+    fx_resume = _floats(_sec_first(lines, "resume_ref6"))
+    fx_eval = _floats(_sec_first(lines, "eval_loss"))
+    fx_acc = _floats(_sec_first(lines, "eval_acc"))
+
+    if n_param != 67 or len(p0) != 67 or len(xs) != n_samples * in_d:
+        print("  [FAIL] fixture layout: n_param=" + str(n_param) + " p0=" + str(len(p0))
+              + " xs=" + str(len(xs)))
+        return 1
+
+    # ---- [1] 1 buoc train khop PyTorch -------------------------------------
+    o1 = new_adamw(n_param, warmup, total, lr_max, lr_min, b1, b2, eps, wd, clip)
+    _copy_into(o1.p, p0)
+    s1 = new_sampler(n_samples, 42)
+    o1.zero_grad()
+    _i0 = s1.next_idx()
+    _l0 = mlp_loss_grad(o1.p, _slice_x(xs, _i0), ys[_i0], o1.g, 1.0 / float(accum))
+    _i1 = s1.next_idx()
+    _l1 = mlp_loss_grad(o1.p, _slice_x(xs, _i1), ys[_i1], o1.g, 1.0 / float(accum))
+    gn = o1.grad_norm()
+    lr0 = o1.lr_now()
+    step_loss = (_l0 + _l1) / float(accum)
+    cases = cases + 1
+    fails = fails + report("buoc 1: loss", _fabs(step_loss - fx_loss[0]), TOL)
+    cases = cases + 1
+    fails = fails + report("buoc 1: grad norm", _fabs(gn - fx_gn[0]), TOL)
+    cases = cases + 1
+    fails = fails + report("buoc 1: lr", _fabs(lr0 - fx_lr[0]), 1e-7)
+    o1.step()
+    cases = cases + 1
+    fails = fails + report("buoc 1: trong so", _maxdiff(o1.p, snap1), TOL)
+
+    # run_steps phai cho cung ket qua (duong vong lap that)
+    o1b = new_adamw(n_param, warmup, total, lr_max, lr_min, b1, b2, eps, wd, clip)
+    _copy_into(o1b.p, p0)
+    s1b = new_sampler(n_samples, 42)
+    l1b = run_steps(o1b, xs, ys, n_samples, accum, 1, s1b)
+    cases = cases + 1
+    fails = fails + report("buoc 1: run_steps loss", _fabs(l1b[0] - fx_loss[0]), TOL)
+    cases = cases + 1
+    fails = fails + report("buoc 1: run_steps trong so", _maxdiff(o1b.p, snap1), TOL)
+
+    # ---- [2] lich lr -------------------------------------------------------
+    bad_lr = 0
+    for s in range(total):
+        _v = lr_at(s, warmup, total, lr_max, lr_min)
+        if _fabs(_v - fx_lr[s]) > 1e-7:
+            bad_lr = bad_lr + 1
+    if bad_lr == 0:
+        print("  [PASS] lich lr: " + str(total) + " buoc warmup+cosine khop")
+    else:
+        print("  [FAIL] lich lr: " + str(bad_lr) + " buoc lech")
+        fails = fails + 1
+    cases = cases + 1
+
+    # ---- [3] clip norm -----------------------------------------------------
+    o3 = new_adamw(n_param, warmup, total, lr_max, lr_min, b1, b2, eps, wd, clip)
+    for i in range(n_param):
+        o3.g[i] = 1.0
+    _gn3 = o3.grad_norm()
+    o3.step()
+    _coef = 1.0 / (_gn3 + 0.000001)
+    _want_m = (1.0 - b1) * _coef
+    cases = cases + 1
+    fails = fails + report("clip: grad lon bi scale (norm=" + str(_gn3) + ")",
+                           _fabs(o3.m[0] - _want_m), 1e-6)
+    o3b = new_adamw(n_param, warmup, total, lr_max, lr_min, b1, b2, eps, wd, clip)
+    for i in range(n_param):
+        o3b.g[i] = 0.0001
+    o3b.step()
+    _want_m2 = (1.0 - b1) * 0.0001
+    cases = cases + 1
+    fails = fails + report("clip: grad nho khong doi", _fabs(o3b.m[0] - _want_m2), 1e-9)
+
+    # ---- [4] overfit 20 mau ------------------------------------------------
+    o4 = new_adamw(n_param, warmup, total, lr_max, lr_min, b1, b2, eps, wd, clip)
+    _copy_into(o4.p, p0)
+    s4 = new_sampler(n_samples, 42)
+    l4 = run_steps(o4, xs, ys, n_samples, accum, total, s4)
+    cases = cases + 1
+    fails = fails + report("overfit: loss tung buoc khop PyTorch", _maxdiff(l4, fx_loss), TOL)
+    cases = cases + 1
+    fails = fails + report("overfit: trong so cuoi khop PyTorch", _maxdiff(o4.p, fx_final), TOL)
+    ev = mlp_eval_loss(o4.p, xs, ys, n_samples)
+    ac = mlp_eval_acc(o4.p, xs, ys, n_samples)
+    cases = cases + 1
+    fails = fails + report("overfit: eval loss", _fabs(ev - fx_eval[0]), TOL)
+    if ev < 0.05 and _fabs(ac - fx_acc[0]) <= 1e-6 and ac >= 0.999:
+        print("  [PASS] overfit: eval_loss=" + str(ev) + " acc=" + str(ac))
+    else:
+        print("  [FAIL] overfit: eval_loss=" + str(ev) + " acc=" + str(ac))
+        fails = fails + 1
+    cases = cases + 1
+
+    # ---- [5] resume bit-exact ----------------------------------------------
+    oa = new_adamw(n_param, warmup, total, lr_max, lr_min, b1, b2, eps, wd, clip)
+    _copy_into(oa.p, p0)
+    sa = new_sampler(n_samples, 42)
+    _la = run_steps(oa, xs, ys, n_samples, accum, 6, sa)
+
+    ob = new_adamw(n_param, warmup, total, lr_max, lr_min, b1, b2, eps, wd, clip)
+    _copy_into(ob.p, p0)
+    sb = new_sampler(n_samples, 42)
+    run_steps(ob, xs, ys, n_samples, accum, 3, sb)
+    os_mkdir(TMP)
+    _sv = ckpt_save(TMP + "/train_ck.txt", ob, sb)
+    oc = new_adamw(n_param, warmup, total, lr_max, lr_min, b1, b2, eps, wd, clip)
+    sc = new_sampler(n_samples, 1)
+    _ld = ckpt_load(TMP + "/train_ck.txt", oc, sc)
+    _lc = run_steps(oc, xs, ys, n_samples, accum, 3, sc)
+    ok5 = 1
+    if _sv != 1 or _ld != 1:
+        ok5 = 0
+    if _bits_equal(oa.p, oc.p) == 0:
+        ok5 = 0
+    if _bits_equal(oa.m, oc.m) == 0:
+        ok5 = 0
+    if _bits_equal(oa.v, oc.v) == 0:
+        ok5 = 0
+    if oa.t != oc.t:
+        ok5 = 0
+    if sc.draws != sa.draws or sc.state != sa.state:
+        ok5 = 0
+    if ok5 == 1:
+        print("  [PASS] resume bit-exact: 3 + save/load + 3 == 6 lien (bit-for-bit)")
+    else:
+        print("  [FAIL] resume: bits khac nhau (t=" + str(oa.t) + "/" + str(oc.t)
+              + " draws=" + str(sc.draws) + "/" + str(sa.draws) + ")")
+        fails = fails + 1
+    cases = cases + 1
+    cases = cases + 1
+    fails = fails + report("resume: khop PyTorch sau 6 buoc", _maxdiff(oc.p, fx_resume), TOL)
+    _ldiff = 0.0
+    for i in range(3):
+        _d = _fabs(_lc[i] - _la[3 + i])
+        if _d > _ldiff:
+            _ldiff = _d
+    if _ldiff > 0.0:
+        fails = fails + 1
+        print("  [FAIL] resume: loss 3 buoc sau khi load khac chay lien (d=" + str(_ldiff) + ")")
+    else:
+        print("  [PASS] resume: loss 3 buoc sau khi load giong chay lien")
+
+    # ---- [6] eval / ppl / throughput ---------------------------------------
+    _ev2 = mlp_eval_loss(o4.p, xs, ys, n_samples)
+    _pp = ppl(_ev2)
+    _dt = now_ms() - t_start
+    _spb = float(total) / (_dt / 1000.0)
+    print("  [PASS] eval loss=" + str(_ev2) + " ppl=" + str(_pp)
+          + " throughput=" + str(_spb) + " buoc/s (" + str(_dt) + " ms)")
+
+    print("=== G4 trainer cases=" + str(cases) + " fails=" + str(fails) + " ===")
+    return fails

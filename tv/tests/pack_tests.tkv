@@ -66,6 +66,14 @@ def _kv(line: 'str', key: 'str') -> 'i64':
                 return _i64(_v)
     return -1
 
+def _shift(xs: 'list[i64]') -> 'list[i64]':
+    # helper tao doc co token lon (1000+): qua ham return de tranh bug compiler
+    # "nested literal append" (docs.append([1,2,3]) -> rac dia chi).
+    out = []
+    for x in xs:
+        out.append(x + 1000)
+    return out
+
 def _eq_ints(a: 'list[i64]', b: 'list[i64]') -> 'i32':
     if len(a) != len(b):
         return 0
@@ -79,7 +87,7 @@ def _eq_ints(a: 'list[i64]', b: 'list[i64]') -> 'i32':
 def main() -> 'i32':
     fails = 0
     print("=== G3: packing + shard reader ===")
-    t0 = now_ms()
+    t_start = now_ms()
 
     txt = read_file(FIX)
     lines = txt.split("\n")
@@ -124,6 +132,28 @@ def main() -> 'i32':
         print("  [FAIL] pack")
         fails = fails + 1
 
+    # --- [1b] cat tail: list phang thu 2 tung lam corrupt token -------------
+    # Regression guard cho bug compiler "list thu 2 trong cung ham": ban cu
+    # tao pk2 de cat tail -> token thanh 0,1,0. Fixture khong co tail le nen
+    # chi ca nay moi bat duoc.
+    _td = []
+    _td.append(_shift([1, 2, 3]))
+    _td.append(_shift([4]))
+    _tpk = pack_sequences(_td, 4, 99)
+    ok1b = 1
+    _want_tpk = [1001, 0, 1002, 0, 1003, 0, 99, 0]
+    if _eq_ints(_tpk, _want_tpk) == 0:
+        ok1b = 0
+    _wft = [1001, 1002, 1003, 99]
+    _gft = flat_tokens(_tpk)
+    if _eq_ints(_gft, _wft) == 0:
+        ok1b = 0
+    if ok1b == 1:
+        print("  [PASS] pack cat tail: 12 pair -> 2 pair, token nguyen ven")
+    else:
+        print("  [FAIL] pack cat tail pk=" + str(_tpk))
+        fails = fails + 1
+
     # --- [2] masks: block-diagonal seq0 + causal 4x4 (flat row-major) ------
     ok2 = 1
     _d0 = pk_docs_at(pk, 0, seq_len)
@@ -155,12 +185,8 @@ def main() -> 'i32':
         fails = fails + 1
 
     # --- [3] shard write + read roundtrip -----------------------------------
-    # chi lay phan duong cac chunk (tail cuoi khong day bi BO - dung spec)
-    flat = []
-    _np = 0
-    while _np + 2 * seq_len <= len(pk):
-        flat.append(pk[_np])
-        _np = _np + 2 * seq_len
+    # token cua toan bo chunk day du (tail cuoi khong day bi BO - dung spec)
+    flat = flat_tokens(pk)
     nw = shard_write(TMP, PREFIX, flat, shard_size)
     ok3 = 1
     if nw != n_shards:
@@ -269,6 +295,6 @@ def main() -> 'i32':
         print("  [FAIL] determinism (o42/43 khop? cs3=" + str(cs3) + ")")
         fails = fails + 1
 
-    dt = now_ms() - t0
-    print("=== G3 pack cases=" + str(5) + " fails=" + str(fails) + " (" + str(dt) + " ms) ===")
+    dt = now_ms() - t_start
+    print("=== G3 pack cases=" + str(6) + " fails=" + str(fails) + " (" + str(dt) + " ms) ===")
     return fails

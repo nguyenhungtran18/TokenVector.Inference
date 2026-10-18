@@ -27,6 +27,9 @@ $RECYCLE.BIN/
 # commit them; sync the canonical file instead.
 /tv.*.tkv
 
+# Scratch output cua test (pack_tests.tkv ghi shard vao day)
+/tv/tests/_tmp_*/
+
 # Distribution output: a full duplicate of the source tree plus a bundled
 # compiler .exe (which *.exe already excludes, so committing it would produce
 # an incomplete package). Kept as a local directory, not in git.

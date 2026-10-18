@@ -1,0 +1,491 @@
+# G4 TRAINER (ROADMAP_TRAIN) — AdamW + warmup/cosine + clip norm +
+# grad accumulation + checkpoint bit-exact + vong train/eval.
+#
+# Reference: tools\gen_trainer_fixture.py (PyTorch) — cung cong thuc, cung
+# thu tu tinh, cung hang so. Fixture: tv/tests/fixtures/train_cases.txt
+#
+# Model demo (dung cho gate G4): MLP 4 -> 8 (ReLU) -> 3, cross-entropy mean.
+# Tham so nam PHANG trong MOT list[f32] (67 phan tu) — workaround bug compiler
+# "list phang thu 2" (xem HANDOFF muc 0.2):
+#    [0..31]   W1  row-major [hid][in]
+#    [32..39]  b1
+#    [40..63]  W2  row-major [out][hid]
+#    [64..66]  b2
+#
+# Cong thuc (khop torch.optim.AdamW + clip_grad_norm_ + LambdaLR):
+#   lr(s): s < warmup -> lr_max*(s+1)/warmup
+#          nguoc lai  -> lr_min + (lr_max-lr_min)*0.5*(1+cos(pi*prog))
+#                        prog = (s-warmup)/(total-warmup)
+#   clip:  norm = L2(L2 tung tham so...); coef = clip/(norm+1e-6), chi nhan <1
+#   AdamW: p *= (1 - lr*wd)
+#          m = b1*m + (1-b1)*g ; v = b2*v + (1-b2)*g*g
+#          step_size = lr/(1 - b1^t) ; denom = sqrt(v)/sqrt(1-b2^t) + eps
+#          p = p - step_size*m/denom
+#
+# Checkpoint: text, tham so/m/v ghi bang BIT IEEE-754 binary32 (khong phai so
+# thap phan) nen save -> load la bit-exact tuyet doi.
+
+import tv.numerics.tensor
+import tv.runtime.f32_bits
+
+IN_D = 4
+HID = 8
+OUT_D = 3
+W1_N = 32
+B1_OFF = 32
+W2_OFF = 40
+B2_OFF = 64
+N_PARAM = 67
+
+def _zeros(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(0.0)
+    return out
+
+def _absf(v: 'f32') -> 'f32':
+    if v < 0.0:
+        return 0.0 - v
+    return v
+
+def _bp(b: 'f32', e: 'i64') -> 'f32':
+    r = 1.0
+    for i in range(e):
+        r = r * b
+    return r
+
+def lr_at(s: 'i64', warmup: 'i64', total: 'i64', lr_max: 'f32', lr_min: 'f32') -> 'f32':
+    if s < warmup:
+        return lr_max * float(s + 1) / float(warmup)
+    if total <= warmup:
+        return lr_max
+    prog = float(s - warmup) / float(total - warmup)
+    return lr_min + (lr_max - lr_min) * 0.5 * (1.0 + cos(3.141592653589793 * prog))
+
+# ============================================================================
+#  Bo toi uu
+# ============================================================================
+
+class AdamW:
+    _ok: 'i64'
+    n: 'i64'
+    p: 'list[f32]'
+    g: 'list[f32]'
+    m: 'list[f32]'
+    v: 'list[f32]'
+    t: 'i64'
+    warmup: 'i64'
+    total: 'i64'
+    lr_max: 'f32'
+    lr_min: 'f32'
+    b1: 'f32'
+    b2: 'f32'
+    eps: 'f32'
+    wd: 'f32'
+    clip: 'f32'
+
+    def __init__(self, n: 'i64', warmup: 'i64', total: 'i64',
+                 lr_max: 'f32', lr_min: 'f32',
+                 b1: 'f32', b2: 'f32', eps: 'f32', wd: 'f32', clip: 'f32'):
+        self.n = n
+        self.p = _zeros(n)
+        self.g = _zeros(n)
+        self.m = _zeros(n)
+        self.v = _zeros(n)
+        self.t = 0
+        self.warmup = warmup
+        self.total = total
+        self.lr_max = lr_max
+        self.lr_min = lr_min
+        self.b1 = b1
+        self.b2 = b2
+        self.eps = eps
+        self.wd = wd
+        self.clip = clip
+
+    def zero_grad(self) -> 'i32':
+        for i in range(self.n):
+            self.g[i] = 0.0
+        return 0
+
+    def lr_now(self) -> 'f32':
+        return lr_at(self.t, self.warmup, self.total, self.lr_max, self.lr_min)
+
+    def grad_norm(self) -> 'f32':
+        # khop PyTorch clip_grad_norm_: L2 tung tham so, roi L2 tren cac norm
+        s1 = 0.0
+        i = 0
+        while i < W1_N:
+            s1 = s1 + self.g[i] * self.g[i]
+            i = i + 1
+        s2 = 0.0
+        i = B1_OFF
+        while i < W2_OFF:
+            s2 = s2 + self.g[i] * self.g[i]
+            i = i + 1
+        s3 = 0.0
+        i = W2_OFF
+        while i < B2_OFF:
+            s3 = s3 + self.g[i] * self.g[i]
+            i = i + 1
+        s4 = 0.0
+        i = B2_OFF
+        while i < N_PARAM:
+            s4 = s4 + self.g[i] * self.g[i]
+            i = i + 1
+        n1 = sqrt(s1)
+        n2 = sqrt(s2)
+        n3 = sqrt(s3)
+        n4 = sqrt(s4)
+        return sqrt(n1 * n1 + n2 * n2 + n3 * n3 + n4 * n4)
+
+    def step(self) -> 'f32':
+        lr = lr_at(self.t, self.warmup, self.total, self.lr_max, self.lr_min)
+        gn = self.grad_norm()
+        coef = 1.0
+        if gn > 0.0:
+            coef = self.clip / (gn + 0.000001)
+            if coef > 1.0:
+                coef = 1.0
+        t1 = self.t + 1
+        bc1 = 1.0 - _bp(self.b1, t1)
+        bc2 = 1.0 - _bp(self.b2, t1)
+        step_size = lr / bc1
+        bc2s = sqrt(bc2)
+        wdf = 1.0 - lr * self.wd
+        for i in range(self.n):
+            gi = self.g[i] * coef
+            self.p[i] = self.p[i] * wdf
+            self.m[i] = self.b1 * self.m[i] + (1.0 - self.b1) * gi
+            self.v[i] = self.b2 * self.v[i] + (1.0 - self.b2) * gi * gi
+            denom = sqrt(self.v[i]) / bc2s + self.eps
+            self.p[i] = self.p[i] - step_size * self.m[i] / denom
+        self.t = self.t + 1
+        return lr
+
+# ============================================================================
+#  Sampler: xao tron moi epoch bang LCG 31-bit (Fisher-Yates), giong fixture
+# ============================================================================
+
+class Sampler:
+    _ok: 'i64'
+    n: 'i64'
+    perm: 'list[i64]'
+    state: 'i64'
+    draws: 'i64'
+
+    def __init__(self, n: 'i64', seed: 'i64'):
+        self.n = n
+        self.state = seed % 2147483648
+        self.draws = 0
+        self.perm = []
+        for i in range(n):
+            self.perm.append(i)
+        self.shuffle()
+
+    def shuffle(self) -> 'i32':
+        # reset ve identity TRUOC moi lan xao (giong fixture: perm = range(n)).
+        # SUA TAI CHO, KHONG gan lai field: sau khi goi ham con, compiler co
+        # the dung tham chieu field CU (index dau tien doc perm cu).
+        for k in range(self.n):
+            self.perm[k] = k
+        i = self.n - 1
+        while i > 0:
+            self.state = (self.state * 1103515245 + 12345) % 2147483648
+            j = self.state % (i + 1)
+            t = self.perm[i]
+            self.perm[i] = self.perm[j]
+            self.perm[j] = t
+            i = i - 1
+        return 0
+
+    def next_idx(self) -> 'i64':
+        if self.draws > 0 and self.draws % self.n == 0:
+            self.shuffle()
+        idx = self.perm[self.draws % self.n]
+        self.draws = self.draws + 1
+        return idx
+
+# Factory (constructor KHONG export qua module — quy tac compiler)
+def new_adamw(n: 'i64', warmup: 'i64', total: 'i64',
+              lr_max: 'f32', lr_min: 'f32',
+              b1: 'f32', b2: 'f32', eps: 'f32', wd: 'f32', clip: 'f32') -> "AdamW":
+    return AdamW(n, warmup, total, lr_max, lr_min, b1, b2, eps, wd, clip)
+
+def new_sampler(n: 'i64', seed: 'i64') -> "Sampler":
+    return Sampler(n, seed)
+
+# ============================================================================
+#  Model MLP tren vector tham so PHANG
+# ============================================================================
+
+def mlp_init(seed: 'i64') -> 'list[f32]':
+    # khoi tao nho, tat dinh (LCG 31-bit, deu trong [-0.5, 0.5)) — dung cho
+    # demo CLI; fixture G4 dung trong so do PyTorch sinh san.
+    out = []
+    s = seed % 2147483648
+    for i in range(N_PARAM):
+        s = (s * 1103515245 + 12345) % 2147483648
+        out.append(float(s) / 2147483648.0 - 0.5)
+    return out
+
+def mlp_logits(p: 'list[f32]', x: 'list[f32]') -> 'list[f32]':
+    # h = relu(W1 x + b1); z = W2 h + b2
+    h = _zeros(HID)
+    for o in range(HID):
+        acc = p[B1_OFF + o]
+        for i in range(IN_D):
+            acc = acc + p[o * IN_D + i] * x[i]
+        if acc < 0.0:
+            acc = 0.0
+        h[o] = acc
+    z = _zeros(OUT_D)
+    for o in range(OUT_D):
+        acc = p[B2_OFF + o]
+        for k in range(HID):
+            acc = acc + p[W2_OFF + o * HID + k] * h[k]
+        z[o] = acc
+    return z
+
+def mlp_loss(p: 'list[f32]', x: 'list[f32]', y: 'i64') -> 'f32':
+    z = mlp_logits(p, x)
+    mx = z[0]
+    for o in range(1, OUT_D):
+        if z[o] > mx:
+            mx = z[o]
+    s = 0.0
+    for o in range(OUT_D):
+        s = s + exp(z[o] - mx)
+    lse = mx + log(s)
+    return lse - z[y]
+
+def mlp_loss_grad(p: 'list[f32]', x: 'list[f32]', y: 'i64',
+                  gacc: 'list[f32]', scale: 'f32') -> 'f32':
+    # forward (recompute — giong G2), CE mean tren OUT_D lop, roi backward
+    hpre = _zeros(HID)
+    h = _zeros(HID)
+    for o in range(HID):
+        acc = p[B1_OFF + o]
+        for i in range(IN_D):
+            acc = acc + p[o * IN_D + i] * x[i]
+        hpre[o] = acc
+        if acc > 0.0:
+            h[o] = acc
+    z = _zeros(OUT_D)
+    for o in range(OUT_D):
+        acc = p[B2_OFF + o]
+        for k in range(HID):
+            acc = acc + p[W2_OFF + o * HID + k] * h[k]
+        z[o] = acc
+    mx = z[0]
+    for o in range(1, OUT_D):
+        if z[o] > mx:
+            mx = z[o]
+    e = _zeros(OUT_D)
+    s = 0.0
+    for o in range(OUT_D):
+        e[o] = exp(z[o] - mx)
+        s = s + e[o]
+    loss = mx + log(s) - z[y]
+    dz = _zeros(OUT_D)
+    for o in range(OUT_D):
+        dz[o] = e[o] / s
+    dz[y] = dz[y] - 1.0
+    # LUU Y: cross_entropy mean cua PyTorch trung binh theo BATCH (1 mau),
+    # KHONG chia cho so lop -> dz = softmax - onehot, khong chia OUT_D.
+    # grad W2, b2
+    for o in range(OUT_D):
+        gacc[B2_OFF + o] = gacc[B2_OFF + o] + scale * dz[o]
+        for k in range(HID):
+            gacc[W2_OFF + o * HID + k] = gacc[W2_OFF + o * HID + k] + scale * dz[o] * h[k]
+    # dh -> grad W1, b1 (ReLU mask theo hpre)
+    for k in range(HID):
+        acc = 0.0
+        for o in range(OUT_D):
+            acc = acc + dz[o] * p[W2_OFF + o * HID + k]
+        if hpre[k] <= 0.0:
+            acc = 0.0
+        gacc[B1_OFF + k] = gacc[B1_OFF + k] + scale * acc
+        for i in range(IN_D):
+            gacc[k * IN_D + i] = gacc[k * IN_D + i] + scale * acc * x[i]
+    return loss
+
+def mlp_eval_loss(p: 'list[f32]', xs: 'list[f32]', ys: 'list[i64]', n_samples: 'i64') -> 'f32':
+    tot = 0.0
+    for s in range(n_samples):
+        x = []
+        for i in range(IN_D):
+            x.append(xs[s * IN_D + i])
+        tot = tot + mlp_loss(p, x, ys[s])
+    return tot / float(n_samples)
+
+def mlp_eval_acc(p: 'list[f32]', xs: 'list[f32]', ys: 'list[i64]', n_samples: 'i64') -> 'f32':
+    ok = 0
+    for s in range(n_samples):
+        x = []
+        for i in range(IN_D):
+            x.append(xs[s * IN_D + i])
+        z = mlp_logits(p, x)
+        best = 0
+        for o in range(1, OUT_D):
+            if z[o] > z[best]:
+                best = o
+        if best == ys[s]:
+            ok = ok + 1
+    return float(ok) / float(n_samples)
+
+# ============================================================================
+#  Vong train: n_steps buoc, moi buoc accum mau, loss mean; tra loss tung buoc
+# ============================================================================
+
+def run_steps(opt: "AdamW", xs: 'list[f32]', ys: 'list[i64]',
+              n_samples: 'i64', accum: 'i64', n_steps: 'i64',
+              smp: "Sampler") -> 'list[f32]':
+    losses = []
+    scale = 1.0 / float(accum)
+    for s in range(n_steps):
+        opt.zero_grad()
+        step_loss = 0.0
+        j = 0
+        while j < accum:
+            idx = smp.next_idx()
+            x = []
+            for i in range(IN_D):
+                x.append(xs[idx * IN_D + i])
+            l = mlp_loss_grad(opt.p, x, ys[idx], opt.g, scale)
+            step_loss = step_loss + l
+            j = j + 1
+        opt.step()
+        losses.append(step_loss / float(accum))
+    return losses
+
+def ppl(loss: 'f32') -> 'f32':
+    return exp(loss)
+
+# ============================================================================
+#  Checkpoint: text, so thuc ghi bang BIT f32 -> save/load bit-exact
+# ============================================================================
+
+def _bits_line(vals: 'list[f32]') -> 'str':
+    parts = []
+    for i in range(len(vals)):
+        parts.append(str(f64_to_f32_bits(float(vals[i]))))
+    return " ".join(parts)
+
+def _ints_line(vals: 'list[i64]') -> 'str':
+    parts = []
+    for i in range(len(vals)):
+        parts.append(str(vals[i]))
+    return " ".join(parts)
+
+def _mk_file(dir: 'str', name: 'str') -> 'str':
+    return dir + "/" + name
+
+def ckpt_save(path: 'str', opt: "AdamW", smp: "Sampler") -> 'i32':
+    lines = []
+    lines.append("# TVTRAIN1")
+    lines.append("n=" + str(opt.n) + " t=" + str(opt.t)
+                 + " warmup=" + str(opt.warmup) + " total=" + str(opt.total))
+    lines.append("lr_max=" + str(opt.lr_max) + " lr_min=" + str(opt.lr_min)
+                 + " b1=" + str(opt.b1) + " b2=" + str(opt.b2)
+                 + " eps=" + str(opt.eps) + " wd=" + str(opt.wd)
+                 + " clip=" + str(opt.clip))
+    lines.append("draws=" + str(smp.draws) + " state=" + str(smp.state))
+    lines.append("#sec perm")
+    lines.append(_ints_line(smp.perm))
+    lines.append("#sec p")
+    lines.append(_bits_line(opt.p))
+    lines.append("#sec m")
+    lines.append(_bits_line(opt.m))
+    lines.append("#sec v")
+    lines.append(_bits_line(opt.v))
+    _w = path_write_text(path, "\n".join(lines) + "\n")
+    return 1
+
+def _line_kv(line: 'str', key: 'str') -> 'str':
+    parts = line.split(" ")
+    for i in range(len(parts)):
+        kv = parts[i].split("=")
+        if len(kv) == 2:
+            if kv[0] == key:
+                return kv[1]
+    return ""
+
+def _floats_of(ln: 'str') -> 'list[f32]':
+    out = []
+    toks = ln.split(" ")
+    for i in range(len(toks)):
+        if len(toks[i]) > 0:
+            out.append(float(toks[i]))
+    return out
+
+def _bits_of(ln: 'str') -> 'list[f32]':
+    out = []
+    toks = ln.split(" ")
+    for i in range(len(toks)):
+        if len(toks[i]) > 0:
+            out.append(f32_bits_to_f64(_i64tok(toks[i])))
+    return out
+
+def _i64tok(t: 'str') -> 'i64':
+    v = 0
+    neg = 0
+    start = 0
+    if len(t) > 0 and t[0] == "-":
+        neg = 1
+        start = 1
+    for i in range(start, len(t)):
+        v = v * 10 + (ord(t[i]) - 48)
+    if neg == 1:
+        return 0 - v
+    return v
+
+def _ints_of(ln: 'str') -> 'list[i64]':
+    out = []
+    toks = ln.split(" ")
+    for i in range(len(toks)):
+        if len(toks[i]) > 0:
+            out.append(_i64tok(toks[i]))
+    return out
+
+def _sec_after(lines: 'list[str]', name: 'str') -> 'str':
+    on = 0
+    for i in range(len(lines)):
+        ln = lines[i]
+        if len(ln) >= 5 and ln[0:5] == "#sec ":
+            if ln[5:] == name:
+                on = 1
+            else:
+                on = 0
+        elif on == 1:
+            return ln
+    return ""
+
+def ckpt_load(path: 'str', opt: "AdamW", smp: "Sampler") -> 'i32':
+    txt = path_read_text(path)
+    lines = txt.split("\n")
+    if len(lines) < 5:
+        return 0
+    hdr = lines[1]
+    t2 = lines[2]
+    t3 = lines[3]
+    opt.n = _i64tok(_line_kv(hdr, "n"))
+    opt.t = _i64tok(_line_kv(hdr, "t"))
+    opt.warmup = _i64tok(_line_kv(hdr, "warmup"))
+    opt.total = _i64tok(_line_kv(hdr, "total"))
+    opt.lr_max = float(_line_kv(t2, "lr_max"))
+    opt.lr_min = float(_line_kv(t2, "lr_min"))
+    opt.b1 = float(_line_kv(t2, "b1"))
+    opt.b2 = float(_line_kv(t2, "b2"))
+    opt.eps = float(_line_kv(t2, "eps"))
+    opt.wd = float(_line_kv(t2, "wd"))
+    opt.clip = float(_line_kv(t2, "clip"))
+    smp.draws = _i64tok(_line_kv(t3, "draws"))
+    smp.state = _i64tok(_line_kv(t3, "state"))
+    smp.perm = _ints_of(_sec_after(lines, "perm"))
+    opt.p = _bits_of(_sec_after(lines, "p"))
+    opt.m = _bits_of(_sec_after(lines, "m"))
+    opt.v = _bits_of(_sec_after(lines, "v"))
+    if len(opt.p) != opt.n or len(opt.m) != opt.n or len(opt.v) != opt.n:
+        return 0
+    return 1

@@ -12,8 +12,8 @@ sẽ diễn ra sau trên GPU Google. Ưu tiên số tuyệt đối với PyTorch
 | **G0** | ✅ **XONG** (17-10-2027) — xem bên dưới |
 | **G1** tensor core + autodiff thật | **XONG** (2026-10-17): `tensor.tkv`; `ops.tkv` (12 op fwd); fixture 47; `grad_tests.tkv` 20/20; `tape.tkv` 8/8; `parity_tests.tkv` 4/4; `kernels_reg.tkv` co mau |
 | **G2** GPT-2 thu nho (256/64/4/2) | **FORWARD + BACKWARD XONG** (2026-10-18): `gpt2_ref.tkv` day du embed/LN row/MHA causal/MLP/tie head + `attention_bwd`/`block_bwd`/`gpt2_backward`; `gpt2_tests` **10/10 PASS** (hidden h0-h2, logits 2.68e-07, loss 0.0; grad wte 1.79e-07, ln1_g0 3.3e-09, attn_w0 3.4e-08, mlp_w1_0 2.5e-08, lnf_g 9.3e-09) vs `torch.autograd`; `run_cases` [8/8] + `--verify-all` xanh. Gate con lai: grad bit-exact (dang dung tol 1e-5 nhu grad_tests) |
-| G3 data pipeline | chưa bắt đầu |
-| G4 trainer | chưa bắt đầu |
+| **G3** data pipeline | ✅ **XONG** (2026-10-19): tokenizer GPT-2 BPE parity `8ac487d` (9/9 case + roundtrip); packing + mask + shard + stream `d8a203a`/`pack_tests.tkv` **5/5 PASS** (pack 8x32, mask block 32x32 + causal4, shard roundtrip 16 shard/256 token, stream seed42 checksum 1184745045, determinism seed 42/43) vs reference `tools/gen_pack_fixture.py` |
+| **G4** trainer | ✅ **XONG** (2026-10-19): `tv/training/trainer.tkv` — AdamW (decoupled WD) + warmup/cosine + clip norm + grad accumulation + checkpoint bit-exact (trọng số/m/v/RNG), vòng train/eval log loss-ppl-throughput, lệnh `train` trong `cli.tkv`; `trainer_tests` **15/15 PASS** (1 bước khớp PyTorch loss 1.2e-7 / grad norm 0.0 / trọng số 3e-8; overfit 20 mẫu eval_loss 0.01495 acc 1.000; resume 3+save/load+3 **bit-for-bit**). Lệch còn lại vs PyTorch ~2.4e-6 (thứ tự làm tròn f32), không phải 0 tuyệt đối |
 | G5 harness + seam GPU | chưa bắt đầu |
 | G6 phân tán (có thể bỏ) | chưa bắt đầu |
 

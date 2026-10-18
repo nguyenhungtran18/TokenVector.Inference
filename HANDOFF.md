@@ -1,14 +1,127 @@
-# HANDOFF — TokenVector.Inference (Pure .TKV) — 2026-10-17
+# HANDOFF — TokenVector.Inference (Pure .TKV) — 2026-10-19
 
 Verified: compiler build 23:58 (2026-10-17) — B-01..B-07 fixed + SIMD GEMM updates.
-Repo HEAD: `6f8ee13` (feat(tv): G1 + fixtures + docs); `64b7a91` (docs: docs updated).
-Working tree: 6 untracked new files (fixture generator, fixtures dir, G1 docs, G2 docs),
-untracked mirror copies (`tv.training.*.tkv` — sync creates them).
+Repo HEAD: `b28bdb7` (registry kernel + numerics-contract); G3 tokenizer `8ac487d`, G3 pack `d8a203a`.
 Not staged: `COMPILER-NOTES-2026-10-16.md` (official compiler team update, not ours).
+
+**Luu y:** muc 1..6 ben duoi la snapshot 2026-10-17 (truoc G2/G3). Trang thai
+hien tai cua G3 nam o muc 0 ngay duoi day.
 
 ---
 
-## 1. STATUS: FULLY VERIFIED ACROSS ALL GATES
+## 0. G3 STATUS (2026-10-19) — PACKING + SHARD XANH 6/6
+
+Gate: `tv/tests/pack_tests.tkv` (reference: `tools/gen_pack_fixture.py`, fixture
+`tv/tests/fixtures/pack_cases.txt`). Chay:
+
+```
+D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/pack_tests.tkv %TEMP%/pack_tests.exe main
+%TEMP%/pack_tests.exe
+```
+
+Ket qua THAT (2026-10-19): **cases=6 fails=0**
+
+| Gate | Ket qua |
+|---|---|
+| [1] packing 8 seq x 32 (seqs + doc_ids tung phan) | PASS |
+| [1b] cat tail 12 pair -> 2 pair, token nguyen ven (regression guard bug #2) | PASS |
+| [2] masks: block_seq0 32x32 flat + causal 4x4 | PASS |
+| [3] shard write/read: 16 shard, 256 token roundtrip | PASS |
+| [4] stream seed42: 16 sample + checksum 1184745045 | PASS |
+| [5] determinism: cung seed -> cung checksum; 42/43 khac thu tu | PASS |
+
+### 0.1 Ba nguyen nhan da tim ra va sua (that, khong doan)
+
+1. **`pack_sequences` tao list phang THU HAI (`pk2`) de cat tail** -> list thu 2
+   trong cung ham bi cap backing `i32[]` (bug compiler #2, muc 0.2) -> token corrupt
+   (1,2,3 -> 0,1,0) nhung CHI khi co tail bi cat. Fixture 8 chunk day du nen
+   gate [1] van xanh, che mat loi. Sua: dem tong pair truoc, chi append phan
+   day du vao MOT list duy nhat. Da them gate [1b] co tail le lam regression
+   guard cho dung bug nay (fixture khong bao gio cat tail).
+2. **Test [3] dung sai `flat`**: sau khi doi sang interleaved pairs, vong lap cu
+   lay `pk[0], pk[64], ...` (1 token/chunk) -> 8 token -> `shard_write n=1`.
+   Sua: them `flat_tokens(pk)` trong `tv/data/dataset.tkv` (mot list phang,
+   return truc tiep) tra token cua toan bo chunk day du.
+3. **Test [2] tai su dung bien `t0`**: `t0 = now_ms()` o dau `main` khien `t0`
+   bi suy `f32`; sau do `t0 = len(_d0)` (=32) thanh `32.0` -> so sanh mask
+   fail du gia tri mask DUNG (probe: bad=0). Sua: doi bien timing thanh
+   `t_start`; them canh bao: KHONG gan i64 vao bien da suy f32.
+
+### 0.2 Bug compiler list (ban day du — HANDOFF tung bi revert mat muc 5.7)
+
+- **#1 nested `list[list[i64]]` qua return/field**: noi dung thanh rac dia chi
+  stack hoac crash `ArrayTypeMismatchException`; cung code voi nested locals
+  thi DUNG. Workaround: moi boundary chi qua `list[i64]` PHANG.
+- **#2 list phang THU HAI trong cung ham** bi cap backing `i32[]` (doc dung,
+  doc i64 ra `4294967297 = 1|1<<32`). Workaround: moi ham chi MOT list phang,
+  return truc tiep.
+- **#3 nested literal append**: `docs.append([1, 2, 3])` voi `docs: list[list[i64]]`
+  -> phan tu thanh rac dia chi (`55454752`), khong crash. Cung du lieu qua ham
+  tra `list[i64]` (`docs.append(mk(...))`) thi DUNG. Repro toi thieu:
+  `docs = []` / `docs.append([1,2,3])` / `docs.append([4])` / in `docs`.
+  Workaround: moi list con phai qua mot ham return `list[i64]`.
+- **#4 gan i64 vao bien da suy f32**: `x = now_ms()` roi `x = len(lst)` -> x thanh
+  `32.0`; dung x lam index/so sanh cho ket qua sai lang le. Khong co chan o
+  compile-time. Workaround: bien rieng cho timing.
+
+### 0.3 G4 TRAINER (2026-10-19) — XANH 15/15
+
+File: `tv/training/trainer.tkv` (+ mirror `tv/tests/` & `tv/tools/`),
+gate `tv/tests/trainer_tests.tkv`, reference `tools/gen_trainer_fixture.py`,
+fixture `tv/tests/fixtures/train_cases.txt`.
+
+```
+D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/trainer_tests.tkv %TEMP%/trainer_tests.exe main
+%TEMP%/trainer_tests.exe
+```
+
+Ket qua THAT (cases=15 fails=0), model MLP 4-8-3, 20 mau, 400 buoc:
+
+| Gate | Ket qua |
+|---|---|
+| 1 buoc: loss / grad norm / lr / trong so | 1.19e-07 / **0.0** / **0.0** / 2.98e-08 vs PyTorch |
+| lich lr warmup+cosine 400 buoc | khop tung buoc (0.0) |
+| clip norm: vuot nguong / duoi nguong | 0.0 / 0.0 |
+| overfit 20 mau: loss tung buoc / trong so cuoi | 2.38e-06 / 1.91e-06 vs PyTorch |
+| overfit ket qua | eval_loss **0.01495**, acc **1.000**, ppl 1.0151 |
+| resume bit-exact 3 + save/load + 3 | **bit-for-bit** bang 6 buoc lien (p, m, v, t, RNG) |
+| resume vs PyTorch sau 6 buoc | 3.58e-07 |
+| throughput | ~8.5k buoc/s (47 ms cho 400 buoc, may nay) |
+
+Khac biet con lai voi PyTorch la **2e-6** (khong bit-exact tuyet doi): PyTorch
+tinh norm/clip va cap nhat Adam trong f32 theo thu tu khac o vai buoc lam tron.
+Gate ROADMAP ghi "bit-exact" — thuc te do duoc la 2.4e-6 tren loss tung buoc;
+**resume trong noi bo .tkv thi bit-exact tuyet doi**.
+
+Checkpoint: text, tham so/m/v ghi bang **bit IEEE-754 f32** (khong phai so thap
+phan) + `t` + `draws/state` + `perm` + sieu tham so -> load lai bit-for-bit.
+
+Lenh CLI: `train --steps N --lr X --samples N --accum K --seed S --log-every K
+--out ck.txt` trong `tv/tools/cli.tkv` (demo MLP tren du lieu tong hop LCG).
+Smoke test 100 buoc: loss 1.133 -> 0.143, eval 0.2236, acc 0.95, checkpoint
+2.3 KB, 31 ms.
+
+### 0.4 Bug compiler moi (tiep 0.2)
+
+- **#5 gan lai field trong method roi doc ngay**: `self.perm = []` (hoac bat ky
+  list moi) trong `shuffle()` xong doc `self.perm[...]` ngay sau do -> doc
+  **tham chieu CU** (index dau tien sau khi xao lay tu perm cu). Workaround:
+  sua TAI CHO (`self.perm[k] = k`) thay vi gan lai field.
+- **#6 constructor khong export qua module**: file khac `import` module roi goi
+  `AdamW(...)` / `Sampler(...)` -> `il_codegen: ham 'AdamW' khong ton tai`.
+  Workaround: factory function `new_adamw(...)`, `new_sampler(...)`.
+- Nho lai: import tu `tv/tests/*.tkv` chi thay module khi co mirror
+  `tv/tests/tv.<duong.dan>.tkv` (va tuong tu cho `tv/tools/`).
+
+### 0.5 Tiep theo: G5 harness + seam GPU
+
+G3 va G4 da xong. Viec tiep: G5 — script sinh fixture PyTorch chay 1 lan
+(`tools/gen_*.py`), mot lenh bao cao ti le khop, backend gia tra ket qua sai
+co chu y de chung minh harness bat duoc, va interface backend cho GPU.
+
+---
+
+## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
 
 | Gate | Command / Path | Result |
 |---|---|---|

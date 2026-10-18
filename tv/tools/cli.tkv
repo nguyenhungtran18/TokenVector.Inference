@@ -10,6 +10,7 @@ import tv.text.generate
 import tv.text.chat_template
 import tv.quantization.engine
 import tv.numerics.tensor
+import tv.training.trainer
 
 class CliArg(Exception):
     msg: 'str'
@@ -36,7 +37,7 @@ def _get(flags: 'dict[str,str]', key: 'str', default: 'str') -> 'str':
 def main() -> 'i32':
     args = argv()
     if len(args) == 0:
-        print("usage: tkvc build tv/tools/cli.tkv -- <serve|gen|export|calibrate|latency> [--key value]")
+        print("usage: tkvc tv/tools/cli.tkv cli.exe -- <serve|gen|export|calibrate|latency|train> [--key value]")
         return 0
     cmd = args[0]
     flags = _flags(args[1:])
@@ -50,6 +51,8 @@ def main() -> 'i32':
         _cmd_calibrate(flags)
     elif cmd == "latency":
         _cmd_latency(flags)
+    elif cmd == "train":
+        _cmd_train(flags)
     else:
         print("unknown command: " + cmd)
     return 0
@@ -151,6 +154,82 @@ def _cmd_latency(flags: 'dict[str,str]') -> 'i32':
     dt = now_us() - t0
     print("{\"iters\":" + str(iters) + ",\"avg_us\":" + str(float(dt) / iters) + "}")
     s.close()
+    return 0
+
+# ---- train (G4) -----------------------------------------------------------
+# Demo trainer: MLP 4-8-3 tren du lieu tong hop tat dinh (LCG), AdamW +
+# warmup/cosine + clip + grad accumulation, in loss/ppl tung moc log.
+#   --steps N  --lr X  --samples N  --accum K  --seed S  --log-every K
+#   --out <file>  (checkpoint: trong so + m/v + step + RNG, bit-exact)
+def _cli_rng(state: 'i64') -> 'i64':
+    return (state * 1103515245 + 12345) % 2147483648
+
+def _cli_gen_data(n: 'i64', seed: 'i64') -> 'list[f32]':
+    # moi dong 5 so: x0..x3 + nhan (0/1/2 theo tong x0+x1). Tra ve MOT list
+    # phang n*5 (quy tac: mot list phang moi ham).
+    out = []
+    s = seed % 2147483648
+    for i in range(n):
+        x0 = 0.0
+        x1 = 0.0
+        for j in range(4):
+            s = _cli_rng(s)
+            v = float(s) / 2147483648.0 - 0.5
+            out.append(v)
+            if j == 0:
+                x0 = v
+            if j == 1:
+                x1 = v
+        t = x0 + x1
+        if t > 0.15:
+            out.append(0.0)
+        elif t < 0.0 - 0.15:
+            out.append(1.0)
+        else:
+            out.append(2.0)
+    return out
+
+def _cmd_train(flags: 'dict[str,str]') -> 'i32':
+    steps = int(_get(flags, "steps", "200"))
+    lr = float(_get(flags, "lr", "0.05"))
+    ns = int(_get(flags, "samples", "20"))
+    accum = int(_get(flags, "accum", "2"))
+    seed = int(_get(flags, "seed", "7"))
+    log_every = int(_get(flags, "log-every", "50"))
+    out = _get(flags, "out", "")
+    data = _cli_gen_data(ns, seed)
+    xs = []
+    ys = []
+    for i in range(ns):
+        for j in range(4):
+            xs.append(data[i * 5 + j])
+        ys.append(int(data[i * 5 + 4]))
+    warmup = steps // 10
+    if warmup < 1:
+        warmup = 1
+    lr_min = lr * 0.05
+    opt = new_adamw(67, warmup, steps, lr, lr_min, 0.9, 0.999, 0.00000001, 0.01, 1.0)
+    p0 = mlp_init(seed)
+    for i in range(67):
+        opt.p[i] = p0[i]
+    smp = new_sampler(ns, seed)
+    t0 = now_ms()
+    losses = run_steps(opt, xs, ys, ns, accum, steps, smp)
+    i = 0
+    while i < len(losses):
+        if i == 0 or (i + 1) % log_every == 0:
+            print("step " + str(i + 1) + "/" + str(steps) + " loss=" + str(losses[i])
+                  + " ppl=" + str(ppl(losses[i])))
+        i = i + 1
+    ev = mlp_eval_loss(opt.p, xs, ys, ns)
+    acc = mlp_eval_acc(opt.p, xs, ys, ns)
+    dt = now_ms() - t0
+    print("train done: steps=" + str(steps) + " eval_loss=" + str(ev)
+          + " ppl=" + str(ppl(ev)) + " acc=" + str(acc)
+          + " " + str(dt) + " ms")
+    if out != "":
+        _sv = ckpt_save(out, opt, smp)
+        print("checkpoint -> " + out)
     return 0
 
 def argv() -> 'list[str]':
