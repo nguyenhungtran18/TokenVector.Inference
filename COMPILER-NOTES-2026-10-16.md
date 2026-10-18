@@ -44,12 +44,35 @@ len TAT CA ban `tv.*.tkv` cung ten trong moi thu muc.** Da dong bo:
 
 ## 4. Gioi han con lai (co workaround, khong chan build)
 
-- **BUG 1 (xac nhan, nghiem trong)**: `Box(_src)` voi `_src: list[f64]` trong khi param la `list[f32]` -> chay ra gia tri rac, khong bao loi. Workaround: khai bao bien dung kieu (`_src: 'list[f32]'`) hoac copy tung phan tu. Compiler chua tu dong convert/bao loi o duong method call/`__init__` (duong top-level call da co coerce).
-- **BUG 2**: `*`/`+` i64 dung checked arithmetic -> OverflowException thay vi wrap 64-bit. Workaround: dung LCG 31-bit (`* 1103515245 + 12345) & 0x7FFFFFFF`). Chua co `mul_wrap_u64`.
-- **`argv()` tra ve `[]`**: CLI chua nhan tham so dong lenh. Cho `cli.tkv` (luon in usage).
-- **`simd_*` chay loi**: thieu `System.Numerics.Vectors.dll` canh exe. Bien dich duoc, chay nem `FileNotFoundException`.
-- **Benchmark repo in `0.0 ms`**: `now_ms`/`gc_allocated_bytes`/… la stub tra 0. Khong phai so that.
-- **Bien dich lazy**: probe `import <module>` chi bat loi cap module. Muon chac phai bien dich ca entry point that (`cli.tkv`, `compare_rivals.tkv`).
+> **Cap nhat 2026-10-17 (sau khi dong B-01…B-07)** — muc 4 da het phan lon.
+> Chi con 2 dong duoi day la con dung. Xem `Release/docs/e_handoff/`.
+>
+> ~~BUG 1~~ **DA FIX (B-01)**: compiler bay gio nem `SyntaxError` ro rang khi
+> truyen `list[f64]` vao tham so `list[f32]`, khong con chay ra gia tri rac.
+> ~~**BUG 2**~~ **DA FIX (B-02)**: `+`/`*`/`-` i64 da bo `.ovf` (unchecked).
+> ~~`argv()` tra `[]`~~ **DA FIX (B-03)**: `sys_argv()` tra dung.
+> ~~`simd_*` chay loi~~ **DA FIX (B-04)**: ship `System.Numerics.Vectors.dll`
+> (ban NuGet `lib/net46`) canh exe — xem `Release/runtime/`.
+> ~~Benchmark in `0.0 ms`~~ **DA FIX (B-05)**: `now_ms`/`now_us`/`gc_*` do that.
+> ~~Bien dich lazy~~ **DA FIX (B-07)**: co `--verify-all`.
+>
+> **LUU Y CUA BAI SAI TRUOC DAY**: dong BUG 1 hoi truoc khuyen
+> `_src: 'list[f32]'` — **nhay don khong bien dich duoc**. TokenVector yeu cau
+> annotation la CHUOI NHÁY KÉP: `_src: "list[f32]"`. Da kiem chung 3 dang deu
+> chay dung tren compiler moi:
+>
+> ```tkv
+> a: "f32"       = 1.5              # -> 1.5
+> a: "list[f32]" = [1.0, 2.0]       # -> len 2
+> _b: "list[f32]" = [1.0, 2.0]
+> a: "list[f32]" = _b               # -> len 2
+> ```
+
+- **`simd_*` chua nhan `list[f32]`**: compiler yeu cau mang array (`shape` array,
+  vi du `np.zeros(n, dtype=np.float32)`), nen kieu tensor chuan cua repo
+  (`list[f32]`) bi tu choi. Layer con chan truoc khi toi assembly.
+- **`--verify-all` can entry `main`**: module thu vien (khong co `main`) phai
+  tu sinh probe thu cong.
 
 ## 5. Cach kiem tra nhanh sau moi lan sua repo
 

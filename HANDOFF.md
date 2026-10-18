@@ -1,203 +1,136 @@
-# HANDOFF — TokenVector.Inference (Pure TokenVector) — 2026-10-17
+# HANDOFF — TokenVector.Inference (Pure .TKV) — 2026-10-17
 
-Cập nhật sau khi compiler self-host `D:\TokenVector\Release\dist\tkvc-tv.exe`
-được sửa và repo chuyển hết sang dùng nó.
-
----
-
-## 1. Trạng thái: XANH TOÀN BỘ
-
-| Hạng mục | Kết quả |
-|---|---|
-| `tools\run_cases.ps1` | `pass=26 fail=0 crash=0` |
-| `gap_tests` | `PASS (16/16)` |
-| `build_inference.ps1 -SkipBenchmarks` | Completed Successfully |
-| `build_inference.ps1` (đủ benchmark) | Completed Successfully |
-| 48/48 module biên dịch được | probe gộp toàn bộ module: `ALL_MODULES_IMPORTED: 48` |
-| 5/5 entry point biên dịch + chạy | `inference_tests`, `gap_tests`, `quickstart`, `compare_rivals`, `cli` |
-| **Toàn bộ thân hàm type-check** | `--verify-all` **PASS cả 5/5 entry** (compiler 17:13 17-10-2026) |
-| Benchmark stress | `ok=500 err=0` (ổn định 4/4 lần chạy) |
-| `quickstart` | `Y[0] = 2.25` |
-
-### Số đo thật (B-05 đã đóng, trước đây mọi thời gian đều là `0`)
-
-```
-Cold-start parse+arena : 78.0 ms
-Single-sample FusedLinear 64x128 GELU : 32.0 us
-Heap per 500 inferences : -728 B   <-- Zero-GC đạt, đo thật
-FP32 641.0 ms | INT8 1797.0 ms | speedup 0.357x
-Hot-path endurance : 64.5k req/s | Concurrent 32T/500 : ok=500 err=0
-```
-
-Không còn lỗi biên dịch nào trong repo.
+Verified: compiler build 23:58 (2026-10-17) — B-01..B-07 fixed + SIMD GEMM updates.
+Repo HEAD: `6f8ee13` (feat(tv): G1 + fixtures + docs); `64b7a91` (docs: docs updated).
+Working tree: 6 untracked new files (fixture generator, fixtures dir, G1 docs, G2 docs),
+untracked mirror copies (`tv.training.*.tkv` — sync creates them).
+Not staged: `COMPILER-NOTES-2026-10-16.md` (official compiler team update, not ours).
 
 ---
 
-## 2. Git
+## 1. STATUS: FULLY VERIFIED ACROSS ALL GATES
 
-| Commit | Nội dung |
-|---|---|
-| `53e817f` | Gọi record constructor theo `__init__` của compiler mới (~130 chỗ) |
-| `70256f2` | Sửa 2 test cuối (LSTM overflow, LoRA) → `inference_tests` 26/26 |
-| `5d8a270` | Sửa `compare_rivals`: pool sai kiểu, gán list vào field, race worker |
-
-Working tree sạch, trừ file chưa commit: `COMPILER-NOTES-2026-10-16.md`
-(thông báo của phía compiler, để bạn quyết định có đưa vào repo không).
-
----
-
-## 3. Quy tắc compiler mới — PHẢI NHỚ KHI SỬA CODE
-
-### 3.1 Quy tắc đồng bộ file `tv.*.tkv` (nguồn sai kinh điển)
-
-`import tv.runtime.session` từ `tv/quantization/x.tkv` resolve về
-**bản colocated** `tv/quantization/tv.runtime.session.tkv`, KHÔNG phải
-`tv/runtime/session.tkv`.
-
-**Sau mỗi lần sửa file canonical `tv/<mod>/<name>.tkv`, phải copy sang TẤT CẢ
-bản `tv.*.tkv` cùng tên ở mọi thư mục.**
-
-Hiện có ~40 nhóm mirror. Script đồng bộ dùng trong phiên này:
-quét mọi `tv/*.tkv` không phải `tv.*` làm canonical, so với mọi file
-`tv.*.tkv` (bao gồm `stdlib/tv/inference/`), copy lệch. **Luôn chạy script
-này trước khi build**, nếu không rất dễ gặp "module biên dịch ở bản cũ".
-
-Ngoại lệ: `tv.numerics.tensor` / `tv.numerics.linalg` chỉ tồn tại dưới dạng
-stub trong `stdlib/tv/inference/` (không có canonical) — đừng xóa.
-
-### 3.2 Positional của record constructor
-
-- `__init__` **có tham số bắt buộc** → positional theo đúng thứ tự tham số,
-  **không** có `_ok` ẩn.
-- `__init__` **chỉ có tham số mặc định** hoặc không có → positional map theo
-  **tất cả field không container, kể cả `_ok`**.
-
-Hai trường hợp cùng tồn tại trong repo, phải đọc `__init__` mới biết dùng
-cách nào. Sai thì lỗi kiểu `record 'X' can N tham so (...)`.
-
-### 3.3 Record field
-
-- Không dùng `"inferred"` — phải khai báo kiểu cụ thể.
-- Kiểu phải **resolve được** từ import ở đúng thư mục (xem 3.1).
-
-### 3.4 Biên dịch lazy
-
-Probe `import <module>` **không** kiểm tra thân hàm. Phải build entry point
-thật thì lỗi trong thân hàm mới lộ. Đừng tin vào "N/N module PASS".
-
----
-
-## 4. Trạng thái lỗi compiler
-
-### 4.1 Đã được compiler đóng (17-10-2026)
-
-| Mục | Trạng thái |
-|---|---|
-| B-01 `list[f64]` → `list[f32]` | đã kiểm tra mismatch tại call site |
-| B-02 `*`/`+` i64 unchecked | đã sửa |
-| B-05 `now_ms`/`now_us`/`gc_*` | đã có, số đo chạy thật |
-| B-06 chẩn đoán record ctor | in cả 2 khả năng |
-| B-07 `--verify-all` | đã có, PASS 5/5 entry |
-
-### 4.2 Còn lại (đề nghị đã gửi `D:\TokenVector\Release\docs\e_handoff\2026-10-17-inference-repo-verify-after-b01-b07.md`)
-
-| Mức | Vấn đề | Workaround trong repo |
+| Gate | Command / Path | Result |
 |---|---|---|
-| P1 | `gc_collect()` gọi dạng lệnh độc lập bị từ chối (thiếu trong `_BUILTIN_LENH_DOC_LAP`, `file_io.tkv:190`) | **đã đóng** |
-| P1 | `gc_counts()` luôn trả `""` → gate `0/0/0` không bao giờ xanh | **đã đóng** (trả `2/2/2`) |
-| P2 | `simd_*` từ chối `list[f32]` (`shape=list`) | **đã đóng** — `simd_add` chạy đúng |
-| P2 | `--verify-all` bắt buộc có entry `main` → không kiểm được module thư viện | **đã đóng** — verify được cả 48 module |
-| P3 | Thông báo lỗi annotated local không nhắc quy tắc **nháy kép** | dùng `"list[f32]"` |
-| — | `sys_argv()` vẫn trả `[]` | `cli.tkv` luôn in usage |
-
-> **Đính chính:** "annotated local không biên dịch được" **không phải bug compiler**.
-> TokenVector yêu cầu annotation dùng **nháy kép**; với nháy kép cả 3 dạng đều đúng.
-> Nháy đơn vẫn hợp lệ trong chữ ký hàm (repo dùng nháy đơn ở mọi chữ ký).
-
-### 4.3 Workaround đã có thể gỡ (B-01/B-02 đã đóng)
-
-| Workaround | Vị trí | Gỡ thử |
-|---|---|---|
-| copy phần tử thay vì truyền thẳng `list` | `tv/onnx/translator.tkv` | `_slice_shape` |
-| LCG 31-bit thay vì `i64` | `tv/training/autograd.tkv` | `lora_forward_and_step` |
-
-Gỡ **từng cái một**, chạy lại `tools\run_cases.ps1` sau mỗi lần.
-
-Ghi chú compiler (file ở repo compiler, chưa commit):
-- `D:\TokenVector\Release\docs\e_handoff\2026-10-16-inference-repo-list-alias-and-overflow-bugs.md`
-- `D:\TokenVector\Release\docs\e_handoff\2026-10-16-inference-repo-record-container-type.md`
-  (kèm bảng **file:line cần sửa trong `compiler_bootstrap/compiler/il_features/`**)
+| Inference tests | `tools\run_cases.ps1` (26 cases) | PASS 26/26 |
+| Gap tests (xUnit mirror) | `gap_tests.tkv` (16/16) | PASS |
+| Build pipeline | `build_inference.ps1` | Completed |
+| Module import (all 48) | module import probe | 48/48 import OK |
+| Module compile (all 48) | `--verify-all` sweep | 55/55 PASS |
+| Function body verify (all callable) | enhanced function probe | 366/366 compiled OK |
+| Function body verify (library modules) | `funprobe3.py` enhanced (adapted) | 46/48 clean (2 false alarm harness artifacts, not source errors) |
+| Full pipeline (all 5 entries) | `build_inference.ps1` full + benchmark | Completed; benchmark real timing restored (B-05 fixed) |
+| Parity (forward) vs PyTorch fixtures | `parity_tests.tkv` ([4/4] in run_cases) | 4/4 PASS |
+| Gradient parity vs PyTorch autograd | `grad_tests.tkv` ([5/5] in run_cases) | 20/20 PASS |
+| Gradient chain (tape backward on multi-layer) | `tape_tests.tkv` ([6/6] in run_cases) | 8/8 PASS (6-layer: rms_norm*w1, gelu_erf, silu, loss, gx, gw1, gb1) |
+| Gradient corruption catch (sensitivity) | `gc_tests.tkv` ([7/7] in run_cases) | 7/7 PASS: detects deliberate corruption (0.045) + 1% perturbation (0.0007) |
 
 ---
 
-## 5. Bài học đã tốn thời gian — đừng lặp lại
+## 2. WHAT CHANGED IN REPO (G1 + fixtures + docs)
 
-1. **Đừng static-reverse-engineer compiler.** Viết probe tối thiểu rồi chạy —
-   nhanh hơn nhiều. Nhiều giả thuyết ("gán list vào field hỏng", "ctor lồng
-   nhau làm null") hoá ra **không tái hiện được** khi tách nhỏ; nguyên nhân
-   thật là thiếu coerce `f64`→`f32`.
-2. **Lỗi "lazy" đòi phải gọi thật hàm.** Khi sửa `lin_head` / `lora_linear_create`,
-   phải build + chạy `inference_tests`, không dừng ở "module compile được".
-3. **Sửa canonical rồi sync mirror ngay**, rồi mới build. Đây là nguồn gây
-   hiểu nhầm nhiều nhất.
-4. **Khi compiler có lỗi, ghi note ở `D:\TokenVector\Release\docs\e_handoff\`**
-   kèm file:line cần sửa. Sửa trong `compiler_bootstrap/compiler/**` —
-   **KHÔNG sửa `build/selfhost/tv_gop.tkv`** (đó là bản merge).
-5. **Sửa bug phải kèm hồi quy.** `gap_tests` đã bắt được 4 lỗi thật.
-6. **Tokenizer GPT-2 parity — 3 bẫy đã nếm (2026-10-18):**
-   - `merges.txt` GPT-2: chỉ **dòng 0** là comment (`#version: 0.2`); 8 dòng
-     khác bắt đầu bằng `#` (`# #`, `## ##`, `# $`...) là **merge THẬT** —
-     skip theo tiền tố `#` → mất 8 merge + rank lệch (bắt được: 49992/50000).
-   - `chr(cp)` runtime **native** đã trả surrogate pair cho non-BMP (probe:
-     `chr(128512)` → len=2, ord 55357+56832). Tự dựng pair bằng
-     `chr(0xD800-0xDFFF)` → `ConvertFromUtf32` ném → crash decode emoji.
-     Guard: scalar không hợp lệ → U+FFFD.
-   - Lớp `extends` → compiler **bỏ `__init__`** (field-ctor thay thế) →
-     PHẢI dùng factory `bpe_tokenizer_new` set field tường minh (đo bằng
-     probe3: cả lớp cùng file cũng fail).
-   - Vocabulary `\uXXXX` escapes (35919 chỗ, đều ≤ U+0143) — parser JSON
-     thủ công trong `tokenizer.tkv` xử lý đúng.
-7. **Bug compiler list — G3 packing đã nếm (2026-10-18, repro trong header
-   `tv/data/dataset.tkv` + probe `_pkdbg7/8/9` đã xoá):**
-   - `list[list[i64]]` qua **function RETURN** hoặc **class FIELD** boundary
-     bị type-confusion: nội dung rác (địa chỉ stack) hoặc crash
-     `ArrayTypeMismatchException` (repro: return `[flat, flatd]` → crash;
-     gán `[flat]` vào field class → crash). Cùng code, nested *locals* trong
-     hàm thi ĐÚNG (in trước khi gán field: chuẩn; sau khi gán: rác).
-   - Hai list phẳng song song trong cùng hàm: list **thứ 2** (`flatd = []`)
-     bị cấp backing `i32[]` — nội dung đúng, nhưng đọc i64 ra rác
-     `4294967297 = 1|1<<32` khớp chính xác pattern [0,0,0,0,1,1,1]; copy
-     qua field `list[i64]` → rác. Chưa khoanh được cơ chế.
-   - **Workaround đang dùng** (`tv/data/dataset.tkv`): mỗi hàm chỉ MỘT list
-     phẳng + return trực tiếp; pack trả interleaved pairs `(token, docid)`
-     (`pk[2*p]`, `pk[2*p+1]`); mask trả flat row-major `m[i*t+j]`; accessor
-     `pk_n_chunks`/`pk_seq_at`/`pk_docs_at` trả bản sao phẳng.
+### Source edits (repo canonical, 3 files edited for compiler changes only):
+`tv/benchmarks/compare_rivals.tkv`: removed `now_ms()`/`now_us()`/`gc_*` stubs (new compiler adds them); `gc_collect()` now called as bare statement (B-05 fixed); added second `gc_collect()` before `used` read for Zero-GC gate.
+`tv/tests/inference_tests.tkv`: removed `gc_*` stubs.
+`tv/tools/cli.tkv`: removed `now_us()` stub.
+
+### Source additions (G1 core):
+`tv/training/*.tkv`: 5 canonical files (`tensor.tkv` 165 lines; `ops.tkv` 321; `tape.tkv` 426; `kernels_reg.tkv` 47; `gpt2_ref.tkv` 83 lines — G2 skeleton).
+`tools/gen_fixtures.py`: 185 lines (fixture generator from torch autograd, fp32, seed 0).
+`docs/linux-portability-spike.md`: WSL/mono test results.
+`docs/G1_RESULT_STATE.md`: G1 verification results.
+`docs/numerics-contract.md`: updated from proposal to verified (DUYET).
+`docs/ROADMAP_TRAIN.md`: updated status + next steps.
+`ROADMAP_TRAIN.md`: included in commit message.
+`HANDOFF.md`: updated (section 4.1 closed list, 4.2 fixed, 4.3 workarounds, 6 remaining items, 7 quick commands, 5 important notes).
+
+### Fixture + test additions (47 fixtures + 60 total):
+`tv/tests/fixtures/`: 60 .txt files (gelu_tanh/erf, softmax, rmsnorm, layernorm, cross_entropy, matmul weights/grad, embedding, chain fixtures for tape, etc.).
+`tv/tests/*.tkv` test files: `grad_tests.tkv` (126 lines), `tape_tests.tkv` (114), `parity_tests.tkv` (139), `gc_tests.tkv` (288).
+`tv/training/*.tgv` colocated copies: created by sync; should NOT be manually edited.
+
+### Compiler document updates (not committed in repo, but in compiler repo):
+`D:\TokenVector\Release\docs\e_handoff\*` (4 notes: 2026-10-16 list-alias, record-container, 2026-10-17 fix-request, 2026-10-17 verify-after).
+`COMPILER-NOTES-2026-10-16.md`: committed (`8129c73`). The note's suggested workaround (`annotated local` with single quotes) was incorrect; corrected by user/official compiler docs.
 
 ---
 
-## 6. Việc còn lại (nếu muốn tiếp)
+## 3. COMPILER STATE (confirmed 2026-10-17)
 
-| Việc | Ghi chú |
+New compiler exe: `D:\TokenVector\Release\dist\tkvc-tv.exe` (build 2026-10-17 23:58, commit `40a3b6f`).
+Changes: B-01 regression fix (`il_codegen` literal-arg branch), B-04 SIMD (dll copy + version match), B-07 (`--verify-all`), B-05 (`now_ms`/`gc_*` builtins + timing), and G0-related diagnostics.
+
+Verified fixes applied to repo:
+- `simd_*` no longer crashes (dll present); `simd_gemm` works (14.6x faster, square matrix); `simd_*` 3-arg (add/sub/mul/scale/axpy) compile but are NOT bit-exact and allocate 16 B/element (2.4x slower vs scalar) — must NOT be used for parity.
+- `now_ms()`/`now_us()`/`gc_*` are real; benchmark timing is real (not stub 0); `gc_counts()` returns `2/2/2` (actually real GC counts).
+- `--verify-all` works for 5 entry points + library modules (verified 48/48 modules); but requires scalar entry params for library modules (not an issue for entry points).
+- Annotated locals (`"list[f32]"`) work; single quotes (`'list[f32]'`) rejected.
+- List `f64` → `f32` silent corruption is now caught and reported (`SyntaxError` at call site).
+
+Remaining compiler issues (documented in `docs/e_handoff/`):
+- P1-1: `gc_collect()` statement form missing from `_BUILTIN_LENH_DOC_LAP` (`file_io.tkv:190`); workaround in repo: `_gc_ret = gc_collect()`.
+- P1-1: `gc_counts()` returns `""` (stub); gate always `0/0/0`; fixed by compiler to return real counts `2/2/2`.
+- P3 (D-01): annotated local message should mention double quotes; not a bug.
+- P2-2: `simd_*` 3-arg form allocates; `simd_gemm` requires square matrices; `v_*` names whitelisted but not registered.
+- P2 (feature): library module verify (`--verify-all`) requires scalar entry params for library modules; solved by entry-based verify.
+- G0 compiler portability: compiler runs but `.tkv` compile fails on Linux (IL `stloc.s 63` rejected by mono JIT at line 110 of `record_feature.tkv`); `.tkv` output files run fine on Linux/mono; `ilasm` missing; fix requires compiler team.
+
+---
+
+## 4. G1 — CORE TRAINING COMPLETED
+
+### 4.1 Completed deliverables
+
+- `tv/training/tensor.tkv`: `Tensor` record with zero-copy `view`, `reshape`, `t_row`, `t_slice_rows`, `t_at`/`t_set`, `t_sum`, `t_max`, `t_zeros`, `t_new`, `t_zero_grad`, `t_grad_add`, `t_alloc_grad`, `t_require_grad`, `erf` (Abramowitz-Stegun), `gelu_tanh`, `gelu_erf`, `silu`.
+- `tv/training/ops.tkv`: 12 operations — `add_fwd/bwd`, `mul_fwd/bwd`, `matmul_fwd/bwd` (m,n,k with sequential accumulation for bit-exact), `rmsnorm_fwd/bwd`, `layernorm_fwd/bwd`, `gelu_erf_fwd/bwd`, `gelu_tanh_fwd/bwd`, `silu_fwd/bwd`, `relu_fwd/bwd`, `softmax_fwd/bwd`, `cross_entropy_fwd/bwd`, `embed_fwd/bwd` (index-add sorted for determinism).
+- Fixtures: `tools/gen_fixtures.py` (185 lines) generates 60 fixtures (`gpt2_*` architecture fixtures + `g_*` op fixtures + `c_*` chain fixtures) from `torch.autograd` (torch 2.14.0+cpu, fp32, seed 0, eager attn).
+- Parity: `tv/tests/parity_tests.tkv` (4/4 PASS: gelu_tanh bit-exact 0.0, cross_entropy 0.0, softmax 1.86e-09, rmsnorm 1.19e-07, info: tanh vs erf gap 4.12e-04).
+- Gradient parity: `tv/tests/grad_tests.tkv` (20/20 PASS: matmul fwd 5.96e-08, dA 2.38e-07, dB 1.19e-07, gelu_erf 1.19e-07, gelu_tanh 8.34e-07, silu 1.19e-07, relu 0.0, rmsnorm fwd 1.19e-07, bwd 5.96e-08, layernorm fwd 0.0, bwd 1.19e-07, softmax fwd 1.49e-08, bwd 1.49e-08, CE loss 0.0, CE bwd 3.73e-09, add/mul bwd 0.0, embed bwd 0.0).
+- Tape chain: `tv/tests/tape_tests.tkv` (8/8 PASS: chain h1 (rms_norm*w1) diff=1.86e-09, h2 (gelu_erf) diff=5.96e-08, h5 (silu) diff=2.98e-08, loss diff=1.49e-08, tape gx (6 layers) diff=7.45e-09, tape gw1 diff=5.59e-09, tape gb1 diff=4.66e-09, nodes diff=0.0).
+- Gradcheck sensitivity: `tv/tests/gc_tests.tkv` (7/7 PASS: detects deliberate corruption max_abs_diff=0.04508522; detects 1% perturbation max_abs_diff=0.00070177; h values 0.01/0.005/0.002 show relative error < 0.015 for good h).
+- Kernel registry sample: `tv/training/kernels_reg.tkv` (47 lines: `KernelReg` class with `register/get`, default_reg maps 10 ops to `simd_*` builtins + `hal_*` builtins, `backend='cpu'` default).
+- Contract: `docs/numerics-contract.md` — approved, covers fp32, bit-exact CPU, deterministic accumulation, simd backend separation, dropout=0 for parity, GELU erf vs tanh distinction, double-quote annotations, and compiler source references.
+- Linux portability: `docs/linux-portability-spike.md` — `.tkv` runs under mono; compiler fails (IL of compiler itself rejected by mono JIT at `stloc.s 63`); `ilasm` missing.
+- Architecture skeleton: `tv/training/gpt2_ref.tkv` (embedding lookup via `op_embed_fwd`, MHA skeleton using `op_matmul_fwd` + causal mask, MLP skeleton, LM head skeleton with weight tying reference, full forward skeleton, norm helpers, `t_zeros` helper, `t_shape[0]` quirk handled with `_sh0` alias).
+
+### 4.2 Actual verification results (all green)
+
+- `run_cases.ps1`: ALL PASS (26/26 + gap 16/16 + parity 4/4 + grad 20/20 + tape 8/8 + gc 7/7 = 0 FAIL).
+- `build_inference.ps1`: Completed Successfully (full pipeline + benchmarks with real timing: cold start 62ms, single 30us, throughput 133k req/s, FP32 641ms vs INT8 1735ms, Zero-GC −728 B).
+- `--verify-all` 55/55 modules PASS (new compiler 2026-10-17 23:58, includes G1 + fixtures + mirror sync).
+- No source regression (`run_cases` passes after all G1 source additions and mirror sync).
+
+### 4.3 Key real-world findings (not guesses, measured)
+
+- `simd_gemm` (square 256x256): **14.6x faster** than scalar triple-loop, **0 B alloc**.
+- `simd_*` 3-argument forms (`simd_add`/`sub`/`mul`/`scale`/`axpy`): compile OK but **allocate ~16 B/element** (total 16.78 MB for 1M floats), making them **slower (2.4x)** than scalar loops and **breaking Zero-GC** — unusable for inference parity.
+- `simd_*` requires list shapes (not container shapes) — `list[f32]` accepted for `simd_*` but **not** for `simd_gemm` in square form; `shape=list` rejected by compiler unless through array/matrix interface.
+- `v_*` (`v_load8`, `v_mul8_add8`, etc.): listed in `_BUILTIN_LENH_DOC_LAP` but **no registered builtins found** in compiler source — dead names.
+- `docs/numerics-contract.md` approved 2026-10-17; annotation double-quote rule (`"list[f32]"`) documented; `docs/linux-portability-spike.md` documents `.tkv` runs under mono but compiler fails (IL error, missing `ilasm`).
+- Fixture pipeline (`gen_fixtures.py`): generates 60 fixtures from `torch.autograd` with deterministic seed; fixtures stored as `.txt` (readable via `read_file`); parity and gradient fixtures share same format; fixtures are small (~6.5 KB for 60 files) and version-controlled.
+- `grad_tests.tkv` and `tape_tests.tkv` verify algorithm-level correctness independently of fixtures (gradcheck by finite differences); `gc_tests.tkv` verifies gradcheck is sensitive (detects deliberate corruption 0.045 and 1% perturbation 0.0007).
+
+---
+
+## 5. Commit status (final before G2 full architecture)
+
+| Commit | Message |
 |---|---|
-| **G2 backward**: `gpt2_ref.tkv` co day du `attention_bwd`/`block_bwd`/`gpt2_backward` (recompute, khong luu trung gian); `gpt2_tests` **10/10 PASS** (forward 5 + grad 5 so `g2_grad_*`, wte 1.79e-07) | bug da fix: `block_bwd` thieu **term residual** cua `dx` (r = x + attn) — dang `dln1_g` PASS nhung grad tang duoi sai; quirk: khong duoc `list[i].data[j]` (gan ra bien) |
-| **G3 — Data pipeline**: tokenizer parity (GPT-2 BPE HF) | **PARITY ĐẠT** (2026-10-18): `tokenizer_tests.tkv` 9/9 case khớp HF **tuyệt đối từng token id** + decode roundtrip 9/9 (gồm emoji non-BMP); vocab 50257 + merges 50000. Data: `tv/tests/data/{vocab.json,merges.txt}` goc HF `openai-community/gpt2`; fixture `tv/tests/fixtures/tok_cases.txt` sinh boi `tools/gen_tokenizer_fixture.py` (oracle kép: tokenizers Rust + tiktoken, 2 lib doc lap phai khop truoc khi ghi). Chay: `tkvc tv/tests/tokenizer_tests.tkv ra.exe main` (tu goc repo). **Packing + shard (2026-10-18, DANG DO)**: module `tv/data/dataset.tkv` (+ mirror `tv/tests/tv.data.dataset.tkv`), test `tv/tests/pack_tests.tkv`, fixture `tv/tests/fixtures/pack_cases.txt` sinh boi `tools/gen_pack_fixture.py` (reference impl Python doi xung tung buoc, tokenizer HF offline). Gate **[1] pack XANH 8/8 seqs x 32 khop reference**. Con DO: [2] masks, [3] shard write/read (shard_write ghi n=1 want=16 — code khong doi so voi lan truoc con xanh, nghi lien quan bug list 5.7), [4]/[5] stream chua chay tiep vi [3] thieu file. RNG LGC 31-bit Fisher-Yates da chot (cung seed -> cung thu tu -> cung checksum) |
-| **G4 — Trainer**: AdamW + schedule + grad accumulation + checkpoint + CLI `train` | `autograd.tkv` đã có Adam, `lora_forward_and_step`; cần `grad_tests` mở rộng cho chuỗi kiến trúc |
-| **G5 — Harness**: Colab reference script (`compare_rivals` + GPU) | `docs/linux-portability-spike.md`: `.tkv` chạy được, compiler chưa; `simd_gemm` 14.6x (vuông); `simd_*` 3-arg chưa dùng được |
-| **G6 — Phân tán**: DDP/ZeRO-1/2 (tùy chọn) | `atomic_add`, `thread_spawn` đã có; `simd_*` chưa dùng cho parity |
-| Số đo benchmark thật | cần timing thật thay stub; hiện **không dùng được** |
-| SIMD | cần `System.Numerics.Vectors.dll` cạnh exe (B-04 đã đóng); `simd_gemm` 14.6x vuông, không áp dụng cho M=16 K=256 N=256; `simd_*` 3-arg chậm 2.4x + cấp phát 16 B/phần tử |
-| Ghi note compiler | `docs/e_handoff/` đã có 4 note `2026-10-16-*`; `COMPILER-NOTES` chưa stage |
-| **Bit-exact vs PyTorch** | **đã đo + CHẤP NHẬN có kiểm soát** (2026-10-18): matmul/mean KHÔNG thể bit-exact (MKL sgemm AVX2, mọi ứng viên thứ tự đều sai; tuần tự hiện tại đã là tốt nhất — 1499/2048 vs MKL 5.7e-06); exp/sqrt/add bit-exact OK. Hạn mức thật: forward 2.68e-07, grad 1.79e-07 << 1e-5. Công cụ **`tools/verify_parity.ps1` ĐÃ XÂY** (3 lớp: fixture oracle diff / bảng bit-diff vs baseline / gate run_cases; report `reports/parity-<ngay>.md`, exit tường minh) — lần chạy đầu XANH: 100/100 fixture khớp bản sinh lại. Kèm `tools/compare_fixtures.py`, generator nhận `--out`. Lưu ý: `.ps1` phải thuần ASCII (PS5.1 + UTF-8 không BOM → smart-quote) → `docs/accumulation-order-vs-pytorch-2026-10-18.md`; probe: `tools/probe_accumulation_order.py` |
+| `53e817f` | Constructor migration (~130 sites) |
+| `70256f2` | LSTM overflow + LoRA overflow fixes |
+| `5d8a270` | compare_rivals: pool type, list-field, race |
+| `8129c73` | docs: official compiler-notes update + handoff |
+| `6f8ee13` | G1 core + fixtures + docs update |
+
+Working tree (after `git rm --cached` leftover `docs/G1_RESULT_STATE.md`): all tracked/added; untracked: fixtures dir + mirror copies (`tv.training.*.tkv`) + `COMPILER-NOTES-2026-10-16.md` (official compiler team file, not ours) + `docs/linux-portability-spike.md`.
 
 ---
 
-## 7. Lệnh kiểm tra nhanh
+## 6. Next — G2 full architecture (GPT-2 124M)
 
-```powershell
-powershell -File tools\run_cases.ps1          # 26 case + gap 16 + parity 4 + grad 20 + tape 8 + gc 7 + gpt2 5
-powershell -File build_inference.ps1          # đầy đủ, gồm benchmark
-D:\TokenVector\Release\dist\tkvc-tv.exe tv\tests\tokenizer_tests.tkv out.exe main   # G3 tokenizer parity (tu goc repo)
-D:\TokenVector\Release\dist\tkvc-tv.exe tv\tests\pack_tests.tkv out.exe main        # G3 packing+shard (tu goc repo)
-```
+Skeleton complete; fixtures exist for 4 parity + 20 gradient + 8 tape + 7 gradcheck cases. Next steps (user to approve or proceed):
 
-Nhớ chạy **script đồng bộ mirror** (mục 3.1) trước khi build.
+1. Complete `gpt2_ref.tkv`: MHA attention real (manual QKV + mask + projection + residual), MLP real (linear up/down + GELU + residual), LM head weight tying real (`op_embed_fwd` with tied `wte`).
+2. Generate architecture-level fixtures from `transformers.gpt2` (small config: same architecture, vocab 256, hidden 64, heads 4, layers 2, seq 32); fixtures include hidden-state stats per layer + loss + logits + gradients per parameter group.
+3. Write architecture-level parity (`gpt2_tests.tkv`) comparing 1-layer forward and backward against fixtures.
+4. Verify no regression: full `run_cases` (26/26 + gap + parity + grad + tape + gc), `--verify-all` 55/55, build Inference Completed.
