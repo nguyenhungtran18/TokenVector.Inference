@@ -41,12 +41,49 @@ class EmbeddingWte:
         self.wpe = []
 
     def lookup(self, token_ids: 'list[i64]', d: 'i64') -> "Tensor":
-        n = len(token_ids)
-        t = t_new(x)  # placeholder for embedding lookup
-        # Trong G2: lookup tra ve Tensor co `data` dai `n*d`, moi hang la
-        # vecto hidden tu vong trong `wte` theo token_ids.
-        # Backward: index-add voi chi so (da co `op_embed_bwd`).
-        return t
+        # G2: lookup su dung `op_embed_fwd` (index-add co sap xep chi so).
+        # KET QUA: Tensor co `data` dai `len(token_ids)*self.hidden`.
+        wt = tv.training.ops.t_new(self.wte, [self.vocab, self.hidden], 0)
+        out = tv.training.ops.op_embed_fwd(wt, token_ids, self.hidden)
+        out = Tensor(out.data, [len(token_ids), d], 0)
+        return out
+
+# ---- Block skeleton: Norm -> Attention -> Residual -> MLP -> Residual ----
+
+def gpt2_block_skeleton(x: "Tensor", w_attn: "Tensor", w_mlp: "Tensor",
+                         b_attn: "Tensor", b_mlp: "Tensor",
+                         mask: 'list[i64]', target: 'i64') -> 'f32':
+    # G2 skeleton: chung minh 6-tang op chain chay qua block tong quat
+    # (norm -> attention -> add -> norm -> mlp -> ce).
+    # Hien chi tra ve 0 de bien dich, chua tinh that. G2 se hoan thien.
+    return 0.0
+
+# ---- Attention MHA (manual) ---------------------------------------------
+
+def gpt2_attn_skeleton(x: "Tensor", w_attn: "Tensor", b_attn: "Tensor",
+                       mask: 'list[i64]', heads: 'i64', d_head: 'i64') -> "Tensor":
+    # G2: MHA su dung matmul/softmax/mask. Chi tra ve Tensor zero cung
+    # kich thuoc dau ra (n, hidden) de bi dich; tinh that de sau.
+    n = x.shape[0]
+    hidden = x.shape[1]
+    out = tv.training.ops.t_zeros([n, hidden])
+    return out
+
+# ---- MLP skeleton (norm -> linear -> GELU -> linear -> add) -------------------
+
+def gpt2_mlp_skeleton(x: "Tensor", w_mlp: "Tensor", b_mlp: "Tensor") -> "Tensor":
+    # G2: MLP su dung matmul, relu/gelu, add. Chi tra ve Tensor zero.
+    n = x.shape[0]
+    hidden = x.shape[1]
+    out = tv.training.ops.t_zeros([n, hidden])
+    return out
+
+# ---- LM head skeleton (tie embedding weights) -----------------------------
+
+def gpt2_lm_head_skeleton(logits: "Tensor", emb_w: "Tensor") -> 'f32':
+    # G2 skeleton: LM head su dung weight tying voi embedding.
+    # Hien chi tra ve 0 de bien dich.
+    return 0.0
 
 # ---- Norm layer (LayerNorm/RMSNorm) dung lai op core -------------------
 
