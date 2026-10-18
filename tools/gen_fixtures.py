@@ -27,6 +27,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT_DIR = os.path.join(ROOT, "tv", "tests", "fixtures")
 
+# --out <thu muc>: ghi ra thu muc khac (dung boi verify_parity.ps1 de so sanh
+# voi ban check-in, KHONG de noi). Mac dinh: tv\tests\fixtures (giu nguyen).
+if "--out" in sys.argv:
+    _i = sys.argv.index("--out")
+    OUT_DIR = os.path.abspath(sys.argv[_i + 1])
+
 
 def fmt(vals):
     return " ".join("%.9g" % float(v) for v in vals)
@@ -38,7 +44,12 @@ def write_case(name, header, values):
     with open(path, "w", encoding="utf-8") as f:
         f.write("# n=%d  %s\n" % (len(values), header))
         f.write(fmt(values) + "\n")
-    print("  -> %s  (n=%d)" % (os.path.relpath(path, ROOT), len(values)))
+    try:
+        shown = os.path.relpath(path, ROOT)
+    except ValueError:
+        # --out tren o khac voi repo (vd C: vs D:) -> in duong dan day du
+        shown = path
+    print("  -> %s  (n=%d)" % (shown, len(values)))
     return path
 
 

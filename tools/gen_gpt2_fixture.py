@@ -32,6 +32,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(ROOT, "tv", "tests", "fixtures")
 
+# --out <thu muc>: ghi ra thu muc khac (dung boi verify_parity.ps1).
+if "--out" in sys.argv:
+    _i = sys.argv.index("--out")
+    OUT = os.path.abspath(sys.argv[_i + 1])
+
 # ---- cau hinh GPT-2 thu nho (giong HF, chi giam kich thuoc) ---------------
 VOCAB = 256
 N_EMBD = 64

@@ -18,8 +18,22 @@ fixture va sua lai moi kernel.
 
 ## 2. Parity va GPU
 
-- CPU: bit-exact 100% voi PyTorch
-- GPU: deterministic, khong TF32, rel <= 1e-5
+**CHOT LAI 2026-10-18** (phe duyet boi chu khoa, bang chung:
+`docs/accumulation-order-vs-pytorch-2026-10-18.md`, tao lai bang
+`tools\verify_parity.ps1`). Muc cu truoc do la "CPU: bit-exact 100% voi
+PyTorch" — do cho thay KHONG kha thi doi voi matmul/reduction (MKL sgemm
++ vectorized reduce, phu thuoc phien ban MKL/ISA), nen co pham vi ro rang:
+
+| Nhom phep toan | Cam ket CPU |
+|---|---|
+| elementwise (add/mul/nhan), `exp`, `sqrt` | **bit-exact** voi PyTorch |
+| matmul, mean/sum, reduction cua LN/RMSNorm | thu tu tich luy TUAN TU f32 co dinh, khong fast-math; do lech do duoc <= 1 ulp/ptu, ky vong cuoi duong <= 3e-07 (thuc te: forward 2.68e-07, grad 1.79e-07) |
+| toan bo duong parity CPU | **deterministic**: cung input -> cung ket qua TREN MOI MAY (thu tu khong phu thuoc parallelization/MKL) |
+
+- **Gate parity: dung sai 1e-5** (mac dinh `parity_tests`/`grad_tests`/
+  `gpt2_tests`) ket hop lop **gradcheck sai phay doc lap** (khong phu thuoc
+  fixture torch) de bat loi cong thuc.
+- GPU: deterministic, khong TF32, rel <= 1e-5 (nguyen trang).
 
 ## 3. Bang quyet dinh tung thanh phan
 

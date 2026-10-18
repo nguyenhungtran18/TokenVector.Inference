@@ -159,6 +159,7 @@ Ghi chú compiler (file ở repo compiler, chưa commit):
 | Số đo benchmark thật | cần timing thật thay stub; hiện **không dùng được** |
 | SIMD | cần `System.Numerics.Vectors.dll` cạnh exe (B-04 đã đóng); `simd_gemm` 14.6x vuông, không áp dụng cho M=16 K=256 N=256; `simd_*` 3-arg chậm 2.4x + cấp phát 16 B/phần tử |
 | Ghi note compiler | `docs/e_handoff/` đã có 4 note `2026-10-16-*`; `COMPILER-NOTES` chưa stage |
+| **Bit-exact vs PyTorch** | **đã đo + CHẤP NHẬN có kiểm soát** (2026-10-18): matmul/mean KHÔNG thể bit-exact (MKL sgemm AVX2, mọi ứng viên thứ tự đều sai; tuần tự hiện tại đã là tốt nhất — 1499/2048 vs MKL 5.7e-06); exp/sqrt/add bit-exact OK. Hạn mức thật: forward 2.68e-07, grad 1.79e-07 << 1e-5. Công cụ **`tools/verify_parity.ps1` ĐÃ XÂY** (3 lớp: fixture oracle diff / bảng bit-diff vs baseline / gate run_cases; report `reports/parity-<ngay>.md`, exit tường minh) — lần chạy đầu XANH: 100/100 fixture khớp bản sinh lại. Kèm `tools/compare_fixtures.py`, generator nhận `--out`. Lưu ý: `.ps1` phải thuần ASCII (PS5.1 + UTF-8 không BOM → smart-quote) → `docs/accumulation-order-vs-pytorch-2026-10-18.md`; probe: `tools/probe_accumulation_order.py` |
 
 ---
 
