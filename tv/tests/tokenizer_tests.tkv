@@ -1,0 +1,133 @@
+import tv.text.tokenizer
+
+# ============================================================================
+#  TOKENIZER TESTS — G3 (ROADMAP_TRAIN): token id GPT-2 BPE khop TUYET DOI
+#  voi HF.
+# ----------------------------------------------------------------------------
+#  Fixture: tools\gen_tokenizer_fixture.py — oracle 2 lib doc lap
+#  (tokenizers Rust = backend HF fast + tiktoken gpt2 cua OpenAI) phai khop
+#  nhau truoc khi ghi. Data: tv\tests\data\{vocab.json,merges.txt} chinh goc
+#  tu HF openai-community/gpt2 (50257 tokens, 50000 merges).
+#
+#  Moi ca trong tok_cases.txt: dong le = text escape (\\n \\t \\r \\\\),
+#  dong chan = cac token id.
+#
+#  Chay: tkvc tv\tests\tokenizer_tests.tkv ra.exe main  (tu goc repo)
+# ============================================================================
+
+FIX = "tv/tests/fixtures/tok_cases.txt"
+VOCAB = "tv/tests/data/vocab.json"
+MERGES = "tv/tests/data/merges.txt"
+
+def _unescape(s: 'str') -> 'str':
+    out = ""
+    bs = chr(92)
+    n = len(s)
+    i = 0
+    while i < n:
+        c = s[i:i + 1]
+        if c == bs and (i + 1 < n):
+            e = s[i + 1:i + 2]
+            if e == "n":
+                out = out + chr(10)
+                i = i + 2
+            elif e == "t":
+                out = out + chr(9)
+                i = i + 2
+            elif e == "r":
+                out = out + chr(13)
+                i = i + 2
+            elif e == bs:
+                out = out + bs
+                i = i + 2
+            else:
+                out = out + c
+                i = i + 1
+        else:
+            out = out + c
+            i = i + 1
+    return out
+
+def _parse_ids(ln: 'str') -> 'list[i64]':
+    out = []
+    toks = ln.split(" ")
+    for j in range(len(toks)):
+        t = toks[j]
+        if len(t) > 0:
+            v = 0
+            ok = 1
+            for k in range(len(t)):
+                d = ord(t[k]) - 48
+                if d < 0 or d > 9:
+                    ok = 0
+                v = v * 10 + d
+            if ok == 1:
+                out.append(v)
+    return out
+
+def _report(name: 'str', got: 'list[i64]', want: 'list[i64]') -> 'i32':
+    n = len(got)
+    if len(want) < n:
+        n = len(want)
+    bad = -1
+    for i in range(n):
+        if got[i] != want[i]:
+            bad = i
+    if bad >= 0 or len(got) != len(want):
+        print("  [FAIL] " + name + "  len got=" + str(len(got)) + " want=" + str(len(want)) + " first_diff=" + str(bad))
+        if bad >= 0:
+            print("        got[" + str(bad) + "]=" + str(got[bad]) + " want=" + str(want[bad]))
+        return 1
+    print("  [PASS] " + name + "  n_ids=" + str(len(got)))
+    return 0
+
+def main() -> 'i32':
+    fails = 0
+    print("=== G3: GPT-2 BPE token ids vs HF fixture ===")
+    t0 = now_ms()
+
+    # Dung FACTORY — class ke thua bi compiler xu ly nhu record
+    # (`__init__` bi bo qua), xem bpe_tokenizer_new.
+    tok = bpe_tokenizer_new(VOCAB, MERGES)
+    vsize = tok.vocab_size()
+    if vsize == 50257:
+        print("  [PASS] vocab_size=50257")
+    else:
+        print("  [FAIL] vocab_size=" + str(vsize) + " (mong doi 50257)")
+        fails = fails + 1
+    if len(tok.merges) == 50000:
+        print("  [PASS] merges=50000")
+    else:
+        print("  [FAIL] merges=" + str(len(tok.merges)) + " (mong doi 50000)")
+        fails = fails + 1
+
+    txt = read_file(FIX)
+    lines = txt.split("\n")
+    # dong 0 = comment; sau do: (text, ids) doi
+    cases = 0
+    rt_fails = 0
+    i = 1
+    while (i + 1) < len(lines):
+        text_l = lines[i]
+        ids_l = lines[i + 1]
+        i = i + 2
+        if len(text_l) < 1 and len(ids_l) < 1:
+            continue
+        text = _unescape(text_l)
+        want = _parse_ids(ids_l)
+        got = tok.encode(text)
+        cases = cases + 1
+        fails = fails + _report("case " + str(cases - 1), got, want)
+        # roundtrip decode: decode(encode(text)) == text
+        back = tok.decode(got)
+        if back != text:
+            rt_fails = rt_fails + 1
+            print("  [FAIL] roundtrip case " + str(cases - 1))
+    if rt_fails == 0:
+        print("  [PASS] decode roundtrip " + str(cases) + "/" + str(cases))
+    else:
+        fails = fails + rt_fails
+
+    dt = now_ms() - t0
+    print("=== G3 cases=" + str(cases) + " fails=" + str(fails) + " (load+encode " + str(dt) + " ms) ===")
+    return fails

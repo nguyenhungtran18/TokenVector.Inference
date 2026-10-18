@@ -497,12 +497,12 @@ class EmbeddedServer:
             return self._tok
         _o = self.opts
         if _o.tokenizer_kind == "bpe" and _o.tokenizer_vocab != "":
-            _bt = BPETokenizer(1, 0)
+            _bt = bpe_tokenizer_new(_o.tokenizer_vocab, _o.tokenizer_merges)
             self._tok = _bt
             self.has_tok = 1
             return self._tok
         if _o.tokenizer_kind == "wordpiece" and _o.tokenizer_vocab != "":
-            _wt = WordPieceTokenizer(1, _o.tokenizer_vocab, 0, "[UNK]")
+            _wt = wordpiece_tokenizer_new(_o.tokenizer_vocab, "[UNK]")
             self._tok = _wt
             self.has_tok = 1
             return self._tok

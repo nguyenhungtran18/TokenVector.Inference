@@ -90,9 +90,9 @@ def _cmd_gen(flags: 'dict[str,str]') -> 'i32':
     s = _session_of(flags)
     kind = _get(flags, "tokenizer", "bpe")
     if kind == "bpe":
-        _c2 = BPETokenizer(_get(flags, "vocab", "vocab.json"), _get(flags, "merges", "merges.txt"))
+        _c2 = bpe_tokenizer_new(_get(flags, "vocab", "vocab.json"), _get(flags, "merges", "merges.txt"))
     else:
-        _c2 = WordPieceTokenizer(1, _get(flags, "vocab", "vocab.txt"), 0, "[UNK]")
+        _c2 = wordpiece_tokenizer_new(_get(flags, "vocab", "vocab.txt"), "[UNK]")
     tok = _c2
     cfg = GenConfig(1, 128, -1, "chatml", default_sample_params())
     cfg.max_new_tokens = int(_get(flags, "max-tokens", "64"))

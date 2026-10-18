@@ -10,6 +10,7 @@ class Tokenizer:
     def vocab_size(self) -> 'i64':
         return 0
 
+
 class BPETokenizer(Tokenizer):
     vocab: 'dict[str,i64]'
     id_to_tok: 'dict[i64,str]'
@@ -50,21 +51,37 @@ class BPETokenizer(Tokenizer):
         return _unicode_to_bytes(_ah31_33.join(parts))
 
     def _encode_word(self, word: 'str') -> 'list[i64]':
+        # Duyet theo INDEX de xu ly dung surrogate pair (UTF-16) —
+        # `for ch in word` lay tung code unit nen emoji se bi tach do.
         syms = []
-        for ch in word:
+        n = len(word)
+        i = 0
+        while i < n:
+            u = ord(word[i])
+            if u >= 55296 and u <= 56319 and (i + 1 < n):
+                u2 = ord(word[i + 1])
+                if u2 >= 56320 and u2 <= 57343:
+                    ch = word[i:i + 2]
+                    i = i + 2
+                else:
+                    ch = word[i:i + 1]
+                    i = i + 1
+            else:
+                ch = word[i:i + 1]
+                i = i + 1
             for b in utf8_bytes(ch):
                 syms.append(self._byte_map[b])
         while len(syms) > 1:
             best = -1
             best_rank = -1
-            for i in range(len(syms) - 1):
-                if syms[i] + " " + syms[i + 1] in self.rank:
-                    _c2 = self.rank[syms[i] + " " + syms[i + 1]]
+            for i2 in range(len(syms) - 1):
+                if syms[i2] + " " + syms[i2 + 1] in self.rank:
+                    _c2 = self.rank[syms[i2] + " " + syms[i2 + 1]]
                 else:
                     _c2 = -1
                 r = _c2
                 if r >= 0 and (best < 0 or r < best_rank):
-                    best = i
+                    best = i2
                     best_rank = r
             if best < 0:
                 break
@@ -81,6 +98,7 @@ class BPETokenizer(Tokenizer):
 
     def vocab_size(self) -> 'i64':
         return len(self.id_to_tok)
+
 
 class WordPieceTokenizer(Tokenizer):
     vocab_path: 'str'
@@ -129,8 +147,201 @@ class WordPieceTokenizer(Tokenizer):
             start = end
         return ids
 
+
+# ============================================================================
+#  G3 (ROADMAP_TRAIN) — PRETOKENIZER / BPE / LOAD cho GPT-2 byte-level BPE.
+#  Gate: token id khop TUYET DOI voi HF (tv/tests/tokenizer_tests.tkv,
+#  fixture sinh boi tools/gen_tokenizer_fixture.py — oracle tokenizers+tiktoken).
+#
+#  Pretokenizer = regex GPT-2 goc (khong co regex engine -> tu khai trang thai):
+#    's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
+#  Han che co nghi (ghi ro neu mo rong): bang \p{L}/\p{N}/\s mon hoa cho cac
+#  khoang Latin/Cyrillic/Greek/Kana/CJK/Hangul + so ASCII/Arabic/Unicode;
+#  ky tu ngoai bang (emoji, dau thong minh...) rot vao nhanh [^\s\p{L}\p{N}]
+#  — dung voi \p{} cho cac phan khong thuoc bang.
+# ============================================================================
+
 def _pretokenize(text: 'str') -> 'list[str]':
     return pretokenize_split(text)
+
+
+def _cp_at(s: 'str', j: 'i64') -> 'i64':
+    # Codepoint tai vi tri j (UTF-16: bo surrogate pair thanh 1 codepoint)
+    u = ord(s[j])
+    if u >= 55296 and u <= 56319 and (j + 1 < len(s)):
+        u2 = ord(s[j + 1])
+        if u2 >= 56320 and u2 <= 57343:
+            return 65536 + (u - 55296) * 1024 + (u2 - 56320)
+    return u
+
+
+def _adv_at(s: 'str', j: 'i64') -> 'i64':
+    # So code unit (1 hoac 2) ma codepoint tai j chiem
+    u = ord(s[j])
+    if u >= 55296 and u <= 56319 and (j + 1 < len(s)):
+        u2 = ord(s[j + 1])
+        if u2 >= 56320 and u2 <= 57343:
+            return 2
+    return 1
+
+
+def _is_letter(cp: 'i64') -> 'i32':
+    if cp >= 65 and cp <= 90:
+        return 1
+    if cp >= 97 and cp <= 122:
+        return 1
+    if cp >= 192 and cp <= 214:
+        return 1
+    if cp >= 216 and cp <= 246:
+        return 1
+    if cp >= 248 and cp <= 591:
+        return 1
+    if cp >= 880 and cp <= 1023:
+        return 1
+    if cp >= 1024 and cp <= 1327:
+        return 1
+    if cp >= 4352 and cp <= 4607:
+        return 1
+    if cp >= 7680 and cp <= 7935:
+        return 1
+    if cp >= 11360 and cp <= 11391:
+        return 1
+    if cp >= 12352 and cp <= 12543:
+        return 1
+    if cp >= 12592 and cp <= 12687:
+        return 1
+    if cp >= 13312 and cp <= 19903:
+        return 1
+    if cp >= 19968 and cp <= 40959:
+        return 1
+    if cp >= 44032 and cp <= 55215:
+        return 1
+    if cp >= 63744 and cp <= 64255:
+        return 1
+    if cp >= 64256 and cp <= 64262:
+        return 1
+    if cp >= 65313 and cp <= 65338:
+        return 1
+    if cp >= 65345 and cp <= 65370:
+        return 1
+    return 0
+
+
+def _is_digit(cp: 'i64') -> 'i32':
+    if cp >= 48 and cp <= 57:
+        return 1
+    if cp == 178 or cp == 179 or cp == 185:
+        return 1
+    if cp >= 1632 and cp <= 1641:
+        return 1
+    if cp >= 1776 and cp <= 1785:
+        return 1
+    if cp >= 8304 and cp <= 8351:
+        return 1
+    if cp >= 8528 and cp <= 8543:
+        return 1
+    if cp >= 9312 and cp <= 9471:
+        return 1
+    if cp >= 65296 and cp <= 65305:
+        return 1
+    return 0
+
+
+def _is_space(cp: 'i64') -> 'i32':
+    # Python re \s (unicode)
+    if cp == 9 or cp == 10 or cp == 11 or cp == 12 or cp == 13 or cp == 32:
+        return 1
+    if cp == 133 or cp == 160 or cp == 5760:
+        return 1
+    if cp >= 8192 and cp <= 8202:
+        return 1
+    if cp == 8232 or cp == 8233 or cp == 8235 or cp == 8287 or cp == 12288:
+        return 1
+    return 0
+
+
+def pretokenize_split(text: 'str') -> 'list[str]':
+    out = []
+    n = len(text)
+    i = 0
+    while i < n:
+        u = ord(text[i])
+        cp = _cp_at(text, i)
+        adv = _adv_at(text, i)
+        take = 0
+
+        # (0) contraction uoc luong: 's 't 'm 'd 're 've 'll
+        if u == 39 and (i + 1 < n):
+            c1 = text[i + 1]
+            if c1 == "s" or c1 == "t" or c1 == "m" or c1 == "d":
+                take = 2
+            elif (i + 2 < n):
+                c2 = text[i + 2]
+                if (c1 == "r" and c2 == "e") or (c1 == "v" and c2 == "e") or (c1 == "l" and c2 == "l"):
+                    take = 3
+
+        if take == 0:
+            # (1) ' ?' truoc ky tu: chi tieu nuoc 0x20 (regex ' ?' la space thuc)
+            if u == 32 and (i + 1 < n):
+                cpj = _cp_at(text, i + 1)
+                aj = _adv_at(text, i + 1)
+                if _is_letter(cpj) == 1:
+                    j = i + 1 + aj
+                    while j < n and _is_letter(_cp_at(text, j)) == 1:
+                        j = j + _adv_at(text, j)
+                    take = j - i
+                elif _is_digit(cpj) == 1:
+                    j = i + 1 + aj
+                    while j < n and _is_digit(_cp_at(text, j)) == 1:
+                        j = j + _adv_at(text, j)
+                    take = j - i
+                elif _is_space(cpj) == 0:
+                    j = i + 1 + aj
+                    while j < n:
+                        cj = _cp_at(text, j)
+                        if _is_letter(cj) == 1 or _is_digit(cj) == 1 or (_is_space(cj) == 1):
+                            break
+                        j = j + _adv_at(text, j)
+                    take = j - i
+
+            if take == 0:
+                if _is_letter(cp) == 1:
+                    j = i + adv
+                    while j < n and _is_letter(_cp_at(text, j)) == 1:
+                        j = j + _adv_at(text, j)
+                    take = j - i
+                elif _is_digit(cp) == 1:
+                    j = i + adv
+                    while j < n and _is_digit(_cp_at(text, j)) == 1:
+                        j = j + _adv_at(text, j)
+                    take = j - i
+                elif _is_space(cp) == 1:
+                    # \s+(?!\S) roi \s+: run ket thuc truoc EOF -> bo ky tu
+                    # ws CUOI cung (se quay lai xu ly o vong sau), EOF -> lay het
+                    m = i
+                    while m < n and _is_space(_cp_at(text, m)) == 1:
+                        m = m + _adv_at(text, m)
+                    run = m - i
+                    if m >= n or run < 2:
+                        take = run
+                    else:
+                        take = run - 1
+                else:
+                    # nhanh [^\s\p{L}\p{N}]+ (khong keo space dan dau — da xu ly tren)
+                    j = i + adv
+                    while j < n:
+                        cj = _cp_at(text, j)
+                        if _is_letter(cj) == 1 or _is_digit(cj) == 1 or (_is_space(cj) == 1):
+                            break
+                        j = j + _adv_at(text, j)
+                    take = j - i
+
+        if take < 1:
+            take = adv
+        out.append(text[i:i + take])
+        i = i + take
+    return out
+
 
 def _bytes_to_unicode() -> "dict[int, str]":
     m = {}
@@ -143,25 +354,238 @@ def _bytes_to_unicode() -> "dict[int, str]":
             n = n + 1
     return m
 
+
+def _chr_cp(cp: 'i64') -> 'str':
+    # chr() runtime (ConvertFromUtf32) chi chap nhan Unicode scalar hop le.
+    # Da do (tok_probe4): cp >= 65536 -> chr() TU tra ve surrogate pair (2
+    # code unit); lap tay goi chr(0xD800-0xDFFF) de dung pair thi
+    # ConvertFromUtf32 ném -> crash decode (nguyen nhan crash roundtrip
+    # emoji truoc do)._cp khong hop le (am, qua 0x10FFFF, surrogate raw
+    # tu UTF-8 hong) -> U+FFFD.
+    if cp < 0 or cp > 1114111:
+        return chr(65533)
+    if cp >= 55296 and cp <= 57343:
+        return chr(65533)
+    return chr(cp)
+
+
+def utf8_bytes(ch: 'str') -> 'list[i64]':
+    # Ma hoa UTF-8 cac codepoint trong ch (1 char hoac surrogate pair)
+    out = []
+    n = len(ch)
+    i = 0
+    while i < n:
+        cp = _cp_at(ch, i)
+        i = i + _adv_at(ch, i)
+        if cp < 128:
+            out.append(cp)
+        elif cp < 2048:
+            out.append(192 + (cp >> 6))
+            out.append(128 + (cp & 63))
+        elif cp < 65536:
+            out.append(224 + (cp >> 12))
+            out.append(128 + ((cp >> 6) & 63))
+            out.append(128 + (cp & 63))
+        else:
+            out.append(240 + (cp >> 18))
+            out.append(128 + ((cp >> 12) & 63))
+            out.append(128 + ((cp >> 6) & 63))
+            out.append(128 + (cp & 63))
+    return out
+
+
+def _utf8_decode_all(bs: 'list[i64]') -> 'str':
+    out = ""
+    j = 0
+    m = len(bs)
+    while j < m:
+        b0 = bs[j]
+        if b0 < 128:
+            cp = b0
+            j = j + 1
+        elif b0 < 224 and (j + 1 < m):
+            cp = (b0 - 192) * 64 + (bs[j + 1] - 128)
+            j = j + 2
+        elif b0 < 240 and (j + 2 < m):
+            cp = (b0 - 224) * 4096 + (bs[j + 1] - 128) * 64 + (bs[j + 2] - 128)
+            j = j + 3
+        elif b0 < 248 and (j + 3 < m):
+            cp = (b0 - 240) * 262144 + (bs[j + 1] - 128) * 4096 + (bs[j + 2] - 128) * 64 + (bs[j + 3] - 128)
+            j = j + 4
+        else:
+            cp = 65533
+            j = j + 1
+        out = out + _chr_cp(cp)
+    return out
+
+
+def unicode_unescape(s: 'str') -> 'str':
+    # Nguoc lai _bytes_to_unicode: byte-unicode string -> ban goc UTF-8
+    bm = _bytes_to_unicode()
+    rev = {}
+    for b in range(256):
+        rev[bm[b]] = b
+    bs = []
+    n = len(s)
+    i = 0
+    while i < n:
+        ch = s[i:i + 1]
+        if ch in rev:
+            bs.append(rev[ch])
+        i = i + 1
+    return _utf8_decode_all(bs)
+
+
 def _unicode_to_bytes(s: 'str') -> 'str':
     return unicode_unescape(s)
 
+
+def bpe_tokenizer_new(vocab_path: 'str', merges_path: 'str') -> "BPETokenizer":
+    # Factory — BO BUOC vi compiler hien tai xu ly class KE THUA nhu RECORD:
+    # `__init__` bi bo qua, ctor la field-ctor (_ok, unk_id) (da do: goi
+    # `BPETokenizer(a, b)` tu file khac -> vocab rong, _byte_map rong -> crash).
+    # Cach nay set truc tiep TAT CA field sau field-ctor.
+    t = BPETokenizer(0, 0)
+    t.vocab = vocab_load_json(vocab_path)
+    t.id_to_tok = {}
+    for kk in t.vocab:
+        t.id_to_tok[t.vocab[kk]] = kk
+    t.merges = merges_load_txt(merges_path)
+    t.rank = {}
+    for i in range(len(t.merges)):
+        t.rank[t.merges[i]] = i
+    t.unk_id = 0
+    t._byte_map = _bytes_to_unicode()
+    return t
+
+
+def wordpiece_tokenizer_new(vocab_path: 'str', unk_token: 'str') -> "WordPieceTokenizer":
+    # Cung nguyen nhan ke thua nhu tren.
+    t = WordPieceTokenizer(0, vocab_path, 0, unk_token)
+    lines = file_read_lines(vocab_path)
+    t.vocab = {}
+    t.id_to_tok = {}
+    for i in range(len(lines)):
+        t.vocab[lines[i]] = i
+        t.id_to_tok[i] = lines[i]
+    if unk_token in t.vocab:
+        t.unk_id = t.vocab[unk_token]
+    return t
+
+
 def vocab_load_json(path: 'str') -> 'dict[str,i64]':
+    # JSON object {"str": int} — parser thu cong (khong co builtin JSON).
     m = {}
+    txt = read_file(path)
+    n = len(txt)
+    i = 0
+    while i < n and txt[i] != "{":
+        i = i + 1
+    i = i + 1
+    while i < n:
+        c = txt[i]
+        if c == "}":
+            break
+        if c == "\"":
+            i = i + 1
+            key = ""
+            closing = 0
+            while i < n and closing == 0:
+                ch = txt[i]
+                if ch == "\\":
+                    i = i + 1
+                    e = txt[i]
+                    if e == "u":
+                        cp = 0
+                        for k in range(4):
+                            cp = cp * 16 + _hexval(txt[i + 1 + k])
+                        key = key + _chr_cp(cp)
+                        i = i + 5
+                    else:
+                        key = key + _json_esc(e)
+                        i = i + 1
+                elif ch == "\"":
+                    closing = 1
+                    i = i + 1
+                else:
+                    key = key + ch
+                    i = i + 1
+            while i < n and txt[i] != ":":
+                i = i + 1
+            i = i + 1
+            while i < n and _is_json_ws(txt[i]) == 1:
+                i = i + 1
+            val = 0
+            while i < n:
+                d = ord(txt[i]) - 48
+                if d < 0 or d > 9:
+                    break
+                val = val * 10 + d
+                i = i + 1
+            m[key] = val
+        else:
+            i = i + 1
     return m
+
+
+def _is_json_ws(ch: 'str') -> 'i32':
+    if ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
+        return 1
+    return 0
+
+
+def _hexval(ch: 'str') -> 'i64':
+    o = ord(ch)
+    if o >= 48 and o <= 57:
+        return o - 48
+    if o >= 97 and o <= 102:
+        return o - 87
+    if o >= 65 and o <= 70:
+        return o - 55
+    return 0
+
+
+def _json_esc(e: 'str') -> 'str':
+    if e == "n":
+        return chr(10)
+    if e == "t":
+        return chr(9)
+    if e == "r":
+        return chr(13)
+    if e == "b":
+        return chr(8)
+    if e == "f":
+        return chr(12)
+    return e
+
 
 def merges_load_txt(path: 'str') -> 'list[str]':
+    # GPT-2 merges.txt: chi DONG 0 la comment ("#version: 0.2"). 8 dong
+    # "#" con lai la merge THAT (vd "# #", "## ##" — '#' la byte-char
+    # hop le). Bo het dong '#' -> thieu 8 merge + rank lech (da do:
+    # 49992/50000). Moi dong con lai la "left right".
     m = []
+    txt = read_file(path)
+    lines = txt.split("\n")
+    cr = chr(13)
+    for i in range(len(lines)):
+        ln = lines[i]
+        if len(ln) > 0:
+            if ln[len(ln) - 1] == cr:
+                ln = ln[0:len(ln) - 1]
+            if len(ln) > 0 and i > 0:
+                m.append(ln)
     return m
 
+
 def file_read_lines(path: 'str') -> 'list[str]':
-    return []
-
-def pretokenize_split(text: 'str') -> 'list[str]':
-    return []
-
-def utf8_bytes(ch: 'str') -> 'list[i64]':
-    return []
-
-def unicode_unescape(s: 'str') -> 'str':
-    return ""
+    out = []
+    txt = read_file(path)
+    lines = txt.split("\n")
+    cr = chr(13)
+    for i in range(len(lines)):
+        ln = lines[i]
+        if len(ln) > 0 and ln[len(ln) - 1] == cr:
+            ln = ln[0:len(ln) - 1]
+        out.append(ln)
+    return out

@@ -144,6 +144,19 @@ Ghi chú compiler (file ở repo compiler, chưa commit):
    kèm file:line cần sửa. Sửa trong `compiler_bootstrap/compiler/**` —
    **KHÔNG sửa `build/selfhost/tv_gop.tkv`** (đó là bản merge).
 5. **Sửa bug phải kèm hồi quy.** `gap_tests` đã bắt được 4 lỗi thật.
+6. **Tokenizer GPT-2 parity — 3 bẫy đã nếm (2026-10-18):**
+   - `merges.txt` GPT-2: chỉ **dòng 0** là comment (`#version: 0.2`); 8 dòng
+     khác bắt đầu bằng `#` (`# #`, `## ##`, `# $`...) là **merge THẬT** —
+     skip theo tiền tố `#` → mất 8 merge + rank lệch (bắt được: 49992/50000).
+   - `chr(cp)` runtime **native** đã trả surrogate pair cho non-BMP (probe:
+     `chr(128512)` → len=2, ord 55357+56832). Tự dựng pair bằng
+     `chr(0xD800-0xDFFF)` → `ConvertFromUtf32` ném → crash decode emoji.
+     Guard: scalar không hợp lệ → U+FFFD.
+   - Lớp `extends` → compiler **bỏ `__init__`** (field-ctor thay thế) →
+     PHẢI dùng factory `bpe_tokenizer_new` set field tường minh (đo bằng
+     probe3: cả lớp cùng file cũng fail).
+   - Vocabulary `\uXXXX` escapes (35919 chỗ, đều ≤ U+0143) — parser JSON
+     thủ công trong `tokenizer.tkv` xử lý đúng.
 
 ---
 
@@ -152,7 +165,7 @@ Ghi chú compiler (file ở repo compiler, chưa commit):
 | Việc | Ghi chú |
 |---|---|
 | **G2 backward**: `gpt2_ref.tkv` co day du `attention_bwd`/`block_bwd`/`gpt2_backward` (recompute, khong luu trung gian); `gpt2_tests` **10/10 PASS** (forward 5 + grad 5 so `g2_grad_*`, wte 1.79e-07) | bug da fix: `block_bwd` thieu **term residual** cua `dx` (r = x + attn) — dang `dln1_g` PASS nhung grad tang duoi sai; quirk: khong duoc `list[i].data[j]` (gan ra bien) |
-| **G3 — Data pipeline**: tokenizer parity (GPT-2 BPE HF) + packing + shard | `tokenizer.tkv` đã có; fixture token id bắt buộc |
+| **G3 — Data pipeline**: tokenizer parity (GPT-2 BPE HF) | **PARITY ĐẠT** (2026-10-18): `tokenizer_tests.tkv` 9/9 case khớp HF **tuyệt đối từng token id** + decode roundtrip 9/9 (gồm emoji non-BMP); vocab 50257 + merges 50000. Data: `tv/tests/data/{vocab.json,merges.txt}` goc HF `openai-community/gpt2`; fixture `tv/tests/fixtures/tok_cases.txt` sinh boi `tools/gen_tokenizer_fixture.py` (oracle kép: tokenizers Rust + tiktoken, 2 lib doc lap phai khop truoc khi ghi). Chay: `tkvc tv/tests/tokenizer_tests.tkv ra.exe main` (tu goc repo). **Còn G3**: packing + shard |
 | **G4 — Trainer**: AdamW + schedule + grad accumulation + checkpoint + CLI `train` | `autograd.tkv` đã có Adam, `lora_forward_and_step`; cần `grad_tests` mở rộng cho chuỗi kiến trúc |
 | **G5 — Harness**: Colab reference script (`compare_rivals` + GPU) | `docs/linux-portability-spike.md`: `.tkv` chạy được, compiler chưa; `simd_gemm` 14.6x (vuông); `simd_*` 3-arg chưa dùng được |
 | **G6 — Phân tán**: DDP/ZeRO-1/2 (tùy chọn) | `atomic_add`, `thread_spawn` đã có; `simd_*` chưa dùng cho parity |
@@ -168,6 +181,7 @@ Ghi chú compiler (file ở repo compiler, chưa commit):
 ```powershell
 powershell -File tools\run_cases.ps1          # 26 case + gap 16 + parity 4 + grad 20 + tape 8 + gc 7 + gpt2 5
 powershell -File build_inference.ps1          # đầy đủ, gồm benchmark
+D:\TokenVector\Release\dist\tkvc-tv.exe tv\tests\tokenizer_tests.tkv out.exe main   # G3 tokenizer parity (tu goc repo)
 ```
 
 Nhớ chạy **script đồng bộ mirror** (mục 3.1) trước khi build.
