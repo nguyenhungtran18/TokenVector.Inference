@@ -1,0 +1,126 @@
+# G5 BACKEND SEAM (ROADMAP_TRAIN G5) — lop tach backend khoi thuat toan.
+#
+# Muc tieu: khi them backend moi (SIMD, GPU/CUDA, WASM...) CHI can them mot
+# module backend moi cung cap cac ham `be_*` duoi day + mot gia tri `kind`,
+# KHONG phai sua ops/trainer/harness.
+#
+# `kind` la dispatch cua lop seam (tkv khong co first-class function, nen
+# dispatch theo so la cach duy nhat giu duoc mot entry point duy nhat):
+#   0 = cpu reference (dung cho moi gate parity)
+#   1..= backend GIA chi de test harness (co y tra ket qua sai)
+#
+# Backend gia (test-only) — chung minh harness THAT SU kiem tra:
+#   kind 1: gelu_erf dung xap xi tanh (loi that hay gap: PyTorch mac dinh la erf)
+#   kind 2: rmsnorm chia (n-1) thay vi n (loi that hay gap: nham mau so)
+#   kind 3: moi output +1e-3 (loi "gan dung" — phai bi bat)
+#
+# Moi ham be_* chi nhan du lieu PHANG (list[f32]) de khong dinh bug compiler
+# list long nhau.
+
+class Backend:
+    _ok: 'i64'
+    name: 'str'
+    kind: 'i64'
+
+def backend_cpu() -> "Backend":
+    return Backend(0, "cpu", 0)
+
+def backend_fake_gelu_tanh() -> "Backend":
+    return Backend(0, "fake_gelu_tanh", 1)
+
+def backend_fake_rmsnorm_n1() -> "Backend":
+    return Backend(0, "fake_rmsnorm_n1", 2)
+
+def backend_fake_bias() -> "Backend":
+    return Backend(0, "fake_bias", 3)
+
+# ---- reference math (self-contained; khong import de tranh trung ten) -------
+
+def _b_erf(x: 'f32') -> 'f32':
+    # Abramowitz & Stegun 7.1.26, sai so tuyet doi < 1.5e-7 (giong tensor.tkv)
+    sg = 1.0
+    if x < 0.0:
+        sg = -1.0
+    ax = abs(x)
+    t = 1.0 / (1.0 + 0.3275911 * ax)
+    poly = 1.061405429
+    poly = poly * t - 1.453152027
+    poly = poly * t + 1.421413741
+    poly = poly * t - 0.284496736
+    poly = poly * t + 0.254829592
+    poly = poly * t
+    return sg * (1.0 - exp(-ax * ax) * poly)
+
+def _b_gelu_erf(v: 'f32') -> 'f32':
+    return 0.5 * v * (1.0 + _b_erf(v / 1.4142135623730951))
+
+def _b_gelu_tanh(v: 'f32') -> 'f32':
+    c = 0.7978845608028654
+    return 0.5 * v * (1.0 + tanh(c * (v + 0.044715 * v * v * v)))
+
+# ---- ops cua backend -------------------------------------------------------
+
+def be_gelu_erf(b: "Backend", x: 'f32') -> 'f32':
+    if b.kind == 1:
+        v = _b_gelu_tanh(x)
+    else:
+        v = _b_gelu_erf(x)
+    if b.kind == 3:
+        v = v + 0.001
+    return v
+
+def be_gelu_tanh(b: "Backend", x: 'f32') -> 'f32':
+    v = _b_gelu_tanh(x)
+    if b.kind == 3:
+        v = v + 0.001
+    return v
+
+def be_softmax_row(b: "Backend", x: 'list[f32]') -> 'list[f32]':
+    n = len(x)
+    mx = x[0]
+    for i in range(1, n):
+        if x[i] > mx:
+            mx = x[i]
+    y = []
+    s = 0.0
+    for i in range(n):
+        e = exp(x[i] - mx)
+        y.append(e)
+        s = s + e
+    inv = 1.0 / s
+    for i in range(n):
+        y[i] = y[i] * inv
+        if b.kind == 3:
+            y[i] = y[i] + 0.001
+    return y
+
+def be_rmsnorm_row(b: "Backend", x: 'list[f32]', eps: 'f32') -> 'list[f32]':
+    n = len(x)
+    ss = 0.0
+    for i in range(n):
+        ss = ss + x[i] * x[i]
+    den = float(n)
+    if b.kind == 2:
+        den = float(n - 1)
+    rs = 1.0 / sqrt(ss / den + eps)
+    y = []
+    for i in range(n):
+        v = x[i] * rs
+        if b.kind == 3:
+            v = v + 0.001
+        y.append(v)
+    return y
+
+def be_cross_entropy(b: "Backend", logits: 'list[f32]', target: 'i64') -> 'f32':
+    n = len(logits)
+    mx = logits[0]
+    for i in range(1, n):
+        if logits[i] > mx:
+            mx = logits[i]
+    s = 0.0
+    for i in range(n):
+        s = s + exp(logits[i] - mx)
+    v = mx + log(s) - logits[target]
+    if b.kind == 3:
+        v = v + 0.001
+    return v

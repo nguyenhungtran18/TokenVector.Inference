@@ -113,11 +113,52 @@ Smoke test 100 buoc: loss 1.133 -> 0.143, eval 0.2236, acc 0.95, checkpoint
 - Nho lai: import tu `tv/tests/*.tkv` chi thay module khi co mirror
   `tv/tests/tv.<duong.dan>.tkv` (va tuong tu cho `tv/tools/`).
 
-### 0.5 Tiep theo: G5 harness + seam GPU
+### 0.5 G5 HARNESS + SEAM BACKEND (2026-10-19) — XANH 4/4
 
-G3 va G4 da xong. Viec tiep: G5 — script sinh fixture PyTorch chay 1 lan
-(`tools/gen_*.py`), mot lenh bao cao ti le khop, backend gia tra ket qua sai
-co chu y de chung minh harness bat duoc, va interface backend cho GPU.
+File: `tv/training/backend.tkv` (seam), `tv/training/parity_harness.tkv`
+(bo test doi chieu), `tv/tests/harness_tests.tkv`, wrapper
+`tools/verify_train_parity.ps1`.
+
+**MOT lenh:**
+
+```
+powershell -NoProfile -File tools\verify_train_parity.ps1
+```
+
+Ket qua THAT (exit 0, bao cao o `reports/train-parity-<stamp>.md`):
+
+```
+=== G5 parity harness (backend=cpu) ===
+  [PASS] gelu_erf        max_abs_diff=1.192e-07
+  [PASS] gelu_tanh       max_abs_diff=0.0
+  [PASS] softmax_row     max_abs_diff=1.863e-09
+  [PASS] rmsnorm         max_abs_diff=1.192e-07
+  [PASS] cross_entropy   max_abs_diff=0.0
+=== 5/5 khop (100.0%) ===
+  [PASS] cpu: 5/5 khop (100%)
+  [PASS] bat backend gia (tanh thay erf): dung 1/5 case
+  [PASS] bat backend gia (rmsnorm /(n-1)): dung 1/5 case
+  [PASS] bat backend gia (+1e-3 moi output): 5/5 case
+=== G5 harness cases=4 fails=0 ===
+```
+
+Backend gia chung minh harness THAT SU kiem tra (khong phai luon xanh) va bat
+**dung** case: dung tanh thay erf chi lam hong `gelu_erf`; rmsnorm chia `n-1`
+chi lam hong `rmsnorm`; backend "gan dung" +1e-3 bi bat ca 5 case.
+
+Seam: `backend.tkv` dispatch theo `kind` (0 = cpu reference; 1.. = backend gia
+chi de test). Them backend moi (SIMD/GPU/WASM) = them module + nhanh `kind`,
+khong sua `ops.tkv`/`trainer.tkv`/harness. Fixture van la PyTorch check-in
+(`tools/gen_fixtures.py`).
+
+Con lai cua G5 (khong thuoc gate, chua lam): notebook Colab de chay lai tren
+GPU khi co may.
+
+### 0.6 Tiep theo
+
+G3, G4, G5 xong (G5 thieu notebook Colab). G6 (phan tan) nam ngoai pham vi
+theo ROADMAP. Viec con lai: noi trainer G4 vao GPT-2 nho cua G2 de co vong
+train that, va viet notebook Colab.
 
 ---
 

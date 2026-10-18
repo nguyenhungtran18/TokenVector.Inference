@@ -1,0 +1,80 @@
+import tv.training.backend
+import tv.training.parity_harness
+
+# ============================================================================
+#  G5 HARNESS TESTS (ROADMAP_TRAIN G5)
+# ----------------------------------------------------------------------------
+#  Gate:
+#    [1] MOT lenh -> bao cao "N/N khop (100%)" cho backend cpu
+#    [2] backend GIA sai co chu y -> harness BAT DUOC, va bat DUNG case
+#        (khong phai "do may ra fail"): gelu_tanh thay erf chi lam hong
+#        gelu_erf; rmsnorm chia n-1 chi lam hong rmsnorm.
+#    [3] backend "gan dung" (+1e-3 moi output) -> CA 5 case deu bi bat.
+#
+#  Chay: tkvc tv\tests\harness_tests.tkv ra.exe main
+#  hoac: powershell -File tools\verify_train_parity.ps1
+# ============================================================================
+
+def _tol() -> 'f32':
+    return 1e-5
+
+def _caught(b: "Backend", i: 'i64') -> 'i32':
+    if h_case_run(b, i) > _tol():
+        return 1
+    return 0
+
+def _line(ok: 'i32', msg: 'str') -> 'i32':
+    if ok == 1:
+        print("  [PASS] " + msg)
+        return 0
+    print("  [FAIL] " + msg)
+    return 1
+
+def main() -> 'i32':
+    fails = 0
+    cases = 0
+    print("=== G5: harness + backend gia ===")
+
+    # ---- [1] cpu backend: N/N khop 100% -----------------------------------
+    cpu = backend_cpu()
+    n = h_case_count()
+    f_cpu = h_report(cpu)
+    cases = cases + 1
+    fails = fails + _line((f_cpu == 0) * 1, "cpu: " + str(n) + "/" + str(n) + " khop (100%)")
+
+    # ---- [2a] fake dung tanh thay erf: chi gelu_erf bi bat -----------------
+    b1 = backend_fake_gelu_tanh()
+    c_erf = _caught(b1, 0)
+    c_tanh = _caught(b1, 1)
+    c_sm = _caught(b1, 2)
+    ok = 1
+    if c_erf != 1:
+        ok = 0
+    if c_tanh != 0 or c_sm != 0:
+        ok = 0
+    cases = cases + 1
+    fails = fails + _line(ok, "bat backend gia (tanh thay erf): dung 1/" + str(n) + " case")
+
+    # ---- [2b] fake rmsnorm chia n-1: chi rmsnorm bi bat --------------------
+    b2 = backend_fake_rmsnorm_n1()
+    c_rms = _caught(b2, 3)
+    c_erf2 = _caught(b2, 0)
+    c_ce2 = _caught(b2, 4)
+    ok2 = 1
+    if c_rms != 1:
+        ok2 = 0
+    if c_erf2 != 0 or c_ce2 != 0:
+        ok2 = 0
+    cases = cases + 1
+    fails = fails + _line(ok2, "bat backend gia (rmsnorm /(n-1)): dung 1/" + str(n) + " case")
+
+    # ---- [3] fake "gan dung" +1e-3: ca 5 case bi bat -----------------------
+    b3 = backend_fake_bias()
+    caught = 0
+    for i in range(n):
+        caught = caught + _caught(b3, i)
+    cases = cases + 1
+    fails = fails + _line((caught == n) * 1, "bat backend gia (+1e-3 moi output): " + str(caught) + "/" + str(n) + " case")
+
+    print("=== G5 harness cases=" + str(cases) + " fails=" + str(fails) + " ===")
+    return fails
