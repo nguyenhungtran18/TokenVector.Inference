@@ -220,11 +220,57 @@ Gate: `tv/tests/swiglu_tests.tkv` (3) + `tv/tests/inplace_tests.tkv` (5).
 Luu y ve guard: day la lop API (`guard_consume/release/write/check`) phai duoc
 GOI tu op/tape; chua tu dong chen vao moi op.
 
-### 0.9 Tiep theo
+### 0.9 G2 124M — CHE DO FIXTURE NGOAI REPO (2026-10-19) — XANH 20/20
 
-G3, G4, G5 xong (G5 thieu notebook Colab). G6 (phan tan) nam ngoai pham vi
-theo ROADMAP. Viec con lai: noi trainer G4 vao GPT-2 nho cua G2 de co vong
-train that, va viet notebook Colab.
+Mo khoa BLOCKER 124M cua 0.6. Mot lenh:
+
+```
+powershell -NoProfile -File tools\verify_gpt2_124m.ps1
+```
+
+4 buoc: (1) sinh/sinh lai fixture `gen_gpt2_fixture.py --full --out
+tv\tests\fixtures-124m` (~2.3 GB text, .gitignore — khong len GitHub duoc vi
+shard 119-231MB vuot 100MB cua GitHub khi khong co LFS), (2) ghi pointer
+`tv/tests/g2_full_dir.txt`, (3) bien dich + chay gate `gpt2_full_tests.tkv`,
+(4) chong hoi quy `gpt2_tests`. Exit: 0 = khong FAIL (SKIP duoc phep). Bao cao
+`reports/gpt2-124m-<stamp>.md`.
+
+Ket qua THAT (19-10-2026, 2m49s, exit=0):
+
+| Case | Ket qua |
+|---|---|
+| hidden h0 (embed) | **0.0** |
+| hidden h1..h12 (12 tang) | 6.1e-07 -> **2.1e-06** (tich luy 12 tang) |
+| logits | 5.56e-06 (tol 1e-4) |
+| loss | 9.5e-07 (tol 1e-5) |
+| grad wte (tie) | 4.11e-06; cac grad khac <= 6.1e-07 |
+
+3 luong do THAT (khong uoc luong):
+1. **argv() khong hoat dong** tren build tkvc hien tai (ca cli.exe cung in
+   usage voi arg) -> gate doc fixture dir qua **file pointer**
+   `tv/tests/g2_full_dir.txt` (chu MISSING -> SKIP, exit 0).
+2. **Import resolve ve flattened copy**: `tv/tests/tv.training.gpt2_ref.tkv`
+   (256/64) thang, canonical `tv/training/gpt2_ref.tkv` (124M) KHONG duoc
+   chon; module chi co ban canonical khong resolve. -> 124M can flattened copy
+   rieng: `tv.training.gpt2_ref124` (copy 2 ban, giong le quy uoc copy).
+3. **Nguong OOM .NET cua text file**: 533 MB split duoc (26s), 594 MB bi
+   OutOfMemoryException sau 4.9s (UTF-16 ~2x + LOH). -> generator `--full`
+   **shard 15M gia tri/man** (`g2_shards.txt` manifest, file `*.0/*.1/*.2`),
+   gate doc manifest va gop. Parse wte 38.6M phan tu = 26.3s do (P4).
+
+Guard generator: `--full` vao thu muc trong repo -> loi exit 2 (khong de
+fixture 2.3 GB lo vao git); thieu transformers -> exit 2. Khong `--full` van
+la ban thu nho 256/64 (verify_parity.ps1 khong bi anh huong).
+
+Files: `tools/gen_gpt2_fixture.py` (`--full` + `--out` + shard),
+`tv/tests/gpt2_full_tests.tkv` (SKIP/doc pointer/shard loader), flattened
+`tv.training.gpt2_ref124` (2 ban copy),
+`tools/verify_gpt2_124m.ps1`. Khong hoi quy: 6/6 gate nho xanh.
+
+### 0.10 Tiep theo
+
+G1-G5 xong gom ca parity 124M ngoai repo (0.9). G5 thieu notebook Colab;
+G6 (phan tan) nam ngoai pham vi theo ROADMAP. G4 da noi vao GPT-2 nho (0.7).
 
 ---
 

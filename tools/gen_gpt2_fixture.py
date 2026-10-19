@@ -15,7 +15,16 @@ chua 124M tham so. Kien truc giong HF `gpt2` y nguyen:
 
 Thu nho chi de fixture nho (duoc check-in), con thuat toan thi y nguyen.
 
-Chay:  python tools\\gen_gpt2_fixture.py
+Che do 124M (KHONG check-in git, xem HANDOFF.md 0.6 + 0.9):
+
+    python tools/gen_gpt2_fixture.py --full          # mac dinh: tv/tests/fixtures-124m (da gitignore)
+    python tools/gen_gpt2_fixture.py --full --out D:/tv-gpt2-124m   # cho phep ngoai repo
+
+--full: VOCAB=50257, n_embd=768, n_head=12, n_layer=12, max_pos=1024 (config
+GPT-2 124M that), shard 15M gia tri/man. GUARD: tu choi exit 2 neu --out nam
+TRONG repo NHUNG khac tv/tests/fixtures-124m (khong de fixture 2.3 GB lo vao
+git). Khong co --full -> van la ban thu nho, khong doi hanh vi cua
+verify_parity.ps1.
 """
 
 import os
@@ -37,9 +46,41 @@ if "--out" in sys.argv:
     _i = sys.argv.index("--out")
     OUT = os.path.abspath(sys.argv[_i + 1])
 
+# --full: bo sung nang luc 124M (khong check-in git).
+FULL = "--full" in sys.argv
+
+# Thu muc 124M hop le DUY NHAT ben trong repo (da .gitignore)
+OUT_OK = os.path.join(ROOT, "tv", "tests", "fixtures-124m")
+
+if FULL:
+    # TRUOC: full khong co --out -> mac dinh vao thu muc gitignore (phai dat
+    # TRUOC GUARD 1, neu de sau GUARD 1 thi OUT van tro ve repo mac dinh bi chan).
+    if "--out" not in sys.argv:
+        OUT = OUT_OK
+        print("  (mac dinh --full OUT = %s)" % OUT)
+    # GUARD 1: khong ghi vao repo ngoai thu muc da gitignore (fixture 124M
+    # 2.3 GB text, GitHub khong nhan file >100 MB; xem HANDOFF.md 0.6).
+    _out_r = os.path.realpath(OUT)
+    _root_r = os.path.realpath(ROOT)
+    _ok_r = os.path.realpath(OUT_OK)
+    _in_repo = _out_r == _root_r or _out_r.startswith(_root_r + os.sep)
+    if _in_repo and _out_r != _ok_r:
+        print("LOI: --full khong duoc ghi vao repo ngoai %s (OUT=%s)."
+              % (OUT_OK, OUT))
+        print("     Khong can --out (mac dinh la %s) hoac chi --out "
+              "thu muc ngoai repo." % OUT_OK)
+        sys.exit(2)
+    # GUARD 2: can python + torch (+transformers) that su — khong cho chay
+    # suy (da gap loi nay khi fixture 124M regenerate dang do 10-2026).
+    try:
+        import transformers  # noqa: F401
+    except ImportError:
+        print("LOI: --full can transformers (pip install transformers).")
+        sys.exit(2)
+
 # ---- cau hinh GPT-2 thu nho (giong HF, chi giam kich thuoc) ---------------
-# (Ban 124M that su bi chan: wte ~425 MB text khong check-in duoc, xem
-# HANDOFF.md 0.6. Giu ban thu nho lam bang chung thuat toan.)
+# (Ban 124M that su bi chan lam fixture check-in: wte ~425 MB text; dung bang
+# che do --full ngoai repo. Xem HANDOFF.md 0.6 + docs/handoff-gpt2-124m.)
 VOCAB = 256
 N_EMBD = 64
 N_HEAD = 4
@@ -48,10 +89,37 @@ MAX_POS = 32
 SEQ = 8
 EPS = 1e-6
 SEED = 7
+SHARD_N = 15000000  # so gia tri toi da moi man khi --full
+
+if FULL:
+    # ---- cau hinh GPT-2 124M THAT (khop gpt2_ref124) ----------------------
+    VOCAB = 50257
+    N_EMBD = 768
+    N_HEAD = 12
+    N_LAYER = 12
+    MAX_POS = 1024
 
 
 def write_case(name, header, values):
     os.makedirs(OUT, exist_ok=True)
+    n = len(values)
+    # --full: shard file lon (nguong LOH .NET: file 594MB -> OutOfMemoryException
+    # luc split, 533MB van pass — da do 2026-10-19). 15M gia tri/moi man ~
+    # 200-280MB text -> UTF-16 ~400-560MB, an toan co bien.
+    if FULL and n > SHARD_N:
+        k = (n + SHARD_N - 1) // SHARD_N
+        for s in range(k):
+            chunk = values[s * SHARD_N:(s + 1) * SHARD_N]
+            path = os.path.join(OUT, "g2_" + name + ".txt." + str(s))
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("# n=%d  %s (shard %d/%d)\n"
+                        % (len(chunk), header, s, k))
+                f.write(" ".join("%.9g" % float(v) for v in chunk) + "\n")
+        with open(os.path.join(OUT, "g2_shards.txt"), "a",
+                  encoding="utf-8") as mf:
+            mf.write("%s %d\n" % (name, k))
+        print("  -> g2_%-22s n=%d SHARDS=%d" % (name, n, k))
+        return os.path.join(OUT, "g2_" + name + ".txt.*")
     path = os.path.join(OUT, "g2_" + name + ".txt")
     with open(path, "w", encoding="utf-8") as f:
         f.write("# n=%d  %s\n" % (len(values), header))
@@ -63,6 +131,12 @@ def write_case(name, header, values):
 def main():
     torch.set_grad_enabled(True)
     torch.manual_seed(SEED)
+    # manifest shard: xoa ban cu (neu regenerate, append se nhan ban dong)
+    if FULL:
+        os.makedirs(OUT, exist_ok=True)
+        with open(os.path.join(OUT, "g2_shards.txt"), "w",
+                  encoding="utf-8") as mf:
+            mf.write("# name shard_count\n")
 
     from transformers import GPT2Config, GPT2LMHeadModel
     cfg = GPT2Config(

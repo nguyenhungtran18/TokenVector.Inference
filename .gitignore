@@ -37,3 +37,9 @@ $RECYCLE.BIN/
 
 # Freebuff platform metadata
 .freebuff/
+
+# Gate 124M: pointer duong dan fixture ngoai repo (runtime file)
+tv/tests/g2_full_dir.txt
+
+# Fixture GPT-2 124M (~2.3 GB, sinh bang gen_gpt2_fixture.py --full) — NGOAI git
+tv/tests/fixtures-124m/

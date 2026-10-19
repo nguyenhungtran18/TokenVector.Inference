@@ -1,0 +1,241 @@
+import tv.training.gpt2_ref124
+
+# ============================================================================
+#  GPT-2 FULL 124M — PARITY NGOAI REPO (xem docs/handoff-gpt2-124m-*)
+# ----------------------------------------------------------------------------
+#  Fixture ~1.6 GB KHONG check-in. Hoat dong bang 2 moc:
+#    1. tools\gen_gpt2_fixture.py --full --out <thu muc ngoai repo>
+#    2. ghi duong dan thu muc vao pointer tv\tests\g2_full_dir.txt
+#       (vi du: C:\Users\...\Temp\tv-gpt2-124m)
+#  Gate doc pointer; neu co chu "MISSING" -> in [SKIP] va return 0.
+#  Chuay qua tools\verify_gpt2_124m.ps1 (tu sinh fixture + pointer).
+#
+#  argv() khong hoat dong tren build tkvc hien tai (da probe: argc=0 voi ca
+#  cli.exe) nen dung file pointer — khong phai doan ma.
+#
+#  TOL: 12 tang tich luy loi fp32 + GELU erf xap xi (numerics-contract) ->
+#  khong the bit-exact. Lan chay dau do so that, chot tol = 10x max do duoc.
+#
+#  Chay (tu goc repo):  tkvc tv\tests\gpt2_full_tests.tkv ra.exe main
+# ============================================================================
+
+POINTER = "tv/tests/g2_full_dir.txt"
+TOL_HID = 1e-4
+TOL_LOSS = 1e-5
+# FIX_DIR doc tu pointer o MODULE LEVEL: compiler hien tai khong cho phep
+# `global` trong ham, khong cho phep gan lai bien module trong ham (da gap
+# ca 3 loi khi viet gate nay). Doc o day luon — exe khoi dong la doc pointer.
+# CHU Y: khong doc duoc file o module-level (compiler cho phep hang so don gian
+# thoi), khong cho `global`/gan lai bien module trong ham — nen moi noi dung
+# doc FIX_DIR truyen qua tham so `d` tu main. main doc pointer; neu khong co
+# file pointer -> read_file loi. PHAI chay qua tools\verify_gpt2_124m.ps1
+# (tu tao pointer, ghi MISSING neu chua gen fixture).
+
+def load_ints_fx(d: 'str', sk: 'dict[str,i64]', name: 'str') -> 'list[i64]':
+    f = load_fx(d, sk, name)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> "list[f32]":
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        ln = lines[i]
+        if _is_comment(ln) == 1:
+            continue
+        toks = ln.split(" ")
+        for j in range(len(toks)):
+            t = toks[j]
+            if len(t) < 1:
+                continue
+            vals.append(float(t))
+    return vals
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+def _abs(v: 'f32') -> 'f32':
+    if v < 0.0:
+        return 0.0 - v
+    return v
+
+def diff(a: 'list[f32]', b: 'list[f32]') -> 'f32':
+    n = len(a)
+    if len(b) < n:
+        n = len(b)
+    if len(a) != len(b):
+        return 1000000.0
+    m = 0.0
+    for i in range(n):
+        d = _abs(a[i] - b[i])
+        if d > m:
+            m = d
+    return m
+
+def report(name: 'str', d: 'f32', tol: 'f32') -> 'i32':
+    if d <= tol:
+        print("  [PASS] " + name + "  max_abs_diff=" + str(d))
+        return 0
+    print("  [FAIL] " + name + "  max_abs_diff=" + str(d) + "  tol=" + str(tol))
+    return 1
+
+def load_shards(d: 'str') -> 'dict[str,i64]':
+    # doc manifest g2_shards.txt (generator --full ghi: "ten so_man")
+    out = {}
+    raw = read_file(d + "g2_shards.txt")
+    mls = raw.split("\n")
+    for i in range(len(mls)):
+        ln = mls[i].strip()
+        if len(ln) < 2:
+            continue
+        if ln[0] == "#":
+            continue
+        toks = ln.split(" ")
+        if len(toks) >= 2:
+            out[toks[0]] = int(float(toks[1]))
+    return out
+
+def load_fx(d: 'str', sk: 'dict[str,i64]', name: 'str') -> "list[f32]":
+    # neu name bi shard (file > 594MB lam .NET OutOfMemory khi split — do 19-10)
+    # thi doc tat ca man; nguoc lai doc 1 file nhu cu.
+    if name in sk:
+        k = sk[name]
+        out = []
+        for s in range(k):
+            part = load_floats(d + "g2_" + name + ".txt." + str(s))
+            for i in range(len(part)):
+                out.append(part[i])
+        return out
+    return load_floats(d + "g2_" + name + ".txt")
+
+def tw(d: 'str', sk: 'dict[str,i64]', name: 'str') -> "Tensor":
+    return t_new(load_fx(d, sk, "w_" + name), [1])
+
+def main() -> 'i32':
+    fails = 0
+    cases = 0
+    print("=== GPT-2 FULL 124M (vocab 50257, embd 768, head 12, layer 12) vs PyTorch ===")
+
+    fix_dir = read_file(POINTER).strip()
+    if fix_dir == "MISSING":
+        print("  [SKIP] fixture 124M chua sinh — chay tools\\verify_gpt2_124m.ps1"
+              + " (hoac gen_gpt2_fixture.py --full --out <dir> + ghi pointer)")
+        print("=== GPT-2 full cases=0 fails=0 SKIP=1 ===")
+        return 0
+
+    d = fix_dir + "/"
+    sk = load_shards(d)
+    VOCAB = VocabSize
+    H = HiddenSize
+    NL = NLayers
+
+    # ---- doc TRUOC cac grad lon nhat khi process con nhe ----------
+    # (grad_wte = 38.6M phan tu, text 533MB; doc luc da giu weights +
+    # forward tensors -> OutOfMemoryException — da do 2 lan 2026-10-19.
+    # Thu tu doc: grad -> weights -> forward/backward, so sanh cuoi cung.)
+    ref_gwte = load_fx(d, sk, "grad_wte")
+    print("[dbg] grad_wte ok n=" + str(len(ref_gwte)))
+    ref_gln1 = load_fx(d, sk, "grad_ln1_g0")
+    ref_gattn = load_fx(d, sk, "grad_attn_w0")
+    ref_gmlp = load_fx(d, sk, "grad_mlp_w1_0")
+    ref_glnf = load_fx(d, sk, "grad_lnf_g")
+
+    ids = load_ints_fx(d, sk, "ids")
+    pos = load_ints_fx(d, sk, "pos")
+
+    # ---- doc weights (124M: ~1.6 GB text, parse ~90s — do P4) ----
+    wte = t_new(load_fx(d, sk, "w_wte"), [VOCAB, H])
+    wpe = t_new(load_fx(d, sk, "w_wpe"), [MaxPos, H])
+
+    ln1_g = []
+    ln1_b = []
+    w_qkv = []
+    b_qkv = []
+    w_proj = []
+    b_proj = []
+    ln2_g = []
+    ln2_b = []
+    w1 = []
+    b1 = []
+    w2 = []
+    b2 = []
+    for i in range(NL):
+        ln1_g.append(tw(d, sk, "ln1_g%d" % i))
+        ln1_b.append(tw(d, sk, "ln1_b%d" % i))
+        w_qkv.append(tw(d, sk, "attn_w%d" % i))
+        b_qkv.append(tw(d, sk, "attn_b%d" % i))
+        w_proj.append(tw(d, sk, "proj_w%d" % i))
+        b_proj.append(tw(d, sk, "proj_b%d" % i))
+        ln2_g.append(tw(d, sk, "ln2_g%d" % i))
+        ln2_b.append(tw(d, sk, "ln2_b%d" % i))
+        w1.append(tw(d, sk, "mlp_w1%d" % i))
+        b1.append(tw(d, sk, "mlp_b1%d" % i))
+        w2.append(tw(d, sk, "mlp_w2%d" % i))
+        b2.append(tw(d, sk, "mlp_b2%d" % i))
+    lnf_g = tw(d, sk, "lnf_g")
+    lnf_b = tw(d, sk, "lnf_b")
+
+    # ---- hidden-state tung tang (khoanh vung loi) ----
+    hx = gpt2_embed(ids, pos, wte, wpe)
+    cases = cases + 1
+    fails = fails + report("hidden h0 (embed)", diff(hx.data, load_fx(d, sk, "h0")), TOL_HID)
+    for i in range(NL):
+        hx = gpt2_block(hx, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
+                        ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i])
+        cases = cases + 1
+        fails = fails + report("hidden h" + str(i + 1) + " (block " + str(i) + ")",
+                               diff(hx.data, load_fx(d, sk, "h" + str(i + 1))), TOL_HID)
+
+    # ---- forward + loss ----
+    logits = gpt2_forward(ids, pos, wte, wpe,
+                          ln1_g, ln1_b, w_qkv, b_qkv, w_proj, b_proj,
+                          ln2_g, ln2_b, w1, b1, w2, b2, lnf_g, lnf_b)
+    cases = cases + 1
+    fails = fails + report("logits", diff(logits.data, load_fx(d, sk, "logits")), TOL_HID)
+
+    my_loss = gpt2_loss(logits, ids)
+    cases = cases + 1
+    fails = fails + report("loss", _abs(my_loss - load_fx(d, sk, "loss")[0]), TOL_LOSS)
+
+    # ---- backward: 5 mau grad (layout giong gpt2_tests) ----
+    grads = gpt2_backward(ids, pos, wte, wpe,
+                          ln1_g, ln1_b, w_qkv, b_qkv, w_proj, b_proj,
+                          ln2_g, ln2_b, w1, b1, w2, b2, lnf_g, lnf_b)
+    gwte = grads[0]
+    dlnf_g = grads[2]
+    dln1_g0 = grads[4]
+    dattn_w0 = grads[6]
+    dmlp_w1_0 = grads[12]
+
+    cases = cases + 1
+    fails = fails + report("grad wte (embed + lmhead tie)",
+                           diff(gwte.data, ref_gwte), TOL_HID)
+    cases = cases + 1
+    fails = fails + report("grad ln1_g[0]",
+                           diff(dln1_g0.data, ref_gln1), TOL_HID)
+    cases = cases + 1
+    fails = fails + report("grad attn_w[0] (c_attn)",
+                           diff(dattn_w0.data, ref_gattn), TOL_HID)
+    cases = cases + 1
+    fails = fails + report("grad mlp_w1[0] (c_fc)",
+                           diff(dmlp_w1_0.data, ref_gmlp), TOL_HID)
+    cases = cases + 1
+    fails = fails + report("grad lnf_g",
+                           diff(dlnf_g.data, ref_glnf), TOL_HID)
+
+    print("=== GPT-2 full cases=" + str(cases) + " fails=" + str(fails) + " ===")
+    return fails
