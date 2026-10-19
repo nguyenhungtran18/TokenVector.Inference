@@ -1,0 +1,12 @@
+# PROBE C — gán global co kieu voi tu khoa 'global'
+G3: "i64" = 0
+
+def set_global_kw(v: 'i32') -> 'i32':
+    global G3
+    G3 = v
+    return 0
+
+def main() -> 'i32':
+    set_global_kw(9)
+    print("G3 sau set_global_kw(9) = " + str(G3) + " (dung = 9)")
+    return 0

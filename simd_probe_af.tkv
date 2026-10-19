@@ -1,0 +1,20 @@
+# PROBE AF — [0.0] * n co chay khong? (t_zeros nhanh: thay append bang nhan list)
+import tv.training.tensor
+
+def main() -> 'i32':
+    n = 16000000
+    t0 = now_ms()
+    a = [0.0] * n
+    t1 = now_ms()
+    print("AF mul len=" + str(len(a)) + " time=" + str(t1 - t0) + " ms a[5]=" + str(a[5]))
+    # chay duong append cu de so sanh
+    t2 = now_ms()
+    b = []
+    for i in range(n):
+        b.append(0.0)
+    t3 = now_ms()
+    print("AF append len=" + str(len(b)) + " time=" + str(t3 - t2) + " ms")
+    # van ghi duoc nhu tensor data?
+    a[7] = 1.25
+    print("AF write-back a[7]=" + str(a[7]))
+    return 0

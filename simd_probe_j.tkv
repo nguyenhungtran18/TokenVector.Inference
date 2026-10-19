@@ -1,0 +1,71 @@
+# PROBE J — tach bwd: dx = smm_dot(gy, w) va dwT = smm_dot(gyT, x)
+import tv.training.tensor
+import tv.training.simd_matmul
+
+def fill(m: 'i64', n: 'i64', kind: 'i64') -> "Tensor":
+    out = t_zeros([m, n])
+    d = out.data
+    for i in range(m * n):
+        if kind == 5:
+            d[i] = (float((i * 7 + 13) % 97) - 48.0) / 48.0
+        if kind == 6:
+            d[i] = (float((i * 13 + 7) % 59) - 29.0) / 29.0
+        if kind == 8:
+            d[i] = (float((i * 19 + 3) % 73) - 36.0) / 36.0
+    return out
+
+def md(a: "Tensor", b: "Tensor") -> 'f32':
+    da = a.data
+    db = b.data
+    m = 0.0
+    for i in range(len(da)):
+        dd = da[i] - db[i]
+        if dd < 0.0:
+            dd = 0.0 - dd
+        if dd > m:
+            m = dd
+    return m
+
+def ref_dx(gy: "Tensor", w: "Tensor", m: 'i64', in_d: 'i64', out_d: 'i64') -> "Tensor":
+    dx = t_zeros([m, in_d])
+    dd = dx.data
+    gd = gy.data
+    wd = w.data
+    for i in range(m):
+        for k in range(in_d):
+            acc = 0.0
+            for o in range(out_d):
+                acc = acc + gd[i * out_d + o] * wd[k * out_d + o]
+            dd[i * in_d + k] = acc
+    return dx
+
+def ref_dwT(gy: "Tensor", x: "Tensor", out_d: 'i64', in_d: 'i64', m: 'i64') -> "Tensor":
+    dwT = t_zeros([out_d, in_d])
+    dd = dwT.data
+    gd = gy.data
+    xd = x.data
+    for o in range(out_d):
+        for k in range(in_d):
+            acc = 0.0
+            for i in range(m):
+                acc = acc + gd[i * out_d + o] * xd[i * in_d + k]
+            dd[o * in_d + k] = acc
+    return dwT
+
+def main() -> 'i32':
+    m = 32
+    in_d = 64
+    out_d = 192
+    x = fill(m, in_d, 5)
+    w = fill(in_d, out_d, 8)
+    gy = fill(m, out_d, 6)
+
+    dxr = ref_dx(gy, w, m, in_d, out_d)
+    dxs = smm_dot(gy, w, m, in_d, out_d)
+    print("J1 dx (smm_dot gy,w) diff=" + str(md(dxr, dxs)))
+
+    dwTr = ref_dwT(gy, x, out_d, in_d, m)
+    gyT = smm_transpose(gy, m, out_d)
+    dwTs = smm_dot(gyT, x, out_d, in_d, m)
+    print("J2 dwT (smm_dot gyT,x) diff=" + str(md(dwTr, dwTs)))
+    return 0

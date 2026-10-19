@@ -1,0 +1,25 @@
+# PROBE H — type() runtime
+import tv.training.tensor
+
+def fill_expr(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append((float(i % 97) - 48.0) / 48.0)
+    return out
+
+def main() -> 'i32':
+    t1 = t_zeros([2, 2])
+    d = t1.data
+    print("t_zeros data: " + str(type(d)))
+    a = fill_expr(4)
+    print("fill_expr: " + str(type(a)))
+    b = []
+    b.append(0.0)
+    print("[] + append 0.0: " + str(type(b)))
+    c = []
+    c.append(float(3))
+    print("[] + append float(3): " + str(type(c)))
+    f1 = float(3)
+    f2 = 1.0
+    print("type(float(3))=" + str(type(f1)) + " type(1.0)=" + str(type(f2)))
+    return 0

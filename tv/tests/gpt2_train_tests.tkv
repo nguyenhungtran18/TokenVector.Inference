@@ -137,5 +137,8 @@ def main() -> 'i32':
     fails = fails + _line(ok4, "resume: loss 3 buoc sau khi load giong chay lien")
     print("  [INFO] loss 6 buoc: " + str(la[0]) + " -> " + str(la[5]))
 
+    # (P1.2 fused-step case da GO: probe simd_probe_ah do duoc fused moi hinh
+    #  thuc deu cham hon 2 vong rieng — xem gpt2_train.tkv + perf-plan.)
+
     print("=== G4xG2 cases=" + str(cases) + " fails=" + str(fails) + " ===")
     return fails

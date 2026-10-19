@@ -1,0 +1,19 @@
+# PROBE AC — f32buf + sqrt trong vephe phai (AdamW denom) co chay khong
+def main() -> 'i32':
+    n = 9
+    v = f32buf(n)
+    r = f32buf(n)
+    i = 0
+    while i < n:
+        v[i] = (float(i) + 1.0) * 0.25
+        r[i] = -999.0
+        i = i + 1
+    # dang 1 phep gan, co sqrt + toan tu hon hop (mong muon P6 dung duoc)
+    i = 0
+    while i < n:
+        r[i] = v[i] / (sqrt(v[i]) + 0.000001)
+        i = i + 1
+    print("AC r0=" + str(r[0]) + " r8=" + str(r[8]))
+    f32buf_free(v)
+    f32buf_free(r)
+    return 0

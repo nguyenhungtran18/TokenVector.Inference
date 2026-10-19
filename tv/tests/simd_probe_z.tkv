@@ -1,0 +1,149 @@
+# PROBE Z — tach backward 124M: head 3 GEMM / fwd chain / layernorm_bwd /
+# block_bwd simd vs scalar / embed. Timing toan bo trong main (bug #8).
+import tv.training.gpt2_ref124
+import tv.training.trainer
+import tv.training.ops
+import tv.training.simd_matmul
+
+def main() -> 'i32':
+    FIX = "tv/tests/fixtures/"
+    ids = []
+    pos = []
+    txt = read_file(FIX + "g2_ids.txt")
+    ln1 = txt.split("\n")
+    for i in range(len(ln1)):
+        if len(ln1[i]) < 1 or ln1[i][0] == "#":
+            continue
+        toks = ln1[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                ids.append(int(float(toks[j])))
+    txt2 = read_file(FIX + "g2_pos.txt")
+    ln2 = txt2.split("\n")
+    for i in range(len(ln2)):
+        if len(ln2[i]) < 1 or ln2[i][0] == "#":
+            continue
+        toks = ln2[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                pos.append(int(float(toks[j])))
+
+    # ---- Z0: alloc 38.6M (kich thuoc dwte) --------------------------------
+    a0 = now_ms()
+    wte_big = t_zeros([50257, 768])
+    a1 = now_ms()
+    print("Z alloc t_zeros 50257x768 (38.6M) = " + str(a1 - a0) + " ms")
+
+    # ---- Z1: head 3 GEMM (synthetic shape, gia tri 0 — timing thoi) -------
+    xf = t_zeros([8, 768])
+    gg = t_zeros([8, 50257])
+    ggT = t_zeros([50257, 8])
+    h0 = now_ms()
+    logits = smm_dot(xf, wte_big, 8, 50257, 768)
+    h1 = now_ms()
+    print("Z head logits smm_dot(8,50257,768) = " + str(h1 - h0) + " ms")
+    h2 = now_ms()
+    dxf = smm_fwd(gg, wte_big, 8, 768, 50257)
+    h3 = now_ms()
+    print("Z head dxf smm_fwd(8,768,50257) = " + str(h3 - h2) + " ms")
+    h4 = now_ms()
+    dwte = smm_fwd(ggT, xf, 50257, 768, 8)
+    h5 = now_ms()
+    print("Z head dwte smm_fwd(50257,768,8) = " + str(h5 - h4) + " ms")
+
+    # ---- Z2: real ps + forward chain (tach embed/blk/head) ----------------
+    ps = gpt2_init(7)
+    wte = ps[0]
+    wpe = ps[1]
+    lnf_g = ps[2]
+    lnf_b = ps[3]
+    ln1_g = []
+    ln1_b = []
+    wq = []
+    bq = []
+    wp = []
+    bp = []
+    ln2_g = []
+    ln2_b = []
+    w1 = []
+    b1 = []
+    w2 = []
+    b2 = []
+    for li in range(NLayers):
+        base = 4 + li * 12
+        ln1_g.append(ps[base + 0])
+        ln1_b.append(ps[base + 1])
+        wq.append(ps[base + 2])
+        bq.append(ps[base + 3])
+        wp.append(ps[base + 4])
+        bp.append(ps[base + 5])
+        ln2_g.append(ps[base + 6])
+        ln2_b.append(ps[base + 7])
+        w1.append(ps[base + 8])
+        b1.append(ps[base + 9])
+        w2.append(ps[base + 10])
+        b2.append(ps[base + 11])
+    n = len(ids)
+    h = HiddenSize
+
+    f0 = now_ms()
+    x = gpt2_embed(ids, pos, wte, wpe)
+    f1 = now_ms()
+    print("Z fwd embed = " + str(f1 - f0) + " ms")
+    xins = []
+    c0 = now_ms()
+    for li in range(NLayers):
+        xins.append(x)
+        x = gpt2_block(x, ln1_g[li], ln1_b[li], wq[li], bq[li], wp[li], bp[li],
+                       ln2_g[li], ln2_b[li], w1[li], b1[li], w2[li], b2[li], 1)
+    c1 = now_ms()
+    print("Z fwd chain 12 block (simd) = " + str(c1 - c0) + " ms")
+    xf_in = x
+    d0 = now_ms()
+    xf2 = gpt2_layernorm(xf_in, lnf_g, lnf_b)
+    d1 = now_ms()
+    print("Z fwd ln_f = " + str(d1 - d0) + " ms")
+
+    # ---- Z3: layernorm_bwd + head-like loops ------------------------------
+    dxf_syn = t_zeros([n, h])
+    e0 = now_ms()
+    rl = gpt2_layernorm_bwd(xf_in, lnf_g, lnf_b, dxf_syn)
+    e1 = now_ms()
+    print("Z ln_f bwd = " + str(e1 - e0) + " ms")
+
+    # ---- Z4: block_bwd toan bo — SIMD -------------------------------------
+    gx = rl[0]
+    s0 = now_ms()
+    for i in range(NLayers):
+        li = NLayers - 1 - i
+        rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
+                            wq[li], bq[li], wp[li], bp[li],
+                            ln2_g[li], ln2_b[li],
+                            w1[li], b1[li], w2[li], b2[li], gx, 1)
+        gx = rb[0]
+    s1 = now_ms()
+    print("Z block_bwd x12 (simd) = " + str(s1 - s0) + " ms")
+
+    # ---- Z5: block_bwd toan bo — SCALAR (cung input) ----------------------
+    gx2 = rl[0]
+    q0 = now_ms()
+    for i in range(NLayers):
+        li = NLayers - 1 - i
+        rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
+                            wq[li], bq[li], wp[li], bp[li],
+                            ln2_g[li], ln2_b[li],
+                            w1[li], b1[li], w2[li], b2[li], gx2, 0)
+        gx2 = rb[0]
+    q1 = now_ms()
+    print("Z block_bwd x12 (scalar) = " + str(q1 - q0) + " ms")
+
+    # ---- Z6: embed bwd + tich luus dwte -----------------------------------
+    p0 = now_ms()
+    gwte_e = op_embed_bwd(wte, ids, h, gx2)
+    gwpe = op_embed_bwd(wpe, pos, h, gx2)
+    for k in range(VocabSize * h):
+        dwte.data[k] = dwte.data[k] + gwte_e.data[k]
+    p1 = now_ms()
+    print("Z embed bwd + accumulate dwte (38.6M loop) = " + str(p1 - p0) + " ms")
+    print("Z done")
+    return 0

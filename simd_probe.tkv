@@ -1,0 +1,79 @@
+# SIMD PROBE — do that truoc khi thiet ke (khong check-in)
+# 1. simd_isa/hw/lanes
+# 2. simd_gemm vuong vs scalar: do chinh sac + toc do (128/256/512)
+# 3. bug #2 (hai list phang cung ham) con khong
+# 4. module-level singleton (ctor + list literal) + mutate tu function
+
+def two_lists() -> 'i32':
+    l1 = []
+    for i in range(8):
+        l1.append(float(i + 1))
+    l2 = []
+    for i in range(8):
+        l2.append(float(100 + i))
+    s = 0.0
+    for i in range(8):
+        s = s + l1[i] * 1000.0 + l2[i]
+    print("  bug#2 check: sum=" + str(s) + " (dung=36828) l1[7]=" + str(l1[7]) + " (dung=8.0) l2[7]=" + str(l2[7]) + " (dung=107.0)")
+    return 0
+
+def fill_a(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n * n):
+        out.append((float(i % 97) - 48.0) / 48.0)
+    return out
+
+def fill_b(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n * n):
+        out.append((float(i % 83) - 41.0) / 41.0)
+    return out
+
+def zero_list(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n * n):
+        out.append(0.0)
+    return out
+
+def scalar_mm(a: 'list[f32]', b: 'list[f32]', n: 'i64') -> 'list[f32]':
+    c = []
+    for i in range(n):
+        for j in range(n):
+            s = 0.0
+            for k in range(n):
+                s = s + a[i * n + k] * b[k * n + j]
+            c.append(s)
+    return c
+
+def maxdiff(a: 'list[f32]', b: 'list[f32]') -> 'f32':
+    m = 0.0
+    for i in range(len(a)):
+        d = a[i] - b[i]
+        if d < 0.0:
+            d = 0.0 - d
+        if d > m:
+            m = d
+    return m
+
+def bench_n(n: 'i64') -> 'i32':
+    a = fill_a(n)
+    b = fill_b(n)
+    c = zero_list(n)
+    t0 = now_ms()
+    cs = scalar_mm(a, b, n)
+    t1 = now_ms()
+    simd_gemm(a, b, c, n)
+    t2 = now_ms()
+    print("  n=" + str(n) + ": scalar " + str(t1 - t0) + " ms | simd_gemm " + str(t2 - t1) + " ms | maxdiff=" + str(maxdiff(cs, c)))
+    return 0
+
+def main() -> 'i32':
+    print("=== SIMD PROBE ===")
+    print("simd_isa=" + str(simd_isa()) + " simd_hw=" + str(simd_hw()) + " lanes_f32=" + str(simd_lanes_f32()))
+    print("--- 1. simd_gemm vuong vs scalar ---")
+    bench_n(128)
+    bench_n(256)
+    bench_n(512)
+    print("--- 2. bug #2 (hai list phang cung ham) ---")
+    two_lists()
+    return 0

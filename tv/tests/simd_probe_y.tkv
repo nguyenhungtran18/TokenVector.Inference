@@ -1,0 +1,23 @@
+# PROBE Y — vong lap smm_fwd 1024^3 de do SO LUONG THREAD ngoai ben
+# (python do CPU-time / wall cua tien trinh: ratio ~1 = 1 luong, ~14 = da luong)
+import tv.training.tensor
+import tv.training.simd_matmul
+
+def main() -> 'i32':
+    sz = 1024
+    a = t_zeros([1024, 1024])
+    ad = a.data
+    for i in range(sz * sz):
+        ad[i] = (float((i * 7 + 13) % 97) - 48.0) / 48.0
+    b = t_zeros([1024, 1024])
+    bd = b.data
+    for i in range(sz * sz):
+        bd[i] = (float((i * 19 + 3) % 73) - 36.0) / 36.0
+    # warmup
+    c = smm_fwd(a, b, 1024, 1024, 1024)
+    t0 = now_ms()
+    for r in range(100):
+        c = smm_fwd(a, b, 1024, 1024, 1024)
+    t1 = now_ms()
+    print("Y smm_fwd 1024^3 x100: total=" + str(t1 - t0) + " ms")
+    return 0

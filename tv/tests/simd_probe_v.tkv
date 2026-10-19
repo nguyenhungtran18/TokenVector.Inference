@@ -1,0 +1,90 @@
+# PROBE V — block_bwd: simd=0 vs simd=1 cung input, tung output rb[0..12]
+import tv.training.tensor
+import tv.training.gpt2_ref
+import tv.training.gpt2_train
+import tv.training.trainer
+import tv.training.simd_matmul
+
+def _tmd(a: "Tensor", b: "Tensor") -> 'f32':
+    da = a.data
+    db = b.data
+    m = 0.0
+    for i in range(len(da)):
+        d = float(da[i]) - float(db[i])
+        if d < 0.0:
+            d = -d
+        if d > m:
+            m = d
+    return m
+
+def main() -> 'i32':
+    ps = gpt2_init(7)
+    wte = ps[0]
+    wpe = ps[1]
+    lnf_g = ps[2]
+    lnf_b = ps[3]
+    ln1_g = []
+    ln1_b = []
+    wq = []
+    bq = []
+    wp = []
+    bp = []
+    ln2_g = []
+    ln2_b = []
+    w1 = []
+    b1 = []
+    w2 = []
+    b2 = []
+    for li in range(NLayers):
+        base = 4 + li * 12
+        ln1_g.append(ps[base + 0])
+        ln1_b.append(ps[base + 1])
+        wq.append(ps[base + 2])
+        bq.append(ps[base + 3])
+        wp.append(ps[base + 4])
+        bp.append(ps[base + 5])
+        ln2_g.append(ps[base + 6])
+        ln2_b.append(ps[base + 7])
+        w1.append(ps[base + 8])
+        b1.append(ps[base + 9])
+        w2.append(ps[base + 10])
+        b2.append(ps[base + 11])
+
+    # forward scalar, giu xins
+    ids = [3, 7, 11, 15, 19, 23, 27, 31]
+    pos = [0, 1, 2, 3, 4, 5, 6, 7]
+    x = gpt2_embed(ids, pos, wte, wpe)
+    xins = []
+    for li in range(NLayers):
+        xins.append(x)
+        x = gpt2_block(x, ln1_g[li], ln1_b[li], wq[li], bq[li], wp[li], bp[li],
+                       ln2_g[li], ln2_b[li], w1[li], b1[li], w2[li], b2[li])
+    xf_in = x
+    h = HiddenSize
+    n = 8
+
+    # dxf don gian: gi nguong 1/n de ca hai bang nhau (day la block bwd test)
+    dxf = t_zeros([n, h])
+    for i in range(n):
+        for k in range(h):
+            dxf.data[i * h + k] = float(i + k) / 100.0
+
+    rl = gpt2_layernorm_bwd(xf_in, lnf_g, lnf_b, dxf)
+    gx = rl[0]
+    for i in range(NLayers):
+        li = NLayers - 1 - i
+        rb0 = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
+                             wq[li], bq[li], wp[li], bp[li],
+                             ln2_g[li], ln2_b[li],
+                             w1[li], b1[li], w2[li], b2[li], gx, 0)
+        rb1 = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
+                             wq[li], bq[li], wp[li], bp[li],
+                             ln2_g[li], ln2_b[li],
+                             w1[li], b1[li], w2[li], b2[li], gx, 1)
+        for j in range(13):
+            d = _tmd(rb0[j], rb1[j])
+            if d > 0.0001:
+                print("V block " + str(li) + " rb[" + str(j) + "] diff=" + str(d))
+        gx = rb0[0]
+    print("V done")
+    return 0

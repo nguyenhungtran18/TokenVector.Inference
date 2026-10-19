@@ -1,0 +1,162 @@
+# SIMD MATMUL — dua SIMD vao duong train (ROADMAP: "dung SIMD de tang toc")
+# ----------------------------------------------------------------------------
+# Nguon toc: simd_gemm(a, b, r, n) — builtin native AVX2+FMA (tkv_simd_native.dll,
+# nap canh .exe), nhan ma TRAN VUONG n x n, r = a x b (row-major), khong copy
+# vao/ra, da luong. Bo nho cua tile duoc cap phai nho hon 1024 x 1024 x 4B = 4 MB.
+#
+# Ky luat tu do (do THAT bang simd_probe, 2026-10-19):
+#   - simd_gemm chi nhan MA TRAN VUONG -> chia thanh o T x T, bo sung 0 o le.
+#   - Khong bit-exact vs scalar: dung FMA + thu tu tich luy khac. Do lech do duoc
+#     ~2e-6 (128^2) .. 3.4e-6 (512^2) voi gia tri +-1. Cua so dung sai chot
+#     1e-4 (cung nguong parity 124M). Vi the SIMD la duong OPT-IN, mac dinh
+#     van scalar (xem gpt2_ref: tham so `simd = 0`).
+#   - simd_gemm ghi r = a x b (GAN, khong tich luy) -> moi o tich luy vao C
+#     ngay sau moi goi (neu k > T thi phai cong tung p-tile).
+#
+# 2 kieu (cung bo tri hang):
+#   smm_fwd(a, b, m, n, k):  C[m,n] = A[m,k] x B[k,n]   (B luu [k hang][n cot])
+#   smm_dot(a, b, m, n, k):  C[i,j] = dot(A[i,:], B[j,:]) (B luu [n hang][k cot])
+# smm_transpose(t, rows, cols): chuyen vi (dung cho dw = (dwT)^T).
+
+def _imin(a: 'i64', b: 'i64') -> 'i64':
+    if a < b:
+        return a
+    return b
+
+def _roundup64(x: 'i64') -> 'i64':
+    r = 64
+    while r < x:
+        r = r + 64
+    return r
+
+def _tilek(k: 'i64') -> 'i64':
+    # kich thuoc o giam (reduce) — toi da 1024 de giu tile <= 4 MB
+    r = _roundup64(k)
+    if r > 1024:
+        r = 1024
+    return r
+
+# ---- tile builder (moi ham return MOT list phang theo quy uoc compiler) ----
+
+# Quy tac kieu (do THAT bang probe 2026-0-19): list can truyen vao simd_gemm
+# phai la list[f32] THUC (List[Single]). Tensor.data (t_zeros) KHONG dung duoc
+# (native GemmF32L doc _items cua List[Single>, gap List[Double] -> crash).
+# Cach dung: ham tra 'list[f32]' + append BIEU THUC (d[i] - 0.0)/1.0 — compiler
+# ep ve List[Single] tai return. Append 0.0/float() thuan tao List[Double].
+def _zeros_list(n: 'i64') -> 'list[f32]':
+    out = []
+    i = 0
+    while i < n:
+        out.append((float(0) - 0.0) / 1.0)
+        i = i + 1
+    return out
+
+# A[i0:i0+ib, p0:p0+pw] bo sung 0 thanh o T x T (A luu [m hang][k cot])
+def _tile_a(a: "Tensor", kdim: 'i64', i0: 'i64', ib: 'i64', p0: 'i64', pw: 'i64', T: 'i64') -> 'list[f32]':
+    out = []
+    d = a.data
+    z = (float(0) - 0.0) / 1.0
+    i = 0
+    while i < T:
+        j = 0
+        while j < T:
+            if i < ib:
+                if j < pw:
+                    out.append((d[(i0 + i) * kdim + (p0 + j)] - 0.0) / 1.0)
+                else:
+                    out.append(z)
+            else:
+                out.append(z)
+            j = j + 1
+        i = i + 1
+    return out
+
+# B tile thanh T x T voi HANG = chi so giam (p), COT = chi so dau ra (j):
+#   trans_b == 0: B luu [k hang][n cot] -> tile[i,j] = B[p0+i, r0+j]
+#   trans_b == 1: B luu [n hang][k cot] -> tile[i,j] = B[r0+j, p0+i]
+def _tile_b(b: "Tensor", ndim: 'i64', p0: 'i64', pw: 'i64', r0: 'i64', br: 'i64', T: 'i64', trans_b: 'i32') -> 'list[f32]':
+    out = []
+    d = b.data
+    z = (float(0) - 0.0) / 1.0
+    i = 0
+    while i < T:
+        j = 0
+        while j < T:
+            if i < pw:
+                if j < br:
+                    if trans_b == 1:
+                        out.append((d[(r0 + j) * ndim + (p0 + i)] - 0.0) / 1.0)
+                    else:
+                        out.append((d[(p0 + i) * ndim + (r0 + j)] - 0.0) / 1.0)
+                else:
+                    out.append(z)
+            else:
+                out.append(z)
+            j = j + 1
+        i = i + 1
+    return out
+
+# ---- core: C = A x B (trans_b=0) hoac A x B^T (trans_b=1), tiled -----------
+def _smm_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32') -> "Tensor":
+    # P0.4 (perf-plan): T = min(_tilek(k), roundup64(min(m,n))) — truoc do T
+    # chi theo k -> o gian (m=8, k=50257) dan len T=1024, A-tile dung 8/1024
+    # hang (0.8% huu dung). Cong thuc chon: V(T) = (ceil(m/T)+ceil(n/T))*ceil(k/T)*T^2
+    # — T nho dan luon giam/the tich dung (do duoc, khong can chia: dung min/roundup).
+    # Do lan cuoi: gate 20/20, probe X, bench A/B/C.
+    T = _imin(_tilek(k), _roundup64(_imin(m, n)))
+    C = t_zeros([m, n])
+    cd = C.data
+    # P0.1 (perf-plan): Ct DUY NHAT 1 lan/call — simd_gemm ghi de toan bo
+    # (r = a x b, GAN khong tich luy) nen khong can sinh/dung lai moi combo.
+    Ct = _zeros_list(T * T)
+    i0 = 0
+    while i0 < m:
+        ib = _imin(T, m - i0)
+        # P0.2: vong i -> p -> j: At xay dung 1 lan cho toan bo j (truoc la
+        # i -> j -> p, At sua lai moi combo -> ~2/3 luong append la dung lai).
+        # Thu tu p van tang dan cho tung (i,j) -> ket qua GIONG BIT ban cu.
+        p0 = 0
+        while p0 < k:
+            pw = _imin(T, k - p0)
+            At = _tile_a(a, k, i0, ib, p0, pw, T)
+            j0 = 0
+            while j0 < n:
+                jb = _imin(T, n - j0)
+                Bt = _tile_b(b, ndim, p0, pw, j0, jb, T, trans_b)
+                # quirk: simd_gemm can 3 BIEN mang rank 1 (khong nhan bieu thuc)
+                simd_gemm(At, Bt, Ct, T)
+                # tich luy vung that cua Ct vao C ngay sau moi goi
+                r = 0
+                while r < ib:
+                    bc = (i0 + r) * n + j0
+                    bt = r * T
+                    c = 0
+                    while c < jb:
+                        cd[bc + c] = cd[bc + c] + Ct[bt + c]
+                        c = c + 1
+                    r = r + 1
+                j0 = j0 + jb
+            p0 = p0 + pw
+        i0 = i0 + ib
+    return C
+
+# C[m,n] = A[m,k] x B[k,n] — cung y nghia layout voi gpt2_linear (w [in_d][out_d])
+def smm_fwd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
+    return _smm_core(a, b, m, n, k, n, 0)
+
+# C[i,j] = dot(A[i,:], B[j,:]) — cung y nghia voi op_matmul_fwd (B [n hang][k cot])
+def smm_dot(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
+    return _smm_core(a, b, m, n, k, k, 1)
+
+def smm_transpose(t: "Tensor", rows: 'i64', cols: 'i64') -> "Tensor":
+    out = t_zeros([cols, rows])
+    od = out.data
+    d = t.data
+    i = 0
+    while i < rows:
+        j = 0
+        while j < cols:
+            od[j * rows + i] = d[i * cols + j]
+            j = j + 1
+        i = i + 1
+    return out

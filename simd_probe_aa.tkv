@@ -1,0 +1,6 @@
+# PROBE AA — cu phap local annotation f32
+def main() -> 'i32':
+    x: 'f32' = 0.0
+    y: 'f64' = 1.5
+    print("AA x=" + str(x + 1.0) + " y=" + str(y))
+    return 0

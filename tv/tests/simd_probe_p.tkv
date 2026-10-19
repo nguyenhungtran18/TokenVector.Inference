@@ -1,0 +1,71 @@
+# PROBE P — dw path tung buoc: transpose gy, smm_dot, transpose dwT
+import tv.training.tensor
+import tv.training.gpt2_ref
+import tv.training.simd_matmul
+
+def fill(m: 'i64', n: 'i64', kind: 'i64') -> "Tensor":
+    out = t_zeros([m, n])
+    d = out.data
+    for i in range(m * n):
+        if kind == 5:
+            d[i] = (float((i * 7 + 13) % 97) - 48.0) / 48.0
+        if kind == 6:
+            d[i] = (float((i * 13 + 7) % 59) - 29.0) / 29.0
+    return out
+
+def md(a: "Tensor", b: "Tensor") -> 'f32':
+    da = a.data
+    db = b.data
+    m = 0.0
+    for i in range(len(da)):
+        dd = da[i] - db[i]
+        if dd < 0.0:
+            dd = 0.0 - dd
+        if dd > m:
+            m = dd
+    return m
+
+def scalar_trans(a: "Tensor", rows: 'i64', cols: 'i64') -> "Tensor":
+    out = t_zeros([cols, rows])
+    od = out.data
+    d = a.data
+    for i in range(rows):
+        for j in range(cols):
+            od[j * rows + i] = d[i * cols + j]
+    return out
+
+def ref_dw(x: "Tensor", gy: "Tensor", m: 'i64', in_d: 'i64', out_d: 'i64') -> "Tensor":
+    dw = t_zeros([in_d, out_d])
+    dd = dw.data
+    xd = x.data
+    gd = gy.data
+    for k in range(in_d):
+        for o in range(out_d):
+            acc = 0.0
+            for i in range(m):
+                acc = acc + xd[i * in_d + k] * gd[i * out_d + o]
+            dd[k * out_d + o] = acc
+    return dw
+
+def main() -> 'i32':
+    m = 32
+    in_d = 64
+    out_d = 192
+    x = fill(m, in_d, 5)
+    gy = fill(m, out_d, 6)
+
+    gyTs = smm_transpose(gy, m, out_d)
+    gyTc = scalar_trans(gy, m, out_d)
+    print("P0 gyT smm vs scalar: " + str(md(gyTc, gyTs)))
+
+    dwTs = smm_dot(gyTs, x, out_d, in_d, m)
+    dwTc = smm_dot(gyTc, x, out_d, in_d, m)
+    print("P1 dwT (smm_dot gyTs) vs (smm_dot gyTc): " + str(md(dwTc, dwTs)))
+
+    dws = smm_transpose(dwTs, out_d, in_d)
+    dwc = scalar_trans(dwTs, out_d, in_d)
+    print("P2 dw smm_trans vs scalar_trans: " + str(md(dwc, dws)))
+
+    dwr = ref_dw(x, gy, m, in_d, out_d)
+    print("P3 dw smm-path vs scalar ref: " + str(md(dwr, dws)))
+    return 0

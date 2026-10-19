@@ -1,0 +1,8 @@
+# PROBE D — default parameter
+def g(a: 'i32', b: 'i32', c: 'i32' = 5) -> 'i32':
+    return a * 100 + b * 10 + c
+
+def main() -> 'i32':
+    print("g(1,2)=" + str(g(1, 2)) + " (dung=125 neu co default)")
+    print("g(1,2,3)=" + str(g(1, 2, 3)) + " (dung=123)")
+    return 0

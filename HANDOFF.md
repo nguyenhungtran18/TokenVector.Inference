@@ -112,6 +112,18 @@ Smoke test 100 buoc: loss 1.133 -> 0.143, eval 0.2236, acc 0.95, checkpoint
   Workaround: factory function `new_adamw(...)`, `new_sampler(...)`.
 - Nho lai: import tu `tv/tests/*.tkv` chi thay module khi co mirror
   `tv/tests/tv.<duong.dan>.tkv` (va tuong tu cho `tv/tools/`).
+- **#7 hai bien cung ten trong 2 nhánh if cung ham, khac kieu**: trong
+  `gpt2_backward`, `gg` la **Tensor** o nhánh `simd==1` nhung **f64** o nhánh
+  `simd==0` (2 bien gop 1 slot) -> toan bo 28 grad hong 1e12–1e15, GIA TRI THAY
+  DOI giua 2 lan chay (khong deterministic). Trace bang cach tach tung vung ra
+  probe thi moi vung deu DUNG — chi ro khi chay toan bo. Fix: doi ten bien
+  (`gsc`). Cung ten o 2 nhánh ma CUNG kieu (mxf/tot/e/inv_tot/inv_n) thi an toan.
+  Quy tac: ten bien rieng per nhánh khi kieu khac nhau.
+- **#8 `now_ms()` (f64) gan vao local trong HAM roi doc trong phep tru**: doc ra
+  ≈0 / gia tri absolute dong ho (probe `simd_probe_w.tkv`: main delta=1453ms DUNG,
+  func delta=37854359 = absolute). Hau qua: ham tra tong thoi gian cho ra so
+  vo nghia (37547187ms / 9ms). Workaround: **toan bo timing dat trong `main`**
+  (pattern gate [8]/[9]), chi nhan ket qua ve. `now_ms()` trong main binh thuong.
 
 ### 0.5 G5 HARNESS + SEAM BACKEND (2026-10-19) — XANH 4/4
 
@@ -269,8 +281,110 @@ Files: `tools/gen_gpt2_fixture.py` (`--full` + `--out` + shard),
 
 ### 0.10 Tiep theo
 
-G1-G5 xong gom ca parity 124M ngoai repo (0.9). G5 thieu notebook Colab;
-G6 (phan tan) nam ngoai pham vi theo ROADMAP. G4 da noi vao GPT-2 nho (0.7).
+G1-G5 xong gom ca parity 124M ngoai repo (0.9). SIMD train da xong (0.11).
+G5 thieu notebook Colab; G6 (phan tan) nam ngoai pham vi theo ROADMAP. G4 da
+noi vao GPT-2 nho (0.7).
+
+### 0.11 SIMD TRAIN (2026-10-19) — XANH 20/20
+
+Muc 8 ROADMAP ("dung SIMD de tang toc") — da dua SIMD vao duong train, opt-in.
+
+**File**
+- `tv/training/simd_matmul.tkv` (+ 2 mirror): `smm_fwd(a,b,m,n,k)` — B luu
+  `[k hang][n cot]` (duong chuan A×B, cung layout `gpt2_linear`); `smm_dot(a,b,m,n,k)`
+  — B luu `[n hang][k cot]` (C[i,j]=dot dong, dong y nghia `op_matmul_fwd`);
+  `smm_transpose(t,rows,cols)`.
+- Boc native `simd_gemm` (AVX2+FMA, `tkv_simd_native.dll` kep exe): chi nhan ma
+  TRAN VUONG T×T -> chia o (T = roundup64(k), toi da 1024 -> tile ≤ 4MB), bo sung
+  0 o le, moi o cong vao C ngay (simd_gemm GAN, khong tich luy).
+- `gpt2_ref.tkv` (canonical + 4 mirror) + `gpt2_train.tkv`: tham so
+  `simd: 'i32' = 0` — **mac dinh scalar, moi gate cu nguyen ven**; truyen 1 de
+  bat SIMD. Linear/attention/mlp/block/forward/backward deu noi qua.
+
+**Gate** `tv/tests/simd_matmul_tests.tkv` — **20/20 PASS**:
+
+| Nhom | Ket qua |
+|---|---|
+| smm_dot/fwd vs scalar (5x7x11, 64³, 70x130x300, 40x96x250) | PASS ≤4.3e-6 |
+| smm_transpose + roundtrip (16x33, 64x64) | PASS 0.0 (bit-exact) |
+| gpt2_linear fwd+bwd (32x64→192) simd vs scalar | PASS 9.5e-7 |
+| forward logits + loss (nho + mask) | PASS 2.4e-7 / 0.0 |
+| gpt2_backward 28 grad simd vs scalar | PASS ≤1e-4 |
+| train 3 buoc (loss buoc 1 + buoc 3 tich luy AdamW) | PASS ≤1e-4 |
+| SPEED linear 256x768x2304 | scalar 3390 ms → simd 63 ms (**~53×**) |
+| SPEED smm_dot head-like 64x768x4096 | 641 → 94 ms (~6.7×) |
+
+Hoi quy: `gpt2_train_tests` 5/5, `gpt2_tests` 10/10, `gpt2_scope_tests` 9/9,
+`gpt2_full_tests` 124M **20/20**.
+
+**2 bug tim duoc do THAT (probe, khong doan)** — xem 0.4 bug #7:
+
+1. **Layout B**: `smm_dot` doc `b[j*k+p]` (B [n][k]) — 3 call site truyen B
+   dang [k][n] (x cua linear_bwd, wte cua dxf/dwte) -> cu SAI 9.478449 lap lai
+   moi chuoi test, dung mo phong tung moc deu PASS (vi ref cung doc sai theo).
+   Fix: dung `smm_fwd` cho 3 cho do (`dwT`, `dxf`, `dwte`) — 2 cho con lai
+   (logits, dx) dung `smm_dot` la DUNG vi B tuong ung co layout [n][k].
+2. **Bug compiler #7** (0.4): bien `gg` Tensor/f64 trung ten 2 nhánh -> hong
+   1e12–1e15 toan 28 grad, fix doi ten `gsc`. Tach probe (head, block, linear
+   tung vung) thi PASS het — chi toan bo chay moi hong.
+
+**Ky luat so**: simd khong bit-exact (FMA + thu tu tich luy), do lech do
+~3e-6 (512², ±1) -> chot dung sai **1e-4** (cung nguong parity 124M). Doc file
+`simd_matmul.tkv` truoc khi sua (ky luat tile + kieu list[f32] cho simd_gemm).
+
+Chay gate:
+
+```
+D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_matmul_tests.tkv %TEMP%/simd_matmul_tests.exe main
+%TEMP%/simd_matmul_tests.exe
+```
+
+Probe tim loi con lai (simd_probe*.tkv o goc va tv/tests/ — ghi nhan phan tich,
+khong phai gate).
+
+### 0.12 BENCH SIMD vs PYTORCH (2026-10-19)
+
+Bao cao day du: **`reports/bench-simd-vs-pytorch-20261019.md`**. So chinh
+(Xeon E5-2695 v3 14C, torch 2.14+cpu 14 threads, fp32, cung AdamW contract):
+
+| Tier | PyTorch | tkv SIMD | tkv scalar |
+|---|---|---|---|
+| A linear 768→2304 x256 tok (fwd+bwd) | **5.6 ms** | 323 ms (49× scalar) | 15 800 ms |
+| B GPT-2 nho seq8 train step | **8.8 ms** | 32.1 ms | 25.8 ms |
+| C GPT-2 **124M** seq8 train step | **999.8 ms** | 31 333 ms | 52 578 ms |
+
+- Params 124M 2 ben = 124439808, loss dau scalar=simd=10.674946 — cau hinh thuc.
+- **SIMD 49× tren GEMM lon, nhung 1.7× thuc te tren 1 buoc 124M** va **CHAM hon
+  scalar o model nho** (tile copy per-element + padding 8/64 hang nuot loi).
+- **TRANG THAI P0/P1 (cung ngay, sau doan tren)**:
+  - **P0 XONG** — `simd_matmul.tkv` (Ct reuse + cache A-tile i→p→j + T theo
+    min(m,n)): tier A 321.9→**262.5 ms**, B 31.3→**21.8 ms** (SIMD vuot scalar
+    26.6), C 31.3s→**24.2-24.5 s/buoc**. Gate simd_matmul 20/20 + hoi quy 4/4
+    (gpt2_train 5/5, gpt2 10/10, scope 9/9, full 20/20).
+  - **P1.2 fused step+unflatten: DA PROBE + REVERT** — probe `simd_probe_ah`
+    (best-of-5 tren 124M): fused moi hinh thuc deu CHAM hon 2 vong rieng
+    (4704-7547ms vs 4516ms). Vao luc do bat duoc 2 bug: for-range sót
+    `jj+1` = skip nua phan tu (loss sai), while-counter local = TkvInt
+    boxed (~+1s). `gpt2_train_step` van 2 vong; khong lam lai.
+  - **P1.4 f32 AdamW: da probe (`simd_probe_ae`) → lu** (m/v 2.9× nhung
+    p-loop sqrt tu choi P6).
+  - **TIEP THEO: P1.1** bwd ghi thẳng opt.g (~−2.5s, can probe truoc) + P1.3
+    `gc_collect` (builtins co that — compare_rivals goi; REFERENCE chua liet ke).
+  - `t_zeros`/zero-init: list-multiplication `[0.0]*n` CHAM 9× append (probe
+    AF) — giu append; `reserve` co trong REFERENCE 2.13 (chua dung).
+  - So cu + 2 buoc toi uu ban dau (chua lam): cache/reuse tile, vectorize
+    AdamW + grad-copy (498M cham/step) — doc bao cao + plan.
+- Timing trong tkv PHAI o `main` (bug #8, xem 0.4).
+- **Nguyen nhan co so (do duoc) + plan uu tien: `docs/perf-plan-simd-vs-pytorch.md`**
+  — cham that = dung tile (probe X: build 43.8ms vs gemm 7.8ms/fwd), BWD 63%
+  buoc 124M, plumbing flat ~27%, AdamW 5s scalar. Moc: P0 cat dung tile
+  (simd_matmul), P1 bo grad materialization + fuse unflatten + f32 AdamW,
+  P2 floor scalar (phu thuoc compiler team), P3 do/sua so luong simd_gemm,
+  P4 bench lai seq1024. Ky vong trung thuc: 31s -> ~19-21s sau P0+P1.
+
+File: `tools/bench_torch.py` (torch A/B/C), `tv/tests/simd_bench.tkv` (nho),
+`tv/tests/simd_bench_124m.tkv` (124M — import `gpt2_ref124` + `trainer`, khong
+import gpt2_train vi gpt2_fwd_ps gan voi ban nho).
 
 ---
 

@@ -1,0 +1,115 @@
+# BENCH tkv — scalar vs SIMD, doi chieu tools/bench_torch.py (cung config/data)
+#   A: linear fwd+bwd 256x768->2304 (giong gate [9] + backward)
+#   B: train step GPT-2 nho seq8 (giong gate [8])
+# LUU Y timing (probe W, bug compiler #8): now_ms() la f64 — doc DUNG o main,
+# doc SAI (≈0/garbage) khi gan vao local trong ham -> toan bo do thoi gian nam
+# trong main, helper chi lam phep toan.
+# Chay: tkvc tv/tests/simd_bench.tkv %TEMP%/simd_bench.exe main && %TEMP%/simd_bench.exe
+import tv.training.tensor
+import tv.training.gpt2_ref
+import tv.training.gpt2_train
+import tv.training.trainer
+import tv.training.simd_matmul
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> "list[f32]":
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                vals.append(float(toks[j]))
+    return vals
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+def _fill(m: 'i64', n: 'i64', kind: 'i64') -> "Tensor":
+    out = t_zeros([m, n])
+    d = out.data
+    for i in range(m * n):
+        if kind == 7:
+            d[i] = (float((i * 3 + 97) % 101) - 50.0) / 50.0
+        if kind == 8:
+            d[i] = (float((i * 19 + 3) % 73) - 36.0) / 36.0
+        if kind == 9:
+            d[i] = (float((i * 23 + 11) % 67) - 33.0) / 33.0
+        if kind == 12:
+            d[i] = (float((i * 31 + 5) % 53) - 26.0) / 26.0
+    return out
+
+def _mk_opt(n: 'i64', groups: 'list[i64]', total: 'i64') -> "AdamW":
+    return new_adamw_g(n, groups, 2, total, 0.05, 0.0025, 0.9, 0.999,
+                       0.00000001, 0.0, 1.0)
+
+def main() -> 'i32':
+    print("BENCH tkv small (2/4/64, vocab256, seq8) — doi chieu bench_torch.py tier B")
+    FIX = "tv/tests/fixtures/"
+
+    # ---- A: linear fwd+bwd 256x768->2304 (setup chung, warmup rieng) ------
+    xb = _fill(256, 768, 7)
+    wb = _fill(768, 2304, 8)
+    bb = _fill(2304, 1, 12)
+    gy = _fill(256, 2304, 9)
+    yw0 = gpt2_linear(xb, wb, bb, 256, 768, 2304, 0)
+    gw0 = gpt2_linear_bwd(xb, wb, gy, 256, 768, 2304, 0)
+    ta0 = now_ms()
+    for r in range(2):
+        ya0 = gpt2_linear(xb, wb, bb, 256, 768, 2304, 0)
+        ga0 = gpt2_linear_bwd(xb, wb, gy, 256, 768, 2304, 0)
+    ta1 = now_ms()
+    print("BENCH A tkv-scalar linear fwd+bwd 256x768->2304: total=" + str(ta1 - ta0) + " ms rounds=2")
+
+    yw1 = gpt2_linear(xb, wb, bb, 256, 768, 2304, 1)
+    gw1 = gpt2_linear_bwd(xb, wb, gy, 256, 768, 2304, 1)
+    tb0 = now_ms()
+    for r in range(10):
+        ya1 = gpt2_linear(xb, wb, bb, 256, 768, 2304, 1)
+        ga1 = gpt2_linear_bwd(xb, wb, gy, 256, 768, 2304, 1)
+    tb1 = now_ms()
+    print("BENCH A tkv-simd   linear fwd+bwd 256x768->2304: total=" + str(tb1 - tb0) + " ms rounds=10")
+
+    # ---- B: train step GPT-2 nho (10 buoc, warmup 1) ----------------------
+    ids = load_ints(FIX + "g2_ids.txt")
+    pos = load_ints(FIX + "g2_pos.txt")
+
+    ps_a = gpt2_init(7)
+    n_a = gpt2_n_param(ps_a)
+    gr_a = gpt2_group_sizes(ps_a)
+    opt_a = _mk_opt(n_a, gr_a, 11)
+    gpt2_copy_into(opt_a.p, gpt2_flatten(ps_a))
+    l0a = gpt2_train_step(opt_a, ps_a, ids, pos, 0)
+    tc0 = now_ms()
+    ls_a = gpt2_train_steps(opt_a, ps_a, ids, pos, 10, 0)
+    tc1 = now_ms()
+    print("BENCH B tkv-scalar train step seq8: total=" + str(tc1 - tc0) + " ms steps=10 first_loss="
+          + str(l0a) + " last_loss=" + str(ls_a[9]) + " n_param=" + str(n_a))
+
+    ps_b = gpt2_init(7)
+    n_b = gpt2_n_param(ps_b)
+    gr_b = gpt2_group_sizes(ps_b)
+    opt_b = _mk_opt(n_b, gr_b, 11)
+    gpt2_copy_into(opt_b.p, gpt2_flatten(ps_b))
+    l0b = gpt2_train_step(opt_b, ps_b, ids, pos, 1)
+    td0 = now_ms()
+    ls_b = gpt2_train_steps(opt_b, ps_b, ids, pos, 10, 1)
+    td1 = now_ms()
+    print("BENCH B tkv-simd   train step seq8: total=" + str(td1 - td0) + " ms steps=10 first_loss="
+          + str(l0b) + " last_loss=" + str(ls_b[9]) + " n_param=" + str(n_b))
+
+    print("BENCH done")
+    return 0

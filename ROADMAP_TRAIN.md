@@ -16,6 +16,7 @@ sẽ diễn ra sau trên GPU Google. Ưu tiên số tuyệt đối với PyTorch
 | **G4** trainer | ✅ **XONG** (2026-10-19, bù 19-10: đã nối vào GPT-2 nhỏ — `gpt2_train_tests` **5/5**, overfit 1 chuỗi loss 5.083 → 0.500, resume bit-exact trên 118.528 tham số): `tv/training/trainer.tkv` — AdamW (decoupled WD) + warmup/cosine + clip norm + grad accumulation + checkpoint bit-exact (trọng số/m/v/RNG), vòng train/eval log loss-ppl-throughput, lệnh `train` trong `cli.tkv`; `trainer_tests` **15/15 PASS** (1 bước khớp PyTorch loss 1.2e-7 / grad norm 0.0 / trọng số 3e-8; overfit 20 mẫu eval_loss 0.01495 acc 1.000; resume 3+save/load+3 **bit-for-bit**). Lệch còn lại vs PyTorch ~2.4e-6 (thứ tự làm tròn f32), không phải 0 tuyệt đối |
 | **G5** harness + seam GPU | ✅ **XONG GATE** (2026-10-19): `tools\verify_train_parity.ps1` **một lệnh** → `5/5 khớp (100%)` (gelu_erf 1.2e-7, gelu_tanh 0.0, softmax 1.9e-9, rmsnorm 1.2e-7, CE 0.0) + báo cáo `reports/`; backend giả (`tv/training/backend.tkv`, dispatch `kind`) bị bắt **đúng case** (tanh-thay-erf 1/5, rmsnorm /(n-1) 1/5, +1e-3 5/5) → harness không luôn xanh. Còn lại: notebook Colab |
 | G6 phân tán (có thể bỏ) | chưa bắt đầu |
+| **SIMD train** (ngoài G — mục 8) | ✅ **XONG** (2026-10-19): `tv/training/simd_matmul.tkv` — `smm_fwd`/`smm_dot`/`smm_transpose` tiled, bọc native `simd_gemm` AVX2+FMA (o T×T, bù 0, tích luỹ từng p-tile); cả GPT-2 ref nhận tham số `simd = 0` (**mặc định scalar — mọi gate cũ nguyên vẹn**), SIMD opt-in. Gate `simd_matmul_tests` **20/20** (linear/forward/loss/28 grad backward/train 3 buoc simd vs scalar ≤1e-4) + 5 gate hồi quy xanh (train 5/5, gpt2 10/10, scope 9/9, full 124M 20/20). Tốc độ: linear 256x768x2304 **3390→63 ms (~53×)**, head-like 64x768x4096 641→94 ms (~6.7×). 2 bug bắt được: (a) layout B của `smm_dot` ([n][k]) vs B chuẩn ([k][n]) → 3 call site phải dùng `smm_fwd`; (b) biến `gg` trùng tên 2 kiểu (Tensor/f64) trong 2 nhánh simd của `gpt2_backward` → compiler gộp 1 slot, hỏng bộ nhớ 1e15 (đổi tên `gsc`) |
 
 ### Kết quả G0
 
@@ -161,7 +162,7 @@ cách PyTorch **thực sự** làm (thứ tự giảm tử, cách reshape, cách
                  │  Kernel registry (tên op → hiện thực)    │
                  ├───────────────┬──────────────────────────┤
                  │  CPU backend  │  GPU backend (để sau)    │
-                 │  scalar/SIMD  │  seam, chưa viết          │
+                 │  scalar/SIMD  │  seam đã có: smm_* (opt-in)   │
                  └───────────────┴──────────────────────────┘
 ```
 
@@ -289,7 +290,8 @@ một thiết bị đã chứng minh được thuật toán. Chỉ làm khi th�
 
 - Backend GPU, CUDA, OpenCL (chỉ làm seam).
 - Phân tán nhiều node.
-- Tối ưu tốc độ, đa luồng hoá GEMM, dùng SIMD để tăng tốc.
+- Tối ưu tốc độ, đa luồng hoá GEMM. (Phần "dùng SIMD để tăng tốc" đã xong
+  2026-10-19 — xem mục TRẠNG THÁI "SIMD train": `simd_matmul.tkv`, gate 20/20.)
 - Quantization trong huấn luyện (QLoRA).
 - Sinh văn bản sau huấn luyện chất lượng.
 

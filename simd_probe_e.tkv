@@ -1,0 +1,29 @@
+# PROBE E — bien float(0) co ep f32 duoc khong
+import tv.training.tensor
+def fill_expr(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n * n):
+        out.append(float(i % 7) / 7.0)
+    return out
+
+def fill_var(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n * n):
+        v = float(0)
+        if i % 3 == 0:
+            v = float(i % 7) / 7.0
+        out.append(v)
+    return out
+
+def main() -> 'i32':
+    n = 64
+    a = fill_expr(n)
+    b = fill_expr(n)
+    c = t_zeros([n, n])
+    cd = c.data
+    simd_gemm(a, b, cd, n)
+    print("expr OK cd[0]=" + str(cd[0]))
+    a2 = fill_var(n)
+    simd_gemm(a2, b, cd, n)
+    print("var-float OK")
+    return 0

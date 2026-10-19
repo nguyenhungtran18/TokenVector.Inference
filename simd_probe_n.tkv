@@ -1,0 +1,71 @@
+# PROBE N — J chuan hoa: L2 truoc J1, J1 lap lai, L2 sau J1
+import tv.training.tensor
+import tv.training.simd_matmul
+
+def fill(m: 'i64', n: 'i64', kind: 'i64') -> "Tensor":
+    out = t_zeros([m, n])
+    d = out.data
+    for i in range(m * n):
+        if kind == 5:
+            d[i] = (float((i * 7 + 13) % 97) - 48.0) / 48.0
+        if kind == 6:
+            d[i] = (float((i * 13 + 7) % 59) - 29.0) / 29.0
+        if kind == 8:
+            d[i] = (float((i * 19 + 3) % 73) - 36.0) / 36.0
+    return out
+
+def md(a: "Tensor", b: "Tensor") -> 'f32':
+    da = a.data
+    db = b.data
+    m = 0.0
+    for i in range(len(da)):
+        dd = da[i] - db[i]
+        if dd < 0.0:
+            dd = 0.0 - dd
+        if dd > m:
+            m = dd
+    return m
+
+def ref_dot(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
+    c = t_zeros([m, n])
+    cd = c.data
+    ad = a.data
+    bd = b.data
+    for i in range(m):
+        for j in range(n):
+            acc = 0.0
+            for p in range(k):
+                acc = acc + ad[i * k + p] * bd[j * k + p]
+            cd[i * n + j] = acc
+    return c
+
+def l2(gy: "Tensor", x: "Tensor") -> 'f32':
+    m = 32
+    out_d = 192
+    in_d = 64
+    gyT = smm_transpose(gy, m, out_d)
+    r = ref_dot(gyT, x, out_d, in_d, m)
+    s = smm_dot(gyT, x, out_d, in_d, m)
+    return md(r, s)
+
+def main() -> 'i32':
+    m = 32
+    out_d = 192
+    in_d = 64
+    gy = fill(m, out_d, 6)
+    x = fill(m, in_d, 5)
+    w = fill(in_d, out_d, 8)
+
+    print("N1 L2 truoc J1: diff=" + str(l2(gy, x)))
+
+    dxs = smm_dot(gy, w, m, in_d, out_d)
+    print("N2 J1 (dx smm_dot, T=192) da chay")
+
+    dxs2 = smm_dot(gy, w, m, in_d, out_d)
+    print("N2b J1 lap lai: diff vs lan 1 = " + str(_md2(dxs, dxs2)))
+
+    print("N3 L2 sau J1: diff=" + str(l2(gy, x)))
+    return 0
+
+def _md2(a: "Tensor", b: "Tensor") -> 'f32':
+    return md(a, b)

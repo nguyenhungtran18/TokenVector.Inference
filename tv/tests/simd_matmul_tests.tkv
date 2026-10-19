@@ -1,0 +1,373 @@
+import tv.training.ops
+import tv.training.simd_matmul
+import tv.training.gpt2_ref
+import tv.training.gpt2_train
+import tv.training.trainer
+
+# ============================================================================
+#  SIMD MATMUL GATE (2026-10-19) — dua SIMD vao duong train
+# ----------------------------------------------------------------------------
+#  [1] smm_dot vs op_matmul_fwd (3 kich thuoc, gom le va vuong)
+#  [2] smm_fwd vs op_matmul_fwd(a, B^T) (3 kich thuoc)
+#  [3] smm_transpose: chinh xac bit (scalar ref + roundtrip)
+#  [4] gpt2_linear fwd/bwd: simd=1 vs simd=0 (trong so gpt2_init)
+#  [5] gpt2_forward + gpt2_loss: simd=1 vs simd=0
+#  [6] gpt2_backward: 28 tensor grad, simd=1 vs simd=0
+#  [7] gpt2_forward_m + gpt2_loss_m (padding mask): simd=1 vs simd=0
+#  [8] train 3 buoc: loss tung buoc simd vs scalar tu cung trong so
+#  [9] toc do: gpt2_linear 256x768->2304 (scalar vs simd, phai nhanh >= 2x)
+#  [10] toc do: smm_dot head-like 64x768 . 4096 (scalar ref vs simd, >= 2x)
+#
+#  SIMD KHONG bit-exact (FMA + thu tu tich luy) — dung sai chot 1e-4 cung
+#  nguong parity 124M. Mac dinh van scalar; gate nay truyen simd=1.
+#  Chay: tkvc tv\tests\simd_matmul_tests.tkv ra.exe main; ra.exe
+# ============================================================================
+
+FIX_DIR = "tv/tests/fixtures/"
+TOL = 0.0001
+TOL_LOSS = 0.00001
+
+def _abs(v: 'f32') -> 'f32':
+    if v < 0.0:
+        return 0.0 - v
+    return v
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> "list[f32]":
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                vals.append(float(toks[j]))
+    return vals
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+def report(name: 'str', d: 'f32', tol: 'f32') -> 'i32':
+    if d <= tol:
+        print("  [PASS] " + name + "  max_abs_diff=" + str(d))
+        return 0
+    print("  [FAIL] " + name + "  max_abs_diff=" + str(d) + "  tol=" + str(tol))
+    return 1
+
+# ---- du lieu synthetic tat dinh -------------------------------------------
+def _fill(m: 'i64', n: 'i64', kind: 'i64') -> "Tensor":
+    out = t_zeros([m, n])
+    d = out.data
+    for i in range(m * n):
+        if kind == 1:
+            d[i] = (float((i * 7 + 13) % 97) - 48.0) / 48.0
+        if kind == 2:
+            d[i] = (float((i * 11 + 5) % 83) - 41.0) / 41.0
+        if kind == 3:
+            d[i] = (float((i * 3 + 29) % 71) - 35.0) / 35.0
+        if kind == 4:
+            d[i] = (float((i * 17 + 1) % 61) - 30.0) / 30.0
+        if kind == 5:
+            d[i] = (float((i * 5 + 41) % 89) - 44.0) / 44.0
+        if kind == 6:
+            d[i] = (float((i * 13 + 7) % 59) - 29.0) / 29.0
+        if kind == 7:
+            d[i] = (float((i * 3 + 97) % 101) - 50.0) / 50.0
+        if kind == 8:
+            d[i] = (float((i * 19 + 3) % 73) - 36.0) / 36.0
+        if kind == 9:
+            d[i] = (float((i * 23 + 11) % 67) - 33.0) / 33.0
+        if kind == 10:
+            d[i] = (float((i * 29 + 17) % 79) - 39.0) / 39.0
+        if kind == 12:
+            d[i] = (float((i * 31 + 5) % 53) - 26.0) / 26.0
+    return out
+
+def _tmd(a: "Tensor", b: "Tensor") -> 'f32':
+    da = a.data
+    db = b.data
+    n = len(da)
+    if len(db) < n:
+        n = len(db)
+    m = 0.0
+    for i in range(n):
+        d = _abs(da[i] - db[i])
+        if d > m:
+            m = d
+    return m
+
+# ---- [1] smm_dot vs op_matmul_fwd -----------------------------------------
+def _case_dot(m: 'i64', n: 'i64', k: 'i64') -> 'f32':
+    a = _fill(m, k, 1)
+    b = _fill(n, k, 2)
+    ref = op_matmul_fwd(a, b, m, n, k)
+    got = smm_dot(a, b, m, n, k)
+    return _tmd(ref, got)
+
+# ---- [2] smm_fwd vs op_matmul_fwd(a, B^T) ---------------------------------
+def _case_fwd(m: 'i64', n: 'i64', k: 'i64') -> 'f32':
+    a = _fill(m, k, 1)
+    b = _fill(k, n, 3)
+    bt = smm_transpose(b, k, n)
+    ref = op_matmul_fwd(a, bt, m, n, k)
+    got = smm_fwd(a, b, m, n, k)
+    return _tmd(ref, got)
+
+# ---- [3] transpose: chinh xac bit + roundtrip ------------------------------
+def _case_trans(rows: 'i64', cols: 'i64') -> 'f32':
+    a = _fill(rows, cols, 4)
+    got = smm_transpose(a, rows, cols)
+    ref = t_zeros([cols, rows])
+    rd = ref.data
+    ad = a.data
+    for i in range(rows):
+        for j in range(cols):
+            rd[j * rows + i] = ad[i * cols + j]
+    d = _tmd(ref, got)
+    back = smm_transpose(got, cols, rows)
+    d2 = _tmd(a, back)
+    if d2 > d:
+        d = d2
+    return d
+
+# ---- [4] gpt2_linear fwd + bwd: simd vs scalar -----------------------------
+def _case_linear(ps: 'list[Tensor]') -> 'f32':
+    x = _fill(32, 64, 5)
+    w = ps[6]
+    b = ps[7]
+    y0 = gpt2_linear(x, w, b, 32, 64, 192)
+    y1 = gpt2_linear(x, w, b, 32, 64, 192, 1)
+    d = _tmd(y0, y1)
+    gy = _fill(32, 192, 6)
+    r0 = gpt2_linear_bwd(x, w, gy, 32, 64, 192)
+    r1 = gpt2_linear_bwd(x, w, gy, 32, 64, 192, 1)
+    for j in range(3):
+        t0 = r0[j]
+        t1 = r1[j]
+        dj = _tmd(t0, t1)
+        if dj > d:
+            d = dj
+    return d
+
+# ---- unpack ps -> 12 list (giong gpt2_fwd_ps) ------------------------------
+def _unpack(ps: 'list[Tensor]') -> 'list[Tensor]':
+    out = []
+    for li in range(NLayers):
+        base = 4 + li * 12
+        out.append(ps[base + 0])
+        out.append(ps[base + 1])
+        out.append(ps[base + 2])
+        out.append(ps[base + 3])
+        out.append(ps[base + 4])
+        out.append(ps[base + 5])
+        out.append(ps[base + 6])
+        out.append(ps[base + 7])
+        out.append(ps[base + 8])
+        out.append(ps[base + 9])
+        out.append(ps[base + 10])
+        out.append(ps[base + 11])
+    return out
+
+# ---- [7] forward_m + loss_m: simd vs scalar --------------------------------
+def _case_fwd_m(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]') -> 'list[f32]':
+    u = _unpack(ps)
+    nL = NLayers
+    out = []
+    ln1_g = []
+    ln1_b = []
+    wq = []
+    bq = []
+    wp = []
+    bp = []
+    ln2_g = []
+    ln2_b = []
+    w1 = []
+    b1 = []
+    w2 = []
+    b2 = []
+    for li in range(nL):
+        ln1_g.append(u[li * 12 + 0])
+        ln1_b.append(u[li * 12 + 1])
+        wq.append(u[li * 12 + 2])
+        bq.append(u[li * 12 + 3])
+        wp.append(u[li * 12 + 4])
+        bp.append(u[li * 12 + 5])
+        ln2_g.append(u[li * 12 + 6])
+        ln2_b.append(u[li * 12 + 7])
+        w1.append(u[li * 12 + 8])
+        b1.append(u[li * 12 + 9])
+        w2.append(u[li * 12 + 10])
+        b2.append(u[li * 12 + 11])
+    kmask = []
+    for i in range(len(ids)):
+        kmask.append(1)
+    kmask[len(ids) - 1] = 0
+    kmask[len(ids) - 2] = 0
+    z0 = gpt2_forward_m(ids, pos, kmask, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                        ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3])
+    z1 = gpt2_forward_m(ids, pos, kmask, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                        ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], 1)
+    d = _tmd(z0, z1)
+    l0 = gpt2_loss_m(z0, ids, kmask)
+    l1 = gpt2_loss_m(z1, ids, kmask)
+    out.append(d)
+    out.append(_abs(l0 - l1))
+    return out
+
+def _mk_opt(n: 'i64', groups: 'list[i64]', total: 'i64') -> "AdamW":
+    return new_adamw_g(n, groups, 2, total, 0.05, 0.0025, 0.9, 0.999,
+                       0.00000001, 0.0, 1.0)
+
+def main() -> 'i32':
+    fails = 0
+    cases = 0
+    print("=== SIMD MATMUL GATE (smm vs scalar + GPT-2 nho simd vs scalar) ===")
+
+    # ---- [1] smm_dot ------------------------------------------------------
+    d = _case_dot(5, 7, 11)
+    cases = cases + 1
+    fails = fails + report("smm_dot 5x7x11 vs op_matmul_fwd", d, TOL)
+    d = _case_dot(64, 64, 64)
+    cases = cases + 1
+    fails = fails + report("smm_dot 64x64x64 (vuong, khong padding)", d, TOL)
+    d = _case_dot(70, 130, 300)
+    cases = cases + 1
+    fails = fails + report("smm_dot 70x130x300 (le, 3 o reduce)", d, TOL)
+
+    # ---- [2] smm_fwd ------------------------------------------------------
+    d = _case_fwd(5, 7, 11)
+    cases = cases + 1
+    fails = fails + report("smm_fwd 5x7x11 vs scalar", d, TOL)
+    d = _case_fwd(64, 64, 64)
+    cases = cases + 1
+    fails = fails + report("smm_fwd 64x64x64", d, TOL)
+    d = _case_fwd(40, 96, 250)
+    cases = cases + 1
+    fails = fails + report("smm_fwd 40x96x250 (le)", d, TOL)
+
+    # ---- [3] transpose ----------------------------------------------------
+    d = _case_trans(16, 33)
+    cases = cases + 1
+    fails = fails + report("smm_transpose 16x33 + roundtrip (bit-exact=0)", d, 0.0)
+    d = _case_trans(64, 64)
+    cases = cases + 1
+    fails = fails + report("smm_transpose 64x64 + roundtrip (bit-exact=0)", d, 0.0)
+
+    # ---- GPT-2 nho --------------------------------------------------------
+    ps = gpt2_init(7)
+    ids = load_ints(FIX_DIR + "g2_ids.txt")
+    pos = load_ints(FIX_DIR + "g2_pos.txt")
+
+    # ---- [4] linear fwd+bwd ------------------------------------------------
+    d = _case_linear(ps)
+    cases = cases + 1
+    fails = fails + report("gpt2_linear fwd+bwd (32x64->192): simd vs scalar", d, TOL)
+
+    # ---- [5] forward + loss ------------------------------------------------
+    z0 = gpt2_fwd_ps(ps, ids, pos)
+    z1 = gpt2_fwd_ps(ps, ids, pos, 1)
+    cases = cases + 1
+    fails = fails + report("gpt2_forward logits: simd vs scalar", _tmd(z0, z1), TOL)
+    l0 = gpt2_loss(z0, ids)
+    l1 = gpt2_loss(z1, ids)
+    cases = cases + 1
+    fails = fails + report("gpt2_loss: simd vs scalar", _abs(l0 - l1), TOL_LOSS)
+
+    # ---- [6] backward 28 tensor -------------------------------------------
+    g0 = gpt2_bwd_ps(ps, ids, pos)
+    g1 = gpt2_bwd_ps(ps, ids, pos, 1)
+    dmax = 0.0
+    widx = 0
+    for i in range(len(g0)):
+        t0 = g0[i]
+        t1 = g1[i]
+        di = _tmd(t0, t1)
+        if di > dmax:
+            dmax = di
+            widx = i
+    cases = cases + 1
+    fails = fails + report("gpt2_backward 28 grad (te nao toi da tensor " + str(widx) + ")", dmax, TOL)
+
+    # ---- [7] mask forward + loss -------------------------------------------
+    r = _case_fwd_m(ps, ids, pos)
+    cases = cases + 1
+    fails = fails + report("gpt2_forward_m logits (co pad cuoi): simd vs scalar", r[0], TOL)
+    cases = cases + 1
+    fails = fails + report("gpt2_loss_m: simd vs scalar", r[1], TOL_LOSS)
+
+    # ---- [8] train 3 buoc --------------------------------------------------
+    npar = gpt2_n_param(ps)
+    groups = gpt2_group_sizes(ps)
+    pa = gpt2_init(7)
+    pb = gpt2_init(7)
+    oa = _mk_opt(npar, groups, 3)
+    ob = _mk_opt(npar, groups, 3)
+    gpt2_copy_into(oa.p, gpt2_flatten(pa))
+    gpt2_copy_into(ob.p, gpt2_flatten(pb))
+    la = gpt2_train_steps(oa, pa, ids, pos, 3)
+    lb = gpt2_train_steps(ob, pb, ids, pos, 3, 1)
+    cases = cases + 1
+    fails = fails + report("train 3 buoc — loss buoc 1: simd vs scalar", _abs(la[0] - lb[0]), TOL)
+    drift = _abs(la[2] - lb[2])
+    cases = cases + 1
+    fails = fails + report("train 3 buoc — loss buoc 3 (tich luy AdamW)", drift, 0.0001)
+
+    # ---- [9] toc do gpt2_linear 256x768 -> 2304 ----------------------------
+    xb = _fill(256, 768, 7)
+    wb = _fill(768, 2304, 8)
+    bb = _fill(2304, 1, 12)
+    s0 = now_ms()
+    yb0 = gpt2_linear(xb, wb, bb, 256, 768, 2304)
+    s1 = now_ms()
+    yb1 = gpt2_linear(xb, wb, bb, 256, 768, 2304, 1)
+    s2 = now_ms()
+    dt_s = s1 - s0
+    dt_v = s2 - s1
+    print("  [SPEED] gpt2_linear 256x768x2304: scalar " + str(dt_s) + " ms | simd " + str(dt_v) + " ms")
+    cases = cases + 1
+    dly = _tmd(yb0, yb1)
+    fails = fails + report("linear lon 256x768->2304: simd vs scalar (dung sai)", dly, TOL)
+    cases = cases + 1
+    if dt_v * 2 > dt_s:
+        print("  [FAIL] linear lon: simd khong nhanh hon 2x (scalar=" + str(dt_s) + " simd=" + str(dt_v) + ")")
+        fails = fails + 1
+    else:
+        print("  [PASS] linear lon: simd nhanh hon 2x (ratio~" + str(dt_s / (dt_v + 1)) + ")")
+
+    # ---- [10] toc do smm_dot head-like 64x768 . 4096 ------------------------
+    ah = _fill(64, 768, 9)
+    bh = _fill(4096, 768, 10)
+    s3 = now_ms()
+    cref = op_matmul_fwd(ah, bh, 64, 4096, 768)
+    s4 = now_ms()
+    cgot = smm_dot(ah, bh, 64, 4096, 768)
+    s5 = now_ms()
+    dt_c = s4 - s3
+    dt_g = s5 - s4
+    print("  [SPEED] smm_dot 64x768x4096 (head-like): scalar " + str(dt_c) + " ms | simd " + str(dt_g) + " ms")
+    cases = cases + 1
+    dhd = _tmd(cref, cgot)
+    fails = fails + report("smm_dot head-like: simd vs scalar (dung sai)", dhd, TOL)
+    cases = cases + 1
+    if dt_g * 2 > dt_c:
+        print("  [FAIL] smm_dot head-like: simd khong nhanh hon 2x (scalar=" + str(dt_c) + " simd=" + str(dt_g) + ")")
+        fails = fails + 1
+    else:
+        print("  [PASS] smm_dot head-like: simd nhanh hon 2x (ratio~" + str(dt_c / (dt_g + 1)) + ")")
+
+    print("=== SIMD matmul cases=" + str(cases) + " fails=" + str(fails) + " ===")
+    if fails == 0:
+        return 0
+    return 1

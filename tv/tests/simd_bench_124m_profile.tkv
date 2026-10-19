@@ -1,0 +1,167 @@
+# PROFILE 124M — phan ria TUNG PHASE cua 1 buoc train simd=1
+# (timing toan bo trong main — bug #8: now_ms() trong local ham doc SAI)
+# Copy helpers tu simd_bench_124m; chay: tkvc ... %TEMP%/prof124.exe main
+import tv.training.gpt2_ref124
+import tv.training.trainer
+import tv.training.simd_matmul
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> "list[f32]":
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                vals.append(float(toks[j]))
+    return vals
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+def _f124_loss(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32') -> 'f32':
+    ln1_g = []
+    ln1_b = []
+    wq = []
+    bq = []
+    wp = []
+    bp = []
+    ln2_g = []
+    ln2_b = []
+    w1 = []
+    b1 = []
+    w2 = []
+    b2 = []
+    for li in range(NLayers):
+        base = 4 + li * 12
+        ln1_g.append(ps[base + 0])
+        ln1_b.append(ps[base + 1])
+        wq.append(ps[base + 2])
+        bq.append(ps[base + 3])
+        wp.append(ps[base + 4])
+        bp.append(ps[base + 5])
+        ln2_g.append(ps[base + 6])
+        ln2_b.append(ps[base + 7])
+        w1.append(ps[base + 8])
+        b1.append(ps[base + 9])
+        w2.append(ps[base + 10])
+        b2.append(ps[base + 11])
+    z = gpt2_forward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                     ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd)
+    return gpt2_loss(z, ids)
+
+def _f124_bwd(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32') -> 'list[Tensor]':
+    ln1_g = []
+    ln1_b = []
+    wq = []
+    bq = []
+    wp = []
+    bp = []
+    ln2_g = []
+    ln2_b = []
+    w1 = []
+    b1 = []
+    w2 = []
+    b2 = []
+    for li in range(NLayers):
+        base = 4 + li * 12
+        ln1_g.append(ps[base + 0])
+        ln1_b.append(ps[base + 1])
+        wq.append(ps[base + 2])
+        bq.append(ps[base + 3])
+        wp.append(ps[base + 4])
+        bp.append(ps[base + 5])
+        ln2_g.append(ps[base + 6])
+        ln2_b.append(ps[base + 7])
+        w1.append(ps[base + 8])
+        b1.append(ps[base + 9])
+        w2.append(ps[base + 10])
+        b2.append(ps[base + 11])
+    return gpt2_backward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                         ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd)
+
+def _n_param(ps: 'list[Tensor]') -> 'i64':
+    n = 0
+    for i in range(len(ps)):
+        t = ps[i]
+        d = t.data
+        n = n + len(d)
+    return n
+
+def _groups(ps: 'list[Tensor]') -> 'list[i64]':
+    out = []
+    for i in range(len(ps)):
+        t = ps[i]
+        d = t.data
+        out.append(len(d))
+    return out
+
+def _mk_opt(n: 'i64', groups: 'list[i64]', total: 'i64') -> "AdamW":
+    return new_adamw_g(n, groups, 2, total, 0.05, 0.0025, 0.9, 0.999,
+                       0.00000001, 0.0, 1.0)
+
+def main() -> 'i32':
+    FIX = "tv/tests/fixtures/"
+    ids = load_ints(FIX + "g2_ids.txt")
+    pos = load_ints(FIX + "g2_pos.txt")
+    ps = gpt2_init(7)
+    n = _n_param(ps)
+    groups = _groups(ps)
+    opt = _mk_opt(n, groups, 4)
+    # prepare: copy ps -> opt.p (setup, khong do)
+    off = 0
+    for i in range(len(ps)):
+        t = ps[i]
+        d = t.data
+        for j in range(len(d)):
+            opt.p[off + j] = d[j]
+        off = off + len(d)
+
+    t0 = now_ms()
+    loss = _f124_loss(ps, ids, pos, 1)
+    t1 = now_ms()
+    grads = _f124_bwd(ps, ids, pos, 1)
+    t2 = now_ms()
+    opt.zero_grad()
+    t3 = now_ms()
+    o2 = 0
+    for i in range(len(grads)):
+        gt = grads[i]
+        d = gt.data
+        for j in range(len(d)):
+            opt.g[o2 + j] = opt.g[o2 + j] + d[j]
+        o2 = o2 + len(d)
+    t4 = now_ms()
+    opt.step()
+    t5 = now_ms()
+    off2 = 0
+    for i in range(len(ps)):
+        t = ps[i]
+        d = t.data
+        for j in range(len(d)):
+            d[j] = opt.p[off2 + j]
+        off2 = off2 + len(d)
+    t6 = now_ms()
+
+    print("P124 loss=" + str(loss))
+    print("P124 FWD+LOSS  = " + str(t1 - t0) + " ms")
+    print("P124 BWD       = " + str(t2 - t1) + " ms")
+    print("P124 ZERO_GRAD = " + str(t3 - t2) + " ms")
+    print("P124 GRAD_ACC   = " + str(t4 - t3) + " ms")
+    print("P124 ADAMW_STEP = " + str(t5 - t4) + " ms")
+    print("P124 UNFLATTEN  = " + str(t6 - t5) + " ms")
+    print("P124 TOTAL      = " + str(t6 - t0) + " ms")
+    return 0

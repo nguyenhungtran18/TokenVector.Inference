@@ -1,0 +1,221 @@
+# PROFILE 124M — phan ria TUNG PHASE cua 1 buoc train simd=1
+# (timing toan bo trong main — bug #8: now_ms() trong local ham doc SAI)
+# Copy helpers tu simd_bench_124m; chay: tkvc ... %TEMP%/prof124.exe main
+import tv.training.gpt2_ref124
+import tv.training.trainer
+import tv.training.simd_matmul
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> "list[f32]":
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                vals.append(float(toks[j]))
+    return vals
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+def _f124_loss(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32') -> 'f32':
+    ln1_g = []
+    ln1_b = []
+    wq = []
+    bq = []
+    wp = []
+    bp = []
+    ln2_g = []
+    ln2_b = []
+    w1 = []
+    b1 = []
+    w2 = []
+    b2 = []
+    for li in range(NLayers):
+        base = 4 + li * 12
+        ln1_g.append(ps[base + 0])
+        ln1_b.append(ps[base + 1])
+        wq.append(ps[base + 2])
+        bq.append(ps[base + 3])
+        wp.append(ps[base + 4])
+        bp.append(ps[base + 5])
+        ln2_g.append(ps[base + 6])
+        ln2_b.append(ps[base + 7])
+        w1.append(ps[base + 8])
+        b1.append(ps[base + 9])
+        w2.append(ps[base + 10])
+        b2.append(ps[base + 11])
+    z = gpt2_forward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                     ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd)
+    return gpt2_loss(z, ids)
+
+def _f124_bwd(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32') -> 'list[Tensor]':
+    ln1_g = []
+    ln1_b = []
+    wq = []
+    bq = []
+    wp = []
+    bp = []
+    ln2_g = []
+    ln2_b = []
+    w1 = []
+    b1 = []
+    w2 = []
+    b2 = []
+    for li in range(NLayers):
+        base = 4 + li * 12
+        ln1_g.append(ps[base + 0])
+        ln1_b.append(ps[base + 1])
+        wq.append(ps[base + 2])
+        bq.append(ps[base + 3])
+        wp.append(ps[base + 4])
+        bp.append(ps[base + 5])
+        ln2_g.append(ps[base + 6])
+        ln2_b.append(ps[base + 7])
+        w1.append(ps[base + 8])
+        b1.append(ps[base + 9])
+        w2.append(ps[base + 10])
+        b2.append(ps[base + 11])
+    return gpt2_backward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                         ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd)
+
+def _n_param(ps: 'list[Tensor]') -> 'i64':
+    n = 0
+    for i in range(len(ps)):
+        t = ps[i]
+        d = t.data
+        n = n + len(d)
+    return n
+
+def _groups(ps: 'list[Tensor]') -> 'list[i64]':
+    out = []
+    for i in range(len(ps)):
+        t = ps[i]
+        d = t.data
+        out.append(len(d))
+    return out
+
+def _mk_opt(n: 'i64', groups: 'list[i64]', total: 'i64') -> "AdamW":
+    return new_adamw_g(n, groups, 2, total, 0.05, 0.0025, 0.9, 0.999,
+                       0.00000001, 0.0, 1.0)
+
+# AH9: fused o DANG FUNCTION module-level (giong gpt2_step_unflatten that —
+# neu inline trong main bi codegen kem do method to thi day la cach do dung)
+def _fused_fn(opt: "AdamW", ps: 'list[Tensor]') -> 'i32':
+    lr = lr_at(opt.t, opt.warmup, opt.total, opt.lr_max, opt.lr_min)
+    gn = opt.grad_norm()
+    coef = 1.0
+    if gn > 0.0:
+        coef = opt.clip / (gn + 0.000001)
+        if coef > 1.0:
+            coef = 1.0
+    t1 = opt.t + 1
+    bc1 = 1.0 - _bp(opt.b1, t1)
+    bc2 = 1.0 - _bp(opt.b2, t1)
+    step_size = lr / bc1
+    bc2s = sqrt(bc2)
+    wdf = 1.0 - lr * opt.wd
+    groups = opt.groups
+    go = 0
+    for gi in range(len(groups)):
+        sz = groups[gi]
+        t = ps[gi]
+        d = t.data
+        for jj in range(sz):
+            j = go + jj
+            gij = opt.g[j] * coef
+            opt.p[j] = opt.p[j] * wdf
+            opt.m[j] = opt.b1 * opt.m[j] + (1.0 - opt.b1) * gij
+            opt.v[j] = opt.b2 * opt.v[j] + (1.0 - opt.b2) * gij * gij
+            denom = sqrt(opt.v[j]) / bc2s + opt.eps
+            opt.p[j] = opt.p[j] - step_size * opt.m[j] / denom
+            d[jj] = opt.p[j]
+        go = go + sz
+    opt.t = opt.t + 1
+    return 0
+
+def main() -> 'i32':
+    FIX = "tv/tests/fixtures/"
+    ids = load_ints(FIX + "g2_ids.txt")
+    pos = load_ints(FIX + "g2_pos.txt")
+    ps = gpt2_init(7)
+    n = _n_param(ps)
+    groups = _groups(ps)
+    opt = _mk_opt(n, groups, 4)
+    # prepare: copy ps -> opt.p (setup, khong do)
+    off = 0
+    for i in range(len(ps)):
+        t = ps[i]
+        d = t.data
+        for j in range(len(d)):
+            opt.p[off + j] = d[j]
+        off = off + len(d)
+
+    # PROBE AH — do step vs unflatten vs FUSED tren CUNG tien trinh, best-of-5.
+    # (Bench C 3 buoc co noise ±3% nuot het loi ich ~0.75s cua fused; o day
+    #  moi pha do truc tiep, ms chinh xac.)
+    # warmup 1 lan day du (JIT + cache)
+    opt.step()
+    off2 = 0
+    for i in range(len(ps)):
+        t = ps[i]
+        d = t.data
+        for j in range(len(d)):
+            d[j] = opt.p[off2 + j]
+        off2 = off2 + len(d)
+
+    best_s = 1.0e9
+    best_u = 1.0e9
+    best_f = 1.0e9
+    iter_s = []
+    iter_u = []
+    iter_f = []
+    k = 0
+    while k < 5:
+        a = now_ms()
+        opt.step()
+        b = now_ms()
+        off3 = 0
+        for i in range(len(ps)):
+            t = ps[i]
+            d = t.data
+            for j in range(len(d)):
+                d[j] = opt.p[off3 + j]
+            off3 = off3 + len(d)
+        c = now_ms()
+        # — fused qua FUNCTION module-level (AH9) —
+        _fused_fn(opt, ps)
+        dd = now_ms()
+        ds = b - a
+        du = c - b
+        df = dd - c
+        iter_s.append(ds)
+        iter_u.append(du)
+        iter_f.append(df)
+        if ds < best_s:
+            best_s = ds
+        if du < best_u:
+            best_u = du
+        if df < best_f:
+            best_f = df
+        k = k + 1
+    print("AH STEP     per-iter=" + str(iter_s) + " best=" + str(best_s))
+    print("AH UNFLAT   per-iter=" + str(iter_u) + " best=" + str(best_u))
+    print("AH FUSED    per-iter=" + str(iter_f) + " best=" + str(best_f))
+    print("AH TONG cu (step+unflat best) = " + str(best_s + best_u) + " ms | fused = " + str(best_f)
+          + " ms | loi nhuan = " + str(best_s + best_u - best_f) + " ms")
+    return 0

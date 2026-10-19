@@ -63,7 +63,7 @@ def gpt2_copy_into(dst: 'list[f32]', src: 'list[f32]') -> 'i32':
 
 # ---- goi model voi ps (thay vi 20 tham so roi) -----------------------------
 
-def gpt2_fwd_ps(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]') -> "Tensor":
+def gpt2_fwd_ps(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32' = 0) -> "Tensor":
     ln1_g = []
     ln1_b = []
     wq = []
@@ -95,9 +95,9 @@ def gpt2_fwd_ps(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]') -> "Tens
     _g = ps[2]
     _b = ps[3]
     return gpt2_forward(ids, pos, _wte, _wpe, ln1_g, ln1_b, wq, bq, wp, bp,
-                        ln2_g, ln2_b, w1, b1, w2, b2, _g, _b)
+                        ln2_g, ln2_b, w1, b1, w2, b2, _g, _b, simd)
 
-def gpt2_bwd_ps(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]') -> 'list[Tensor]':
+def gpt2_bwd_ps(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32' = 0) -> 'list[Tensor]':
     ln1_g = []
     ln1_b = []
     wq = []
@@ -129,18 +129,24 @@ def gpt2_bwd_ps(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]') -> 'list
     _g = ps[2]
     _b = ps[3]
     return gpt2_backward(ids, pos, _wte, _wpe, ln1_g, ln1_b, wq, bq, wp, bp,
-                         ln2_g, ln2_b, w1, b1, w2, b2, _g, _b)
+                         ln2_g, ln2_b, w1, b1, w2, b2, _g, _b, simd)
 
-def gpt2_loss_of(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]') -> 'f32':
-    z = gpt2_fwd_ps(ps, ids, pos)
+def gpt2_loss_of(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32' = 0) -> 'f32':
+    z = gpt2_fwd_ps(ps, ids, pos, simd)
     return gpt2_loss(z, ids)
 
 # ---- mot buoc train --------------------------------------------------------
 
+# P1.2 (perf-plan 2026-10-19): DA PROBE — fused step+unflatten KHONG THANG.
+# So do best-of-5 tren 124M (probe simd_probe_ah): duong cu step()+unflatten
+# = 4516ms; fused moi hinh thuc deu cham hon: while-loop 6468, for-range 5453,
+# bo ghi d 4704, function-level 7547. Con ca bug do ra: `for jj in range(sz)`
+# ket hop `jj = jj + 1` con lai tu while-loop → skip nua phan tu (loss sai,
+# gate [5 bat duoc). KET LUAN: GIU 2 VONG RIENG — dung lam lai fused nay.
 def gpt2_train_step(opt: "AdamW", ps: 'list[Tensor]',
-                    ids: 'list[i64]', pos: 'list[i64]') -> 'f32':
-    loss = gpt2_loss_of(ps, ids, pos)
-    grads = gpt2_bwd_ps(ps, ids, pos)
+                    ids: 'list[i64]', pos: 'list[i64]', simd: 'i32' = 0) -> 'f32':
+    loss = gpt2_loss_of(ps, ids, pos, simd)
+    grads = gpt2_bwd_ps(ps, ids, pos, simd)
     opt.zero_grad()
     off = 0
     for i in range(len(grads)):
@@ -155,8 +161,8 @@ def gpt2_train_step(opt: "AdamW", ps: 'list[Tensor]',
     return loss
 
 def gpt2_train_steps(opt: "AdamW", ps: 'list[Tensor]',
-                     ids: 'list[i64]', pos: 'list[i64]', n_steps: 'i64') -> 'list[f32]':
+                     ids: 'list[i64]', pos: 'list[i64]', n_steps: 'i64', simd: 'i32' = 0) -> 'list[f32]':
     losses = []
     for s in range(n_steps):
-        losses.append(gpt2_train_step(opt, ps, ids, pos))
+        losses.append(gpt2_train_step(opt, ps, ids, pos, simd))
     return losses
