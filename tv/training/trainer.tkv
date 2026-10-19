@@ -35,7 +35,13 @@ W1_N = 32
 B1_OFF = 32
 W2_OFF = 40
 B2_OFF = 64
-N_PARAM = 67
+VocabSize = 50257
+HiddenSize = 768
+NHeads = 12
+HeadDim = 64
+NLayers = 12
+MaxPos = 1024
+EPS = 1e-6
 
 def _zeros(n: 'i64') -> 'list[f32]':
     out = []
@@ -83,6 +89,7 @@ class AdamW:
     eps: 'f32'
     wd: 'f32'
     clip: 'f32'
+    groups: 'list[i64]'
 
     def __init__(self, n: 'i64', warmup: 'i64', total: 'i64',
                  lr_max: 'f32', lr_min: 'f32',
@@ -102,6 +109,10 @@ class AdamW:
         self.eps = eps
         self.wd = wd
         self.clip = clip
+        # groups = kich thuoc tung nhom tham so de tinh grad norm giong
+        # PyTorch clip_grad_norm_ (L2 tung tensor roi L2 cac norm). Rong =
+        # layout MLP 4-8-3 (mac dinh cua trainer demo).
+        self.groups = []
 
     def zero_grad(self) -> 'i32':
         for i in range(self.n):
@@ -112,6 +123,11 @@ class AdamW:
         return lr_at(self.t, self.warmup, self.total, self.lr_max, self.lr_min)
 
     def grad_norm(self) -> 'f32':
+        if len(self.groups) > 0:
+            return _norm_groups(self.g, self.groups)
+        return self._norm_mlp()
+
+    def _norm_mlp(self) -> 'f32':
         # khop PyTorch clip_grad_norm_: L2 tung tham so, roi L2 tren cac norm
         s1 = 0.0
         i = 0
@@ -206,6 +222,20 @@ class Sampler:
         self.draws = self.draws + 1
         return idx
 
+def _norm_groups(g: 'list[f32]', groups: 'list[i64]') -> 'f32':
+    # PyTorch clip_grad_norm_: norm = L2( norm(g1), norm(g2), ... )
+    tot = 0.0
+    off = 0
+    for k in range(len(groups)):
+        cnt = groups[k]
+        s = 0.0
+        for i in range(cnt):
+            s = s + g[off + i] * g[off + i]
+        nrm = sqrt(s)
+        tot = tot + nrm * nrm
+        off = off + cnt
+    return sqrt(tot)
+
 # Factory (constructor KHONG export qua module — quy tac compiler)
 def new_adamw(n: 'i64', warmup: 'i64', total: 'i64',
               lr_max: 'f32', lr_min: 'f32',
@@ -215,124 +245,380 @@ def new_adamw(n: 'i64', warmup: 'i64', total: 'i64',
 def new_sampler(n: 'i64', seed: 'i64') -> "Sampler":
     return Sampler(n, seed)
 
+def new_adamw_g(n: 'i64', groups: 'list[i64]', warmup: 'i64', total: 'i64',
+                lr_max: 'f32', lr_min: 'f32',
+                b1: 'f32', b2: 'f32', eps: 'f32', wd: 'f32', clip: 'f32') -> "AdamW":
+    o = AdamW(n, warmup, total, lr_max, lr_min, b1, b2, eps, wd, clip)
+    o.groups = groups
+    return o
+
 # ============================================================================
 #  Model MLP tren vector tham so PHANG
 # ============================================================================
 
-def mlp_init(seed: 'i64') -> 'list[f32]':
-    # khoi tao nho, tat dinh (LCG 31-bit, deu trong [-0.5, 0.5)) — dung cho
-    # demo CLI; fixture G4 dung trong so do PyTorch sinh san.
+def gpt2_init(seed: 'i64') -> 'list[Tensor]':
+    # khoi tao trong so GPT-2 124M (normal 0,0.02 dung LCG + Box-Muller)
+    # thu tu: wte, wpe, lnf_g, lnf_b, roi tung layer 12 tham so
+    ps = []
+    ps.append(t_new(_gi_noise(VocabSize * HiddenSize, seed + 1), [VocabSize, HiddenSize]))
+    ps.append(t_new(_gi_noise(MaxPos * HiddenSize, seed + 2), [MaxPos, HiddenSize]))
+    ps.append(t_new(_gi_ones(HiddenSize), [HiddenSize]))
+    ps.append(t_new(_gi_zeros(HiddenSize), [HiddenSize]))
+    for li in range(NLayers):
+        sd = seed + 10 + li * 100
+        ps.append(t_new(_gi_ones(HiddenSize), [HiddenSize]))
+        ps.append(t_new(_gi_zeros(HiddenSize), [HiddenSize]))
+        ps.append(t_new(_gi_noise(HiddenSize * 3 * HiddenSize, sd + 1), [HiddenSize, 3 * HiddenSize]))
+        ps.append(t_new(_gi_zeros(3 * HiddenSize), [3 * HiddenSize]))
+        ps.append(t_new(_gi_noise(HiddenSize * HiddenSize, sd + 2), [HiddenSize, HiddenSize]))
+        ps.append(t_new(_gi_zeros(HiddenSize), [HiddenSize]))
+        ps.append(t_new(_gi_ones(HiddenSize), [HiddenSize]))
+        ps.append(t_new(_gi_zeros(HiddenSize), [HiddenSize]))
+        ps.append(t_new(_gi_noise(HiddenSize * 4 * HiddenSize, sd + 3), [HiddenSize, 4 * HiddenSize]))
+        ps.append(t_new(_gi_zeros(4 * HiddenSize), [4 * HiddenSize]))
+        ps.append(t_new(_gi_noise(4 * HiddenSize * HiddenSize, sd + 4), [4 * HiddenSize, HiddenSize]))
+        ps.append(t_new(_gi_zeros(HiddenSize), [HiddenSize]))
+    return ps
+
+def gpt2_forward(ids: 'list[i64]', pos: 'list[i64]',
+                 wte: "Tensor", wpe: "Tensor",
+                 ln1_g: 'list[Tensor]', ln1_b: 'list[Tensor]',
+                 w_qkv: 'list[Tensor]', b_qkv: 'list[Tensor]',
+                 w_proj: 'list[Tensor]', b_proj: 'list[Tensor]',
+                 ln2_g: 'list[Tensor]', ln2_b: 'list[Tensor]',
+                 w1: 'list[Tensor]', b1: 'list[Tensor]',
+                 w2: 'list[Tensor]', b2: 'list[Tensor]',
+                 lnf_g: "Tensor", lnf_b: "Tensor") -> "Tensor":
+    n = len(ids)
+    h = HiddenSize
+    x = gpt2_embed(ids, pos, wte, wpe)
+    for i in range(NLayers):
+        x = gpt2_block(x, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
+                       ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i])
+    x = gpt2_layernorm(x, lnf_g, lnf_b)
+    # LM head: tie weight voi wte -> logits = x @ wte^T  (wte [vocab, h])
+    logits = t_zeros([n, VocabSize])
+    for i in range(n):
+        for o in range(VocabSize):
+            acc = 0.0
+            for k in range(h):
+                acc = acc + x.data[i * h + k] * wte.data[o * h + k]
+            logits.data[i * VocabSize + o] = acc
+    return logits
+
+def gpt2_loss(logits: "Tensor", ids: 'list[i64]') -> 'f32':
+    n = _sh0(logits)
+    tot = 0.0
+    for i in range(n):
+        base = i * VocabSize
+        mx = logits.data[base]
+        for o in range(1, VocabSize):
+            if logits.data[base + o] > mx:
+                mx = logits.data[base + o]
+        s = 0.0
+        for o in range(VocabSize):
+            s = s + exp(logits.data[base + o] - mx)
+        lse = mx + log(s)
+        tot = tot + (lse - logits.data[base + ids[i]])
+    return tot / float(n)
+
+def gpt2_loss_m(logits: "Tensor", ids: 'list[i64]', kmask: 'list[i64]') -> 'f32':
+    n = _sh0(logits)
+    tot = 0.0
+    cnt = 0
+    for i in range(n):
+        if kmask[i] != 0:
+            base = i * VocabSize
+            mx = logits.data[base]
+            for o in range(1, VocabSize):
+                if logits.data[base + o] > mx:
+                    mx = logits.data[base + o]
+            s = 0.0
+            for o in range(VocabSize):
+                s = s + exp(logits.data[base + o] - mx)
+            lse = mx + log(s)
+            tot = tot + (lse - logits.data[base + ids[i]])
+            cnt = cnt + 1
+    if cnt == 0:
+        return 0.0
+    return tot / float(cnt)
+
+def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
+                  wte: "Tensor", wpe: "Tensor",
+                  ln1_g: 'list[Tensor]', ln1_b: 'list[Tensor]',
+                  w_qkv: 'list[Tensor]', b_qkv: 'list[Tensor]',
+                  w_proj: 'list[Tensor]', b_proj: 'list[Tensor]',
+                  ln2_g: 'list[Tensor]', ln2_b: 'list[Tensor]',
+                  w1: 'list[Tensor]', b1: 'list[Tensor]',
+                  w2: 'list[Tensor]', b2: 'list[Tensor]',
+                  lnf_g: "Tensor", lnf_b: "Tensor") -> 'list[Tensor]':
+    n = len(ids)
+    h = HiddenSize
+    # forward (giu lai dau vao cua moi block)
+    x = gpt2_embed(ids, pos, wte, wpe)
+    xins = []
+    for i in range(NLayers):
+        xins.append(x)
+        x = gpt2_block(x, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
+                       ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i])
+    xf_in = x
+    xf = gpt2_layernorm(x, lnf_g, lnf_b)
+    # duong lm head (tie weight): g_logits = (p - onehot)/n
+    dxf = t_zeros([n, h])
+    dwte = t_zeros([VocabSize, h])
+    for i in range(n):
+        row = []
+        mxf = 0.0
+        for o in range(VocabSize):
+            acc = 0.0
+            for k in range(h):
+                acc = acc + xf.data[i * h + k] * wte.data[o * h + k]
+            row.append(acc)
+            if o == 0:
+                mxf = acc
+            if acc > mxf:
+                mxf = acc
+        tot = 0.0
+        for o in range(VocabSize):
+            e = exp(row[o] - mxf)
+            row[o] = e
+            tot = tot + e
+        inv_tot = 1.0 / tot
+        inv_n = 1.0 / float(n)
+        for o in range(VocabSize):
+            gg = row[o] * inv_tot * inv_n
+            if o == ids[i]:
+                gg = gg - inv_n
+            for k in range(h):
+                dxf.data[i * h + k] = dxf.data[i * h + k] + gg * wte.data[o * h + k]
+                dwte.data[o * h + k] = dwte.data[o * h + k] + gg * xf.data[i * h + k]
+    # ln_f
+    rl = gpt2_layernorm_bwd(xf_in, lnf_g, lnf_b, dxf)
+    # backward qua cac block (tu cuoi ve dau), luu phang theo thu tu backward
+    rblocks = []
+    gx = rl[0]
+    for i in range(NLayers):
+        li = NLayers - 1 - i
+        rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
+                            w_qkv[li], b_qkv[li], w_proj[li], b_proj[li],
+                            ln2_g[li], ln2_b[li],
+                            w1[li], b1[li], w2[li], b2[li], gx)
+        gx = rb[0]
+        for j in range(1, 13):
+            rblocks.append(rb[j])
+    # embedding bwd: wte nhan grad tu 2 duong (tie)
+    gwte_e = op_embed_bwd(wte, ids, h, gx)
+    gwpe = op_embed_bwd(wpe, pos, h, gx)
+    for k in range(VocabSize * h):
+        dwte.data[k] = dwte.data[k] + gwte_e.data[k]
+    # xep theo layout: layer 0 truoc
     out = []
-    s = seed % 2147483648
-    for i in range(N_PARAM):
-        s = (s * 1103515245 + 12345) % 2147483648
-        out.append(float(s) / 2147483648.0 - 0.5)
+    out.append(dwte)
+    out.append(gwpe)
+    out.append(rl[1])
+    out.append(rl[2])
+    for li in range(NLayers):
+        base = (NLayers - 1 - li) * 12
+        for j in range(12):
+            out.append(rblocks[base + j])
     return out
 
-def mlp_logits(p: 'list[f32]', x: 'list[f32]') -> 'list[f32]':
-    # h = relu(W1 x + b1); z = W2 h + b2
-    h = _zeros(HID)
-    for o in range(HID):
-        acc = p[B1_OFF + o]
-        for i in range(IN_D):
-            acc = acc + p[o * IN_D + i] * x[i]
-        if acc < 0.0:
-            acc = 0.0
-        h[o] = acc
-    z = _zeros(OUT_D)
-    for o in range(OUT_D):
-        acc = p[B2_OFF + o]
-        for k in range(HID):
-            acc = acc + p[W2_OFF + o * HID + k] * h[k]
-        z[o] = acc
-    return z
-
-def mlp_loss(p: 'list[f32]', x: 'list[f32]', y: 'i64') -> 'f32':
-    z = mlp_logits(p, x)
-    mx = z[0]
-    for o in range(1, OUT_D):
-        if z[o] > mx:
-            mx = z[o]
-    s = 0.0
-    for o in range(OUT_D):
-        s = s + exp(z[o] - mx)
-    lse = mx + log(s)
-    return lse - z[y]
-
-def mlp_loss_grad(p: 'list[f32]', x: 'list[f32]', y: 'i64',
-                  gacc: 'list[f32]', scale: 'f32') -> 'f32':
-    # forward (recompute — giong G2), CE mean tren OUT_D lop, roi backward
-    hpre = _zeros(HID)
-    h = _zeros(HID)
-    for o in range(HID):
-        acc = p[B1_OFF + o]
-        for i in range(IN_D):
-            acc = acc + p[o * IN_D + i] * x[i]
-        hpre[o] = acc
-        if acc > 0.0:
-            h[o] = acc
-    z = _zeros(OUT_D)
-    for o in range(OUT_D):
-        acc = p[B2_OFF + o]
-        for k in range(HID):
-            acc = acc + p[W2_OFF + o * HID + k] * h[k]
-        z[o] = acc
-    mx = z[0]
-    for o in range(1, OUT_D):
-        if z[o] > mx:
-            mx = z[o]
-    e = _zeros(OUT_D)
-    s = 0.0
-    for o in range(OUT_D):
-        e[o] = exp(z[o] - mx)
-        s = s + e[o]
-    loss = mx + log(s) - z[y]
-    dz = _zeros(OUT_D)
-    for o in range(OUT_D):
-        dz[o] = e[o] / s
-    dz[y] = dz[y] - 1.0
-    # LUU Y: cross_entropy mean cua PyTorch trung binh theo BATCH (1 mau),
-    # KHONG chia cho so lop -> dz = softmax - onehot, khong chia OUT_D.
-    # grad W2, b2
-    for o in range(OUT_D):
-        gacc[B2_OFF + o] = gacc[B2_OFF + o] + scale * dz[o]
-        for k in range(HID):
-            gacc[W2_OFF + o * HID + k] = gacc[W2_OFF + o * HID + k] + scale * dz[o] * h[k]
-    # dh -> grad W1, b1 (ReLU mask theo hpre)
-    for k in range(HID):
-        acc = 0.0
-        for o in range(OUT_D):
-            acc = acc + dz[o] * p[W2_OFF + o * HID + k]
-        if hpre[k] <= 0.0:
-            acc = 0.0
-        gacc[B1_OFF + k] = gacc[B1_OFF + k] + scale * acc
-        for i in range(IN_D):
-            gacc[k * IN_D + i] = gacc[k * IN_D + i] + scale * acc * x[i]
-    return loss
-
-def mlp_eval_loss(p: 'list[f32]', xs: 'list[f32]', ys: 'list[i64]', n_samples: 'i64') -> 'f32':
+def gpt2_eval_loss(p: "Tensor", ids: 'list[i64]', kmask: 'list[i64]') -> 'f32':
+    # tinh loss chi tren vi tri kmask != 0 (labels=-100 trong PyTorch)
+    n = _sh0(p)
     tot = 0.0
-    for s in range(n_samples):
-        x = []
-        for i in range(IN_D):
-            x.append(xs[s * IN_D + i])
-        tot = tot + mlp_loss(p, x, ys[s])
-    return tot / float(n_samples)
+    cnt = 0
+    for i in range(n):
+        if kmask[i] != 0:
+            base = i * VocabSize
+            mx = p.data[base]
+            for o in range(1, VocabSize):
+                if p.data[base + o] > mx:
+                    mx = p.data[base + o]
+            s = 0.0
+            for o in range(VocabSize):
+                s = s + exp(p.data[base + o] - mx)
+            lse = mx + log(s)
+            tot = tot + (lse - p.data[base + ids[i]])
+            cnt = cnt + 1
+    if cnt == 0:
+        return 0.0
+    return tot / float(cnt)
 
-def mlp_eval_acc(p: 'list[f32]', xs: 'list[f32]', ys: 'list[i64]', n_samples: 'i64') -> 'f32':
+def gpt2_eval_acc(p: "Tensor", ids: 'list[i64]', kmask: 'list[i64]') -> 'f32':
+    # chon token co cao nhat theo logits (chi tren mask)
     ok = 0
-    for s in range(n_samples):
-        x = []
-        for i in range(IN_D):
-            x.append(xs[s * IN_D + i])
-        z = mlp_logits(p, x)
+    n = _sh0(p)
+    for i in range(n):
+        if kmask[i] == 0:
+            continue
+        base = i * VocabSize
         best = 0
-        for o in range(1, OUT_D):
-            if z[o] > z[best]:
+        for o in range(1, VocabSize):
+            if p.data[base + o] > p.data[base + best]:
                 best = o
-        if best == ys[s]:
+        if best == ids[i] and kmask[i] != 0:
             ok = ok + 1
-    return float(ok) / float(n_samples)
+    return float(ok) / float(n)
+
+def run_steps(opt: "AdamW", xs: 'list[f32]', ys: 'list[i64]',
+              n_samples: 'i64', accum: 'i64', n_steps: 'i64',
+              smp: "Sampler", kmask: 'list[i64]' = None) -> 'list[f32]':
+    losses = []
+    scale = 1.0 / float(accum)
+    for s in range(n_steps):
+        opt.zero_grad()
+        step_loss = 0.0
+        j = 0
+        while j < accum:
+            idx = smp.next_idx()
+            x = []
+            for i in range(IN_D):
+                x.append(xs[idx * IN_D + i])
+            # GPT-2 forward (recompute) + loss
+            logits = gpt2_forward([idx], [smp.draws % MaxPos],
+                                  wte, wpe,
+                                  ln1_g, ln1_b, w_qkv, b_qkv, w_proj, b_proj,
+                                  ln2_g, ln2_b, w1, b1, w2, b2,
+                                  lnf_g, lnf_b)
+            l = gpt2_loss(logits, [idx])
+            step_loss = step_loss + l
+            j = j + 1
+        opt.step()
+        losses.append(step_loss / float(accum))
+    return losses
+
+def ppl(loss: 'f32') -> 'f32':
+    return exp(loss)
+
+# ============================================================================
+#  Checkpoint: text, so thuc ghi bang BIT f32 -> save/load bit-exact
+# ============================================================================
+
+def _bits_line(vals: 'list[f32]') -> 'str':
+    parts = []
+    for i in range(len(vals)):
+        parts.append(str(f64_to_f32_bits(float(vals[i]))))
+    return " ".join(parts)
+
+def _ints_line(vals: 'list[i64]') -> 'str':
+    parts = []
+    for i in range(len(vals)):
+        parts.append(str(vals[i]))
+    return " ".join(parts)
+
+def _mk_file(dir: 'str', name: 'str') -> 'str':
+    return dir + "/" + name
+
+def ckpt_save(path: 'str', opt: "AdamW", smp: "Sampler") -> 'i32':
+    lines = []
+    lines.append("# TVTRAIN1")
+    lines.append("n=" + str(opt.n) + " t=" + str(opt.t)
+                 + " warmup=" + str(opt.warmup) + " total=" + str(opt.total))
+    lines.append("lr_max=" + str(opt.lr_max) + " lr_min=" + str(opt.lr_min)
+                 + " b1=" + str(opt.b1) + " b2=" + str(opt.b2)
+                 + " eps=" + str(opt.eps) + " wd=" + str(opt.wd)
+                 + " clip=" + str(opt.clip))
+    lines.append("draws=" + str(smp.draws) + " state=" + str(smp.state))
+    lines.append("#sec perm")
+    lines.append(_ints_line(smp.perm))
+    lines.append("#sec p")
+    lines.append(_bits_line(opt.p))
+    lines.append("#sec m")
+    lines.append(_bits_line(opt.m))
+    lines.append("#sec v")
+    lines.append(_bits_line(opt.v))
+    _w = path_write_text(path, "\n".join(lines) + "\n")
+    return 1
+
+def _line_kv(line: 'str', key: 'str') -> 'str':
+    parts = line.split(" ")
+    for i in range(len(parts)):
+        kv = parts[i].split("=")
+        if len(kv) == 2:
+            if kv[0] == key:
+                return kv[1]
+    return ""
+
+def _floats_of(ln: 'str') -> 'list[f32]':
+    out = []
+    toks = ln.split(" ")
+    for i in range(len(toks)):
+        if len(toks[i]) > 0:
+            out.append(float(toks[i]))
+    return out
+
+def _bits_of(ln: 'str') -> 'list[f32]':
+    out = []
+    toks = ln.split(" ")
+    for i in range(len(toks)):
+        if len(toks[i]) > 0:
+            out.append(f32_bits_to_f64(_i64tok(toks[i])))
+    return out
+
+def _i64tok(t: 'str') -> 'i64':
+    v = 0
+    neg = 0
+    start = 0
+    if len(t) > 0 and t[0] == "-":
+        neg = 1
+        start = 1
+    for i in range(start, len(t)):
+        v = v * 10 + (ord(t[i]) - 48)
+    if neg == 1:
+        return 0 - v
+    return v
+
+def _ints_of(ln: 'str') -> 'list[i64]':
+    out = []
+    toks = ln.split(" ")
+    for i in range(len(toks)):
+        if len(toks[i]) > 0:
+            out.append(_i64tok(toks[i]))
+    return out
+
+def _sec_after(lines: 'list[str]', name: 'str') -> 'str':
+    on = 0
+    for i in range(len(lines)):
+        ln = lines[i]
+        if len(ln) >= 5 and ln[0:5] == "#sec ":
+            if ln[5:] == name:
+                on = 1
+            else:
+                on = 0
+        elif on == 1:
+            return ln
+    return ""
+
+def ckpt_load(path: 'str', opt: "AdamW", smp: "Sampler") -> 'i32':
+    txt = path_read_text(path)
+    lines = txt.split("\n")
+    if len(lines) < 5:
+        return 0
+    hdr = lines[1]
+    t2 = lines[2]
+    t3 = lines[3]
+    opt.n = _i64tok(_line_kv(hdr, "n"))
+    opt.t = _i64tok(_line_kv(hdr, "t"))
+    opt.warmup = _i64tok(_line_kv(hdr, "warmup"))
+    opt.total = _i64tok(_line_kv(hdr, "total"))
+    opt.lr_max = float(_line_kv(t2, "lr_max"))
+    opt.lr_min = float(_line_kv(t2, "lr_min"))
+    opt.b1 = float(_line_kv(t2, "b1"))
+    opt.b2 = float(_line_kv(t2, "b2"))
+    opt.eps = float(_line_kv(t2, "eps"))
+    opt.wd = float(_line_kv(t2, "wd"))
+    opt.clip = float(_line_kv(t2, "clip"))
+    smp.draws = _i64tok(_line_kv(t3, "draws"))
+    smp.state = _i64tok(_line_kv(t3, "state"))
+    smp.perm = _ints_of(_sec_after(lines, "perm"))
+    opt.p = _bits_of(_sec_after(lines, "p"))
+    opt.m = _bits_of(_sec_after(lines, "m"))
+    opt.v = _bits_of(_sec_after(lines, "v"))
+    if len(opt.p) != opt.n or len(opt.m) != opt.n or len(opt.v) != opt.n:
+        return 0
+    return 1
+
 
 # ============================================================================
 #  Vong train: n_steps buoc, moi buoc accum mau, loss mean; tra loss tung buoc

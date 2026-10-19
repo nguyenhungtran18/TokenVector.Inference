@@ -83,6 +83,7 @@ class AdamW:
     eps: 'f32'
     wd: 'f32'
     clip: 'f32'
+    groups: 'list[i64]'
 
     def __init__(self, n: 'i64', warmup: 'i64', total: 'i64',
                  lr_max: 'f32', lr_min: 'f32',
@@ -102,6 +103,10 @@ class AdamW:
         self.eps = eps
         self.wd = wd
         self.clip = clip
+        # groups = kich thuoc tung nhom tham so de tinh grad norm giong
+        # PyTorch clip_grad_norm_ (L2 tung tensor roi L2 cac norm). Rong =
+        # layout MLP 4-8-3 (mac dinh cua trainer demo).
+        self.groups = []
 
     def zero_grad(self) -> 'i32':
         for i in range(self.n):
@@ -112,6 +117,11 @@ class AdamW:
         return lr_at(self.t, self.warmup, self.total, self.lr_max, self.lr_min)
 
     def grad_norm(self) -> 'f32':
+        if len(self.groups) > 0:
+            return _norm_groups(self.g, self.groups)
+        return self._norm_mlp()
+
+    def _norm_mlp(self) -> 'f32':
         # khop PyTorch clip_grad_norm_: L2 tung tham so, roi L2 tren cac norm
         s1 = 0.0
         i = 0
@@ -206,6 +216,20 @@ class Sampler:
         self.draws = self.draws + 1
         return idx
 
+def _norm_groups(g: 'list[f32]', groups: 'list[i64]') -> 'f32':
+    # PyTorch clip_grad_norm_: norm = L2( norm(g1), norm(g2), ... )
+    tot = 0.0
+    off = 0
+    for k in range(len(groups)):
+        cnt = groups[k]
+        s = 0.0
+        for i in range(cnt):
+            s = s + g[off + i] * g[off + i]
+        nrm = sqrt(s)
+        tot = tot + nrm * nrm
+        off = off + cnt
+    return sqrt(tot)
+
 # Factory (constructor KHONG export qua module — quy tac compiler)
 def new_adamw(n: 'i64', warmup: 'i64', total: 'i64',
               lr_max: 'f32', lr_min: 'f32',
@@ -214,6 +238,13 @@ def new_adamw(n: 'i64', warmup: 'i64', total: 'i64',
 
 def new_sampler(n: 'i64', seed: 'i64') -> "Sampler":
     return Sampler(n, seed)
+
+def new_adamw_g(n: 'i64', groups: 'list[i64]', warmup: 'i64', total: 'i64',
+                lr_max: 'f32', lr_min: 'f32',
+                b1: 'f32', b2: 'f32', eps: 'f32', wd: 'f32', clip: 'f32') -> "AdamW":
+    o = AdamW(n, warmup, total, lr_max, lr_min, b1, b2, eps, wd, clip)
+    o.groups = groups
+    return o
 
 # ============================================================================
 #  Model MLP tren vector tham so PHANG

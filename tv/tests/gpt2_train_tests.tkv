@@ -1,0 +1,141 @@
+import tv.training.gpt2_ref
+import tv.training.gpt2_train
+import tv.training.trainer
+import tv.runtime.f32_bits
+
+# ============================================================================
+#  G4 x G2 — TRAIN THAT TREN GPT-2 NHO (2026-10-19)
+# ----------------------------------------------------------------------------
+#  [1] so tham so / nhom grad norm dung
+#  [2] train 12 buoc tren 1 chuoi -> loss GIAM (overfit 1 mau)
+#  [3] resume bit-exact: 3 + save/load + 3 == 6 lien (tung bit cua trong so)
+#  [4] checkpoint ghi/doc duoc voi model that (~118k tham so)
+#
+#  Chay: tkvc tv\tests\gpt2_train_tests.tkv ra.exe main
+# ============================================================================
+
+FIX_DIR = "tv/tests/fixtures/"
+TMP = "tv/tests/_tmp_gpt2_train"
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_ints(path: 'str') -> 'list[i64]':
+    txt = read_file(path)
+    lines = txt.split("\n")
+    out = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                out.append(int(float(toks[j])))
+    return out
+
+def _bits_equal(a: 'list[f32]', b: 'list[f32]') -> 'i32':
+    if len(a) != len(b):
+        return 0
+    for i in range(len(a)):
+        if f64_to_f32_bits(float(a[i])) != f64_to_f32_bits(float(b[i])):
+            return 0
+    return 1
+
+def _line(ok: 'i32', msg: 'str') -> 'i32':
+    if ok == 1:
+        print("  [PASS] " + msg)
+        return 0
+    print("  [FAIL] " + msg)
+    return 1
+
+def _mk_opt(n: 'i64', groups: 'list[i64]', total: 'i64') -> "AdamW":
+    return new_adamw_g(n, groups, 2, total, 0.05, 0.0025, 0.9, 0.999,
+                       0.00000001, 0.0, 1.0)
+
+def main() -> 'i32':
+    fails = 0
+    cases = 0
+    print("=== G4 x G2: train GPT-2 nho ===")
+
+    ids = load_ints(FIX_DIR + "g2_ids.txt")
+    pos = load_ints(FIX_DIR + "g2_pos.txt")
+
+    ps = gpt2_init(7)
+    n = gpt2_n_param(ps)
+    groups = gpt2_group_sizes(ps)
+    cases = cases + 1
+    ok = 1
+    if len(groups) != 28:
+        ok = 0
+    _s = 0
+    for i in range(len(groups)):
+        _s = _s + groups[i]
+    if _s != n:
+        ok = 0
+    fails = fails + _line(ok, "tham so: n=" + str(n) + ", 28 nhom, tong nhom = n")
+
+    # ---- [1] loss truoc train (phai huu han) + 12 buoc ---------------------
+    l_init = gpt2_loss_of(ps, ids, pos)
+    opt = _mk_opt(n, groups, 12)
+    gpt2_copy_into(opt.p, gpt2_flatten(ps))
+    t0 = now_ms()
+    losses = gpt2_train_steps(opt, ps, ids, pos, 12)
+    dt = now_ms() - t0
+    cases = cases + 1
+    fails = fails + _line((losses[11] < 0.5 * losses[0]) * 1,
+                          "overfit 1 chuoi: loss " + str(losses[0]) + " -> " + str(losses[11])
+                          + " (" + str(dt) + " ms cho 12 buoc)")
+    cases = cases + 1
+    ok2 = 1
+    if losses[11] >= losses[0]:
+        ok2 = 0
+    if l_init != l_init:
+        ok2 = 0
+    fails = fails + _line(ok2, "loss giam don dieu theo moc 1/6/12: "
+                          + str(losses[0]) + " / " + str(losses[5]) + " / " + str(losses[11]))
+
+    # ---- [2] resume bit-exact ---------------------------------------------
+    pa = gpt2_init(7)
+    oa = _mk_opt(n, groups, 6)
+    gpt2_copy_into(oa.p, gpt2_flatten(pa))
+    la = gpt2_train_steps(oa, pa, ids, pos, 6)
+    fa = gpt2_flatten(pa)
+
+    pb = gpt2_init(7)
+    ob = _mk_opt(n, groups, 6)
+    gpt2_copy_into(ob.p, gpt2_flatten(pb))
+    sa = new_sampler(1, 0)
+    run3 = gpt2_train_steps(ob, pb, ids, pos, 3)
+    os_mkdir(TMP)
+    _sv = ckpt_save(TMP + "/gpt2_ck.txt", ob, sa)
+    oc = _mk_opt(n, groups, 6)
+    sc = new_sampler(1, 0)
+    _ld = ckpt_load(TMP + "/gpt2_ck.txt", oc, sc)
+    pc = gpt2_init(7)
+    gpt2_unflatten(pc, oc.p)
+    run3b = gpt2_train_steps(oc, pc, ids, pos, 3)
+    fc = gpt2_flatten(pc)
+
+    cases = cases + 1
+    ok3 = 1
+    if _sv != 1 or _ld != 1:
+        ok3 = 0
+    if _bits_equal(fa, fc) == 0:
+        ok3 = 0
+    fails = fails + _line(ok3, "resume bit-exact: 3 + save/load + 3 == 6 lien ("
+                          + str(n) + " tham so, tung bit)")
+
+    cases = cases + 1
+    ok4 = 1
+    for i in range(3):
+        if run3b[i] != la[3 + i]:
+            ok4 = 0
+    fails = fails + _line(ok4, "resume: loss 3 buoc sau khi load giong chay lien")
+    print("  [INFO] loss 6 buoc: " + str(la[0]) + " -> " + str(la[5]))
+
+    print("=== G4xG2 cases=" + str(cases) + " fails=" + str(fails) + " ===")
+    return fails
