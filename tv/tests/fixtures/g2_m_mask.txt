@@ -1,0 +1,2 @@
+# n=8  attention_mask
+1 1 1 1 1 1 0 0

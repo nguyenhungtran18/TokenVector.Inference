@@ -1,7 +1,7 @@
 ﻿# GPT-2 reference — G2 (ROADMAP_TRAIN.md)
 # ---------------------------------------------------
-# Kien truc GIONG HF `gpt2`, thu nho de chung minh thuat toan:
-#   vocab 256, n_embd 64, n_head 4, n_layer 2, max_pos 32
+# Kien truc GIONG HF `gpt2`, 124M tham so (de chinh minh thuat toan va train):
+#   vocab 50257, n_embd 768, n_head 12, n_layer 12, max_pos 1024
 #
 # Moi block: ln -> attn(QKV + causal mask + softmax) -> residual
 #            -> ln -> mlp(linear -> gelu erf -> linear) -> residual
@@ -25,12 +25,12 @@
 import tv.training.ops
 
 # ---- thong so (khop fixture g2_*) -----------------------------------------
-VocabSize = 256
-HiddenSize = 64
-NHeads = 4
-HeadDim = 16
-NLayers = 2
-MaxPos = 32
+VocabSize = 50257
+HiddenSize = 768
+NHeads = 12
+HeadDim = 64
+NLayers = 12
+MaxPos = 1024
 EPS = 1e-6
 
 # ---- helpers --------------------------------------------------------------
@@ -486,3 +486,182 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
         for j in range(12):
             out.append(rblocks[base + j])
     return out
+
+# ============================================================================
+#  G2 PHAM VI BO SUNG (2026-10-19): khoi tao trong so + padding mask
+# ----------------------------------------------------------------------------
+#  gpt2_init(seed): normal(0, 0.02) tat dinh (LCG 31-bit + Box-Muller), thu tu
+#  phat sinh CO DINH: wte, wpe, lnf_g, lnf_b, roi tung layer 12 tham so.
+#  Tra ve list[Tensor] theo DUNG layout dau ra cua gpt2_backward.
+#
+#  Mask path: giong HF `attention_mask` — chan KEY o vi tri pad trong attention
+#  (causal + pad). Gate G2 chi doi forward/loss cho duong mask.
+# ============================================================================
+
+def _gi_uniform(state: 'i64') -> 'i64':
+    return (state * 1103515245 + 12345) % 2147483648
+
+def _gi_noise(n: 'i64', seed: 'i64') -> 'list[f32]':
+    out = []
+    s = seed % 2147483648
+    i = 0
+    while i < n:
+        s = _gi_uniform(s)
+        u1 = (float(s) + 0.5) / 2147483648.0
+        s = _gi_uniform(s)
+        u2 = float(s) / 2147483648.0
+        out.append(sqrt(0.0 - 2.0 * log(u1)) * cos(6.283185307179586 * u2) * 0.02)
+        i = i + 1
+    return out
+
+def _gi_ones(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(1.0)
+    return out
+
+def _gi_zeros(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(0.0)
+    return out
+
+def gpt2_init(seed: 'i64') -> 'list[Tensor]':
+    ps = []
+    ps.append(t_new(_gi_noise(VocabSize * HiddenSize, seed + 1), [VocabSize, HiddenSize]))
+    ps.append(t_new(_gi_noise(MaxPos * HiddenSize, seed + 2), [MaxPos, HiddenSize]))
+    ps.append(t_new(_gi_ones(HiddenSize), [HiddenSize]))
+    ps.append(t_new(_gi_zeros(HiddenSize), [HiddenSize]))
+    for li in range(NLayers):
+        sd = seed + 10 + li * 100
+        ps.append(t_new(_gi_ones(HiddenSize), [HiddenSize]))
+        ps.append(t_new(_gi_zeros(HiddenSize), [HiddenSize]))
+        ps.append(t_new(_gi_noise(HiddenSize * 3 * HiddenSize, sd + 1), [HiddenSize, 3 * HiddenSize]))
+        ps.append(t_new(_gi_zeros(3 * HiddenSize), [3 * HiddenSize]))
+        ps.append(t_new(_gi_noise(HiddenSize * HiddenSize, sd + 2), [HiddenSize, HiddenSize]))
+        ps.append(t_new(_gi_zeros(HiddenSize), [HiddenSize]))
+        ps.append(t_new(_gi_ones(HiddenSize), [HiddenSize]))
+        ps.append(t_new(_gi_zeros(HiddenSize), [HiddenSize]))
+        ps.append(t_new(_gi_noise(HiddenSize * 4 * HiddenSize, sd + 3), [HiddenSize, 4 * HiddenSize]))
+        ps.append(t_new(_gi_zeros(4 * HiddenSize), [4 * HiddenSize]))
+        ps.append(t_new(_gi_noise(4 * HiddenSize * HiddenSize, sd + 4), [4 * HiddenSize, HiddenSize]))
+        ps.append(t_new(_gi_zeros(HiddenSize), [HiddenSize]))
+    return ps
+
+# ---- attention co padding mask (chan KEY) ----------------------------------
+def gpt2_attention_m(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
+                     w_proj: "Tensor", b_proj: "Tensor", n: 'i64',
+                     kmask: 'list[i64]') -> "Tensor":
+    h = HiddenSize
+    hd = HeadDim
+    qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h)
+    out = t_zeros([n, h])
+    inv = 1.0 / sqrt(float(hd))
+    for t in range(n):
+        ctx = []
+        for d in range(h):
+            ctx.append(0.0)
+        for head in range(NHeads):
+            ho = head * hd
+            qv = []
+            for d in range(hd):
+                qv.append(qkv.data[t * 3 * h + ho + d])
+            # chi giu key u <= t VA kmask[u] != 0
+            scores = []
+            vidx = []
+            for u in range(t + 1):
+                if kmask[u] != 0:
+                    s = 0.0
+                    for d in range(hd):
+                        s = s + qv[d] * qkv.data[u * 3 * h + h + ho + d]
+                    scores.append(s * inv)
+                    vidx.append(u)
+            nv = len(scores)
+            if nv > 0:
+                mx = scores[0]
+                for k in range(1, nv):
+                    if scores[k] > mx:
+                        mx = scores[k]
+                tot = 0.0
+                for k in range(nv):
+                    e = exp(scores[k] - mx)
+                    scores[k] = e
+                    tot = tot + e
+                inv_tot = 1.0 / tot
+                for d in range(hd):
+                    acc = 0.0
+                    for k in range(nv):
+                        acc = acc + scores[k] * qkv.data[vidx[k] * 3 * h + 2 * h + ho + d]
+                    ctx[ho + d] = acc * inv_tot
+        for o in range(h):
+            acc = b_proj.data[o]
+            for r in range(h):
+                acc = acc + ctx[r] * w_proj.data[r * h + o]
+            out.data[t * h + o] = acc
+    return out
+
+def gpt2_block_m(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
+                 w_qkv: "Tensor", b_qkv: "Tensor", w_proj: "Tensor", b_proj: "Tensor",
+                 ln2_g: "Tensor", ln2_b: "Tensor",
+                 w1: "Tensor", b1: "Tensor", w2: "Tensor", b2: "Tensor",
+                 kmask: 'list[i64]') -> "Tensor":
+    n = _sh0(x)
+    h = _sh1(x)
+    a = gpt2_layernorm(x, ln1_g, ln1_b)
+    a = gpt2_attention_m(a, w_qkv, b_qkv, w_proj, b_proj, n, kmask)
+    r = t_zeros([n, h])
+    for i in range(n * h):
+        r.data[i] = x.data[i] + a.data[i]
+    m = gpt2_layernorm(r, ln2_g, ln2_b)
+    m = gpt2_mlp(m, w1, b1, w2, b2, n)
+    out = t_zeros([n, h])
+    for i in range(n * h):
+        out.data[i] = r.data[i] + m.data[i]
+    return out
+
+def gpt2_forward_m(ids: 'list[i64]', pos: 'list[i64]', kmask: 'list[i64]',
+                   wte: "Tensor", wpe: "Tensor",
+                   ln1_g: 'list[Tensor]', ln1_b: 'list[Tensor]',
+                   w_qkv: 'list[Tensor]', b_qkv: 'list[Tensor]',
+                   w_proj: 'list[Tensor]', b_proj: 'list[Tensor]',
+                   ln2_g: 'list[Tensor]', ln2_b: 'list[Tensor]',
+                   w1: 'list[Tensor]', b1: 'list[Tensor]',
+                   w2: 'list[Tensor]', b2: 'list[Tensor]',
+                   lnf_g: "Tensor", lnf_b: "Tensor") -> "Tensor":
+    n = len(ids)
+    h = HiddenSize
+    x = gpt2_embed(ids, pos, wte, wpe)
+    for i in range(NLayers):
+        x = gpt2_block_m(x, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
+                         ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i], kmask)
+    x = gpt2_layernorm(x, lnf_g, lnf_b)
+    logits = t_zeros([n, VocabSize])
+    for i in range(n):
+        for o in range(VocabSize):
+            acc = 0.0
+            for k in range(h):
+                acc = acc + x.data[i * h + k] * wte.data[o * h + k]
+            logits.data[i * VocabSize + o] = acc
+    return logits
+
+# Cross entropy CHI tren vi tri kmask != 0 (giong labels=-100 cua PyTorch).
+def gpt2_loss_m(logits: "Tensor", ids: 'list[i64]', kmask: 'list[i64]') -> 'f32':
+    n = _sh0(logits)
+    tot = 0.0
+    cnt = 0
+    for i in range(n):
+        if kmask[i] != 0:
+            base = i * VocabSize
+            mx = logits.data[base]
+            for o in range(1, VocabSize):
+                if logits.data[base + o] > mx:
+                    mx = logits.data[base + o]
+            s = 0.0
+            for o in range(VocabSize):
+                s = s + exp(logits.data[base + o] - mx)
+            lse = mx + log(s)
+            tot = tot + (lse - logits.data[base + ids[i]])
+            cnt = cnt + 1
+    if cnt == 0:
+        return 0.0
+    return tot / float(cnt)

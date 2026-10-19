@@ -1,0 +1,219 @@
+import tv.training.gpt2_ref
+
+# ============================================================================
+#  G2 PHAM VI BO SUNG (2026-10-19)
+# ----------------------------------------------------------------------------
+#  [1] gpt2_init(seed): normal(0, 0.02) tat dinh (cung seed -> cung trong so,
+#      khac seed -> khac), mean ~ 0, std ~ 0.02 tren 16384 mau.
+#  [2] padding mask: forward/loss voi attention_mask khop HF (fixture g2_m_*).
+#  [3] invariant: vi tri hop le khong bi anh huong boi pad o CUOI (causal) —
+#      logits 6 dong dau khi co pad == logits khi chay rieng 6 token dau.
+#
+#  Fixture sinh boi tools\gen_gpt2_fixture.py (HF gpt2 thu nho).
+#  Chay: tkvc tv\tests\gpt2_scope_tests.tkv ra.exe main
+# ============================================================================
+
+FIX_DIR = "tv/tests/fixtures/"
+TOL = 1e-5
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> "list[f32]":
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                vals.append(float(toks[j]))
+    return vals
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+def _abs(v: 'f32') -> 'f32':
+    if v < 0.0:
+        return 0.0 - v
+    return v
+
+def diff(a: 'list[f32]', b: 'list[f32]') -> 'f32':
+    n = len(a)
+    if len(b) < n:
+        n = len(b)
+    m = 0.0
+    for i in range(n):
+        d = _abs(a[i] - b[i])
+        if d > m:
+            m = d
+    if len(a) != len(b):
+        return 1000000.0
+    return m
+
+def report(name: 'str', d: 'f32', tol: 'f32') -> 'i32':
+    if d <= tol:
+        print("  [PASS] " + name + "  max_abs_diff=" + str(d))
+        return 0
+    print("  [FAIL] " + name + "  max_abs_diff=" + str(d) + "  tol=" + str(tol))
+    return 1
+
+def _head6(xs: 'list[f32]', nrows: 'i64', cols: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(nrows * cols):
+        out.append(xs[i])
+    return out
+
+def _tflat(t: "Tensor") -> 'list[f32]':
+    out = []
+    for i in range(len(t.data)):
+        out.append(t.data[i])
+    return out
+
+def _eq_bits(a: 'list[f32]', b: 'list[f32]') -> 'i32':
+    if len(a) != len(b):
+        return 0
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            return 0
+    return 1
+
+def main() -> 'i32':
+    fails = 0
+    cases = 0
+    print("=== G2 bo sung: init (0,0.02) + padding mask ===")
+
+    # ---- [1] gpt2_init: tat dinh + thong ke --------------------------------
+    p1 = gpt2_init(7)
+    p2 = gpt2_init(7)
+    p3 = gpt2_init(8)
+    w1 = _tflat(p1[0])
+    w2 = _tflat(p2[0])
+    w3 = _tflat(p3[0])
+    cases = cases + 1
+    ok1 = 1
+    if _eq_bits(w1, w2) == 0:
+        ok1 = 0
+    if _eq_bits(w1, w3) == 1:
+        ok1 = 0
+    if len(p1) != 28:
+        ok1 = 0
+    if ok1 == 1:
+        print("  [PASS] init: cung seed bit-for-bit, khac seed khac; 28 tensor")
+    else:
+        print("  [FAIL] init: tat dinh/thu tu sai (n=" + str(len(p1)) + ")")
+        fails = fails + 1
+    s = 0.0
+    for i in range(len(w1)):
+        s = s + w1[i]
+    mu = s / float(len(w1))
+    v = 0.0
+    for i in range(len(w1)):
+        d = w1[i] - mu
+        v = v + d * d
+    sd = sqrt(v / float(len(w1)))
+    cases = cases + 1
+    if _abs(mu) <= 0.0005 and _abs(sd - 0.02) <= 0.001:
+        print("  [PASS] init: mean=" + str(mu) + " std=" + str(sd) + " (~0 / ~0.02)")
+    else:
+        print("  [FAIL] init: mean=" + str(mu) + " std=" + str(sd))
+        fails = fails + 1
+
+    # ---- load trong so HF ---------------------------------------------------
+    VOCAB = VocabSize
+    H = HiddenSize
+    NL = NLayers
+
+    def tw(name: 'str') -> "Tensor":
+        return t_new(load_floats(FIX_DIR + "g2_w_" + name + ".txt"), [1])
+
+    wte = t_new(load_floats(FIX_DIR + "g2_w_wte.txt"), [VOCAB, H])
+    wpe = t_new(load_floats(FIX_DIR + "g2_w_wpe.txt"), [MaxPos, H])
+    ln1_g = []
+    ln1_b = []
+    w_qkv = []
+    b_qkv = []
+    w_proj = []
+    b_proj = []
+    ln2_g = []
+    ln2_b = []
+    mw1 = []
+    mb1 = []
+    mw2 = []
+    mb2 = []
+    for i in range(NL):
+        ln1_g.append(tw("ln1_g%d" % i))
+        ln1_b.append(tw("ln1_b%d" % i))
+        w_qkv.append(tw("attn_w%d" % i))
+        b_qkv.append(tw("attn_b%d" % i))
+        w_proj.append(tw("proj_w%d" % i))
+        b_proj.append(tw("proj_b%d" % i))
+        ln2_g.append(tw("ln2_g%d" % i))
+        ln2_b.append(tw("ln2_b%d" % i))
+        mw1.append(tw("mlp_w1%d" % i))
+        mb1.append(tw("mlp_b1%d" % i))
+        mw2.append(tw("mlp_w2%d" % i))
+        mb2.append(tw("mlp_b2%d" % i))
+    lnf_g = tw("lnf_g")
+    lnf_b = tw("lnf_b")
+
+    # ---- [2] padding mask vs HF --------------------------------------------
+    ids = load_ints(FIX_DIR + "g2_m_ids.txt")
+    kmask = load_ints(FIX_DIR + "g2_m_mask.txt")
+    pos = load_ints(FIX_DIR + "g2_m_pos.txt")
+    T = len(ids)
+
+    x = gpt2_embed(ids, pos, wte, wpe)
+    cases = cases + 1
+    fails = fails + report("mask: hidden h0 (embed)",
+                           diff(_tflat(x), load_floats(FIX_DIR + "g2_m_h0.txt")), TOL)
+    for i in range(NL):
+        x = gpt2_block_m(x, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
+                         ln2_g[i], ln2_b[i], mw1[i], mb1[i], mw2[i], mb2[i], kmask)
+        cases = cases + 1
+        fails = fails + report("mask: hidden h" + str(i + 1) + " (block " + str(i) + ")",
+                               diff(_tflat(x), load_floats(FIX_DIR + "g2_m_h" + str(i + 1) + ".txt")),
+                               TOL)
+
+    xf = gpt2_layernorm(x, lnf_g, lnf_b)
+    cases = cases + 1
+    fails = fails + report("mask: hidden sau ln_f",
+                           diff(_tflat(xf), load_floats(FIX_DIR + "g2_m_lnf.txt")), TOL)
+
+    logits_m = gpt2_forward_m(ids, pos, kmask, wte, wpe,
+                              ln1_g, ln1_b, w_qkv, b_qkv, w_proj, b_proj,
+                              ln2_g, ln2_b, mw1, mb1, mw2, mb2, lnf_g, lnf_b)
+    cases = cases + 1
+    fails = fails + report("mask: logits", diff(_tflat(logits_m), load_floats(FIX_DIR + "g2_m_logits.txt")), TOL)
+
+    lm = gpt2_loss_m(logits_m, ids, kmask)
+    cases = cases + 1
+    fails = fails + report("mask: loss (chi vi tri mask=1)",
+                           _abs(lm - load_floats(FIX_DIR + "g2_m_loss.txt")[0]), TOL)
+
+    # ---- [3] invariant: pad o cuoi khong doi 6 dong dau ---------------------
+    ids6 = []
+    pos6 = []
+    for i in range(6):
+        ids6.append(ids[i])
+        pos6.append(pos[i])
+    logits6 = gpt2_forward(ids6, pos6, wte, wpe,
+                           ln1_g, ln1_b, w_qkv, b_qkv, w_proj, b_proj,
+                           ln2_g, ln2_b, mw1, mb1, mw2, mb2, lnf_g, lnf_b)
+    cases = cases + 1
+    fails = fails + report("invariant: 6 dong dau khong doi khi them pad",
+                           diff(_head6(_tflat(logits6), 6, VOCAB),
+                                _head6(_tflat(logits_m), 6, VOCAB)), TOL)
+
+    print("=== G2 scope cases=" + str(cases) + " fails=" + str(fails) + " ===")
+    return fails

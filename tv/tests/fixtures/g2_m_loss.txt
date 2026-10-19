@@ -1,0 +1,2 @@
+# n=1  CE mean chi tren vi tri mask=1
+4.90788031
