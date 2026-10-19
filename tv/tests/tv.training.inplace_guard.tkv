@@ -1,0 +1,74 @@
+# G1 — PHAT HIEN IN-PLACE NGUY HIEM (dong bo ROADMAP G1)
+#
+# Van de: nhieu op backward can doc lai input (vi du silu, gelu, attention).
+# Neu code ghi de len input do TRUOC khi backward chay, gradient se sai am
+# tham — khong co exception, chi ket qua lech.
+#
+# Guard nay la so ghi nhan "tensor da duoc mot op can cho backward" va chan
+# ghi de theo ten logic (khong can reference equality cua list):
+#   guard_consume(g, name)   - op doc tensor, se can lai khi backward
+#   guard_release(g, name)   - backward da chay xong, ghi de luc nay an toan
+#   guard_write(g, name)     - 1 = an toan, 0 = NGUY HIEM (dong thoi tang
+#                              violations — de test khang dinh da bat duoc)
+#   guard_check(g, name)     - nhu guard_write nhung raise ValueError
+#
+# Quy uoc: moi tensor co `name` duy nhat (Tensor.name) truoc khi vao tape.
+# Day la buoc "phat hien" o muc API; chua tu dong chen vao moi op (lam o G5/G6
+# khi co nhieu backend).
+
+class InplaceGuard:
+    _ok: 'i64'
+    names: 'list[str]'
+    used: 'list[i64]'
+    released: 'list[i64]'
+    violations: 'i64'
+
+    def __init__(self):
+        self.names = []
+        self.used = []
+        self.released = []
+        self.violations = 0
+
+def new_guard() -> "InplaceGuard":
+    return InplaceGuard()
+
+def _ig_idx(g: "InplaceGuard", name: 'str') -> 'i64':
+    for i in range(len(g.names)):
+        if g.names[i] == name:
+            return i
+    return -1
+
+def guard_consume(g: "InplaceGuard", name: 'str') -> 'i32':
+    i = _ig_idx(g, name)
+    if i < 0:
+        g.names.append(name)
+        g.used.append(1)
+        g.released.append(0)
+    else:
+        g.used[i] = g.used[i] + 1
+        if g.released[i] != 0:
+            g.released[i] = 0
+    return 0
+
+def guard_release(g: "InplaceGuard", name: 'str') -> 'i32':
+    i = _ig_idx(g, name)
+    if i >= 0:
+        g.released[i] = 1
+    return 0
+
+def guard_write(g: "InplaceGuard", name: 'str') -> 'i32':
+    i = _ig_idx(g, name)
+    if i < 0:
+        return 1
+    if g.used[i] > 0 and g.released[i] == 0:
+        g.violations = g.violations + 1
+        return 0
+    return 1
+
+def guard_check(g: "InplaceGuard", name: 'str') -> 'i32':
+    if guard_write(g, name) == 0:
+        raise ValueError("in-place write vao '" + name + "' khi backward con can")
+    return 0
+
+def guard_violations(g: "InplaceGuard") -> 'i64':
+    return g.violations

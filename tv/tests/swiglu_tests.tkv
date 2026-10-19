@@ -1,0 +1,119 @@
+import tv.training.ops
+
+# ============================================================================
+#  G1 — SWIGLU (dong bo ROADMAP: "gelu, silu, swiglu")
+# ----------------------------------------------------------------------------
+#  [1] forward khop PyTorch: y = silu(gate) * value
+#  [2] backward khop torch.autograd (ca hai nua gate/value)
+#  [3] gradcheck bang sai phan huu han (khong dua vao PyTorch)
+#
+#  Fixture: tools\gen_swiglu_fixture.py (torch 2.14, float32, seed 11).
+#  Chay: tkvc tv\tests\swiglu_tests.tkv ra.exe main
+# ============================================================================
+
+FIX_DIR = "tv/tests/fixtures/"
+N = 4
+D = 8
+TOL = 1e-6
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> "list[f32]":
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                vals.append(float(toks[j]))
+    return vals
+
+def _abs(v: 'f32') -> 'f32':
+    if v < 0.0:
+        return 0.0 - v
+    return v
+
+def diff(a: 'list[f32]', b: 'list[f32]') -> 'f32':
+    n = len(a)
+    if len(b) < n:
+        n = len(b)
+    m = 0.0
+    for i in range(n):
+        d = _abs(a[i] - b[i])
+        if d > m:
+            m = d
+    if len(a) != len(b):
+        return 1000000.0
+    return m
+
+def report(name: 'str', d: 'f32', tol: 'f32') -> 'i32':
+    if d <= tol:
+        print("  [PASS] " + name + "  max_abs_diff=" + str(d))
+        return 0
+    print("  [FAIL] " + name + "  max_abs_diff=" + str(d) + "  tol=" + str(tol))
+    return 1
+
+def _loss_sw(xs: 'list[f32]', gys: 'list[f32]') -> 'f32':
+    x = t_new(xs, [N, 2 * D])
+    y = op_swiglu_fwd(x, N, D)
+    s = 0.0
+    for i in range(N * D):
+        s = s + y.data[i] * gys[i]
+    return s
+
+def _copy_with(xs: 'list[f32]', idx: 'i64', delta: 'f32') -> 'list[f32]':
+    out = []
+    for i in range(len(xs)):
+        if i == idx:
+            out.append(xs[i] + delta)
+        else:
+            out.append(xs[i])
+    return out
+
+def main() -> 'i32':
+    fails = 0
+    cases = 0
+    print("=== G1: swiglu (forward + backward + gradcheck) ===")
+
+    xs = load_floats(FIX_DIR + "g_sw_x.txt")
+    ys = load_floats(FIX_DIR + "g_sw_y.txt")
+    gys = load_floats(FIX_DIR + "g_sw_gy.txt")
+    gxs = load_floats(FIX_DIR + "g_sw_gx.txt")
+    if len(xs) != N * 2 * D or len(gxs) != N * 2 * D:
+        print("  [FAIL] fixture sai kich thuoc")
+        return 1
+
+    x = t_new(xs, [N, 2 * D])
+    y = op_swiglu_fwd(x, N, D)
+    cases = cases + 1
+    fails = fails + report("forward", diff(y.data, ys), TOL)
+
+    gy = t_new(gys, [N, D])
+    gx = op_swiglu_bwd(x, gy, N, D)
+    cases = cases + 1
+    fails = fails + report("backward (gate + value)", diff(gx.data, gxs), TOL)
+
+    # ---- gradcheck sai phan huu han ---------------------------------------
+    h = 0.001
+    an = gx.data
+    worst = 0.0
+    for i in range(len(xs)):
+        lp = _loss_sw(_copy_with(xs, i, h), gys)
+        lm = _loss_sw(_copy_with(xs, i, 0.0 - h), gys)
+        num = (lp - lm) / (2.0 * h)
+        d = _abs(num - an[i])
+        if d > worst:
+            worst = d
+    cases = cases + 1
+    fails = fails + report("gradcheck (sai phan huu han, h=1e-3)", worst, 0.002)
+
+    print("=== G1 swiglu cases=" + str(cases) + " fails=" + str(fails) + " ===")
+    return fails

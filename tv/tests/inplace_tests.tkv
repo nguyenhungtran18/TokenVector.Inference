@@ -1,0 +1,68 @@
+import tv.training.inplace_guard
+
+# ============================================================================
+#  G1 — IN-PLACE GUARD (ROADMAP: "phat hien in-place nguy hiem")
+# ----------------------------------------------------------------------------
+#  [1] tensor chua duoc op nao can -> ghi de an toan
+#  [2] tensor da consume (backward se can) -> ghi de bi BAT, violations +1
+#  [3] sau release (backward xong) -> ghi de lai an toan
+#  [4] guard_check raise ValueError (khong am tham bo qua)
+#  [5] guard khong "luon bao dong": ten khac / tensor khac van an toan
+#
+#  Chay: tkvc tv\tests\inplace_tests.tkv ra.exe main
+# ============================================================================
+
+def _line(ok: 'i32', msg: 'str') -> 'i32':
+    if ok == 1:
+        print("  [PASS] " + msg)
+        return 0
+    print("  [FAIL] " + msg)
+    return 1
+
+def main() -> 'i32':
+    fails = 0
+    cases = 0
+    print("=== G1: phat hien in-place nguy hiem ===")
+
+    g = new_guard()
+
+    # [1] chua consume -> an toan
+    cases = cases + 1
+    fails = fails + _line((guard_write(g, "x") == 1) * 1, "ghi de tensor chua ai doc: an toan")
+
+    # [2] consume -> nguy hiem, violations tang
+    _c = guard_consume(g, "x")
+    cases = cases + 1
+    ok = 0
+    if guard_write(g, "x") == 0:
+        ok = 1
+    if guard_violations(g) != 1:
+        ok = 0
+    fails = fails + _line(ok, "ghi de sau khi op can backward: BI BAT (violations=1)")
+
+    # [3] release -> an toan tro lai
+    _r = guard_release(g, "x")
+    cases = cases + 1
+    fails = fails + _line((guard_write(g, "x") == 1) * 1, "sau khi backward xong (release): an toan")
+
+    # [4] guard_check raise
+    _c2 = guard_consume(g, "y")
+    cases = cases + 1
+    caught = 0
+    try:
+        _x = guard_check(g, "y")
+    except Exception:
+        caught = 1
+    fails = fails + _line(caught * 1, "guard_check nem ValueError khi ghi de nguy hiem")
+
+    # [5] khong bao dong sai: ten khac an toan, va chi 'y' bi danh dau
+    cases = cases + 1
+    ok5 = 1
+    if guard_write(g, "z") != 1:
+        ok5 = 0
+    if guard_violations(g) != 2:
+        ok5 = 0
+    fails = fails + _line(ok5 * 1, "khong bao dong sai: 'z' an toan, violations=2")
+
+    print("=== G1 inplace cases=" + str(cases) + " fails=" + str(fails) + " ===")
+    return fails

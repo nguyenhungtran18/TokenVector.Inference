@@ -219,6 +219,71 @@ def op_silu_bwd(x: "Tensor", gy: "Tensor") -> "Tensor":
         g.data[i] = gy.data[i] * (s + v * s * (1.0 - s))
     return g
 
+# ---- SwiGLU (G1: swiglu fwd/bwd) ------------------------------------------
+# Input [n, 2d]: nua dau la GATE (qua silu), nua sau la VALUE (tuyen tinh).
+#   y[i,j] = silu(x[i,j]) * x[i, d+j]
+#   dx[i,j]      = gy * value * silu'(gate)
+#   dx[i, d+j]   = gy * silu(gate)
+# Dung cho GPT-2 o ban MLP kieu LLaMA; khong nam trong parity 124M (G2 dung
+# GELU) nhung G1 liet ke ro trong ROADMAP.
+
+def op_swiglu_fwd(x: "Tensor", n: 'i64', d: 'i64') -> "Tensor":
+    y = t_zeros([n, d])
+    for i in range(n):
+        for j in range(d):
+            gv = x.data[i * 2 * d + j]
+            vv = x.data[i * 2 * d + d + j]
+            s = 1.0 / (1.0 + exp(-gv))
+            y.data[i * d + j] = gv * s * vv
+    return y
+
+def op_swiglu_bwd(x: "Tensor", gy: "Tensor", n: 'i64', d: 'i64') -> "Tensor":
+    gx = t_zeros([n, 2 * d])
+    for i in range(n):
+        for j in range(d):
+            gv = x.data[i * 2 * d + j]
+            vv = x.data[i * 2 * d + d + j]
+            s = 1.0 / (1.0 + exp(-gv))
+            sg = gv * s
+            gg = gy.data[i * d + j]
+            gx.data[i * 2 * d + j] = gg * vv * (s + gv * s * (1.0 - s))
+            gx.data[i * 2 * d + d + j] = gg * sg
+    return gx
+
+# In-place guard: gate (first half) consumed for silu derivative in backward
+# value (second half) not consumed
+def guard_swiglu_bwd(g: "InplaceGuard", name: 'str', x: "Tensor", gy: "Tensor", n: 'i64', d: 'i64') -> "Tensor":
+    guard_consume(g, name + "_gate")  # gate half consumed for silu'
+    # Call original backward
+    gx = t_zeros([n, 2 * d])
+    for i in range(n):
+        for j in range(d):
+            gv = x.data[i * 2 * d + j]
+            vv = x.data[i * 2 * d + d + j]
+            s = 1.0 / (1.0 + exp(-gv))
+            gg = gy.data[i * d + j]
+            gx.data[i * 2 * d + j] = gg * vv * (s + gv * s * (1.0 - s))
+            gx.data[i * 2 * d + d + j] = gg * sg
+    guard_release(g, name + "_gate")  # release after backward
+    return gx
+
+# In-place guard: gate (first half) consumed for silu derivative in backward
+    # value (second half) not consumed
+def guard_swiglu_bwd(g: "InplaceGuard", name: 'str', x: "Tensor", gy: "Tensor", n: 'i64', d: 'i64') -> "Tensor":
+    guard_consume(g, name + "_gate")  # gate half consumed for silu'
+    # Call original backward
+    gx = t_zeros([n, 2 * d])
+    for i in range(n):
+        for j in range(d):
+            gv = x.data[i * 2 * d + j]
+            vv = x.data[i * 2 * d + d + j]
+            s = 1.0 / (1.0 + exp(-gv))
+            gg = gy.data[i * d + j]
+            gx.data[i * 2 * d + j] = gg * vv * (s + gv * s * (1.0 - s))
+            gx.data[i * 2 * d + d + j] = gg * sg
+    guard_release(g, name + "_gate")  # release after backward
+    return gx
+
 def op_relu_fwd(x: "Tensor") -> "Tensor":
     n = len(x.data)
     y = t_zeros([n])
