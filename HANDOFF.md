@@ -154,7 +154,73 @@ khong sua `ops.tkv`/`trainer.tkv`/harness. Fixture van la PyTorch check-in
 Con lai cua G5 (khong thuoc gate, chua lam): notebook Colab de chay lai tren
 GPU khi co may.
 
-### 0.6 Tiep theo
+### 0.6 G2 PHAM VI BO SUNG (2026-10-19) — XANH 9/9
+
+File: `tv/training/gpt2_ref.tkv` (them `gpt2_init`, duong padding mask),
+gate `tv/tests/gpt2_scope_tests.tkv`, fixture `g2_m_*` sinh boi
+`tools/gen_gpt2_fixture.py` (HF gpt2 thu nho + `attention_mask`).
+
+Ket qua THAT (cases=9 fails=0):
+
+| Gate | Ket qua |
+|---|---|
+| `gpt2_init(7)` hai lan | bit-for-bit giong nhau; seed 8 khac |
+| `gpt2_init` thong ke 16384 mau | mean=0.00012, std=0.02009 (dung ~0 / ~0.02) |
+| mask: hidden h0/h1/h2 | 0.0 / 2.2e-08 / 3.9e-08 vs HF |
+| mask: sau ln_f / logits / loss | 1.2e-06 / 2.7e-07 / **0.0** |
+| invariant: them 2 pad o CUOI khong doi 6 dong dau | 0.0 |
+
+`gpt2_tests` cu van **10/10** (khong hoi quy sau khi sua gpt2_ref).
+
+**Chua lam duoc — BLOCKER 124M (so do that, khong phai uoc luong suong):**
+
+1. Fixture: `wte` cua 124M = 50257x768 = 38.6M phan tu ~ **425 MB text**; m/v
+   cua optimizer them ~850 MB -> khong the check-in theo quy uoc repo.
+2. Toc do: forward GPT-2 nho (2 lop/64/seq 8) do duoc **3.75 ms** (200 lan, may
+   nay). Cung thuat toan o 124M (12 lop/768/vocab 50257) nang hon ~**1266x** theo
+   so phep nhan -> ~0.6 s/token, ~4.8 s cho 1 forward 8 token, ~15 s cho 1 buoc
+   train (chua tinh backward). Mot gate parity 10 buoc se mat vai phut.
+3. Bit-exact voi HF khong the dat khi GELU dung xap xi A&S `erf`
+   (docs/numerics-contract.md): sai so ~1.5e-7 luon lon hon 0.
+
+=> Ket luan: giu ban thu nho lam bang chung thuat toan (dung tinh than "chung
+minh thuat toan" cua ROADMAP); muon 124M phai co che do fixture ngoai repo +
+thoi gian do tren may khoac. So do tren ghi lai de quyet dinh sau, khong che
+giau.
+
+### 0.7 G4 x G2 — TRAIN THAT TREN GPT-2 (2026-10-19) — XANH 5/5
+
+File: `tv/training/gpt2_train.tkv` (cau noi), gate `tv/tests/gpt2_train_tests.tkv`.
+Trainer `trainer.tkv` duoc tong quat hoa: `AdamW.groups` + `new_adamw_g(...)` de
+clip grad norm theo TUNG tensor (giong PyTorch), thay vi cung layout MLP.
+
+Ket qua THAT (cases=5 fails=0), GPT-2 nho **118.528 tham so / 28 tensor**:
+
+| Gate | Ket qua |
+|---|---|
+| so tham so + 28 nhom grad norm | n=118528, tong nhom = n |
+| overfit 1 chuoi 12 buoc | loss **5.083 -> 0.500** (375 ms cho 12 buoc) |
+| loss theo moc 1/6/12 | 5.083 / 2.390 / 0.500 (giam deu) |
+| resume bit-exact | 3 + save/load + 3 == 6 lien, **tung bit** tren 118.528 tham so |
+| loss sau resume | giong chay lien |
+
+Khong hoi quy: `trainer_tests` 15/15, `gpt2_tests` 10/10, `gpt2_scope_tests`
+9/9, CLI compile OK, harness 5/5 (100%).
+
+### 0.8 G1 — DONG NOT 2 MUC CON THIEU (2026-10-19) — XANH 8/8
+
+| Muc | File | Ket qua |
+|---|---|---|
+| `swiglu` fwd/bwd | `tv/training/ops.tkv` (`op_swiglu_fwd/bwd`) | fwd 5.96e-08, bwd 2.38e-07 vs PyTorch; gradcheck sai phan 1.97e-04 |
+| phat hien in-place nguy hiem | `tv/training/inplace_guard.tkv` | 5/5: bat ghi de khi backward con can, cho qua sau release, khong bao dong sai |
+
+Fixture swiglu: `tools/gen_swiglu_fixture.py` -> `tv/tests/fixtures/g_sw_*.txt`.
+Gate: `tv/tests/swiglu_tests.tkv` (3) + `tv/tests/inplace_tests.tkv` (5).
+
+Luu y ve guard: day la lop API (`guard_consume/release/write/check`) phai duoc
+GOI tu op/tape; chua tu dong chen vao moi op.
+
+### 0.9 Tiep theo
 
 G3, G4, G5 xong (G5 thieu notebook Colab). G6 (phan tan) nam ngoai pham vi
 theo ROADMAP. Viec con lai: noi trainer G4 vao GPT-2 nho cua G2 de co vong

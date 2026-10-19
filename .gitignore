@@ -34,3 +34,6 @@ $RECYCLE.BIN/
 # compiler .exe (which *.exe already excludes, so committing it would produce
 # an incomplete package). Kept as a local directory, not in git.
 /release/
+
+# Freebuff platform metadata
+.freebuff/
