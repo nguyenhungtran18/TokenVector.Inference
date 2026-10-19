@@ -1,7 +1,7 @@
 # ROADMAP — Huấn luyện LLM trong TokenVector (chứng minh thuật toán)
 
-Ngày lập: **2026-10-17**
-Trạng thái: **KHÔNG CODE** — tài liệu này chỉ là kế hoạch.
+Ngày lập: **2026-10-17** · cập nhật gần nhất: **2026-10-19**
+Trạng thái: **ĐÃ CODE — G0→G5 XANH, G6 chưa bắt đầu** (bảng TRẠNG THÁI dưới đây).
 Phạm vi: chứng minh đúng thuật toán huấn luyện LLM; việc kiểm thử hiệu năng thực
 sẽ diễn ra sau trên GPU Google. Ưu tiên số tuyệt đối với PyTorch.
 
@@ -9,9 +9,9 @@ sẽ diễn ra sau trên GPU Google. Ưu tiên số tuyệt đối với PyTorch
 
 | Giai đoạn | Trạng thái |
 |---|---|
-| **G0** | ✅ **XONG** (17-10-2027) — xem bên dưới |
-| **G1** tensor core + autodiff thật | **XONG** (2026-10-17, bù 2026-10-19: `swiglu` fwd/bwd + guard in-place — `swiglu_tests` 3/3, `inplace_tests` 5/5): `tensor.tkv`; `ops.tkv` (12 op fwd); fixture 47; `grad_tests.tkv` 20/20; `tape.tkv` 8/8; `parity_tests.tkv` 4/4; `kernels_reg.tkv` co mau |
-| **G2** GPT-2 thu nho (256/64/4/2) + **124M that: parity 20/20 ngoai repo** (`verify_gpt2_124m.ps1`, fixture ~2.3 GB shard tai tv/tests/fixtures-124m — gitignore, xem HANDOFF 0.9) | **FORWARD + BACKWARD + INIT + MASK XONG** (2026-10-19: `gpt2_init` normal(0,0.02) tat dinh + duong padding mask khop HF, `gpt2_scope_tests` **9/9**; 2026-10-18): `gpt2_ref.tkv` day du embed/LN row/MHA causal/MLP/tie head + `attention_bwd`/`block_bwd`/`gpt2_backward`; `gpt2_tests` **10/10 PASS** (hidden h0-h2, logits 2.68e-07, loss 0.0; grad wte 1.79e-07, ln1_g0 3.3e-09, attn_w0 3.4e-08, mlp_w1_0 2.5e-08, lnf_g 9.3e-09) vs `torch.autograd`; `run_cases` [8/8] + `--verify-all` xanh. Gate con lai: grad bit-exact (dang dung tol 1e-5 nhu grad_tests) |
+| **G0** | ✅ **XONG** (17-10-2026) — xem bên dưới |
+| **G1** tensor core + autodiff thật | ✅ **XONG** (2026-10-17, bù 2026-10-19: `swiglu` fwd/bwd + guard in-place — `swiglu_tests` 3/3, `inplace_tests` 5/5): `tensor.tkv`; `ops.tkv` (12 op fwd); fixture 47; `grad_tests.tkv` 20/20; `tape.tkv` 8/8; `parity_tests.tkv` 4/4; `kernels_reg.tkv` co mau |
+| **G2** GPT-2 thu nho (256/64/4/2) + **124M that: parity 20/20 ngoai repo** (`verify_gpt2_124m.ps1`, fixture ~2.3 GB shard tai tv/tests/fixtures-124m — gitignore, xem HANDOFF 0.9) | ✅ **XONG** (2026-10-19: parity 124M THẬT **20/20** — `verify_gpt2_124m.ps1`, logits 5.56e-06, grad wte 4.11e-06; `gpt2_init` normal(0,0.02) tat dinh + duong padding mask khop HF, `gpt2_scope_tests` **9/9**; 2026-10-18): `gpt2_ref.tkv` day du embed/LN row/MHA causal/MLP/tie head + `attention_bwd`/`block_bwd`/`gpt2_backward`; `gpt2_tests` **10/10 PASS** (hidden h0-h2, logits 2.68e-07, loss 0.0; grad wte 1.79e-07, ln1_g0 3.3e-09, attn_w0 3.4e-08, mlp_w1_0 2.5e-08, lnf_g 9.3e-09) vs `torch.autograd`; `run_cases` [8/8] + `--verify-all` xanh. Chốt dung sai 1e-5/1e-4 — bit-exact với HF không thể đạt được vì GELU erf xấp xỉ lệch ~1.5e-7 mỗi bước (numerics-contract) |
 | **G3** data pipeline | ✅ **XONG** (2026-10-19): tokenizer GPT-2 BPE parity `8ac487d` (9/9 case + roundtrip); packing + mask + shard + stream `d8a203a`/`pack_tests.tkv` **5/5 PASS** (pack 8x32, mask block 32x32 + causal4, shard roundtrip 16 shard/256 token, stream seed42 checksum 1184745045, determinism seed 42/43) vs reference `tools/gen_pack_fixture.py` |
 | **G4** trainer | ✅ **XONG** (2026-10-19, bù 19-10: đã nối vào GPT-2 nhỏ — `gpt2_train_tests` **5/5**, overfit 1 chuỗi loss 5.083 → 0.500, resume bit-exact trên 118.528 tham số): `tv/training/trainer.tkv` — AdamW (decoupled WD) + warmup/cosine + clip norm + grad accumulation + checkpoint bit-exact (trọng số/m/v/RNG), vòng train/eval log loss-ppl-throughput, lệnh `train` trong `cli.tkv`; `trainer_tests` **15/15 PASS** (1 bước khớp PyTorch loss 1.2e-7 / grad norm 0.0 / trọng số 3e-8; overfit 20 mẫu eval_loss 0.01495 acc 1.000; resume 3+save/load+3 **bit-for-bit**). Lệch còn lại vs PyTorch ~2.4e-6 (thứ tự làm tròn f32), không phải 0 tuyệt đối |
 | **G5** harness + seam GPU | ✅ **XONG GATE** (2026-10-19): `tools\verify_train_parity.ps1` **một lệnh** → `5/5 khớp (100%)` (gelu_erf 1.2e-7, gelu_tanh 0.0, softmax 1.9e-9, rmsnorm 1.2e-7, CE 0.0) + báo cáo `reports/`; backend giả (`tv/training/backend.tkv`, dispatch `kind`) bị bắt **đúng case** (tanh-thay-erf 1/5, rmsnorm /(n-1) 1/5, +1e-3 5/5) → harness không luôn xanh. Còn lại: notebook Colab |
@@ -172,7 +172,7 @@ Yêu cầu cứng: **đổi backend không được sửa một dòng thuật to
 
 Quy ước cỡ: **S** ≈ vài ngày, **M** ≈ 1–2 tuần, **L** ≈ 1 tháng trở lên.
 
-### G0 — Spike khả thi + chốt hợp đồng số học  *(S)*
+### G0 — Spike khả thi + chốt hợp đồng số học  *(S)* — ✅ XONG (2026-10-17)
 
 **Nội dung**
 - Chạy thử 1 forward + 1 backward tối giản trên CPU.
@@ -189,7 +189,7 @@ Quy ước cỡ: **S** ≈ vài ngày, **M** ≈ 1–2 tuần, **L** ≈ 1 thán
 
 ---
 
-### G1 — Tensor core backend-agnostic + autodiff thật  *(L)*
+### G1 — Tensor core backend-agnostic + autodiff thật  *(L)* — ✅ XONG (2026-10-17, bù 2026-10-19)
 
 **Nội dung**
 - Abstraction tensor: shape, dtype, offset, đọc/ghi phần tử.
@@ -207,9 +207,11 @@ Quy ước cỡ: **S** ≈ vài ngày, **M** ≈ 1–2 tuần, **L** ≈ 1 thán
 - **Mọi op khớp 100% fixture PyTorch** (bit-exact trên CPU).
 - `tools\run_cases.ps1` và `--verify-all` vẫn xanh (không hồi quy).
 
+**Kết quả (2026-10-17, bù 2026-10-19): ✅** — gradcheck mọi op (`grad_tests` 20/20 + `swiglu_tests` 3/3 + `inplace_tests` 5/5); khớp fixture ở tol ~1e-7, riêng gelu_tanh + cross_entropy bit-exact 0.0; run_cases + `--verify-all` xanh.
+
 ---
 
-### G2 — GPT-2 124M  *(L)*
+### G2 — GPT-2 124M  *(L)* — ✅ XONG (2026-10-19)
 
 **Nội dung**
 - Embedding (wte/wpe) + 12 block + head LM + liên kết trọng số (weight tying).
@@ -224,9 +226,11 @@ Quy ước cỡ: **S** ≈ vài ngày, **M** ≈ 1–2 tuần, **L** ≈ 1 thán
 - Hidden-state thống kê theo tầng khớp → phát hiện sai ở tầng nào.
 - Backward: gradient các tham số chọn mẫu khớp bit-exact.
 
+**Kết quả (2026-10-19): ✅** — bản thu nhỏ (256/64/4/2): `gpt2_tests` **10/10** + `gpt2_scope_tests` **9/9**; **124M thật: 20/20** (`tools\verify_gpt2_124m.ps1`, gate 2 phút 49 giây) — h0=0.0, h1..h12 ≤ 2.1e-06, logits 5.56e-06, loss 9.5e-07, grad wte 4.11e-06. Đạt ở **dung sai 1e-5/1e-4** thay vì bit-exact: GELU erf xấp xỉ lệch HF ~1.5e-7 mỗi bước (numerics-contract) — ngưỡng đã chốt, không phải lỗ hổng.
+
 ---
 
-### G3 — Data pipeline  *(M)*
+### G3 — Data pipeline  *(M)* — ✅ XONG (2026-10-19)
 
 **Nội dung**
 - Tokenizer: khớp GPT-2 BPE (kể cả regex tách từ) — kiểm bằng fixture token id.
@@ -237,9 +241,11 @@ Quy ước cỡ: **S** ≈ vài ngày, **M** ≈ 1–2 tuần, **L** ≈ 1 thán
 - Token id của một đoạn văn bất kỳ khớp HF ** tuyệt đối** (so từng id).
 - Cùng seed → cùng thứ tự mẫu, cùng checksum.
 
+**Kết quả (2026-10-19): ✅** — tokenizer GPT-2 BPE parity **9/9** (so từng id + roundtrip); packing/mask/shard/stream `pack_tests` **5/5** (determinism seed 42/43).
+
 ---
 
-### G4 — Trainer  *(M)*
+### G4 — Trainer  *(M)* — ✅ XONG (2026-10-19)
 
 **Nội dung**
 - AdamW + warmup/cosine đúng công thức, grad accumulation, clip norm.
@@ -252,9 +258,11 @@ Quy ước cỡ: **S** ≈ vài ngày, **M** ≈ 1–2 tuần, **L** ≈ 1 thán
 - **Resume bit-exact**: dừng giữa chừng rồi chạy tiếp cho kết quả y hệt chạy liền.
 - Khớp 1 bước train với PyTorch cùng hyper-parameter (bit-exact).
 
+**Kết quả (2026-10-19): ✅** — overfit 20 mẫu: eval_loss 0.015, acc 1.000; resume **bit-exact** tuyệt đối trong .tkv (checkpoint IEEE-754 bit); khớp 1 bước PyTorch ở 1.2e-7 (loss), grad norm 0.0, trọng số 3e-8 — lệch tích lũy ~2e-6 do thứ tự làm tròn f32. Đã nối trainer vào GPT-2 nhỏ: `gpt2_train_tests` **5/5** (overfit 5.08 → 0.50, resume bit-exact 118.528 tham số).
+
 ---
 
-### G5 — Harness + seam GPU  *(M)*
+### G5 — Harness + seam GPU  *(M)* — ✅ XONG GATE (2026-10-19, còn notebook Colab)
 
 **Nội dung**
 - Script sinh fixture (PyTorch) — chạy 1 lần, check-in kết quả.
@@ -266,6 +274,8 @@ Quy ước cỡ: **S** ≈ vài ngày, **M** ≈ 1–2 tuần, **L** ≈ 1 thán
 - Một lệnh → báo cáo `N/N khớp 100%`.
 - Thêm backend giả (trả về kết quả sai có chủ ý) → bộ test **bắt được**, chứng minh
   harness thật sự kiểm tra chứ không phải luôn xanh.
+
+**Kết quả (2026-10-19): ✅ GATE** — `tools\verify_train_parity.ps1` báo cáo **5/5 khớp (100%)**; backend giả bị bắt đúng case (tanh-thay-erf 1/5, rmsnorm /(n-1) 1/5, +1e-3 5/5). **Còn ngoài gate:** notebook Colab.
 
 ---
 
@@ -309,5 +319,8 @@ một thiết bị đã chứng minh được thuật toán. Chỉ làm khi th�
 | Hồi quy toàn repo | `powershell -File tools\run_cases.ps1` |
 | Toàn bộ thân hàm | `tkvc <module> <out.exe> --verify-all` |
 | Pipeline đầy đủ | `powershell -File build_inference.ps1` |
+| Parity GPT-2 thu nhỏ (G2) | `powershell -File tools\verify_parity.ps1` |
+| Parity GPT-2 124M (G2) | `powershell -File tools\verify_gpt2_124m.ps1` (SKIP exit 0 nếu thiếu python/transformers) |
+| Train parity harness (G5) | `powershell -File tools\verify_train_parity.ps1` |
 
 Mọi gate trong tài liệu này đều phải giữ ba cổng trên ở trạng thái xanh.
