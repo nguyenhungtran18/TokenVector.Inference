@@ -1,0 +1,16 @@
+# PROBE AK — cu phap default param None cho list
+def f(a: 'list[i64]' = None) -> 'i32':
+    if a == None:
+        a = []
+    return len(a)
+
+def g(a: 'list[f32]' = None) -> 'i32':
+    if a == None:
+        a = []
+    return len(a)
+
+def main() -> 'i32':
+    print("AK1 " + str(f()))
+    print("AK2 " + str(g([1.0, 2.0])))
+    print("AK done")
+    return 0

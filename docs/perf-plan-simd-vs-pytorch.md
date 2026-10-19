@@ -96,20 +96,29 @@ Kỳ vọng tổng: tier A 323→**~150-200 ms**; bước 124M 31s→**~24-26 s*
 
 | # | Việc | Kỳ vọng |
 |---|---|---|
-| P1.1 | **Bwd ghi thẳng vào flat `opt.g`** (tính offset theo thứ tự ps) — bỏ t_zeros grads 28 tensor + vòng GRAD_ACC | −2.5 s — **CÒN LẠI, việc nên làm tiếp** |
+| P1.1 | **Bwd ghi thẳng vào flat `opt.g`** | **HOÀN THÀNH 2026-10-19 — −1.4 s thật** (bench C 24.17→22.78 s/bước). Refactor: `gpt2_backward`/`block_bwd`/`attention_bwd`/`mlp_bwd`/`linear_bwd`/`layernorm_bwd` nhận optional `gflat`/offsets (default off = đường cũ parity nguyên ven); bỏ GRAD_ACC + materialization; probe AL xác nhận **maxdiff=0.0 cả 28 nhóm** + loss bit-exact. Ít hơn ước tính 2.5 s vì: dwte/gg/smm intermediates vẫn materialize, copy-add simd ~0.3-0.5 s. **BÀI HỌC**: `tv/tests/tv.training.gpt2_ref.tkv` + `tv/training/tv.training.gpt2_ref.tkv` là **bản NHỎ 256/64/2** — sync mirror phải giữ hằng số riêng; builder offset `acc0` sai hệ số 4*h*h + indent làm loss khác ULP→to (gate parity bắt được, probe AL tìm ra trong 1 lần chạy) |
 | P1.2 | ~~Fuse unflatten vào AdamW step~~ | **REVERT — đã probe (`simd_probe_ah`, best-of-5, 124M): fused mọi hình thức ĐỀU CHẬM HƠN 2 vòng riêng (4516 ms): inline-while 6468 / inline-for 5453 / bỏ ghi-d 4704 / function-level 7547. Vào lúc probe đã bắt được 2 bẫy: (1) `for jj in range(sz)` sót `jj = jj + 1` từ while cũ → compiler skip nửa phần tử, loss SAI (gate parity bắt được); (2) biến đếm `while` local = TkvInt boxed slow-path (~+1 s, đúng lỗi perf_f32buf ghi nhận). Bài học: `opt.step()` vòng phẳng `range(self.n)` ĐÃ LÀ FORM TỐT NHẤT trên runtime này — đừng gộp.** |
-| P1.3 | **Pool buffer grads/activation** + đo GC — `gc_collect()` builtins **có thật** (`tv/benchmarks/compare_rivals.tkv` gọi; REFERENCE chưa liệt kê) nhưng chưa probe đo | −1.3 s + GC churn |
+| P1.3 | **Pool buffer grads/activation** + GC — **đã probe (`simd_probe_aj`, builtins thật: `gc_collect()`/`gc_allocated_bytes()`/`gc_counts()` — REFERENCE chưa liệt kê)**: 1 bước 124M = 23.2s, BWD +1577 MB live (grads 148 tensor materialized), GRAD_ACC free 1577 MB (1.42s), UNFLAT free 2837 MB (gen2+1 — LOH garbage từ boxed f64 AdamW ~496M object/bước). **743 gen0 + 8 gen1 + 7 gen2 collections/bước** — churn ~8 GB/bước là THẬT (giải thích wall time cao hơn cpu time). Pool grads tiết kiệm 1.58 GB sống + churn; AdamW boxing cần native/f32 buffer (phụ thuộc compiler team) | −1.3 s + giảm churn |
 | P1.4 | AdamW f32 — **đã probe (`simd_probe_ae`)**: vòng m/v vectorize P6 ~2.9× (47→16 ms/16M phần tử), nhưng p-loop sqrt bị P6 từ chối (buf 109 > list 78 ms) → chỉ lời ~1-1.5 s nếu redesign nặng | **lùi — không làm vội** |
 
 Kỳ vọng tổng sau P1.1 (nếu −2.5 s đo được): **~21.5-22 s**/bước (P1.2/P1.4 không đóng góp).
 
-### P2 — Floor scalar (cần đo thêm trước khi làm)
+### P2 — Floor scalar — **ĐÃ PROBE (simd_probe_am): KHÔNG CÒN scalar residue đáng sửa**
 
-- Tách `gpt2_block_bwd` (simd) thành từng vùng: attention dqkv loops, LN bwd,
-  gelu bwd, bias-add — probe Z-style, chọn vùng chiếm >1s trước.
-- Vòng elementwise hot: thử f32 trước (P1.4 ra kết luận) — nếu chưa đủ,
-  **phụ thuộc compiler team**: `simd_*` 3-đối-tượng hiện allocate 16B/phần tử
-  (HANDOFF) → không dùng được; cần biến in-place / kernel `adamw`, `layernorm_bwd`.
+Phân rã block_bwd 124M (best-of-3, layer 6, n=8):
+
+| Vùng | ms/block | Ghi chú |
+|---|---|---|
+| MLP bwd (2 linear_bwd + gelu + fwd-linear) | **391 (57%)** | GEMM-bound ~380 GFLOPS |
+| Attention bwd | **219 (32%)** | qkv fwd + rq linear_bwd simd; scalar dctx+dw_proj ≈ 10M MAC ≈ ~1 ms |
+| Fwd recompute trong block (LN×2 + attn fwd) | ~77 (11%) | |
+| LN bwd ×2 | **0.0** | 37K iteration — không đáng kể |
+| **Block tổng** | **687** | ×12 layer ≈ 8.2s trong BWD 13.25s; head 4.3s + embed ≈ phần còn
+
+**Kết luận**: “bwd nặng gấp 4.5× fwd” = do ~3× GEMM volume (mỗi linear_bwd = dx + dw + fwd-linear), **KHÔNG phải scalar residue**. Sửa scalar attention (dctx/dw_proj → smm) chỉ lời ~1ms/block — không làm. Nút thắt thật còn lại:
+1. **Head skinny GEMM** (m=8: logits 1.33 + dxf 1.24 + dwte 1.72 = 4.3s chỉ ~232 GFLOPS) → **P4 seq1024** sửa tự nhiên (M=1024).
+2. **GC/boxing ~8GB/bước** (probe AJ) — phụ thuộc native/f32 buffer từ compiler team.
+3. GEMM volume itself → native kernels (compiler team).
 
 ### P3 — Số luồng simd_gemm
 
@@ -131,7 +140,7 @@ Kỳ vọng tổng sau P1.1 (nếu −2.5 s đo được): **~21.5-22 s**/bướ
 |---|---|
 | trước P0 | 31.3 s |
 | **sau P0 (đo thật 2026-10-19)** | **~24.2-24.5 s** |
-| sau P1.1 (nếu −2.5 s đo được) | ~21.5-22 s |
+| **sau P1.1 (đo thật: −1.4 s)** | **22.78 s** |
 | sau P2+P3 (nếu compiler team cộng tác) | ~12-15 s |
 | PyTorch | 1.0 s |
 
@@ -143,9 +152,11 @@ kernels từ compiler team — ghi rõ trong HANDOFF khi tiếp.
 
 1. ✅ P0.1-P0.4 — hoàn thành 2026-10-19 (số ở mục P0; gate + hồi quy + bench).
 2. ✅ P1.2 + P1.4 — đã probe → kết luận REVERT / lùi (mục P1, có số đo).
-3. **TIẾP THEO: P1.1** (bwd ghi thẳng opt.g — probe materialization grads
-   trước, rủi ro: parity `gpt2_backward` core) + P1.3 (gc_collect đo GC).
-4. P2 probe phân rã scalar → chọn vùng; P3 probe luồng; P4 bench seq1024.
+3. ✅ P1.1 — hoàn thành 2026-10-19 (−1.4 s thật; số ở mục P1; probe AL
+   = grads parity old-vs-flat, probe AJ = GC breakdown).
+4. ✅ P2 — probe AM phân rã xong: scalar residue <5% (LN 0ms, attn scalar
+   ~1ms/block) → bỏ ý định sửa scalar; nút thật = head skinny GEMM → P4.
+5. P3 probe luồng; P4 bench seq1024 (ưu tiên cao — sửa luôn head m=8).
 
 Probe còn dùng được: `simd_probe_x` (build vs gemm), `simd_bench_124m_profile`
 (phase), `simd_probe_z` (bwd tách), `simd_probe_y` (luồng).

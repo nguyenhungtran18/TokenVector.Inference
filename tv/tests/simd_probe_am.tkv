@@ -1,0 +1,103 @@
+# PROBE AM — P2: phan rach block_bwd 124M theo VUNG (best-of-3, ms)
+# Canh coi: attention_bwd (dctx + head loops + dw_proj), mlp_bwd (linear fwd +
+# gelu + 2 linear_bwd simd), layernorm_bwd x2, va block_bwd toan bo doi chieu.
+# Chay: tkvc tv/tests/simd_probe_am.tkv ra.exe main (tu goc repo)
+import tv.training.gpt2_ref124
+import tv.training.trainer
+import tv.training.simd_matmul
+
+FIX = "tv/tests/fixtures/"
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> 'list[f32]':
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                vals.append(float(toks[j]))
+    return vals
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+def _mn(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+def main() -> 'i32':
+    ids = load_ints(FIX + "g2_ids.txt")
+    pos = load_ints(FIX + "g2_pos.txt")
+    ps = gpt2_init(7)
+    n = len(ids)
+    h = HiddenSize
+    print("AM n=" + str(n) + " h=" + str(h) + " NLayers=" + str(NLayers))
+
+    # — forward giu xins (giong backward that) —
+    x = gpt2_embed(ids, pos, ps[0], ps[1])
+    xins = []
+    for i in range(NLayers):
+        xins.append(x)
+        b = 4 + i * 12
+        x = gpt2_block(x, ps[b + 0], ps[b + 1], ps[b + 2], ps[b + 3],
+                       ps[b + 4], ps[b + 5], ps[b + 6], ps[b + 7],
+                       ps[b + 8], ps[b + 9], ps[b + 10], ps[b + 11], 1)
+
+    li = 6
+    base = 4 + li * 12
+    xi = xins[li]
+    # gy/gout GIA — chi can shape dung cho do thoi gian
+    gy = t_zeros([n, h])
+    for i in range(n * h):
+        gy.data[i] = 0.1
+    a = gpt2_layernorm(xi, ps[base + 0], ps[base + 1])
+
+    b_ln = 1.0e9
+    b_att = 1.0e9
+    b_mlp = 1.0e9
+    b_blk = 1.0e9
+    k = 0
+    while k < 3:
+        t0 = now_ms()
+        rl1 = gpt2_layernorm_bwd(xi, ps[base + 0], ps[base + 1], gy)
+        rl2 = gpt2_layernorm_bwd(xi, ps[base + 6], ps[base + 7], gy)
+        t1 = now_ms()
+        rb = gpt2_attention_bwd(a, ps[base + 2], ps[base + 3],
+                                ps[base + 4], ps[base + 5], n, gy, 1)
+        t2 = now_ms()
+        rm = gpt2_mlp_bwd(a, ps[base + 8], ps[base + 9],
+                          ps[base + 10], ps[base + 11], n, gy, 1)
+        t3 = now_ms()
+        blk = gpt2_block_bwd(xi, ps[base + 0], ps[base + 1], ps[base + 2],
+                             ps[base + 3], ps[base + 4], ps[base + 5],
+                             ps[base + 6], ps[base + 7], ps[base + 8],
+                             ps[base + 9], ps[base + 10], ps[base + 11],
+                             gy, 1)
+        t4 = now_ms()
+        b_ln = _mn(b_ln, t1 - t0)
+        b_att = _mn(b_att, t2 - t1)
+        b_mlp = _mn(b_mlp, t3 - t2)
+        b_blk = _mn(b_blk, t4 - t3)
+        k = k + 1
+
+    print("AM LN_BWD_x2      = " + str(b_ln) + " ms")
+    print("AM ATTENTION_BWD  = " + str(b_att) + " ms")
+    print("AM MLP_BWD        = " + str(b_mlp) + " ms")
+    print("AM SUM_cac_vung   = " + str(b_ln + b_att + b_mlp) + " ms")
+    print("AM BLOCK_BWD      = " + str(b_blk) + " ms (doi chieu)")
+    return 0

@@ -1,0 +1,116 @@
+# PROBE AL — P1.1 verify: grads old (materialize + acc) vs flat (gai truc tiep)
+# tren model NHO (256/64/2): so sanh tung nhom theo offsets flatten.
+import tv.training.gpt2_ref
+import tv.training.gpt2_train
+import tv.training.trainer
+
+FIX_DIR = "tv/tests/fixtures/"
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_ints(path: 'str') -> 'list[i64]':
+    txt = read_file(path)
+    lines = txt.split("\n")
+    out = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                out.append(int(float(toks[j])))
+    return out
+
+def _poff_check(h: 'i64', vocab: 'i64', maxpos: 'i64', nl: 'i64') -> 'i32':
+    # copy y hệt vong poff trong gpt2_backward (small: h=64 V=256 P=32 L=2)
+    poff = []
+    acc0 = 0
+    poff.append(acc0)
+    acc0 = acc0 + vocab * h
+    poff.append(acc0)
+    acc0 = acc0 + maxpos * h
+    poff.append(acc0)
+    acc0 = acc0 + h
+    poff.append(acc0)
+    acc0 = acc0 + h
+    for li in range(nl):
+        poff.append(acc0)
+        acc0 = acc0 + h
+        poff.append(acc0)
+        acc0 = acc0 + h
+        poff.append(acc0)
+        acc0 = acc0 + 3 * h * h
+        poff.append(acc0)
+        acc0 = acc0 + 3 * h
+        poff.append(acc0)
+        acc0 = acc0 + 4 * h * h
+        poff.append(acc0)
+        acc0 = acc0 + h
+        poff.append(acc0)
+        acc0 = acc0 + h
+        poff.append(acc0)
+        acc0 = acc0 + h
+        poff.append(acc0)
+        acc0 = acc0 + 4 * h * h
+        poff.append(acc0)
+        acc0 = acc0 + 4 * h
+        poff.append(acc0)
+        acc0 = acc0 + 4 * h * h
+        poff.append(acc0)
+        acc0 = acc0 + h
+    for i in range(len(poff)):
+        print("AL poff" + str(i) + "=" + str(poff[i]))
+    return 0
+
+def main() -> 'i32':
+    _p = _poff_check(64, 256, 32, 2)
+    ids = load_ints(FIX_DIR + "g2_ids.txt")
+    pos = load_ints(FIX_DIR + "g2_pos.txt")
+    ps = gpt2_init(7)
+    n = gpt2_n_param(ps)
+    groups = gpt2_group_sizes(ps)
+    print("AL n=" + str(n) + " groups=" + str(len(groups)))
+
+    # — duong cu: materialize + acc flat —
+    gr = gpt2_bwd_ps(ps, ids, pos, 0)
+    ga = []
+    for i in range(len(gr)):
+        t = gr[i]
+        dd = t.data
+        for j in range(len(dd)):
+            ga.append(dd[j])
+    print("AL grads-cu list len=" + str(len(ga)))
+
+    # — duong moi: flat —
+    gb = []
+    for i in range(n):
+        gb.append(0.0)
+    gr2 = gpt2_bwd_ps(ps, ids, pos, 0, gb)
+
+    off = 0
+    worst = 0.0
+    wi = -1
+    for i in range(len(groups)):
+        sz = groups[i]
+        mx = 0.0
+        sa = 0.0
+        for j in range(sz):
+            df = ga[off + j] - gb[off + j]
+            if df < 0.0:
+                df = -df
+            if df > mx:
+                mx = df
+            sa = sa + ga[off + j] * ga[off + j]
+        print("AL g" + str(i) + " sz=" + str(sz) + " maxdiff=" + str(mx)
+              + " rms_a=" + str(sqrt(sa / float(sz))))
+        if mx > worst:
+            worst = mx
+            wi = i
+        off = off + sz
+    print("AL WORST group=" + str(wi) + " maxdiff=" + str(worst))
+    return 0

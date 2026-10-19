@@ -97,7 +97,8 @@ def gpt2_fwd_ps(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i
     return gpt2_forward(ids, pos, _wte, _wpe, ln1_g, ln1_b, wq, bq, wp, bp,
                         ln2_g, ln2_b, w1, b1, w2, b2, _g, _b, simd)
 
-def gpt2_bwd_ps(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32' = 0) -> 'list[Tensor]':
+def gpt2_bwd_ps(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]',
+                simd: 'i32' = 0, gflat: 'list[f32]' = None) -> 'list[Tensor]':
     ln1_g = []
     ln1_b = []
     wq = []
@@ -129,7 +130,7 @@ def gpt2_bwd_ps(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i
     _g = ps[2]
     _b = ps[3]
     return gpt2_backward(ids, pos, _wte, _wpe, ln1_g, ln1_b, wq, bq, wp, bp,
-                         ln2_g, ln2_b, w1, b1, w2, b2, _g, _b, simd)
+                         ln2_g, ln2_b, w1, b1, w2, b2, _g, _b, simd, gflat)
 
 def gpt2_loss_of(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32' = 0) -> 'f32':
     z = gpt2_fwd_ps(ps, ids, pos, simd)
@@ -146,15 +147,12 @@ def gpt2_loss_of(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: '
 def gpt2_train_step(opt: "AdamW", ps: 'list[Tensor]',
                     ids: 'list[i64]', pos: 'list[i64]', simd: 'i32' = 0) -> 'f32':
     loss = gpt2_loss_of(ps, ids, pos, simd)
-    grads = gpt2_bwd_ps(ps, ids, pos, simd)
+    # P1.1 (perf-plan): bwd ghi THANG param grads vao opt.g (da zero) —
+    # bo duoc materialization grads 148 tensor (~1.6 GB song) + vong GRAD_ACC
+    # (~1.4s/buoc 124M). out list cua backward = placeholder len 0.
+    # Khac thu tu accumulate vs duong cu -> ULP-scale (parity torch ok).
     opt.zero_grad()
-    off = 0
-    for i in range(len(grads)):
-        gt = grads[i]
-        d = gt.data
-        for j in range(len(d)):
-            opt.g[off + j] = opt.g[off + j] + d[j]
-        off = off + len(d)
+    grads = gpt2_bwd_ps(ps, ids, pos, simd, opt.g)
     opt.step()
     # ghi trong so da cap nhat tro lai tensor
     gpt2_unflatten(ps, opt.p)

@@ -368,8 +368,37 @@ Bao cao day du: **`reports/bench-simd-vs-pytorch-20261019.md`**. So chinh
     boxed (~+1s). `gpt2_train_step` van 2 vong; khong lam lai.
   - **P1.4 f32 AdamW: da probe (`simd_probe_ae`) → lu** (m/v 2.9× nhung
     p-loop sqrt tu choi P6).
-  - **TIEP THEO: P1.1** bwd ghi thẳng opt.g (~−2.5s, can probe truoc) + P1.3
-    `gc_collect` (builtins co that — compare_rivals goi; REFERENCE chua liet ke).
+  - **PROBE AJ (P1.3 GC) — XONG**: builtins THAT = `gc_collect()` /
+    `gc_allocated_bytes()` / `gc_counts()` (tra string "gen0/gen1/gen2" —
+    KHONG index duoc, `t[i]` = AccessViolation). 1 buoc 124M = 23.2s:
+    BWD +1577 MB live (grads materialized), GRAD_ACC free 1577 MB (1.42s),
+    UNFLAT free 2837 MB (gen2+1). **743 gen0 + 8 gen1 + 7 gen2 collections/
+    buoc — churn ~8 GB boxed f64 tu AdamW la THAT** (giai thich wall > cpu).
+  - **P1.1 XONG (2026-10-19) — bwd ghi thẳng opt.g: −1.4s that**
+    (bench C 24.17 → **22.78s/buoc**; losses bit-exact 10.674946 -> 8.5497055
+    -> 9.754064). Refactor backward nhan optional `gflat`/offsets (default
+    off — duong cu parity nguyen ven); bo GRAD_ACC + mat grads. Gate 5/5 xanh
+    + probe AL: **grads flat vs cu maxdiff=0.0 ca 28 nhom**. It hon uoc tinh
+    2.5s: dwte/gg/smm intermediates van mat, copy-add simd ~0.3-0.5s.
+  - **CANH BAO mirror**: `tv/tests/tv.training.gpt2_ref.tkv` va
+    `tv/training/tv.training.gpt2_ref.tkv` la **ban NHO 256/64/4heads/2layers**
+    (khac 3 file 124M con lai) — sync phai giu hang so rieng, khong cp blind.
+    (Lan nay da loi: init 124M trong test nho, phai git checkout + sed hang.)
+  - Probes moi: `simd_probe_aj` (GC per phase: 743 gen0 + 7 gen2/buoc,
+    BWD +1577MB live), `simd_probe_al` (grads parity old-vs-flat),
+    `simd_probe_ah` (P1.2 fused measurements), `simd_probe_ak` (cu phap
+    default param None: `x: 'list[i64]' = None` + `== None` OK, list literal
+    default BI TU CHOI, bare 'list' annotation khong parse),
+    `simd_probe_af` ([0.0]*n cham 9x append).
+  - **PROBE AM (P2) — XONG, ket luat dao nguoc**: phan rach block_bwd 124M
+    (best-of-3): **MLP bwd 391ms (57%) + attention bwd 219ms (32%) + fwd
+    recompute ~77ms + LN bwd = 0.0ms** — block tong 687ms (x12 = 8.2s/13.25s
+    BWD). **Scalar residue <5%** (attention scalar dctx+dw_proj ≈ 1ms/block)
+    → KHONG con vung scalar >1s de sua. "Bwd 4.5x fwd" = GEMM volume 3x
+    (moi linear_bwd = dx+dw+fwd-linear), khong phai residue.
+  - **TIEP THEO**: **P4 seq1024 uu tien cao** (head skinny GEMM m=8 chi
+    ~232 GFLOPS = 4.3s/buoc — seq1024 sua tu nhien); P3 do luong simd_gemm;
+    GC/boxing 8GB/buoc can native buffer tu compiler team.
   - `t_zeros`/zero-init: list-multiplication `[0.0]*n` CHAM 9× append (probe
     AF) — giu append; `reserve` co trong REFERENCE 2.13 (chua dung).
   - So cu + 2 buoc toi uu ban dau (chua lam): cache/reuse tile, vectorize

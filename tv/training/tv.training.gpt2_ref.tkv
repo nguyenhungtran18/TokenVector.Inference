@@ -1,7 +1,7 @@
 ﻿# GPT-2 reference — G2 (ROADMAP_TRAIN.md)
 # ---------------------------------------------------
-# Kien truc GIONG HF `gpt2`, thu nho de chung minh thuat toan:
-#   vocab 256, n_embd 64, n_head 4, n_layer 2, max_pos 32
+# Kien truc GIONG HF `gpt2`, 124M tham so (de chinh minh thuat toan va train):
+#   vocab 50257, n_embd 768, n_head 12, n_layer 12, max_pos 1024
 #
 # Moi block: ln -> attn(QKV + causal mask + softmax) -> residual
 #            -> ln -> mlp(linear -> gelu erf -> linear) -> residual
@@ -235,7 +235,8 @@ def gpt2_loss(logits: "Tensor", ids: 'list[i64]') -> 'f32':
 # ----------------------------------------------------------------------------
 
 # [dx, dg, db] — LayerNorm theo row co g/b
-def gpt2_layernorm_bwd(x: "Tensor", g: "Tensor", b: "Tensor", gy: "Tensor") -> 'list[Tensor]':
+def gpt2_layernorm_bwd(x: "Tensor", g: "Tensor", b: "Tensor", gy: "Tensor",
+                       gflat: 'list[f32]' = None, o_dg: 'i64' = -1, o_db: 'i64' = -1) -> 'list[Tensor]':
     n = _sh0(x)
     h = _sh1(x)
     dx = t_zeros([n, h])
@@ -266,12 +267,29 @@ def gpt2_layernorm_bwd(x: "Tensor", g: "Tensor", b: "Tensor", gy: "Tensor") -> '
             xh = (x.data[base + j] - mu) * rstd
             gg = gy.data[base + j] * g.data[j]
             dx.data[base + j] = rstd * (gg - m1 - xh * m2)
-            dg.data[j] = dg.data[j] + gy.data[base + j] * xh
-            db.data[j] = db.data[j] + gy.data[base + j]
+            if o_dg >= 0:
+                gflat[o_dg + j] = gflat[o_dg + j] + gy.data[base + j] * xh
+            else:
+                dg.data[j] = dg.data[j] + gy.data[base + j] * xh
+            if o_db >= 0:
+                gflat[o_db + j] = gflat[o_db + j] + gy.data[base + j]
+            else:
+                db.data[j] = db.data[j] + gy.data[base + j]
+    if o_dg >= 0:
+        dg = t_zeros([0])
+    if o_db >= 0:
+        db = t_zeros([0])
     return [dx, dg, db]
 
 # [dx, dw, db] — linear Conv1D: w[in, out]
-def gpt2_linear_bwd(x: "Tensor", w: "Tensor", gy: "Tensor", n: 'i64', in_d: 'i64', out_d: 'i64', simd: 'i32' = 0) -> 'list[Tensor]':
+# P1.1 (perf-plan): gflat/goff — neu goff >= 0 thi dw ghi THANG vao
+# gflat[goff + k*out_d + o] (gflat da duoc zero boi caller) thay vi t_zeros +
+# acc. Bit-exact: cung phep cong, cung thu tu; gflat = 0 nen 0 + a + b = a + b.
+# Khi ghi thang thi tra ve dw placeholder (t_zeros([0])) — chi dung cho
+# gpt2_train_step (acc loop len 0 = nop).
+def gpt2_linear_bwd(x: "Tensor", w: "Tensor", gy: "Tensor", n: 'i64', in_d: 'i64', out_d: 'i64',
+                    simd: 'i32' = 0, gflat: 'list[f32]' = None, goff: 'i64' = -1,
+                    dboff: 'i64' = -1) -> 'list[Tensor]':
     if simd == 1:
         # dx[i,k] = sum_o gy[i,o]*w[k,o] -> smm_dot(gy, w): B=w luu [in_d hang]
         # [out_d cot] dung ngay bo tri [n hang][k giam]
@@ -286,15 +304,48 @@ def gpt2_linear_bwd(x: "Tensor", w: "Tensor", gy: "Tensor", n: 'i64', in_d: 'i64
         for i in range(n):
             base = i * out_d
             for o in range(out_d):
-                db.data[o] = db.data[o] + gy.data[base + o]
+                if dboff >= 0:
+                    gflat[dboff + o] = gflat[dboff + o] + gy.data[base + o]
+                else:
+                    db.data[o] = db.data[o] + gy.data[base + o]
         r = []
         r.append(dx)
-        r.append(dw)
-        r.append(db)
+        if goff >= 0:
+            for k in range(in_d * out_d):
+                gflat[goff + k] = gflat[goff + k] + dw.data[k]
+            r.append(t_zeros([0]))
+        else:
+            r.append(dw)
+        if dboff >= 0:
+            r.append(t_zeros([0]))
+        else:
+            r.append(db)
         return r
     dx = t_zeros([n, in_d])
     dw = t_zeros([in_d, out_d])
     db = t_zeros([out_d])
+    if goff >= 0 or dboff >= 0:
+        # vong ghi thang (copy tu vong cu — chi doi cho dw/db)
+        for i in range(n):
+            for o in range(out_d):
+                gg = gy.data[i * out_d + o]
+                if dboff >= 0:
+                    gflat[dboff + o] = gflat[dboff + o] + gg
+                else:
+                    db.data[o] = db.data[o] + gg
+                for k in range(in_d):
+                    if goff >= 0:
+                        gflat[goff + k * out_d + o] = gflat[goff + k * out_d + o] + x.data[i * in_d + k] * gg
+                    else:
+                        dw.data[k * out_d + o] = dw.data[k * out_d + o] + x.data[i * in_d + k] * gg
+                    dx.data[i * in_d + k] = dx.data[i * in_d + k] + gg * w.data[k * out_d + o]
+        rdw = t_zeros([0])
+        if goff < 0:
+            rdw = dw
+        rdb = t_zeros([0])
+        if dboff < 0:
+            rdb = db
+        return [dx, rdw, rdb]
     for i in range(n):
         for o in range(out_d):
             gg = gy.data[i * out_d + o]
@@ -305,8 +356,11 @@ def gpt2_linear_bwd(x: "Tensor", w: "Tensor", gy: "Tensor", n: 'i64', in_d: 'i64
     return [dx, dw, db]
 
 # [dx, dw_qkv, db_qkv, dw_proj, db_proj] — MHA causal (recompute softmax)
+# P1.1: gflat + o_qkv/o_proj — ghi thang dw_qkv (qua linear_bwd) + dw_proj.
 def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
-                       w_proj: "Tensor", b_proj: "Tensor", n: 'i64', gout: "Tensor", simd: 'i32' = 0) -> 'list[Tensor]':
+                       w_proj: "Tensor", b_proj: "Tensor", n: 'i64', gout: "Tensor", simd: 'i32' = 0,
+                       gflat: 'list[f32]' = None, o_qkv: 'i64' = -1, o_bqkv: 'i64' = -1,
+                       o_proj: 'i64' = -1, o_bproj: 'i64' = -1) -> 'list[Tensor]':
     h = HiddenSize
     hd = HeadDim
     qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h, simd)
@@ -373,24 +427,38 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
         # dw_proj / db_proj tu ctx va gout
         for o in range(h):
             gg = gout.data[t * h + o]
-            db_proj.data[o] = db_proj.data[o] + gg
+            if o_bproj >= 0:
+                gflat[o_bproj + o] = gflat[o_bproj + o] + gg
+            else:
+                db_proj.data[o] = db_proj.data[o] + gg
             for r in range(h):
-                dw_proj.data[r * h + o] = dw_proj.data[r * h + o] + ctx[r] * gg
-    rq = gpt2_linear_bwd(x, w_qkv, dqkv, n, h, 3 * h, simd)
+                if o_proj >= 0:
+                    gflat[o_proj + r * h + o] = gflat[o_proj + r * h + o] + ctx[r] * gg
+                else:
+                    dw_proj.data[r * h + o] = dw_proj.data[r * h + o] + ctx[r] * gg
+    rq = gpt2_linear_bwd(x, w_qkv, dqkv, n, h, 3 * h, simd, gflat, o_qkv, o_bqkv)
+    # dw_proj / db_proj placeholder khi ghi thang
+    if o_proj >= 0:
+        dw_proj = t_zeros([0])
+    if o_bproj >= 0:
+        db_proj = t_zeros([0])
     return [rq[0], rq[1], rq[2], dw_proj, db_proj]
 
 # [dx, dw1, db1, dw2, db2] — MLP gelu erf
+# P1.1: gflat + o_w1/o_w2 — ghi thang dw1/dw2 qua linear_bwd.
 def gpt2_mlp_bwd(x: "Tensor", w1: "Tensor", b1: "Tensor",
-                 w2: "Tensor", b2: "Tensor", n: 'i64', gout: "Tensor", simd: 'i32' = 0) -> 'list[Tensor]':
+                 w2: "Tensor", b2: "Tensor", n: 'i64', gout: "Tensor", simd: 'i32' = 0,
+                 gflat: 'list[f32]' = None, o_w1: 'i64' = -1, o_b1: 'i64' = -1,
+                 o_w2: 'i64' = -1, o_b2: 'i64' = -1) -> 'list[Tensor]':
     h = HiddenSize
     inner = gpt2_linear(x, w1, b1, n, h, 4 * h, simd)
     a = t_zeros([n * 4 * h])
     for i in range(n * 4 * h):
         a.data[i] = gelu_erf(inner.data[i])
-    r2 = gpt2_linear_bwd(a, w2, gout, n, 4 * h, h, simd)
+    r2 = gpt2_linear_bwd(a, w2, gout, n, 4 * h, h, simd, gflat, o_w2, o_b2)
     # dA cung shape voi inner [n, 4h] — khong truc tiep gout [n, h]
     d_inner = op_gelu_erf_bwd(inner, r2[0])
-    r1 = gpt2_linear_bwd(x, w1, d_inner, n, h, 4 * h, simd)
+    r1 = gpt2_linear_bwd(x, w1, d_inner, n, h, 4 * h, simd, gflat, o_w1, o_b1)
     return [r1[0], r1[1], r1[2], r2[1], r2[2]]
 
 # [dx, dln1_g, dln1_b, dw_qkv, db_qkv, dw_proj, db_proj,
@@ -399,7 +467,38 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
                    w_qkv: "Tensor", b_qkv: "Tensor", w_proj: "Tensor", b_proj: "Tensor",
                    ln2_g: "Tensor", ln2_b: "Tensor",
                    w1: "Tensor", b1: "Tensor", w2: "Tensor", b2: "Tensor",
-                   gout: "Tensor", simd: 'i32' = 0) -> 'list[Tensor]':
+                   gout: "Tensor", simd: 'i32' = 0,
+                   gflat: 'list[f32]' = None, offs: 'list[i64]' = None) -> 'list[Tensor]':
+    # offs = 12 offset flat theo layout layer (0 ln1_g 1 ln1_b 2 w_qkv
+    # 3 b_qkv 4 w_proj 5 b_proj 6 ln2_g 7 ln2_b 8 w1 9 b1 10 w2 11 b2);
+    # rong = off (duong cu, parity nguyen ven).
+    if offs == None:
+        offs = []
+    o_l1g = -1
+    o_l1b = -1
+    o_qkv = -1
+    o_bqkv = -1
+    o_proj = -1
+    o_bproj = -1
+    o_l2g = -1
+    o_l2b = -1
+    o_w1 = -1
+    o_b1 = -1
+    o_w2 = -1
+    o_b2 = -1
+    if len(offs) >= 12:
+        o_l1g = offs[0]
+        o_l1b = offs[1]
+        o_qkv = offs[2]
+        o_bqkv = offs[3]
+        o_proj = offs[4]
+        o_bproj = offs[5]
+        o_l2g = offs[6]
+        o_l2b = offs[7]
+        o_w1 = offs[8]
+        o_b1 = offs[9]
+        o_w2 = offs[10]
+        o_b2 = offs[11]
     n = _sh0(x)
     h = _sh1(x)
     a = gpt2_layernorm(x, ln1_g, ln1_b)
@@ -409,18 +508,19 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
         r.data[i] = x.data[i] + attn_out.data[i]
     m = gpt2_layernorm(r, ln2_g, ln2_b)
     # out = r + mlp(m)
-    rmlp = gpt2_mlp_bwd(m, w1, b1, w2, b2, n, gout, simd)
+    rmlp = gpt2_mlp_bwd(m, w1, b1, w2, b2, n, gout, simd, gflat, o_w1, o_b1, o_w2, o_b2)
     dr = t_zeros([n, h])
     for i in range(n * h):
         dr.data[i] = gout.data[i]
-    rl2 = gpt2_layernorm_bwd(r, ln2_g, ln2_b, rmlp[0])
+    rl2 = gpt2_layernorm_bwd(r, ln2_g, ln2_b, rmlp[0], gflat, o_l2g, o_l2b)
     # quirk: khong duoc `rl2[0].data[i]` — gan ra bien truoc
     drl2 = rl2[0]
     for i in range(n * h):
         dr.data[i] = dr.data[i] + drl2.data[i]
     # r = x + attn_out
-    r_att = gpt2_attention_bwd(a, w_qkv, b_qkv, w_proj, b_proj, n, dr, simd)
-    rl1 = gpt2_layernorm_bwd(x, ln1_g, ln1_b, r_att[0])
+    r_att = gpt2_attention_bwd(a, w_qkv, b_qkv, w_proj, b_proj, n, dr, simd,
+                               gflat, o_qkv, o_bqkv, o_proj, o_bproj)
+    rl1 = gpt2_layernorm_bwd(x, ln1_g, ln1_b, r_att[0], gflat, o_l1g, o_l1b)
     drl1 = rl1[0]
     dx = t_zeros([n, h])
     for i in range(n * h):
@@ -448,9 +548,70 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
                   ln2_g: 'list[Tensor]', ln2_b: 'list[Tensor]',
                   w1: 'list[Tensor]', b1: 'list[Tensor]',
                   w2: 'list[Tensor]', b2: 'list[Tensor]',
-                  lnf_g: "Tensor", lnf_b: "Tensor", simd: 'i32' = 0) -> 'list[Tensor]':
+                  lnf_g: "Tensor", lnf_b: "Tensor", simd: 'i32' = 0,
+                  gflat: 'list[f32]' = None) -> 'list[Tensor]':
     n = len(ids)
     h = HiddenSize
+    # P1.1: gflat = flat grads phang cua AdamW (da zero) — neu KHONG rong thi
+    # ghi thang TAT CA param grads vao day theo layout flatten cua ps; out list
+    # tra ve placeholder (len 0). LUU Y: thu tu accumulate doi (dwte/gwpe tinh
+    # xong sau blocks) -> khong bit-exact vs duong cu, chi trong ULP — parity
+    # torch tolerance 1e-4 an toan. Duong cu (gflat rong) giu nguyen 100%.
+    if gflat == None:
+        gflat = []
+    use_flat = 0
+    if len(gflat) > 0:
+        use_flat = 1
+    # P1.1: bang offset flat theo layout flatten cua ps (cumulative numel):
+    #   [0] wte  [1] wpe  [2] lnf_g  [3] lnf_b
+    #   layer li: base = 4 + li*12 (0 ln1_g 1 ln1_b 2 w_qkv 3 b_qkv
+    #             4 w_proj 5 b_proj 6 ln2_g 7 ln2_b 8 w1 9 b1 10 w2 11 b2)
+    # goff >= 0 thi ghi thang weights grads vao gflat (da zero); tensor nho
+    # (bias/LN) van t_zeros + acc binh thuong.
+    poff = []
+    acc0 = 0
+    poff.append(acc0)
+    acc0 = acc0 + VocabSize * h
+    poff.append(acc0)
+    acc0 = acc0 + MaxPos * h
+    poff.append(acc0)
+    acc0 = acc0 + h
+    poff.append(acc0)
+    acc0 = acc0 + h
+    for li in range(NLayers):
+        poff.append(acc0)
+        acc0 = acc0 + h
+        poff.append(acc0)
+        acc0 = acc0 + h
+        poff.append(acc0)
+        acc0 = acc0 + 3 * h * h
+        poff.append(acc0)
+        acc0 = acc0 + 3 * h
+        poff.append(acc0)
+        acc0 = acc0 + h * h
+        poff.append(acc0)
+        acc0 = acc0 + h
+        poff.append(acc0)
+        acc0 = acc0 + h
+        poff.append(acc0)
+        acc0 = acc0 + h
+        poff.append(acc0)
+        acc0 = acc0 + 4 * h * h
+        poff.append(acc0)
+        acc0 = acc0 + 4 * h
+        poff.append(acc0)
+        acc0 = acc0 + 4 * h * h
+        poff.append(acc0)
+        acc0 = acc0 + h
+    o_wte = -1
+    o_wpe = -1
+    o_lnf_g = -1
+    o_lnf_b = -1
+    if use_flat == 1:
+        o_wte = poff[0]
+        o_wpe = poff[1]
+        o_lnf_g = poff[2]
+        o_lnf_b = poff[3]
     # forward (giu lai dau vao cua moi block)
     x = gpt2_embed(ids, pos, wte, wpe)
     xins = []
@@ -521,16 +682,20 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
                     dxf.data[i * h + k] = dxf.data[i * h + k] + gsc * wte.data[o * h + k]
                     dwte.data[o * h + k] = dwte.data[o * h + k] + gsc * xf.data[i * h + k]
     # ln_f
-    rl = gpt2_layernorm_bwd(xf_in, lnf_g, lnf_b, dxf)
+    rl = gpt2_layernorm_bwd(xf_in, lnf_g, lnf_b, dxf, gflat, o_lnf_g, o_lnf_b)
     # backward qua cac block (tu cuoi ve dau), luu phang theo thu tu backward
     rblocks = []
     gx = rl[0]
     for i in range(NLayers):
         li = NLayers - 1 - i
+        lo = []
+        if use_flat == 1:
+            for j in range(12):
+                lo.append(poff[4 + li * 12 + j])
         rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
                             w_qkv[li], b_qkv[li], w_proj[li], b_proj[li],
                             ln2_g[li], ln2_b[li],
-                            w1[li], b1[li], w2[li], b2[li], gx, simd)
+                            w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo)
         gx = rb[0]
         for j in range(1, 13):
             rblocks.append(rb[j])
@@ -541,8 +706,17 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
         dwte.data[k] = dwte.data[k] + gwte_e.data[k]
     # xep theo layout: layer 0 truoc
     out = []
-    out.append(dwte)
-    out.append(gwpe)
+    if use_flat == 1:
+        # ghi thang dwte/gwpe vao flat (dwte gom 2 duong da gop)
+        for k in range(VocabSize * h):
+            gflat[o_wte + k] = gflat[o_wte + k] + dwte.data[k]
+        for k in range(MaxPos * h):
+            gflat[o_wpe + k] = gflat[o_wpe + k] + gwpe.data[k]
+        out.append(t_zeros([0]))
+        out.append(t_zeros([0]))
+    else:
+        out.append(dwte)
+        out.append(gwpe)
     out.append(rl[1])
     out.append(rl[2])
     for li in range(NLayers):
