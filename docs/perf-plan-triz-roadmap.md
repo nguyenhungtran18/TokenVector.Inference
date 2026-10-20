@@ -31,7 +31,7 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 | Pha (gọi thẳng library, simd=1) | seq8 | seq256 | seq1024 | % @1024 |
 |---|---|---|---|---|
 | `attention_bwd` ×12 | 2.20 s | 6.06 s | **48.86 s** | **39%** |
-| fwd recompute (`gpt2_forward` trong bwd) | 1.03 s | 3.75 s | 19.11 s | 15% |
+| fwd recompute (`gpt2_forward` trong bwd) — **P5.5 ĐÃ BỎ** (xem §11) | 1.03 s | 3.75 s | ~~19.11 s~~ | ~~15%~~ → 0 |
 | `mlp_bwd` ×12 (gelu fwd+bwd = 3.3 s) | 4.70 s | 7.58 s | 16.34 s | 13% |
 | attn-fwd tính lại trong `block_bwd` | ~0.3 s | 1.80 s | ~15.4 s | 12% |
 | ghi flatten `gflat` (bench − probe) | ~2.6 s | ~4.8 s | ~12.2 s | 10% |
@@ -194,7 +194,9 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 | 84/84 assertions | Pass | **Pass** | Không hồi quy |
 | Loss vs PyTorch fixture | ≤2.4e-7 logits / ≤8.3e-7 124M grad | **Không đổi** | Parity duy trì |
 
-**Cập nhật 2026-10-20 sau P5.4 (§10):** full step seq1024 **141.219 s → 39.9×** (từ 154.234 s / 43.5×); seq8 20.7×, seq256 26.9×. Còn lại để tới ~20×: Phase 2 flatten (~10%) + gộp/cache forward (~27%) + phase 3.
+**Cập nhật 2026-10-20 sau P5.4 (§10):** full step seq1024 **141.219 s → 39.9×** (từ 154.234 s / 43.5×); seq8 20.7×, seq256 26.9×.
+
+**Cập nhật 2026-10-20 sau P5.5 (§11):** full step seq1024 **118.641 s → 33.5×** (gộp forward, −16.0%); seq8 18.7×, seq256 23.2×. Còn lại để tới ~20× (~85 s): cache attn-fwd + MLP fwd trong block_bwd (~50 s → cắt dần), Phase 2 flatten (~2 s thật, nhỏ hơn dự kiến), lm-head.
 
 ## 8. RỦI RO + CONTINGENCY
 
@@ -223,6 +225,7 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 | `tv/tests/simd_probe_ar.tkv` | Phân rach từng phép trong `attention_bwd` + P13 build-vs-gemm |
 | `tv/tests/simd_probe_at.tkv` | Phân giải `now_ms`/`now_us` (~15.6 ms — bài học đo) |
 | `tv/tests/simd_probe_au.tkv` | Test ngôn ngữ `<=` + if/else lớn |
+| `tv/tests/simd_probe_as.tkv` | Bit-exact saves-vs-recompute + đo fwd_saved overhead (P5.5) |
 
 ---
 
@@ -244,4 +247,22 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 - fwd+bwd @1024: 150.750 (ctrl) → **136.469 s** (−9.5%); **bwd 125.969 → 111.625 s (−11.4%)**.
 - Pha AQ @1024 trước/sau: `attention_bwd`×12 48.86 → **38.20 s (−21.8%)**, `mlp_bwd` −8.1%; LN/GELU/EMBED không đổi ✓ (đúng code không sửa).
 - Loss khớp từng chữ số (10.760399 → 13.442912); **84/84 gate xanh**; tỉ lệ vs torch 43.5× → **39.9×**.
-- Chưa làm (ứng viên kế, theo số đo §1): gộp forward loss+backward (−19 s), cache attn-fwd trong `block_bwd` (−15 s), Phase 2 flatten (~12 s), lm-head (~11 s).
+- ~~Chưa làm (ứng viên kế, theo số đo §1): gộp forward loss+backward (−19 s)~~ → **đã làm: P5.5 (§11)**. Còn: cache attn-fwd trong `block_bwd`, Phase 2 flatten, lm-head.
+
+---
+
+## 11. TIẾN ĐỘ 2026-10-20 — P5.5 GOP FORWARD: BACKWARD DÙNG SAVES (XONG)
+
+**Cơ chế:** `gpt2_forward_saved` trả `[logits, xf, xf_in, xins…]`; `gpt2_backward(…, saves=None)` — param mới **cuối cùng**: `saves != None` → dùng lại forward của loss pass + `saves[0]` thay GEMM logits lm-head; `saves == None` → đường recompute cũ nguyên vẹn (mọi gate/fixture không đổi). Bit-exact xác minh bằng probe `simd_probe_as.tkv` (logits/gflat/out/reuse = 0.0 @n=8) + loss khớp từng chữ số @seq1024. Đánh đổi: +~250 MB memory @seq1024 để giữ activations (chuẩn LSTM-style).
+
+| seq | full step TRƯỚC (P5.4) | SAU (P5.5) | Δ |
+|---|---|---|---|
+| 8 | 19.297 s | **17.469 s** | −9.5% |
+| 256 | 37.813 s | **32.578 s** | −13.8% |
+| 1024 | 141.219 s | **118.641 s** | **−16.0%** |
+
+- bwd @1024: 111.6 → **86.2 s (−22.8%)**; fwd không đổi (24.6 s, overhead saves ≈ 0).
+- AQ @1024: TOTAL_bwd 103.2 → **84.3 s** — đúng bằng phần recompute bị bỏ; phân bổ mới: ATTN_BWD×12 42.4 s, MLP_BWD 16.2 s, LHEAD 11.7 s, LN_BWD 0.77 s, EMBED 1.2 s.
+- **84/84 gate**; tỉ lệ vs torch 39.9× → **33.5×** (seq8 18.7×, seq256 23.2×).
+- Lưu ý đo: máy drift ~5-8% trong ngày → % A/B bench có thể lệch vài điểm; ground truth cùng tiến trình: probe AS bwd @n8 −16.8%, AQ TOTAL_bwd −18.9 s @1024.
+- Ứng viên kế (theo AQ mới): cache attn-fwd + MLP fwd trong `block_bwd` (P5.6), lm-head, Phase 2 flatten (thực chất chỉ ~2 s).

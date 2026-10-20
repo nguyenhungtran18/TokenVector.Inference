@@ -1,0 +1,191 @@
+# PROBE AS — P5.5 gop forward: saves (gpt2_forward_saved) vs recompute
+# 1) BIT-EXACT (n=8 fixture, 124M config):
+#   - logits: saves[0] vs gpt2_forward -> maxdiff phai = 0.0
+#   - gflat (toan bo n_param) + out list: gpt2_backward(saves) vs
+#     gpt2_backward(recompute) -> maxdiff phai = 0.0
+#   - goi bwd saves LAN THU 2: saves khong bi mutate -> out2 == out1
+# 2) DO (best-of, reps vuot phan giai now_ms ~15.6ms):
+#   fwd (gpt2_forward) vs fwd_saved; bwd recompute vs bwd voi saves
+# Chay (tu goc repo):
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_as.tkv out/as.exe main
+#   ./out/as.exe
+import tv.training.gpt2_ref124
+
+FIX = "tv/tests/fixtures/"
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> 'list[f32]':
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                vals.append(float(toks[j]))
+    return vals
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+def _mn(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+def _abs(x: 'f64') -> 'f64':
+    if x < 0.0:
+        return 0.0 - x
+    return x
+
+def _maxdiff_t(a: "Tensor", b: "Tensor") -> 'f64':
+    da = a.data
+    db = b.data
+    m = 0.0
+    for i in range(len(da)):
+        d = _abs(da[i] - db[i])
+        if d > m:
+            m = d
+    return m
+
+def main() -> 'i32':
+    ids = load_ints(FIX + "g2_ids.txt")
+    pos = load_ints(FIX + "g2_pos.txt")
+    n = len(ids)
+    h = HiddenSize
+    print("AS n=" + str(n) + " h=" + str(h) + " NLayers=" + str(NLayers))
+
+    ps = gpt2_init(7)
+    ln1_g = []
+    ln1_b = []
+    wq = []
+    bq = []
+    wp = []
+    bp = []
+    ln2_g = []
+    ln2_b = []
+    w1 = []
+    b1 = []
+    w2 = []
+    b2 = []
+    for li in range(NLayers):
+        base = 4 + li * 12
+        ln1_g.append(ps[base + 0])
+        ln1_b.append(ps[base + 1])
+        wq.append(ps[base + 2])
+        bq.append(ps[base + 3])
+        wp.append(ps[base + 4])
+        bp.append(ps[base + 5])
+        ln2_g.append(ps[base + 6])
+        ln2_b.append(ps[base + 7])
+        w1.append(ps[base + 8])
+        b1.append(ps[base + 9])
+        w2.append(ps[base + 10])
+        b2.append(ps[base + 11])
+
+    # ---- 1) BIT-EXACT: logits saved vs forward --------------------------------
+    sv = gpt2_forward_saved(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                            ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], 1)
+    z = gpt2_forward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                     ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], 1)
+    d_logits = _maxdiff_t(sv[0], z)
+
+    # ---- 1b) BIT-EXACT: gflat + out cua bwd saves vs recompute ----------------
+    npar = 0
+    for i in range(len(ps)):
+        ti = ps[i]
+        di = ti.data
+        npar = npar + len(di)
+    gA = []
+    gB = []
+    for i in range(npar):
+        gA.append(0.0)
+        gB.append(0.0)
+    outA = gpt2_backward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                         ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], 1, gA, sv)
+    outB = gpt2_backward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                         ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], 1, gB)
+    d_gflat = 0.0
+    for i in range(npar):
+        d = _abs(gA[i] - gB[i])
+        if d > d_gflat:
+            d_gflat = d
+    d_out = 0.0
+    if len(outA) != len(outB):
+        print("AS FAIL: out len " + str(len(outA)) + " vs " + str(len(outB)))
+    else:
+        for i in range(len(outA)):
+            d2 = _maxdiff_t(outA[i], outB[i])
+            if d2 > d_out:
+                d_out = d2
+
+    # ---- 1c) saves KHONG bi mutate: goi bwd saves lan thu 2 -------------------
+    gA2 = []
+    for i in range(npar):
+        gA2.append(0.0)
+    outA2 = gpt2_backward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                          ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], 1, gA2, sv)
+    d_reuse = 0.0
+    for i in range(npar):
+        d = _abs(gA[i] - gA2[i])
+        if d > d_reuse:
+            d_reuse = d
+    print("AS BITEXACT logits=" + str(d_logits) + " gflat=" + str(d_gflat)
+          + " out=" + str(d_out) + " reuse=" + str(d_reuse))
+
+    # ---- 2) DO: fwd vs fwd_saved, bwd recompute vs bwd saves ------------------
+    rf = 20
+    v_f = 1.0e18
+    v_s = 1.0e18
+    k = 0
+    while k < rf:
+        t0 = now_ms()
+        z2 = gpt2_forward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                          ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], 1)
+        t1 = now_ms()
+        v_f = _mn(v_f, t1 - t0)
+        t0 = now_ms()
+        sv2 = gpt2_forward_saved(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                                 ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], 1)
+        t1 = now_ms()
+        v_s = _mn(v_s, t1 - t0)
+        k = k + 1
+    rb = 3
+    gT = []
+    for i in range(npar):
+        gT.append(0.0)
+    v_br = 1.0e18
+    v_bs = 1.0e18
+    k = 0
+    while k < rb:
+        t0 = now_ms()
+        outT = gpt2_backward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                             ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], 1, gT)
+        t1 = now_ms()
+        v_br = _mn(v_br, t1 - t0)
+        t0 = now_ms()
+        outU = gpt2_backward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                             ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], 1, gT, sv)
+        t1 = now_ms()
+        v_bs = _mn(v_bs, t1 - t0)
+        k = k + 1
+    print("AS fwd        = " + str(v_f) + " ms  (gpt2_forward)")
+    print("AS fwd_saved  = " + str(v_s) + " ms  (overhead = "
+          + str(100.0 * (v_s - v_f) / v_f) + "%)")
+    print("AS bwd_recomp = " + str(v_br) + " ms  (duong cu)")
+    print("AS bwd_saves  = " + str(v_bs) + " ms  (loi nhuan = "
+          + str(100.0 * (v_br - v_bs) / v_br) + "%)")
+    print("AS done")
+    return 0

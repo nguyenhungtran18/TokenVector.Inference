@@ -13,6 +13,8 @@ hien tai cua G3 nam o muc 0 ngay duoi day.
 (43.5x vs torch) -> ~85 s (~20x), giữ nguyên 84/84 parity assertions.
 **P5.4 (2026-10-20) da ha 154.234 -> 141.219 s (39.9x), 84/84 gate — xem 0.14
 (5 file gpt2_ref sua chua commit, 4 probe untracked, chua push).**
+**P5.5 (2026-10-20) gop forward: 141.219 -> 118.641 s (33.5x), 84/84,
+bit-exact — xem 0.15.**
 
 ---
 
@@ -660,6 +662,56 @@ materialize (~12s), lm-head (~11s). KPI ~20× can ca 3 nhom nay + Phase 3.
 **Trang thai git:** 5 file gpt2_ref sua chua commit (P5.4), 4 probe untracked,
 simd_matmul da tro lai HEAD. Chua push.
 
+### 0.15 P5.5 — GOP FORWARD: backward dung saves (2026-10-20) — 84/84, −16.0%
+
+**Van de (so do AQ/AR 0.14):** moi full step forward chay 2 lan — 1 lan cho
+loss + 1 lan TINH LAI trong gpt2_backward (FWD_BODY ~19-21s @seq1024 = 15%
+bwd) + GEMM logits lm-head tinh lai (~2-3s). Tong ~22-25s/lang thua.
+
+**Thay doi (5 mirror gpt2_ref, dong bo):**
+
+1. `gpt2_forward_saved(...)` — forward + LUU [logits, xf, xf_in, xins[0..11]]
+   (~250MB @seq1024: z 206MB + activations ~40MB).
+2. `gpt2_backward(..., saves=None)` — param moi CUOI; saves != None thi dung
+   lai forward (khong recompute) + saves[0] thay GEMM logits lm-head;
+   saves == None duong cu nguyen ven (toan bo gate/fixture khong doi).
+3. 2 bench (`simd_bench_124m`, `simd_bench_124m_seq`) + probe AQ chuyen
+   sang duong saves.
+
+**BIT-EXACT (probe `tv/tests/simd_probe_as.tkv`, n=8, config 124M):**
+logits=0.0, gflat (toan bo n_param)=0.0, out list=0.0, goi lan 2=0.0
+(saves khong bi mutate). Overhead fwd_saved = 0.0%.
+
+**Do A/B:**
+
+| seq | full step TRUOC (P5.4) | SAU (P5.5) | Δ |
+|---|---|---|---|
+| 8 | 19.297 s | **17.469 s** | −9.5% |
+| 256 | 37.813 s | **32.578 s** | −13.8% |
+| 1024 | 141.219 s | **118.641 s** | **−16.0%** |
+
+- mode 0 @1024: fwd 24.625 + bwd **86.219** (truoc 111.625, **−22.8%**)
+  = 110.844 s (truoc 136.469, −18.8%).
+- AQ @1024 sau: TOTAL_bwd **84.328s** (truoc 103.2s recompute = −18.9s —
+  dung so fwd recompute da bo); LHEAD van 11.7s (con softmax+dxf+dwte).
+- Loss khop tung chu so P5.4 (10.760399 → 13.442912) — xac nhan bit-exact
+  o seq1024 (khong chi o n=8).
+- Gate: **84/84** (duong saves=None). Ty le vs torch: 39.9× → **33.5×**
+  (seq8 18.7×, seq256 23.2×; torch 0.934/1.404/3.542 s cung ngay).
+
+**Ghi chu do luong:** may drift ~5-8% so voi luc do P5.4 cung ngay
+(FWD_BODY 19.7→21.3, ATTN_BWD 38.2→42.4) -> ty le % A/B bench co the lech
+vai phan tram; so ground truth cung tien trinh: probe AS bwd @n8
+11812 → 9829 ms (−16.8%), va AQ TOTAL_bwd −18.9s @1024.
+
+**Con lai (ung vien ke theo so AQ moi @1024):** ATTN_BWD×12 42.4s
+(cache attn-fwd trong block_bwd — P5.6), MLP_BWD 16.2s (mlp fwd tinh lai
+trong mlp_bwd), LHEAD 11.7s, flatten ~2s, LN_BWD 0.77s. KPI ~20× (~85s)
+can tiep 2-3 attack nua.
+
+**Trang thai git:** 5 gpt2_ref + 2 bench + probe AQ sua, probe AS moi —
+chua commit/push.
+
 ---
 
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
@@ -807,6 +859,9 @@ full step seq1024 **154.234 s vs 3.542 s = 43.5×** (truoc P5.3: 114.5× fwd+bwd
 
 **Sau P5.4 (cung ngay 2026-10-20, do A/B cung phien): full step 19.297 /
 37.813 / 141.219 s — ty le 20.7x / 26.9x / 39.9x. Chi tiet: 0.14.**
+
+**Sau P5.5 (cung ngay 2026-10-20): full step 17.469 / 32.578 / 118.641 s —
+ty le 18.7x / 23.2x / 33.5x. Chi tiet: 0.15.**
 
 ### 7.2 Doc so (cai gi can sua)
 

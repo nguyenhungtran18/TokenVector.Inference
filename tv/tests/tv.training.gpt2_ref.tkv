@@ -273,6 +273,50 @@ def gpt2_forward(ids: 'list[i64]', pos: 'list[i64]',
             logits.data[i * VocabSize + o] = acc
     return logits
 
+# ---- P5.5 (2026-10-20): forward + LUU activations cho backward ------------
+# Tra ve list[Tensor]:
+#   [0] logits (z)  [1] xf (ln_f out)  [2] xf_in (out block cuoi)
+#   [3 .. 3+NLayers-1] xins[i] (dau vao block i)
+# Dung kem gpt2_backward(..., saves=...) de bo forward recompute (~19.1s
+# @seq1024 = 15% bwd, probe AQ). Cung phep voi gpt2_forward -> cung BIT
+# (deterministic cung input) -> grad bit-exact.
+def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
+                       wte: "Tensor", wpe: "Tensor",
+                       ln1_g: 'list[Tensor]', ln1_b: 'list[Tensor]',
+                       w_qkv: 'list[Tensor]', b_qkv: 'list[Tensor]',
+                       w_proj: 'list[Tensor]', b_proj: 'list[Tensor]',
+                       ln2_g: 'list[Tensor]', ln2_b: 'list[Tensor]',
+                       w1: 'list[Tensor]', b1: 'list[Tensor]',
+                       w2: 'list[Tensor]', b2: 'list[Tensor]',
+                       lnf_g: "Tensor", lnf_b: "Tensor", simd: 'i32' = 0) -> 'list[Tensor]':
+    n = len(ids)
+    h = HiddenSize
+    x = gpt2_embed(ids, pos, wte, wpe)
+    xins = []
+    for i in range(NLayers):
+        xins.append(x)
+        x = gpt2_block(x, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
+                       ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i], simd)
+    xf_in = x
+    xf = gpt2_layernorm(x, lnf_g, lnf_b)
+    if simd == 1:
+        logits = smm_dot(xf, wte, n, VocabSize, h)
+    else:
+        logits = t_zeros([n, VocabSize])
+        for i in range(n):
+            for o in range(VocabSize):
+                acc = 0.0
+                for k in range(h):
+                    acc = acc + xf.data[i * h + k] * wte.data[o * h + k]
+                logits.data[i * VocabSize + o] = acc
+    out = []
+    out.append(logits)
+    out.append(xf)
+    out.append(xf_in)
+    for i in range(NLayers):
+        out.append(xins[i])
+    return out
+
 # ---- Cross entropy (F.cross_entropy mean = mean_i(lse_i - logit[i, y_i]))
 # NOT op_ce_fwd: op do mask theo TRUC LOAI va chia /cnt — dung cho parity op,
 # khong phai cong thuc mean toan bo token cua PyTorch.
@@ -738,7 +782,8 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
                   w1: 'list[Tensor]', b1: 'list[Tensor]',
                   w2: 'list[Tensor]', b2: 'list[Tensor]',
                   lnf_g: "Tensor", lnf_b: "Tensor", simd: 'i32' = 0,
-                  gflat: 'list[f32]' = None) -> 'list[Tensor]':
+                  gflat: 'list[f32]' = None,
+                  saves: 'list[Tensor]' = None) -> 'list[Tensor]':
     n = len(ids)
     h = HiddenSize
     # P1.1: gflat = flat grads phang cua AdamW (da zero) — neu KHONG rong thi
@@ -801,22 +846,39 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
         o_wpe = poff[1]
         o_lnf_g = poff[2]
         o_lnf_b = poff[3]
-    # forward (giu lai dau vao cua moi block)
-    x = gpt2_embed(ids, pos, wte, wpe)
+    # P5.5 (2026-10-20, do bench A/B): saves != None thi dung LAI forward da
+    # tinh trong loss pass (gpt2_forward_saved) — bo het forward recompute
+    # (~19.1s @seq1024 = 15% bwd) + GEMM logits trong lm-head. saves =
+    # [logits, xf, xf_in, xins[0..NLayers-1]] — cung gia tri TUNG BIT voi
+    # duong recompute (cung phep, deterministic) -> grad BIT-EXACT.
+    # saves == None: duong cu nguyen ven (parity/fixture khong doi).
     xins = []
-    for i in range(NLayers):
-        xins.append(x)
-        x = gpt2_block(x, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
-                       ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i], simd)
-    xf_in = x
-    xf = gpt2_layernorm(x, lnf_g, lnf_b)
+    if saves == None:
+        # forward (giu lai dau vao cua moi block)
+        x = gpt2_embed(ids, pos, wte, wpe)
+        for i in range(NLayers):
+            xins.append(x)
+            x = gpt2_block(x, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
+                           ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i], simd)
+        xf_in = x
+        xf = gpt2_layernorm(x, lnf_g, lnf_b)
+    else:
+        xf = saves[1]
+        xf_in = saves[2]
+        for i in range(NLayers):
+            xins.append(saves[3 + i])
     # duong lm head (tie weight): g_logits = (p - onehot)/n
     dxf = t_zeros([n, h])
     dwte = t_zeros([VocabSize, h])
     if simd == 1:
         # duong SIMD: logits toan bo bang smm_dot (giong head fwd), xong
         # dxf = gg x wte va dwTte = gg x xf^T — 2 GEMM lon, khong lap manh vocab
-        logits_t = smm_dot(xf, wte, n, VocabSize, h)
+        # P5.5: saves[0] = logits da tinh trong forward_saved -> bo lai GEMM nay.
+        logits_t = xf
+        if saves == None:
+            logits_t = smm_dot(xf, wte, n, VocabSize, h)
+        else:
+            logits_t = saves[0]
         gg = t_zeros([n, VocabSize])
         for i in range(n):
             base = i * VocabSize

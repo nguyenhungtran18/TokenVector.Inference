@@ -34,8 +34,10 @@ def load_ints(path: 'str') -> 'list[i64]':
         out.append(int(f[i]))
     return out
 
-# ---- forward + loss (ban sao gpt2_fwd_ps, ten rieng de tranh clash) --------
-def _f124_loss(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32') -> 'f32':
+# ---- forward + LUU activations (P5.5: ban sao gpt2_fwd_ps + forward_saved)
+# Tra ve saves = [logits, xf, xf_in, xins...] — loss tinh rieng bang
+# gpt2_loss(saves[0], ids) tai call site (cung ben trong vong do fwd).
+def _f124_fwd2(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32') -> 'list[Tensor]':
     ln1_g = []
     ln1_b = []
     wq = []
@@ -62,13 +64,12 @@ def _f124_loss(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i3
         b1.append(ps[base + 9])
         w2.append(ps[base + 10])
         b2.append(ps[base + 11])
-    z = gpt2_forward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
-                     ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd)
-    return gpt2_loss(z, ids)
+    return gpt2_forward_saved(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                              ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd)
 
-# ---- backward (ban sao gpt2_bwd_ps) ----------------------------------------
+# ---- backward (ban sao gpt2_bwd_ps + saves P5.5) --------------------------
 def _f124_bwd(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32',
-              gflat: 'list[f32]' = None) -> 'list[Tensor]':
+              gflat: 'list[f32]' = None, saves: 'list[Tensor]' = None) -> 'list[Tensor]':
     ln1_g = []
     ln1_b = []
     wq = []
@@ -96,16 +97,18 @@ def _f124_bwd(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32
         w2.append(ps[base + 10])
         b2.append(ps[base + 11])
     return gpt2_backward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
-                         ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd, gflat)
+                         ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd, gflat, saves)
 
 # ---- 1 buoc train day du (ban sao gpt2_train_step, flatten inline) ----------
 # (P1.2 fused da REVERT sau probe simd_probe_ah: fused cham hon — giu 2 vong.)
 def _step124(opt: "AdamW", ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32') -> 'f32':
-    loss = _f124_loss(ps, ids, pos, simd)
+    # P5.5: forward_saved -> bwd dung lai saves (khong forward recompute)
+    sv = _f124_fwd2(ps, ids, pos, simd)
+    loss = gpt2_loss(sv[0], ids)
     # P1.1: bwd ghi THANG param grads vao opt.g (da zero) — bo mat grads +
     # GRAD_ACC (probe AL: bit-exact vs duong cu, maxdiff=0.0/28 nhom).
     opt.zero_grad()
-    grads = _f124_bwd(ps, ids, pos, simd, opt.g)
+    grads = _f124_bwd(ps, ids, pos, simd, opt.g, sv)
     opt.step()
     # ghi trong so da cap nhat tro lai tensor (unflatten inline)
     off = 0

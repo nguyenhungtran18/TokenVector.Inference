@@ -1,4 +1,8 @@
 # PROBE AQ — phan rach BACKWARD 124M theo PHA (2026-10-20, sau P5.3)
+# GHI CHU P5.5 (2026-10-20): TOTAL_bwd tu dong nay la duong SAVES (forward
+# tinh trong loss pass, khong forward recompute). So TRUOC P5.5 @1024
+# (recompute, sau P5.4): TOTAL_bwd = 103.2 s (FWD_BODY 19.7 s trong do) —
+# xem HANDOFF 0.14/0.15.
 # Muc dich: chot so phan bo "attention vs KHONG-attention" ma roadmap TRIZ
 # (docs/perf-plan-triz-roadmap.md muc 1) ghi la "CHUA DO DUOC".
 # Cau hinh: tv/tests/_seq_cfg.txt DONG 1 = seq (dong 2/3 khong dung).
@@ -295,6 +299,13 @@ def main() -> 'i32':
         k8 = k8 + 1
 
     # ---- PHA 9: TOAN BO backward library (gpt2_backward, simd=1) -----------
+    # P5.5 (2026-10-20): TRUOC do total do duong RECOMPUTE (backward tinh lai
+    # forward). Sau P5.5 duong that = saves (forward tinh trong loss pass,
+    # gpt2_forward_saved) -> truyen saves vao day. FWD_BODY van do rieng de
+    # doi chieu (gia tri forward_saved = forward + copy activations).
+    sv9 = gpt2_forward_saved(ids, pos, ps[0], ps[1],
+                             ln1_g, ln1_b, wq, bq, wp, bp,
+                             ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], 1)
     v_tot = 1.0e18
     k9 = 0
     while k9 < rs:
@@ -302,7 +313,7 @@ def main() -> 'i32':
         tot = gpt2_backward(ids, pos, ps[0], ps[1],
                             ln1_g, ln1_b, wq, bq, wp, bp,
                             ln2_g, ln2_b, w1, b1, w2, b2,
-                            ps[2], ps[3], 1)
+                            ps[2], ps[3], 1, [], sv9)
         t1 = now_ms()
         v_tot = _mn(v_tot, t1 - t0)
         k9 = k9 + 1
