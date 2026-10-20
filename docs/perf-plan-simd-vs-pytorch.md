@@ -257,6 +257,71 @@ khi scalar thật chỉ **~134 MMAC/s** (đóng hộp f64, 1 luồng — đúng 
 3. Không đo từng token (3 now_ms/token × 1024 token → lỗi lũy cộng hàng
    trăm ms): đo **cả hàm** rồi tách bằng biến `mode`.
 
+### P5 — Đưa attention + proj về `smm` — **ĐÃ PROBE (simd_probe_ap): XÁC NHẬN, CÓ LỢI**
+
+Probe `tv/tests/simd_probe_ap.tkv` (124M thật, layer 6, **2 bản copy giống hệt**
+code library + biến `mode` để tắt từng vùng, tự kiểm bằng self-check
+copy-vs-library). Cấu hình: `tv/tests/_seq_cfg.txt` (dong 1 = n, dong 4 = số
+lần lặp để trung bình).
+
+**Kết quả (ms / layer / 1 lần attention):**
+
+| Vùng | n=8 fwd | n=8 bwd | n=1024 fwd | n=1024 bwd | **Prototype GEMM (n=1024)** |
+|---|---|---|---|---|---|
+| qkv linear (SIMD) | 26 | 26 | 187 | 187 | — |
+| **core O(n²) scalar** | ~0 | ~1 | **5 858** | **15 999** | 756 (12 head: score 16 + ctx 47) |
+| **proj scalar (n·h²)** | **31** | — | **3 970** | — | **78** |
+| **dctx scalar (n·h²)** | — | **19** | — | **2 204** | **47** |
+| **dw_proj scalar (n·h²)** | — | **51** | — | **7 032** | **78** |
+| attention total (library) | 54 | 225 | 9 188 | 24 703 | — |
+
+**Tính đúng (self-check):** copy mode 0 = library (n=8: 54.0 vs 54.1; n=1024:
+10 015 vs 9 188 — chênh 9% do nhánh `mode` trong vòng hot). Tổng các vùng
+= tổng library ✓.
+
+**Cross-check scale (xác nhận đo đúng):** các vùng n·h² scale **tuyến tính**
+theo n → proj 3 970/128 = 31.0 ms ở n=8, đo được **31.1 ms** ✓; dctx
+17.2 vs 19.0 ✓; dw_proj 54.9 vs 51.4 ✓.
+
+**Tiết kiệm P5 (thành thật):**
+
+| seq | fwd/layer | bwd/layer | **tổng 12 layer** | % của bước |
+|---|---|---|---|---|
+| 8 | 22.7 ms | 39.8 ms | **0.75 s** | 3.3% (22.78 → ~22.0 s) |
+| 1024 | 8 994 ms | 14 213 ms | **279 s** | **41%** (674.6 → ~395 s) |
+
+- fwd: (5 858−756) + (3 970−78) = 8 994 ms/layer.
+- bwd: (5 858−756) + (2 204−47) + (7 032−78) = 14 213 ms/layer.
+- **CẢNH BÁO**: phần `dp/ds/dqkv` của core bwd (15 999 − 5 858 = **10 141
+  ms/layer**) **VẪN SCALAR** nếu chỉ làm P5.1 — con số 41% là trần của
+  P5.1, không phải của P5 đầy đủ.
+- Ở seq1024, attention scalar = 12 × (9 188 + 24 703) = **406 s / 666 s
+  fwd+bwd = 61%** ✓ đúng gia thuyết P4.
+
+**SỬA ƯỚC LƯỢNG SAI CỦA P2:** P2 kết luận “sửa scalar attention (dctx/dw_proj
+→ smm) chỉ lời ~1 ms/block — không làm”. **SAI ~6×**: probe AP đo được 70
+ms/layer ở n=8 (dctx 19 + dw_proj 51) ⇒ ~5.8 ms/block, tức ~0.5 s trong bwd
+124M. Nguyên nhân: ước lượng cũ dùng “10M MAC ≈ 1 ms” (≈10 GMAC/s) trong
+khi scalar thật chỉ **~134 MMAC/s** (đóng hộp f64, 1 luồng — đúng P3).
+
+**Kết luận P5: ĐÚNG — làm.** Đây là nút thắt lớn nhất còn lại trong repo
+(attention scalar 1 luồng), và **không cần compiler team** (chỉ cần `smm`
+đã có). Chia 2 bước:
+- **P5.1** (ít rủi ro): proj / dctx / dw_proj → `smm` (n·h²).
+- **P5.2** (rủi ro cao hơn): score/ctx theo từng head → `smm` + softmax
+  nhân mask causal (core O(n²)); phần `dp/ds/dqkv` vẫn scalar.
+
+### Bài học về đo (từ probe AP — áp dụng cho mọi probe sau)
+
+1. **`now_ms()` có độ phân giải ~15.6 ms** (đồng hồ Windows) → ở seq8, một
+   lần đo là vô nghĩa (mọi số đều là bội số 15.6). Phải **trung bình N
+   lần** (probe AP đọc `reps` ở dong 4 config) — 24 lần ở n=8 cho số sạch.
+2. **Vòng hot của library dùng LIST cục bộ** (`ctx[r]`, `qv[d]`), KHÔNG dùng
+   `tensor.data[...]` → bản copy dùng tensor indexing **chậm ~1.8×** → phép
+   “total − qkv − proj” ra số **ÂM**. Copy phải giống hệt cách truy cập.
+3. Không đo từng token (3 now_ms/token × 1024 token → lỗi lũy cộng hàng
+   trăm ms): đo **cả hàm** rồi tách bằng biến `mode`.
+
 ### Kỳ vọng trung thực
 
 | Mốc | Bước 124M |
