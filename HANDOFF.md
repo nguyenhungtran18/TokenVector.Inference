@@ -11,6 +11,8 @@ hien tai cua G3 nam o muc 0 ngay duoi day.
 **Dinh huong hien tai (2026-10-20):** muc 7 (TRIZ roadmap) + file
 `docs/perf-plan-triz-roadmap.md` — muc tieu seq1024 full step 154.234 s
 (43.5x vs torch) -> ~85 s (~20x), giữ nguyên 84/84 parity assertions.
+**P5.4 (2026-10-20) da ha 154.234 -> 141.219 s (39.9x), 84/84 gate — xem 0.14
+(5 file gpt2_ref sua chua commit, 4 probe untracked, chua push).**
 
 ---
 
@@ -595,6 +597,69 @@ attention GEMM voi `simd=1`** — nen ban draft hong van “xanh” vi khong ai 
 So chi tiet: `docs/perf-plan-simd-vs-pytorch.md` (muc **P5.2 + P5.3**),
 `ROADMAP_TRAIN.md` (dong “SIMD train”).
 
+### 0.14 P5.4 — ATTACK ATTENTION BWD (2026-10-20) — XANH 84/84, −8.8%
+
+**Vi sao:** probe AQ (muc 1/TRIZ truoc do ghi "chua do duoc") tach duoc
+backward @seq1024: attention_bwd 48.9s + fwd recompute 15.4s = **51%**,
+LN chi 0.6%, embed 0.8%, gelu 2.6% — chon attack attention bwd (qyet dinh
+goc 2026-10-20). 4 probe tao ra:
+
+- `tv/tests/simd_probe_aq.tkv` — phan rach backward theo PHA, seq doc dong 1
+  cua `tv/tests/_seq_cfg.txt` (8/256/1024), self-check SUM vs TOTAL ≤3%.
+- `tv/tests/simd_probe_ar.tkv` — phan rach TUNG PHEP trong attention_bwd
+  (1 tang, 19 pass; P13 build-vs-gemm), self-check −2.8/−2.2/+1.1%.
+- `tv/tests/simd_probe_at.tkv` — now_us = now_ms×1000, phan giai ~15.6ms
+  → vung do phai gop qua nhieu cua so (reps × NHeads) — bai hoc do luong.
+- `tv/tests/simd_probe_au.tkv` — kiem `<=` + if/else lon (DUNG, khong phai loi ngon ngu).
+
+**Bang quyet dinh (attention_bwd, 1 tang @seq1024, lib 4265 ms):**
+
+| Vung | ms/layer | % |
+|---|---|---|
+| 6 GEMM/head (score/ctx/dp/dq/dk/dv) | 2469 | 58% |
+| **2 transpose n^2/head (gDts+gPts)** | **672** | **16%** |
+| qkv linear_bwd | 454 | 11% |
+| softmax + gDs scalar | 375 | 9% |
+| qkv fwd + extract + dctx + proj + writeback | 345 | 8% |
+
+**DA LAM (giu — 5 mirror gpt2_ref dong bo):**
+
+1. **Bo 2 transpose n^2/head** trong gpt2_attention_bwd: dk/dv tinh qua
+   chuyen vi NHO cua Q/dctx (n×hd = 65K thay vi n×n = 1M) + writeback doc
+   strided `gDkT[d*n+t2]`. Cung tich luy p-tile tang dan → **bit-exact**.
+2. **dw = xᵀ·gy truc tiep** trong gpt2_linear_bwd: bo gyT (n×out_d) + dwT
+   (in_d×out_d) — seq1024 qkv 4.13M → 0.79M copy/layer. Bit-exact.
+
+**DA REVERT (do chung minh regression):** thu tu vong `_smm_core`
+p0→j0→i0 cho m>n (ly thuyet P13 "it build tile hon") — that te **cham hon**:
+FWD_BODY +101%, moi pha GEMM +40-100% @seq256 (tach bang git stash tung
+nhom: revert 3 file simd_matmul thi ve baseline). `git checkout` 3 file.
+**Bai hoc: so luong build tile khong phai chi phi thuc — chi do A/B moi chot.**
+
+**Do A/B (cung phien, loss khop tung chu so 10.760399 → 13.442912):**
+
+| seq | full step TRUOC | SAU | Δ |
+|---|---|---|---|
+| 8 | 22.219 s | **19.297 s** | −13.1% |
+| 256 | 41.218 s | **37.813 s** | −8.3% |
+| 1024 | 154.891 s (ctrl) | **141.219 s** | **−8.8%** |
+
+- fwd+bwd @1024: 150.750 (ctrl) → **136.469 s** (−9.5%);
+  **bwd 125.969 → 111.625 s (−11.4%)**.
+- Pha AQ @1024 truoc/sau: ATTN_BWD×12 48.86 → **38.20 s (−21.8%)**,
+  MLP_BWD −8.1%; LN/GELU/EMBED khong doi ✓ (dung code khong sua).
+- Tyle vs torch (full step, khong do lai): 43.5× → **39.9×**
+  (seq8 20.7×, seq256 26.9×; torch 0.934/1.404/3.542 s cung ngay).
+- 5 gate trang thai cuoi: **84/84** (20+17+9+5+33, fails=0);
+  SIMD grads 124M vs PyTorch ≤8.3e-7.
+
+**Chua lam (ung vien ke theo so do):** gop forward loss+backward (−19s
+@1024), cache attn-fwd trong block_bwd (−15s), Phase 2 flatten/lazy
+materialize (~12s), lm-head (~11s). KPI ~20× can ca 3 nhom nay + Phase 3.
+
+**Trang thai git:** 5 file gpt2_ref sua chua commit (P5.4), 4 probe untracked,
+simd_matmul da tro lai HEAD. Chua push.
+
 ---
 
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
@@ -739,6 +804,9 @@ full step seq1024 **154.234 s vs 3.542 s = 43.5×** (truoc P5.3: 114.5× fwd+bwd
 | 8 | 15.812 s | 0.302 s | **22.219 s** | 0.934 s | **23.8×** |
 | 256 | 35.172 s | 0.782 s | **41.218 s** | 1.404 s | **29.4×** |
 | 1024 | 150.625 s (fwd 25.281 + bwd 125.344) | 2.987 s | **154.234 s** | 3.542 s | **43.5×** |
+
+**Sau P5.4 (cung ngay 2026-10-20, do A/B cung phien): full step 19.297 /
+37.813 / 141.219 s — ty le 20.7x / 26.9x / 39.9x. Chi tiet: 0.14.**
 
 ### 7.2 Doc so (cai gi can sua)
 

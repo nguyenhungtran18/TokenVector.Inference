@@ -26,7 +26,34 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 4. **seq256: 109.4 s (P5.1-only) → 41.218 s = 2.65×** nhờ P5.2+P5.3; tỉ lệ vs torch 76.7× → 29.4× → hiệu năng P5.x **không chỉ có ở seq1024**.
 5. Loss `simd=1` khớp **từng chữ số** (`10.760399 → 13.442912`) ⇒ cùng thuật toán, chỉ khác FMA/thứ tự tích lũy.
 
-**Chưa đo được:** 154.234 s chưa tách trực tiếp thành attention vs từng pha không-attention → cần `simd_bench_124m_profile` (đo từng pha) trước khi chốt con số phân bổ.
+**ĐÃ ĐO (2026-10-20, probe `tv/tests/simd_probe_aq.tkv`, seq 8/256/1024, self-check SUM vs TOTAL ≤3%)** — backward 125.3 s @seq1024 tách ra:
+
+| Pha (gọi thẳng library, simd=1) | seq8 | seq256 | seq1024 | % @1024 |
+|---|---|---|---|---|
+| `attention_bwd` ×12 | 2.20 s | 6.06 s | **48.86 s** | **39%** |
+| fwd recompute (`gpt2_forward` trong bwd) | 1.03 s | 3.75 s | 19.11 s | 15% |
+| `mlp_bwd` ×12 (gelu fwd+bwd = 3.3 s) | 4.70 s | 7.58 s | 16.34 s | 13% |
+| attn-fwd tính lại trong `block_bwd` | ~0.3 s | 1.80 s | ~15.4 s | 12% |
+| ghi flatten `gflat` (bench − probe) | ~2.6 s | ~4.8 s | ~12.2 s | 10% |
+| lm-head bwd (softmax grad + 3 GEMM) | 2.20 s | 4.39 s | 10.84 s | 9% |
+| **`layernorm_bwd` ×25** | ~0 | **0.17 s** | **0.73 s** | **0.6%** |
+| `embed_bwd` | 0.80 s | 0.80 s | 0.98 s | 0.8% |
+
+**Đọc số — sửa tiền đề của chính roadmap này:**
+
+1. "Sau P5.3 attention không còn là nút thắt" → **SAI**: attention (bwd 48.9 s + fwd recompute 15.4 s) vẫn **51%** backward.
+2. "Nút thắt là LN / gelu / embed-LM-head" → LN **0.6%**, embed **0.8%**, gelu **2.6%** — gộp <5%; item thật trong nhóm này là **lm-head 9%** + **flatten 10%**.
+3. Mỗi full step forward chạy **2 lần** (một lần cho loss + một lần trong `gpt2_backward`) → ~19 s "tính lại" chưa attack (ứng viên kế tiếp).
+
+**Phân rã từng phép trong `attention_bwd` (probe `tv/tests/simd_probe_ar.tkv`, 1 layer @seq1024, lib 4265 ms/layer, self-check +1.1%):**
+
+| Vùng | ms/layer | % |
+|---|---|---|
+| 6 GEMM/head (score/ctx/dp/dq/dk/dv) | 2469 | 58% |
+| **2 transpose n²/head (gDts+gPts)** | **672** | **16%** |
+| qkv linear_bwd | 454 | 11% |
+| softmax + gDs scalar | 375 | 9% |
+| qkv fwd + extract + dctx + proj + writeback | 345 | 8% |
 
 ---
 
@@ -46,6 +73,8 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 ## 3. PHASE 1 — BACKWARD KHÔNG-ATTENTION (6 tuần)
 
 **Mục tiêu:** seq1024 fwd+bwd 150.625 s → **~70 s**; full step → **~85 s**; tỉ lệ **43.5× → ~24×**.
+
+> **CẬP NHẬT 2026-10-20 (theo số đo, không theo giả thuyết):** thứ tự 3.1 → 3.2 → 3.3 bị số đo lật ngược — `layernorm_bwd` chỉ **0.6%** backward (0.73 s / 125 s @seq1024, probe AQ, xem §1) → **hạ ưu tiên task 3.1**; attack attention bwd trước (51%). Đã làm **P5.4** (§10): −8.8% full step seq1024, 84/84 gate.
 
 ### 3.1 `layernorm_bwd` FMA tiled (2 tuần)
 **File:** `tv/training/layernorm_bwd.tkv` (mới, theo pattern `tensor.tkv`)
@@ -165,6 +194,8 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 | 84/84 assertions | Pass | **Pass** | Không hồi quy |
 | Loss vs PyTorch fixture | ≤2.4e-7 logits / ≤8.3e-7 124M grad | **Không đổi** | Parity duy trì |
 
+**Cập nhật 2026-10-20 sau P5.4 (§10):** full step seq1024 **141.219 s → 39.9×** (từ 154.234 s / 43.5×); seq8 20.7×, seq256 26.9×. Còn lại để tới ~20×: Phase 2 flatten (~10%) + gộp/cache forward (~27%) + phase 3.
+
 ## 8. RỦI RO + CONTINGENCY
 
 | Rủi ro | Xác suất | Contingency |
@@ -188,3 +219,29 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 | `tv/training/linear_bwd.tkv` | Cache-blocked linear backward |
 | `tv/training/dispatch.tkv` | Runtime feature detection + path policy |
 | `tv/training/precision.tkv` | Mixed precision policy |
+| `tv/tests/simd_probe_aq.tkv` | Phân rach backward theo pha, seq qua `_seq_cfg.txt` (8/256/1024) |
+| `tv/tests/simd_probe_ar.tkv` | Phân rach từng phép trong `attention_bwd` + P13 build-vs-gemm |
+| `tv/tests/simd_probe_at.tkv` | Phân giải `now_ms`/`now_us` (~15.6 ms — bài học đo) |
+| `tv/tests/simd_probe_au.tkv` | Test ngôn ngữ `<=` + if/else lớn |
+
+---
+
+## 10. TIẾN ĐỘ 2026-10-20 — P5.4 ATTACK ATTENTION BWD (XONG)
+
+**Giữ lại (đo net win trên cả 3 seq, 5 mirror `gpt2_ref` đồng bộ):**
+
+1. **Bỏ 2 transpose n²/head** trong `gpt2_attention_bwd` — dk/dv tính qua transpose **nhỏ** của Q/dctx (n×hd = 65K thay vì n×n = 1M) + writeback đọc strided `gDkT[d*n+t2]`. Cùng tích lũy p-tile tăng dần → **bit-exact**.
+2. **`dw = xᵀ·gy` trực tiếp** trong `gpt2_linear_bwd` — bỏ gyT + dwT transpose (seq1024 qkv: 4.13M → 0.79M copy/layer). Bit-exact.
+
+**Đã REVERT (đo chứng minh là regression):** thứ tự vòng `_smm_core` p0→j0→i0 cho m>n (lý thuyết P13: "ít build tile hơn") — chạy thật **chậm hơn**: FWD_BODY +101%, mọi pha GEMM +40-100% @seq256 (tách biệt bằng `git stash` từng nhóm). **Bài học: số lượt build tile không phải chi phí thật — chỉ có đo A/B mới chốt được.**
+
+| seq | full step TRUOC | SAU | Δ |
+|---|---|---|---|
+| 8 | 22.219 s | **19.297 s** | −13.1% |
+| 256 | 41.218 s | **37.813 s** | −8.3% |
+| 1024 | 154.891 s (ctrl cùng phiên) | **141.219 s** | **−8.8%** |
+
+- fwd+bwd @1024: 150.750 (ctrl) → **136.469 s** (−9.5%); **bwd 125.969 → 111.625 s (−11.4%)**.
+- Pha AQ @1024 trước/sau: `attention_bwd`×12 48.86 → **38.20 s (−21.8%)**, `mlp_bwd` −8.1%; LN/GELU/EMBED không đổi ✓ (đúng code không sửa).
+- Loss khớp từng chữ số (10.760399 → 13.442912); **84/84 gate xanh**; tỉ lệ vs torch 43.5× → **39.9×**.
+- Chưa làm (ứng viên kế, theo số đo §1): gộp forward loss+backward (−19 s), cache attn-fwd trong `block_bwd` (−15 s), Phase 2 flatten (~12 s), lm-head (~11 s).

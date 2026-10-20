@@ -1,0 +1,572 @@
+# PROBE AR — tach vung gpt2_attention_bwd (simd=1) theo PHEP (2026-10-20)
+# Muc dich: do chinh xac 48.9s/12 tang attention_bwd @seq1024 (tu probe AQ)
+# di vao vung nao: tile build vs simd_gemm, transpose n^2, softmax, gDs,
+# extract/writeback, linear_bwd — chon dung muc tieu sua (roadmap TRIZ).
+#
+# Cach do:
+#   - 1 tang dai li = NLayers/2 (cac tang cung shape -> x12 = toan tang).
+#   - Moi vung = MOT PASS rieng: vong lap (reps x NHeads) trong MOI t0..t1
+#     -> cua so do >= phan gioi 15.6 ms cua now_ms (xem probe AT).
+#   - Self-check: tong cac pass vs library gpt2_attention_bwd (lech ~15%).
+#   - P13: tach rieng build A / build B / simd_gemm / accumulate tren shape
+#     gDq (m=n, n=hd, k=n) voi CA 2 thu tu vong: hien tai (i0->p0->j0) va
+#     doi (p0->j0->i0) — so nay quyet dinh co doi _smm_core khong.
+# Cau hinh: tv/tests/_seq_cfg.txt DONG 1 = seq.
+#   printf "1024\n0\n1\n" > tv/tests/_seq_cfg.txt
+#   tkvc tv/tests/simd_probe_ar.tkv out/ar.exe main && ./out/ar.exe
+import tv.training.gpt2_ref124
+import tv.training.trainer
+import tv.training.ops
+import tv.training.simd_matmul
+
+CFG = "tv/tests/_seq_cfg.txt"
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> 'list[f32]':
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                vals.append(float(toks[j]))
+    return vals
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+# ---- tile builders (sao tu simd_matmul, ten rieng _ar_* de tranh clash) ----
+def _ar_zlist(n: 'i64') -> 'list[f32]':
+    out = []
+    i = 0
+    while i < n:
+        out.append((float(0) - 0.0) / 1.0)
+        i = i + 1
+    return out
+
+def _ar_ta(a: "Tensor", kdim: 'i64', i0: 'i64', ib: 'i64', p0: 'i64', pw: 'i64',
+           T: 'i64') -> 'list[f32]':
+    out = []
+    d = a.data
+    z = (float(0) - 0.0) / 1.0
+    i = 0
+    while i < T:
+        j = 0
+        while j < T:
+            if i < ib:
+                if j < pw:
+                    out.append((d[(i0 + i) * kdim + (p0 + j)] - 0.0) / 1.0)
+                else:
+                    out.append(z)
+            else:
+                out.append(z)
+            j = j + 1
+        i = i + 1
+    return out
+
+def _ar_tb(b: "Tensor", ndim: 'i64', p0: 'i64', pw: 'i64', r0: 'i64', br: 'i64',
+           T: 'i64') -> 'list[f32]':
+    out = []
+    d = b.data
+    z = (float(0) - 0.0) / 1.0
+    i = 0
+    while i < T:
+        j = 0
+        while j < T:
+            if i < pw:
+                if j < br:
+                    out.append((d[(p0 + i) * ndim + (r0 + j)] - 0.0) / 1.0)
+                else:
+                    out.append(z)
+            else:
+                out.append(z)
+            j = j + 1
+        i = i + 1
+    return out
+
+def main() -> 'i32':
+    cfg = load_ints(CFG)
+    n = cfg[0]
+    h = HiddenSize
+    hd = HeadDim
+    inv = 1.0 / sqrt(float(hd))
+    li = 6
+    base = 4 + li * 12
+    rp = 1
+    if n <= 8:
+        rp = 40
+    if n > 8:
+        if n <= 256:
+            rp = 8
+    print("AR seq=" + str(n) + " tang=" + str(li) + " reps=" + str(rp))
+
+    ps = gpt2_init(7)
+    wq = ps[base + 2]
+    bq = ps[base + 3]
+    wp = ps[base + 4]
+    bp = ps[base + 5]
+
+    # ---- placeholder (values khong anh huong timing, chi can shape) ---------
+    x = t_zeros([n, h])
+    gout = t_zeros([n, h])
+    qkv = t_zeros([n, 3 * h])
+    dctxT = t_zeros([n, h])
+    ctxT = t_zeros([n, h])
+    dqkv = t_zeros([n, 3 * h])
+    dbp = t_zeros([h])
+    dwp = t_zeros([h, h])
+    gQs = []
+    gKs = []
+    gVs = []
+    gDcs = []
+    gCtxs = []
+    gDps = []
+    gDqs = []
+    gDks = []
+    gDvs = []
+    Ss = []
+    gDss = []
+    gDtss = []
+    gSts = []
+    i = 0
+    while i < NHeads:
+        gQs.append(t_zeros([n, hd]))
+        gKs.append(t_zeros([n, hd]))
+        gVs.append(t_zeros([n, hd]))
+        gDcs.append(t_zeros([n, hd]))
+        gCtxs.append(t_zeros([n, hd]))
+        gDps.append(t_zeros([n, n]))
+        gDqs.append(t_zeros([n, hd]))
+        gDks.append(t_zeros([n, hd]))
+        gDvs.append(t_zeros([n, hd]))
+        Ss.append(t_zeros([n, n]))
+        gDss.append(t_zeros([n, n]))
+        gDtss.append(t_zeros([n, n]))
+        gSts.append(t_zeros([n, n]))
+        i = i + 1
+
+    print("AR m1 setup done")
+    # LUU Y: qkv linear fwd va dctx GEMM chi 1 LAN moi attention_bwd (khong phai per-head)
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        qq = gpt2_linear(x, wq, bq, n, h, 3 * h, 1)
+        rr = rr + 1
+    t1 = now_ms()
+    rgq = t1 - t0
+
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        dd0 = smm_dot(gout, wp, n, h, h)
+        rr = rr + 1
+    t1 = now_ms()
+    rgdctx = t1 - t0
+
+    # ---- P1 extract gQ/gK/gV/gDc -------------------------------------------
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        for head in range(NHeads):
+            ho = head * hd
+            gQ = t_zeros([n, hd])
+            gK = t_zeros([n, hd])
+            gV = t_zeros([n, hd])
+            gDc = t_zeros([n, hd])
+            for t2 in range(n):
+                s0 = t2 * 3 * h + ho
+                c0 = t2 * h + ho
+                for d in range(hd):
+                    gQ.data[t2 * hd + d] = qkv.data[s0 + d]
+                    gK.data[t2 * hd + d] = qkv.data[s0 + h + d]
+                    gV.data[t2 * hd + d] = qkv.data[s0 + 2 * h + d]
+                    gDc.data[t2 * hd + d] = dctxT.data[c0 + d]
+        rr = rr + 1
+    t1 = now_ms()
+    rgx = t1 - t0
+
+    # ---- P2 score GEMM ------------------------------------------------------
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        for head in range(NHeads):
+            sm2 = smm_dot(gQs[head], gKs[head], n, n, hd)
+        rr = rr + 1
+    t1 = now_ms()
+    rgs = t1 - t0
+
+    # ---- P3 softmax causal --------------------------------------------------
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        for head in range(NHeads):
+            Smat = Ss[head]
+            for t2 in range(n):
+                b0 = t2 * n
+                m0 = Smat.data[b0] * inv
+                Smat.data[b0] = m0
+                mxv = m0
+                for u in range(1, t2 + 1):
+                    m0 = Smat.data[b0 + u] * inv
+                    Smat.data[b0 + u] = m0
+                    if m0 > mxv:
+                        mxv = m0
+                totv = 0.0
+                for u in range(t2 + 1):
+                    e = exp(Smat.data[b0 + u] - mxv)
+                    Smat.data[b0 + u] = e
+                    totv = totv + e
+                ivv = 1.0 / totv
+                for u in range(t2 + 1):
+                    Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
+                for u in range(t2 + 1, n):
+                    Smat.data[b0 + u] = 0.0
+        rr = rr + 1
+    t1 = now_ms()
+    rgsm = t1 - t0
+
+    # ---- P4 ctx GEMM + copy ctxT -------------------------------------------
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        for head in range(NHeads):
+            ho = head * hd
+            gc2 = smm_fwd(Ss[head], gVs[head], n, hd, n)
+            for t2 in range(n):
+                d0 = t2 * hd
+                c0 = t2 * h + ho
+                for d in range(hd):
+                    ctxT.data[c0 + d] = gc2.data[d0 + d]
+        rr = rr + 1
+    t1 = now_ms()
+    rgc = t1 - t0
+
+    # ---- P5 dp GEMM ---------------------------------------------------------
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        for head in range(NHeads):
+            dp2 = smm_dot(gDcs[head], gVs[head], n, n, hd)
+        rr = rr + 1
+    t1 = now_ms()
+    rgdp = t1 - t0
+
+    print("AR m2 P0-P5 done")
+    # ---- P6 gDs build -------------------------------------------------------
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        for head in range(NHeads):
+            Smat = Ss[head]
+            gDc = gDcs[head]
+            gCtx = gCtxs[head]
+            gDp = gDps[head]
+            gDs = t_zeros([n, n])
+            for t2 in range(n):
+                b0 = t2 * n
+                d0 = t2 * hd
+                dotv = 0.0
+                for d in range(hd):
+                    dotv = dotv + gDc.data[d0 + d] * gCtx.data[d0 + d]
+                for u in range(t2 + 1):
+                    gDs.data[b0 + u] = Smat.data[b0 + u] * (gDp.data[b0 + u] - dotv)
+                for u in range(t2 + 1, n):
+                    gDs.data[b0 + u] = 0.0
+        rr = rr + 1
+    t1 = now_ms()
+    rgds = t1 - t0
+
+    # ---- P7 dq GEMM ---------------------------------------------------------
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        for head in range(NHeads):
+            dq2 = smm_fwd(gDss[head], gKs[head], n, hd, n)
+        rr = rr + 1
+    t1 = now_ms()
+    rgdq = t1 - t0
+
+    # ---- P8a transpose ds | P8b dk GEMM -------------------------------------
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        for head in range(NHeads):
+            dt2 = smm_transpose(gDss[head], n, n)
+        rr = rr + 1
+    t1 = now_ms()
+    rgdta = t1 - t0
+
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        for head in range(NHeads):
+            dk2 = smm_fwd(gDtss[head], gQs[head], n, hd, n)
+        rr = rr + 1
+    t1 = now_ms()
+    rgdk = t1 - t0
+
+    # ---- P9a transpose S | P9b dv GEMM --------------------------------------
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        for head in range(NHeads):
+            gs2 = smm_transpose(Ss[head], n, n)
+        rr = rr + 1
+    t1 = now_ms()
+    rgst = t1 - t0
+
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        for head in range(NHeads):
+            dv2 = smm_fwd(gSts[head], gDcs[head], n, hd, n)
+        rr = rr + 1
+    t1 = now_ms()
+    rgdv = t1 - t0
+
+    print("AR m3 P7-P9 done")
+    # ---- P10 writeback dqkv -------------------------------------------------
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        for head in range(NHeads):
+            ho = head * hd
+            gDq = gDqs[head]
+            gDk = gDks[head]
+            gDv = gDvs[head]
+            for t2 in range(n):
+                d0 = t2 * hd
+                r0 = t2 * 3 * h + ho
+                for d in range(hd):
+                    dqkv.data[r0 + d] = gDq.data[d0 + d] * inv
+                    dqkv.data[r0 + h + d] = gDk.data[d0 + d] * inv
+                    dqkv.data[r0 + 2 * h + d] = gDv.data[d0 + d]
+        rr = rr + 1
+    t1 = now_ms()
+    rgwb = t1 - t0
+
+    print("AR m4 P10 done")
+    # ---- P11a transpose ctxT | P11b dw_proj GEMM | P11c db | P11d copy ------
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        ct2 = smm_transpose(ctxT, n, h)
+        rr = rr + 1
+    t1 = now_ms()
+    rgta = t1 - t0
+
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        dw2 = smm_fwd(ct2, gout, h, h, n)
+        rr = rr + 1
+    t1 = now_ms()
+    rgdw = t1 - t0
+
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        for o in range(h):
+            acc = 0.0
+            for t2 in range(n):
+                acc = acc + gout.data[t2 * h + o]
+            dbp.data[o] = dbp.data[o] + acc
+        rr = rr + 1
+    t1 = now_ms()
+    rgdb = t1 - t0
+
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        for r11 in range(h):
+            for o11 in range(h):
+                dwp.data[r11 * h + o11] = dwp.data[r11 * h + o11] + dw2.data[r11 * h + o11]
+        rr = rr + 1
+    t1 = now_ms()
+    rgdwp = t1 - t0
+
+    print("AR m5 P11 done")
+    # ---- P12 qkv linear_bwd -------------------------------------------------
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        rlq = gpt2_linear_bwd(x, wq, dqkv, n, h, 3 * h, 1)
+        rr = rr + 1
+    t1 = now_ms()
+    rglb = t1 - t0
+
+    print("AR m6 P12 done")
+    # ---- PLIB library toan bo ----------------------------------------------
+    t0 = now_ms()
+    rr = 0
+    while rr < rp:
+        rlib = gpt2_attention_bwd(x, wq, bq, wp, bp, n, gout, 1)
+        rr = rr + 1
+    t1 = now_ms()
+    rglib = t1 - t0
+
+    sum_p = rgq + rgdctx + rgx + rgs + rgsm + rgc + rgdp + rgds + rgdq + rgdta + rgdk + rgst + rgdv + rgwb + rgta + rgdw + rgdb + rgdwp + rglb
+
+    print("AR P00 qkv_linear_fwd = " + str(rgq) + " ms")
+    print("AR P0  dctx GEMM      = " + str(rgdctx) + " ms")
+    print("AR P1  extract gQKVDc = " + str(rgx) + " ms")
+    print("AR P2  score GEMM     = " + str(rgs) + " ms  (build + simd_gemm)")
+    print("AR P3  softmax causal = " + str(rgsm) + " ms")
+    print("AR P4  ctx GEMM+copy  = " + str(rgc) + " ms")
+    print("AR P5  dp GEMM        = " + str(rgdp) + " ms")
+    print("AR P6  gDs build      = " + str(rgds) + " ms")
+    print("AR P7  dq GEMM        = " + str(rgdq) + " ms")
+    print("AR P8a transpose ds   = " + str(rgdta) + " ms")
+    print("AR P8b dk GEMM        = " + str(rgdk) + " ms")
+    print("AR P9a transpose S    = " + str(rgst) + " ms")
+    print("AR P9b dv GEMM        = " + str(rgdv) + " ms")
+    print("AR P10 writeback dqkv = " + str(rgwb) + " ms")
+    print("AR P11a transpose ctx = " + str(rgta) + " ms")
+    print("AR P11b dw_proj GEMM  = " + str(rgdw) + " ms")
+    print("AR P11c db_proj       = " + str(rgdb) + " ms")
+    print("AR P11d dw_proj copy  = " + str(rgdwp) + " ms")
+    print("AR P12 qkv linear_bwd = " + str(rglb) + " ms")
+    print("AR SUM_cac_pass       = " + str(sum_p) + " ms")
+    print("AR LIBRARY attn_bwd   = " + str(rglib) + " ms")
+    print("AR CHECK (sum-lib)/lib = " + str((sum_p - rglib) / rglib))
+
+    # ---- P13: build A / build B / gemm / acc — shape gDq (m=n, n=hd, k=n) --
+    T13 = 64
+    K13 = 10
+    if n <= 8:
+        K13 = 300
+    if n > 8:
+        if n <= 256:
+            K13 = 30
+    C13 = t_zeros([n, hd])
+    Ct13 = _ar_zlist(T13 * T13)
+    A13 = gDss[0]
+    B13 = gKs[0]
+
+    print("AR m7 PLIB done")
+    # thu tu HIEN TAI: i0 -> p0 -> j0
+    ba1 = 0.0
+    bb1 = 0.0
+    bg1 = 0.0
+    bc1 = 0.0
+    kk = 0
+    while kk < K13:
+        i0 = 0
+        while i0 < n:
+            ib = T13
+            if n - i0 < T13:
+                ib = n - i0
+            p0 = 0
+            while p0 < n:
+                pw = T13
+                if n - p0 < T13:
+                    pw = n - p0
+                t0 = now_ms()
+                At13 = _ar_ta(A13, n, i0, ib, p0, pw, T13)
+                t1 = now_ms()
+                ba1 = ba1 + (t1 - t0)
+                j0 = 0
+                while j0 < hd:
+                    jb = T13
+                    if hd - j0 < T13:
+                        jb = hd - j0
+                    t0 = now_ms()
+                    Bt13 = _ar_tb(B13, hd, p0, pw, j0, jb, T13)
+                    t1 = now_ms()
+                    bb1 = bb1 + (t1 - t0)
+                    t0 = now_ms()
+                    simd_gemm(At13, Bt13, Ct13, T13)
+                    t1 = now_ms()
+                    bg1 = bg1 + (t1 - t0)
+                    t0 = now_ms()
+                    r13 = 0
+                    while r13 < ib:
+                        bc13 = (i0 + r13) * hd + j0
+                        bt13 = r13 * T13
+                        c13 = 0
+                        while c13 < jb:
+                            C13.data[bc13 + c13] = C13.data[bc13 + c13] + Ct13[bt13 + c13]
+                            c13 = c13 + 1
+                        r13 = r13 + 1
+                    t1 = now_ms()
+                    bc1 = bc1 + (t1 - t0)
+                    j0 = j0 + jb
+                p0 = p0 + pw
+            i0 = i0 + ib
+        kk = kk + 1
+
+    print("AR m8 P13a done")
+    # thu tu DOI: p0 -> j0 -> i0
+    ba2 = 0.0
+    bb2 = 0.0
+    bg2 = 0.0
+    bc2 = 0.0
+    kk = 0
+    while kk < K13:
+        p0 = 0
+        while p0 < n:
+            pw = T13
+            if n - p0 < T13:
+                pw = n - p0
+            j0 = 0
+            while j0 < hd:
+                jb = T13
+                if hd - j0 < T13:
+                    jb = hd - j0
+                t0 = now_ms()
+                Bt14 = _ar_tb(B13, hd, p0, pw, j0, jb, T13)
+                t1 = now_ms()
+                bb2 = bb2 + (t1 - t0)
+                i0 = 0
+                while i0 < n:
+                    ib = T13
+                    if n - i0 < T13:
+                        ib = n - i0
+                    t0 = now_ms()
+                    At14 = _ar_ta(A13, n, i0, ib, p0, pw, T13)
+                    t1 = now_ms()
+                    ba2 = ba2 + (t1 - t0)
+                    t0 = now_ms()
+                    simd_gemm(At14, Bt14, Ct13, T13)
+                    t1 = now_ms()
+                    bg2 = bg2 + (t1 - t0)
+                    t0 = now_ms()
+                    r14 = 0
+                    while r14 < ib:
+                        bc14 = (i0 + r14) * hd + j0
+                        bt14 = r14 * T13
+                        c14 = 0
+                        while c14 < jb:
+                            C13.data[bc14 + c14] = C13.data[bc14 + c14] + Ct13[bt14 + c14]
+                            c14 = c14 + 1
+                        r14 = r14 + 1
+                    t1 = now_ms()
+                    bc2 = bc2 + (t1 - t0)
+                    i0 = i0 + ib
+                j0 = j0 + jb
+            p0 = p0 + pw
+        kk = kk + 1
+
+    t13a = ba1 + bb1 + bg1 + bc1
+    t13b = ba2 + bb2 + bg2 + bc2
+    print("AR P13 hien tai (i0>p0>j0): buildA=" + str(ba1) + " buildB=" + str(bb1)
+          + " gemm=" + str(bg1) + " acc=" + str(bc1) + " TONG=" + str(t13a)
+          + " ms (K=" + str(K13) + ")")
+    print("AR P13 doi     (p0>j0>i0): buildA=" + str(ba2) + " buildB=" + str(bb2)
+          + " gemm=" + str(bg2) + " acc=" + str(bc2) + " TONG=" + str(t13b) + " ms")
+    print("AR P13 ty le doi/hien tai = " + str(t13b / t13a))
+    print("AR done")
+    return 0
