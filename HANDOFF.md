@@ -786,6 +786,75 @@ seq256 29.750 s, @1024 fwd+bwd 95.797 / bwd **70.688 s** = P5.6; mode1
 102.641 s (+2.9 s drift nhiet o pha optimizer — fwd/bwd khong doi).
 Bit-exact 0.0, **84/84** gate.
 
+### 0.18 P5.8 REDO — KERNEL GEMM v2 (2026-10-21) — DANG DO, CHUA WIRE
+
+**Yeu cau chu khoa:** "lam lai tu P5.8" — bo 2 ban P5.8/P5.9 lam truoc do
+(worktree, khong commit) vi **hong**: `_smm_core_p58` khong goi `simd_gemm`
+(lap scalar sai chi so, `smm_fwd_p58` truyen sai ndim = k thay n), P5.9 co
+3 ham `pass` tra tensor rong. Da `git checkout` 3 file ve HEAD, xoa
+`__pycache__`.
+
+**Phat hien quan trong ve P5.7 (commit `6bf4a1c`, dang o HEAD):**
+
+1. **4 mirror `gpt2_ref` KHONG co hunk P5.7** (chi canonical thay doi) ->
+   gate 84/84 sau P5.7 **da chay tren code cu** — hunk P5.7 chua bao gio
+   duoc test.
+2. Hunk do **BUG**: nhanh `if use_flat == 1 ...` trong `simd == 0` chi ghi
+   dwte vao gflat, **bo qua tich luy `dxf`** (dxf = 0 -> grad ln_f/sau do
+   sai toan bo), la `xfT = smm_transpose(xf, n, h)` tinh roi **khong dung**.
+   (HANDOFF 0.17 ghi "chi them comment" — khong khop voi diff thuc te.)
+3. Ke hoach: revert hunk nay ve trang truoc 6bf4a1c (mirror dang giu dung
+   trang do), dong bo 5 file, chay gate truoc khi lam P5.8 tiep.
+
+**P5.8 v2 da implement (tv/training/simd_matmul.tkv + 2 mirror da sync, chua goi):**
+
+- `_p58_tile_a_at` — build tile A-transposed: doc nguon row-major lienh tuc,
+  scatter vao o T×T nho (khong materialize A^T).
+- `_p58_core` — **1 loop nest** (ghi ro trong comment: 2 nest + early-return
+  cham hon 2.3x — doan ma compiler); dispatch: `use_acc = 1` chi khi
+  `p0t >= 2 && j0t == 1 && m*n >= T*T` -> tich luy `acc += Rt` bang
+  **`simd_add` NATIVE**, reset bang `simd_sub(acc,acc,acc)`; nguoi khac di
+  duong v1.
+- Export: `smm_fwd_v2`, `smm_dot_v2`, `smm_fwd_at` (a luu [k][m] = A^T).
+- **DETERMINISM:** thu tu tich luy p0 tang dan, cung gia tri p-tile nhu v1.
+
+**Probe (chay duoc, tu goc repo):**
+
+| Probe | Ket qua |
+|---|---|
+| `simd_probe_ax.tkv` | **BIT-EXACT 0.0 TOAN BO** (dwte_at/dxf/ctx/score/logits/qkv) + simd_add semantics/aliasing/resize OK. **NHUNG v2 cham hon v1: dwte 1797->3672, dxf 1078->3046, logits 1172->3171, qkv 47->140 ms @seq256.** |
+| `simd_probe_ay.tkv` | Gap on dinh 2.3x, khong phai GC/thu tu (v2 truoc van cham): v1 47-63 vs v2 141-172 ms. |
+| `simd_probe_az.tkv` | Clone `_az_core` (cung logic, 1 nest, trong probe) = v1 (47-63 ms); `_p58_core` van cham -> **khong phai do lap lai nest**. |
+| `simd_probe_ba.tkv` | Tach pha @256x2304x768: tile 16 vs 30 ms, gemm ~0, **acc 31 vs 126 ms (4x)** — vong tich luy cua v2 cham 4x DUONG MA IDENTICAL (use_acc=0, else-branch). |
+| `simd_probe_bb.tkv` | **BAC BO:** +bien thua/acc var/ceildiv = khong cham (47-79); +trans_a param +chi nhanh = khong cham (46-62). |
+
+**Con 2 gia thuyet chua test (nguoi ke lam tiep — probe BC):**
+
+- **v5:** v3 + chi nhanh `if use_acc == 1: simd_add(...) else: <acc loop>`
+  + goi `simd_sub` trong function (khong chay) — co phai su co call site
+  simd_add/simd_sub lam codegen kem?
+- **v6:** copy NGUYEN VAN `_p58_core` vao probe — neu cham trong probe ->
+  noi dung function; neu nhanh -> vi tri/checkbox module `simd_matmul`.
+
+Neu khong do duoc: **split thanh 2 ham** — `_p58_core_simple` (giong
+`_bb_v1` + trans_a, dam bao khong cham) va `_p58_core_acc` (chi dung cho
+j0t==1), dispatch o wrapper export.
+
+**Trang thai file (chua commit):**
+
+- `tv/training/simd_matmul.tkv` + 2 mirror (`tv/tests/`, `tv/training/`):
+  + P5.8 v2. Gate cu chua chay lai.
+- `tv/tests/simd_probe_{ax,ay,az,ba,bb}.tkv`: moi (untracked).
+- `gpt2_ref`: NGUYEN trang HEAD — can revert hunk P5.7 + dong bo 5 mirror
+  TRUOC khi wire `smm_fwd_at/smm_fwd_v2` vao lm-head simd==1.
+- `tv/tests/_seq_cfg.txt` = 256 (untracked, probe config).
+
+**Cong viec con lai (theo thu tu):** (1) chot nguyen nhan cham / split
+2 ham; (2) do lai AX toi khi v2 >= v1 moi shape; (3) revert hunk P5.7 +
+dong bo 5 mirror gpt2_ref; (4) wire vao lm-head (dwte = smm_fwd_at bo
+transpose ggT) va cac call site do duoc loi; (5) gate 84/84 + bench
+seq8/256/1024 A/B; (6) cap nhat plan §12 + ROADMAP + chuong nay.
+
 ---
 
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES

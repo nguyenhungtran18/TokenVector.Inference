@@ -1,0 +1,287 @@
+# PROBE AX — P5.8 KERNEL GEMM v2 (2026-10-21)
+# Muc dich: do A/B TRUOC khi goi vao gpt2_ref (bai hoc P5.4: chi do moi chot).
+#   [0] simd_add semantics: o = a + b, aliasing simd_add(a,b,a) co dung khong
+#   [1] microbench: simd_add vs vong scalar tren o T x T (768^2, 1024^2)
+#   [2] dwte shape [V,h] = ggT[V,n] x xf[n,h]:
+#         cu  = smm_transpose(gg) + smm_fwd(ggT, xf)   (transpose 1.5s @1024)
+#         v2  = smm_fwd_at(gg, xf)                      (trans-A, khong transpose)
+#       -> maxdiff phai 0.0 (cung gia tri p-tile, cung thu tu tich luy)
+#   [3] dxf shape [n,h] = gg[n,V] x wte[V,h]  (k=V lon, 66 p-tile @1024)
+#         cu = smm_fwd | v2 = smm_fwd_v2 -> maxdiff 0.0
+#   [4] attention ctx [n,hd] = S[n,n] x V[n,hd]  (T=64, 16 p-tile)
+#         cu = smm_fwd | v2 = smm_fwd_v2 -> maxdiff 0.0
+#   [5] attention score [n,n] = Q[n,hd] x K^T (smm_dot, p0t=1, T=64)
+#         cu = smm_dot | v2 = smm_dot_v2 -> maxdiff 0.0
+#   [6] logits [n,V] = xf[n,h] x wteT (smm_dot, p0t=1, T=768)
+#         cu = smm_dot | v2 = smm_dot_v2 -> maxdiff 0.0
+#   [7] qkv linear fwd [n,3h] = x[n,h] x w[h,3h] (p0t=1, T=768)
+#         cu = smm_dot | v2 = smm_dot_v2 -> maxdiff 0.0
+# Cau hinh: tv/tests/_seq_cfg.txt DONG 1 = seq.
+# Chay (tu goc repo):
+#   printf "1024\n0\n1\n" > tv/tests/_seq_cfg.txt
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_ax.tkv out/ax.exe main
+#   ./out/ax.exe
+import tv.training.simd_matmul
+import tv.training.gpt2_ref124
+
+CFG = "tv/tests/_seq_cfg.txt"
+RS = 3
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> 'list[f32]':
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                vals.append(float(toks[j]))
+    return vals
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+def _mn(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+def _absf(v: 'f64') -> 'f64':
+    if v < 0.0:
+        return 0.0 - v
+    return v
+
+def _fill(rows: 'i64', cols: 'i64', seed: 'i64') -> "Tensor":
+    out = t_zeros([rows, cols])
+    d = out.data
+    for i in range(rows * cols):
+        d[i] = (float((i * 13 + seed) % 211) - 105.0) / 105.0
+    return out
+
+def _tmd(a: "Tensor", b: "Tensor") -> 'f64':
+    da = a.data
+    db = b.data
+    m = 0.0
+    for i in range(len(da)):
+        dd = _absf(da[i] - db[i])
+        if dd > m:
+            m = dd
+    return m
+
+def _fl(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append((float(0) - 0.0) / 1.0)
+    return out
+
+def main() -> 'i32':
+    cfg = load_ints(CFG)
+    n = cfg[0]
+    V = VocabSize
+    h = HiddenSize
+    hd = HeadDim
+    print("AX seq=" + str(n) + " V=" + str(V) + " h=" + str(h) + " hd=" + str(hd))
+    fails = 0
+
+    # ---- [0] simd_add semantics + aliasing ---------------------------------
+    la = _fl(1003)
+    lb = _fl(1003)
+    lo = _fl(1003)
+    for i in range(1003):
+        la[i] = (float(i % 97) - 48.0) / 8.0
+        lb[i] = (float((i * 3) % 89) - 44.0) / 4.0
+    simd_add(la, lb, lo)
+    bad = 0
+    for i in range(1003):
+        if _absf(lo[i] - (la[i] + lb[i])) > 1e-6:
+            bad = bad + 1
+    print("AX[0] simd_add o=a+b  mismatches=" + str(bad))
+    # aliasing: simd_add(la, lb, la) -> la = la + lb
+    simd_add(la, lb, la)
+    bad2 = 0
+    for i in range(1003):
+        if _absf(la[i] - (lb[i] + ((float(i % 97) - 48.0) / 8.0))) > 1e-6:
+            bad2 = bad2 + 1
+    print("AX[0] simd_add alias  mismatches=" + str(bad2))
+    # reset: simd_sub(la, la, la) -> 0
+    simd_sub(la, la, la)
+    bad3 = 0
+    for i in range(1003):
+        if _absf(la[i]) > 0.0:
+            bad3 = bad3 + 1
+    print("AX[0] simd_sub self->0 mismatches=" + str(bad3))
+    if bad + bad2 + bad3 > 0:
+        fails = fails + 1
+
+    # ---- [1] microbench: simd_add vs scalar, o T x T -----------------------
+    for T in [64, 768, 1024]:
+        la = _fl(T * T)
+        lb = _fl(T * T)
+        for i in range(T * T):
+            la[i] = (float(i % 71) - 35.0) / 35.0
+            lb[i] = (float((i * 5) % 61) - 30.0) / 30.0
+        v_simd = 1.0e18
+        v_scl = 1.0e18
+        for rep in range(RS):
+            t0 = now_ms()
+            simd_add(la, lb, la)
+            t1 = now_ms()
+            v_simd = _mn(v_simd, t1 - t0)
+            t0 = now_ms()
+            for i in range(T * T):
+                la[i] = la[i] + lb[i]
+            t1 = now_ms()
+            v_scl = _mn(v_scl, t1 - t0)
+        print("AX[1] add T=" + str(T) + "  simd=" + str(v_simd) + " ms  scalar=" + str(v_scl) + " ms")
+
+    # ---- inputs chung ------------------------------------------------------
+    gg = _fill(n, V, 3)
+    xf = _fill(n, h, 7)
+    wte = _fill(V, h, 11)
+    Sv = _fill(n, n, 13)
+    Vv = _fill(n, hd, 17)
+    Qv = _fill(n, hd, 19)
+    Kv = _fill(n, hd, 23)
+    xq = _fill(n, h, 29)
+    wq = _fill(h, 3 * h, 31)
+
+    # ---- [2] dwte: cu (transpose + fwd) vs v2 trans-A ----------------------
+    v_cu = 1.0e18
+    v_at = 1.0e18
+    dwte_cu = t_zeros([V, h])
+    dwte_at = t_zeros([V, h])
+    for rep in range(RS):
+        t0 = now_ms()
+        ggT = smm_transpose(gg, n, V)
+        dwte_cu = smm_fwd(ggT, xf, V, h, n)
+        t1 = now_ms()
+        v_cu = _mn(v_cu, t1 - t0)
+        t0 = now_ms()
+        dwte_at = smm_fwd_at(gg, xf, V, h, n)
+        t1 = now_ms()
+        v_at = _mn(v_at, t1 - t0)
+    md2 = _tmd(dwte_cu, dwte_at)
+    print("AX[2] dwte cu=" + str(v_cu) + " ms (transpose+gemm)  v2_at=" + str(v_at) + " ms  maxdiff=" + str(md2))
+    if md2 > 0.0:
+        fails = fails + 1
+        print("AX[2] FAIL: phai bit-exact 0.0")
+
+    # ---- [3] dxf: k=V (66 p-tile @1024) ------------------------------------
+    v_cu = 1.0e18
+    v_v2 = 1.0e18
+    d1 = t_zeros([n, h])
+    d2 = t_zeros([n, h])
+    for rep in range(RS):
+        t0 = now_ms()
+        d1 = smm_fwd(gg, wte, n, h, V)
+        t1 = now_ms()
+        v_cu = _mn(v_cu, t1 - t0)
+        t0 = now_ms()
+        d2 = smm_fwd_v2(gg, wte, n, h, V)
+        t1 = now_ms()
+        v_v2 = _mn(v_v2, t1 - t0)
+    md3 = _tmd(d1, d2)
+    print("AX[3] dxf cu=" + str(v_cu) + " ms  v2=" + str(v_v2) + " ms  maxdiff=" + str(md3))
+    if md3 > 0.0:
+        fails = fails + 1
+        print("AX[3] FAIL: phai bit-exact 0.0")
+
+    # ---- [4] attention ctx: [n,hd] = S[n,n] x Vv[n,hd], T=64, 16 p-tile ----
+    v_cu = 1.0e18
+    v_v2 = 1.0e18
+    c1 = t_zeros([n, hd])
+    c2 = t_zeros([n, hd])
+    for rep in range(RS):
+        t0 = now_ms()
+        c1 = smm_fwd(Sv, Vv, n, hd, n)
+        t1 = now_ms()
+        v_cu = _mn(v_cu, t1 - t0)
+        t0 = now_ms()
+        c2 = smm_fwd_v2(Sv, Vv, n, hd, n)
+        t1 = now_ms()
+        v_v2 = _mn(v_v2, t1 - t0)
+    md4 = _tmd(c1, c2)
+    print("AX[4] attn_ctx cu=" + str(v_cu) + " ms  v2=" + str(v_v2) + " ms  maxdiff=" + str(md4))
+    if md4 > 0.0:
+        fails = fails + 1
+        print("AX[4] FAIL: phai bit-exact 0.0")
+
+    # ---- [5] attention score: [n,n] = Q x K^T (smm_dot, p0t=1) -------------
+    v_cu = 1.0e18
+    v_v2 = 1.0e18
+    s1 = t_zeros([n, n])
+    s2 = t_zeros([n, n])
+    for rep in range(RS):
+        t0 = now_ms()
+        s1 = smm_dot(Qv, Kv, n, n, hd)
+        t1 = now_ms()
+        v_cu = _mn(v_cu, t1 - t0)
+        t0 = now_ms()
+        s2 = smm_dot_v2(Qv, Kv, n, n, hd)
+        t1 = now_ms()
+        v_v2 = _mn(v_v2, t1 - t0)
+    md5 = _tmd(s1, s2)
+    print("AX[5] attn_score cu=" + str(v_cu) + " ms  v2=" + str(v_v2) + " ms  maxdiff=" + str(md5))
+    if md5 > 0.0:
+        fails = fails + 1
+        print("AX[5] FAIL: phai bit-exact 0.0")
+
+    # ---- [6] logits: [n,V] = xf x wte^T (smm_dot, p0t=1, T=768) -----------
+    v_cu = 1.0e18
+    v_v2 = 1.0e18
+    l1 = t_zeros([n, V])
+    l2 = t_zeros([n, V])
+    for rep in range(RS):
+        t0 = now_ms()
+        l1 = smm_dot(xf, wte, n, V, h)
+        t1 = now_ms()
+        v_cu = _mn(v_cu, t1 - t0)
+        t0 = now_ms()
+        l2 = smm_dot_v2(xf, wte, n, V, h)
+        t1 = now_ms()
+        v_v2 = _mn(v_v2, t1 - t0)
+    md6 = _tmd(l1, l2)
+    print("AX[6] logits cu=" + str(v_cu) + " ms  v2=" + str(v_v2) + " ms  maxdiff=" + str(md6))
+    if md6 > 0.0:
+        fails = fails + 1
+        print("AX[6] FAIL: phai bit-exact 0.0")
+
+    # ---- [7] qkv linear fwd: [n,3h] = x x w (p0t=1) ------------------------
+    v_cu = 1.0e18
+    v_v2 = 1.0e18
+    q1 = t_zeros([n, 3 * h])
+    q2 = t_zeros([n, 3 * h])
+    for rep in range(RS):
+        t0 = now_ms()
+        q1 = smm_dot(xq, wq, n, 3 * h, h)
+        t1 = now_ms()
+        v_cu = _mn(v_cu, t1 - t0)
+        t0 = now_ms()
+        q2 = smm_dot_v2(xq, wq, n, 3 * h, h)
+        t1 = now_ms()
+        v_v2 = _mn(v_v2, t1 - t0)
+    md7 = _tmd(q1, q2)
+    print("AX[7] qkv cu=" + str(v_cu) + " ms  v2=" + str(v_v2) + " ms  maxdiff=" + str(md7))
+    if md7 > 0.0:
+        fails = fails + 1
+        print("AX[7] FAIL: phai bit-exact 0.0")
+
+    if fails == 0:
+        print("AX RESULT: ALL BIT-EXACT 0.0")
+    else:
+        print("AX RESULT: " + str(fails) + " FAILS")
+    print("AX done")
+    return 0

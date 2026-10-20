@@ -1,0 +1,164 @@
+# PROBE BB — p5.8 chuan doan nguyen nhan: bien thua / chi nhanh / acc var?
+# BB-v1 = clone v1 (nhanh, doi chieu)
+# BB-v3 = v1 + bien thua unused (p0t/j0t/use_acc/acc dummy) — neu cham ->
+#         nguyen nhan = so bien local lam compiler codegen kem.
+# BB-v4 = v1 + trans_a param + chi nhanh chon tile builder trong loop
+# Chay: tkvc tv/tests/simd_probe_bb.tkv out/bb.exe main; ./out/bb.exe
+import tv.training.ops
+import tv.training.simd_matmul
+
+def _fill(rows: 'i64', cols: 'i64', seed: 'i64') -> "Tensor":
+    out = t_zeros([rows, cols])
+    d = out.data
+    for i in range(rows * cols):
+        d[i] = (float((i * 13 + seed) % 211) - 105.0) / 105.0
+    return out
+
+def _bb_ceildiv(a: 'i64', b: 'i64') -> 'i64':
+    r = 0
+    s = 0
+    while s < a:
+        s = s + b
+        r = r + 1
+    return r
+
+# ---- BB-v1: clone v1 nhanh ------------------------------------------------------
+def _bb_v1(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32') -> "Tensor":
+    T = _imin(_tilek(k), _roundup64(_imin(m, n)))
+    C = t_zeros([m, n])
+    cd = C.data
+    Ct = _zeros_list(T * T)
+    i0 = 0
+    while i0 < m:
+        ib = _imin(T, m - i0)
+        p0 = 0
+        while p0 < k:
+            pw = _imin(T, k - p0)
+            At = _tile_a(a, k, i0, ib, p0, pw, T)
+            j0 = 0
+            while j0 < n:
+                jb = _imin(T, n - j0)
+                Bt = _tile_b(b, ndim, p0, pw, j0, jb, T, trans_b)
+                simd_gemm(At, Bt, Ct, T)
+                r = 0
+                while r < ib:
+                    bc = (i0 + r) * n + j0
+                    bt = r * T
+                    c = 0
+                    while c < jb:
+                        cd[bc + c] = cd[bc + c] + Ct[bt + c]
+                        c = c + 1
+                    r = r + 1
+                j0 = j0 + jb
+            p0 = p0 + pw
+        i0 = i0 + ib
+    return C
+
+# ---- BB-v3: v1 + bien thua (khong dung trong vong nong) -------------------------
+def _bb_v3(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32') -> "Tensor":
+    T = _imin(_tilek(k), _roundup64(_imin(m, n)))
+    C = t_zeros([m, n])
+    cd = C.data
+    Ct = _zeros_list(T * T)
+    p0t = _bb_ceildiv(k, T)
+    j0t = _bb_ceildiv(n, T)
+    use_acc = 0
+    if p0t >= 2:
+        if j0t == 1:
+            if m * n >= T * T:
+                use_acc = 1
+    acc = _zeros_list(1)
+    if use_acc == 1:
+        acc = _zeros_list(T * T)
+    i0 = 0
+    while i0 < m:
+        ib = _imin(T, m - i0)
+        p0 = 0
+        while p0 < k:
+            pw = _imin(T, k - p0)
+            At = _tile_a(a, k, i0, ib, p0, pw, T)
+            j0 = 0
+            while j0 < n:
+                jb = _imin(T, n - j0)
+                Bt = _tile_b(b, ndim, p0, pw, j0, jb, T, trans_b)
+                simd_gemm(At, Bt, Ct, T)
+                r = 0
+                while r < ib:
+                    bc = (i0 + r) * n + j0
+                    bt = r * T
+                    c = 0
+                    while c < jb:
+                        cd[bc + c] = cd[bc + c] + Ct[bt + c]
+                        c = c + 1
+                    r = r + 1
+                j0 = j0 + jb
+            p0 = p0 + pw
+        i0 = i0 + ib
+    return C
+
+# ---- BB-v4: v1 + trans_a param + chi nhanh chon tile builder --------------------
+def _bb_v4(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32', trans_a: 'i32') -> "Tensor":
+    T = _imin(_tilek(k), _roundup64(_imin(m, n)))
+    C = t_zeros([m, n])
+    cd = C.data
+    Ct = _zeros_list(T * T)
+    i0 = 0
+    while i0 < m:
+        ib = _imin(T, m - i0)
+        p0 = 0
+        while p0 < k:
+            pw = _imin(T, k - p0)
+            if trans_a == 1:
+                At = _tile_a(a, k, i0, ib, p0, pw, T)
+            else:
+                At = _tile_a(a, k, i0, ib, p0, pw, T)
+            j0 = 0
+            while j0 < n:
+                jb = _imin(T, n - j0)
+                Bt = _tile_b(b, ndim, p0, pw, j0, jb, T, trans_b)
+                simd_gemm(At, Bt, Ct, T)
+                r = 0
+                while r < ib:
+                    bc = (i0 + r) * n + j0
+                    bt = r * T
+                    c = 0
+                    while c < jb:
+                        cd[bc + c] = cd[bc + c] + Ct[bt + c]
+                        c = c + 1
+                    r = r + 1
+                j0 = j0 + jb
+            p0 = p0 + pw
+        i0 = i0 + ib
+    return C
+
+def main() -> 'i32':
+    m = 256
+    n = 2304
+    kk = 768
+    a = _fill(m, kk, 3)
+    b = _fill(kk, n, 7)
+    print("BB m=" + str(m) + " n=" + str(n) + " k=" + str(kk))
+    c1 = _bb_v1(a, b, m, n, kk, kk, 1)
+    c3 = _bb_v3(a, b, m, n, kk, kk, 1)
+    c4 = _bb_v4(a, b, m, n, kk, kk, 1, 0)
+    d3 = c3.data[0] - c1.data[0]
+    d4 = c4.data[0] - c1.data[0]
+    print("BB bit3=" + str(d3) + " bit4=" + str(d4))
+    i = 0
+    while i < 3:
+        t0 = now_ms()
+        c1 = _bb_v1(a, b, m, n, kk, kk, 1)
+        t1 = now_ms()
+        dv1 = t1 - t0
+        t0 = now_ms()
+        c3 = _bb_v3(a, b, m, n, kk, kk, 1)
+        t1 = now_ms()
+        dv3 = t1 - t0
+        t0 = now_ms()
+        c4 = _bb_v4(a, b, m, n, kk, kk, 1, 0)
+        t1 = now_ms()
+        dv4 = t1 - t0
+        print("BB rep" + str(i) + " v1=" + str(dv1) + "  dummy=" + str(dv3) + "  transab=" + str(dv4))
+        i = i + 1
+    print("BB done")
+    return 0

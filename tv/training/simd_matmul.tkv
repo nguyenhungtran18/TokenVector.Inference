@@ -163,3 +163,127 @@ def smm_transpose(t: "Tensor", rows: 'i64', cols: 'i64') -> "Tensor":
             j = j + 1
         i = i + 1
     return out
+
+
+# ==== P5.8 (2026-10-21): KERNEL GEMM v2 — trans-A + tich luy NATIVE + dispatch ====
+# Yeu cau do duoc tu P5.7 (roadmap TRIZ §12):
+#   (a) trans-A: nhan C = A^T x B TRUC TIEP tu A dang luu [k hang][m cot] —
+#       bo 1.56s transpose ggT @1024 (probe AW: PLAIN [1024,50257] = 1500ms).
+#   (b) tich luy in-place: tich luy ket qua moi p-tile vao buffer T x T bang
+#       simd_add NATIVE (System.Numerics.Vector) thay vong lap thong dich
+#       ib*jb phan tu/oi — dung khi p0t >= 2 VA j0t == 1 (dxf 52M, dwte 77M,
+#       attn ctx 16 o @1024). j0t > 1 giu duong v1 (khong list-of-lists —
+#       compiler khong nhan list[list[f32]] cho simd_add).
+#   (c) dispatch: p0t == 1 -> khong tich luy (gemm + ghi thang);
+#       nho (m*n < T^2) -> duong cu (tranh them T^2 add vs vung that qua nho).
+# DETERMINISM: thu tu tich luy GIU NGUYEN (p0 tang dan, cung gia tri p-tile
+# nhu v1) -> ket qua BIT-EXACT voi v1 (kiem chung bang probe AX).
+# v1 NGUYEN KHONG DOI; v2 la duong RIENG, chua goi cho den khi do A/B chot.
+
+def _p58_ceildiv(a: 'i64', b: 'i64') -> 'i64':
+    r = 0
+    s = 0
+    while s < a:
+        s = s + b
+        r = r + 1
+    return r
+
+# At[r][t] = A_stored[(p0+t)*mdim + (i0+r)] — A_stored luu [k hang][m cot] (= A^T).
+# Nguon row-major doc lienh tuc; ghi scatter vao o nho T x T (L2/L1) — khong
+# can materialize A^T toan phan (transpose ggT [n][V] = 51.5M ptu @1024).
+def _p58_tile_a_at(a: "Tensor", mdim: 'i64', i0: 'i64', ib: 'i64', p0: 'i64', pw: 'i64', T: 'i64') -> 'list[f32]':
+    out = _zeros_list(T * T)
+    d = a.data
+    t = 0
+    while t < pw:
+        src = (p0 + t) * mdim + i0
+        off = t
+        r = 0
+        while r < ib:
+            out[r * T + off] = (d[src + r] - 0.0) / 1.0
+            r = r + 1
+        t = t + 1
+    return out
+
+def _p58_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32', trans_a: 'i32') -> "Tensor":
+    # TRONG SO 1 LOOP NEST (probe AZ 2026-10-21: ban co early-return p0t==1
+    # lap lai toan bo nest cham hon 2.3x — compiler codegen tieu voi function
+    # lon; clone cung logic 1 nest bang nhau voi v1). Dispatch bien dau ra:
+    # use_acc = 0 va p0t == 1 -> tich luy vung that C nhu v1 (1 p-tile cung
+    # chinh la vung that sau moi gemm).
+    T = _imin(_tilek(k), _roundup64(_imin(m, n)))
+    C = t_zeros([m, n])
+    cd = C.data
+    Rt = _zeros_list(T * T)
+    p0t = _p58_ceildiv(k, T)
+    j0t = _p58_ceildiv(n, T)
+    # (b) use_acc = 1 chi khi p0t >= 2 VA j0t == 1 (1 buffer T x T duy nhat;
+    # compiler khong nhan list[list[f32]] cho simd_add)
+    use_acc = 0
+    if p0t >= 2:
+        if j0t == 1:
+            if m * n >= T * T:
+                use_acc = 1
+    acc = _zeros_list(1)
+    if use_acc == 1:
+        acc = _zeros_list(T * T)
+    i0 = 0
+    while i0 < m:
+        ib = _imin(T, m - i0)
+        p0 = 0
+        while p0 < k:
+            pw = _imin(T, k - p0)
+            if trans_a == 1:
+                At = _p58_tile_a_at(a, m, i0, ib, p0, pw, T)
+            else:
+                At = _tile_a(a, k, i0, ib, p0, pw, T)
+            j0 = 0
+            while j0 < n:
+                jb = _imin(T, n - j0)
+                Bt = _tile_b(b, ndim, p0, pw, j0, jb, T, trans_b)
+                simd_gemm(At, Bt, Rt, T)
+                if use_acc == 1:
+                    # (b) tich luy NATIVE: acc = acc + Rt (toan bo o T x T)
+                    simd_add(acc, Rt, acc)
+                else:
+                    # duong cu v1: tich luy vung that C sau moi p-tile
+                    r = 0
+                    while r < ib:
+                        bc = (i0 + r) * n + j0
+                        bt = r * T
+                        c = 0
+                        while c < jb:
+                            cd[bc + c] = cd[bc + c] + Rt[bt + c]
+                            c = c + 1
+                        r = r + 1
+                j0 = j0 + jb
+            p0 = p0 + pw
+        if use_acc == 1:
+            # ghi vung that C 1 lan + reset acc ve 0 (native: acc - acc)
+            r = 0
+            while r < ib:
+                bc = (i0 + r) * n
+                bt = r * T
+                c = 0
+                while c < n:
+                    cd[bc + c] = cd[bc + c] + acc[bt + c]
+                    c = c + 1
+                r = r + 1
+            simd_sub(acc, acc, acc)
+        i0 = i0 + ib
+    return C
+
+# C[m,n] = A x B — v2 (bit-exact voi smm_fwd, tich luy native)
+def smm_fwd_v2(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
+    return _p58_core(a, b, m, n, k, n, 0, 0)
+
+# C[i,j] = dot(A[i,:], B[j,:]) — v2 (bit-exact voi smm_dot)
+def smm_dot_v2(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
+    return _p58_core(a, b, m, n, k, k, 1, 0)
+
+# (a) trans-A: a luu [k hang][m cot] (= A^T), b luu [k hang][n cot]
+#     -> C[m,n] = A^T x B, khong materialize A^T.
+# Vi du lm-head: dwte[V,h] = ggT[V,n] x xf[n,h] voi gg luu [n][V]
+#   -> smm_fwd_at(gg, xf, V, h, n) — chi transpose theo o T x T khi build.
+def smm_fwd_at(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
+    return _p58_core(a, b, m, n, k, n, 0, 1)
