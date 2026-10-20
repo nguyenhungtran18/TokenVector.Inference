@@ -8,13 +8,17 @@ Not staged: `COMPILER-NOTES-2026-10-16.md` (official compiler team update, not o
 **Luu y:** muc 1..6 ben duoi la snapshot 2026-10-17 (truoc G2/G3). Trang thai
 hien tai cua G3 nam o muc 0 ngay duoi day.
 
-**Dinh huong hien tai (2026-10-20):** muc 7 (TRIZ roadmap) + file
-`docs/perf-plan-triz-roadmap.md` — muc tieu seq1024 full step 154.234 s
-(43.5x vs torch) -> ~85 s (~20x), giữ nguyên 84/84 parity assertions.
+**Dinh huong hien tai (2026-10-20, MUC TIEU MOI — chu khoa):** phai dat
+BANG roi NHANH HON PyTorch (1.0× roi ≤0.8×) tren CA 3 seq, van giu 84/84
+parity — KHONG dung o muc ~20× nua. Sàn don luong ~37s > 3.542s -> da luong
+la dieu kien can (P6). Ladder + phan tich: `docs/perf-plan-triz-roadmap.md`
+§12. Duong di da di: 154.234 -> 141.219 (P5.4) -> **118.641 s (33.5×, P5.5)**.
 **P5.4 (2026-10-20) da ha 154.234 -> 141.219 s (39.9x), 84/84 gate — xem 0.14
 (5 file gpt2_ref sua chua commit, 4 probe untracked, chua push).**
 **P5.5 (2026-10-20) gop forward: 141.219 -> 118.641 s (33.5x), 84/84,
 bit-exact — xem 0.15.**
+**P5.6 (2026-10-20) cache attention-fwd trong block_bwd: 118.641 ->
+99.719 s (28.2x), 84/84, bit-exact — xem 0.16.**
 
 ---
 
@@ -712,6 +716,42 @@ can tiep 2-3 attack nua.
 **Trang thai git:** 5 gpt2_ref + 2 bench + probe AQ sua, probe AS moi —
 chua commit/push.
 
+### 0.16 P5.6 — CACHE ATTENTION FWD TRONG block_bwd (2026-10-20) — 84/84, −16.0%
+
+**Van de:** `block_bwd` recompute CA `gpt2_attention` fwd (~15.4s @seq1024 =
+12% backward, probe AQ) chi de co `r = x + attn_out`.
+
+**Thay doi (5 mirror gpt2_ref, dong bo):**
+
+1. `gpt2_block_saved(...)` — nhu gpt2_block + tra `[out, r]` (gpt2_block giu nguyen).
+2. `gpt2_forward_saved` luu them `rs[12]` (residual sau attention tung layer,
+   +37MB @seq1024) — layout `[z, xf, xf_in, xins..., rs...]`.
+3. `gpt2_block_bwd(..., save_r=None)` — save_r != None thi dung r, BO HAN
+   attention fwd; None thi duong cu (parity nguyen ven).
+
+**Bit-exact:** probe AS logits/gflat/out/reuse = **0.0** (khong doi).
+
+**Do A/B (loss khop tung chu so 10.760399 -> 13.442912):**
+
+| seq | full step P5.5 | **P5.6** | Δ |
+|---|---|---|---|
+| 8 | 17.469 s | **16.937 s** | −3.0% |
+| 256 | 32.578 s | **29.735 s** | −8.7% |
+| 1024 | 118.641 s | **99.719 s** | **−16.0%** |
+
+- mode 0 @1024: bwd 86.219 -> **70.734 s** (−18.0% = **−15.485s** dung bang
+  attn-fwd recompute da bo); fwd 25.032 s (khong doi).
+- AQ @1024: TOTAL_bwd 84.328 -> **68.187 s**. Con lai: **ATTN_BWD 41.5 s (61%)**,
+  MLP_BWD 16.0 s (23%), LHEAD 11.5 s (17%), LN/EMBED 1.9 s.
+- Gate: **84/84**. Ty le vs torch: 33.5× -> **28.2×** (seq8 18.1×, seq256 21.2×).
+- Luu y AQ: RESIDUAL am lon (−24.5s) la binh thuong — SUM_cac_phan gio gom
+  FWD_BODY (21.3s) khong con nam trong TOTAL_bwd; doc TOTAL + cac pha rieng.
+
+**Ke tiep (§12):** P5.7 LHEAD 11.5 s (softmax-grad scalar + dxf/dwte GEMM),
+roi P5.8 kernel GEMM v2; P6 da luong / P7 precision van cho quyet dinh chu khoa.
+
+**Trang thai git:** 5 gpt2_ref sua — chua commit.
+
 ---
 
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
@@ -863,6 +903,9 @@ full step seq1024 **154.234 s vs 3.542 s = 43.5×** (truoc P5.3: 114.5× fwd+bwd
 **Sau P5.5 (cung ngay 2026-10-20): full step 17.469 / 32.578 / 118.641 s —
 ty le 18.7x / 23.2x / 33.5x. Chi tiet: 0.15.**
 
+**Sau P5.6 (cung ngay 2026-10-20): full step 16.937 / 29.735 / 99.719 s —
+ty le 18.1x / 21.2x / 28.2x. Chi tiet: 0.16.**
+
 ### 7.2 Doc so (cai gi can sua)
 
 - **Backward chiem 83-88%** fwd+bwd cua tkv — sau P5.3, **attention khong con la
@@ -896,6 +939,11 @@ ty le 18.7x / 23.2x / 33.5x. Chi tiet: 0.15.**
   ty le **~20-22×**.
 - **Muc tieu chung: ty le tkv/torch ~20× o seq1024 full step** (tu 43.5× hien tai)
   — tuc "thua nang" sang "khac duoc".
+- **CAP NHAT 2026-10-20 (chu khoa): MUC TIEU MOI = Bang roi NHANH HON PyTorch
+  (1.0× roi <1.0×) tren ca 3 seq** — ke hoach 3 phase ~20× ben tren bi thay bo
+  boi ladder toi parity: `docs/perf-plan-triz-roadmap.md` §12 (P5.6 cache
+  block-fwd → P5.7 lm-head → P5.8 kernel → **P6 da luong (bat buoc — san don
+  luong ~37s > 3.542s)** → P7 mixed precision). Hien tai 33.5× @seq1024 (P5.5).
 
 ### 7.5 Parity phai giu (khong duoc break)
 

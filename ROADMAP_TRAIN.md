@@ -18,6 +18,8 @@ sẽ diễn ra sau trên GPU Google. Ưu tiên số tuyệt đối với PyTorch
 | G6 phân tán (có thể bỏ) | chưa bắt đầu |
 | **SIMD train** (ngoài G — mục 8) | ✅ **XONG** (2026-10-19): `tv/training/simd_matmul.tkv` — `smm_fwd`/`smm_dot`/`smm_transpose` tiled, bọc native `simd_gemm` AVX2+FMA (o T×T, bù 0, tích luỹ từng p-tile); cả GPT-2 ref nhận tham số `simd = 0` (**mặc định scalar — mọi gate cũ nguyên vẹn**), SIMD opt-in. Gate `simd_matmul_tests` **20/20** (linear/forward/loss/28 grad backward/train 3 buoc simd vs scalar ≤1e-4) + 5 gate hồi quy xanh (train 5/5, **gpt2 17/17**, scope 9/9, **full 124M 33/33**, tổng **84/84**). Tốc độ: linear 256x768x2304 **3390→63 ms (~53×)**, head-like 64x768x4096 641→94 ms (~6.7×). 2 bug bắt được: (a) layout B của `smm_dot` ([n][k]) vs B chuẩn ([k][n]) → 3 call site phải dùng `smm_fwd`; (b) biến `gg` trùng tên 2 kiểu (Tensor/f64) trong 2 nhánh simd của `gpt2_backward` → compiler gộp 1 slot, hỏng bộ nhớ 1e15 (đổi tên `gsc`). **P5.2 + P5.3 ✅ (2026-10-20)**: score/ctx và `dp/ds/dqkv` của attention chuyển sang `smm` (vòng **head ngoài** vòng token, mask causal + scale `1/sqrt(hd)`; `dq=inv·ds·K`, `dk=inv·dsᵀ·Q`, `dv=Pᵀ·dctx`). Đo A/B/C cùng process: attention 1 layer seq1024 **20 390 → 5 437 ms = 3.75×** (fwd 4 937→1 281, bwd 15 453→4 156); seq8 **−2%** → giao điểm ≈ seq 16-32, lỗ cả 12 layer ≈ +0.25% một bước seq8. **Đo thẳng CẢ BUỚC seq1024** (2 lần chạy cùng binary, chỉ khác 2 hàm attention): **420.6 s → 157.1 s = 2.68× (−263.5 s)**, loss khớp tới chữ số cuối; torch cùng máy cùng ngày 3.672 s → tỉ lệ 114.5× → **42.8×**. **Bench lại toàn dải seq (2026-10-20, lần 2)**: full step seq8/256/1024 = **22.2 / 41.2 / 154.2 s** vs torch **0.934 / 1.404 / 3.542 s** → **23.8× / 29.4× / 43.5×** (fwd+bwd 15.8/35.2/150.6 s vs 0.302/0.782/2.987 s = 45-52×; backward chiếm 83-88% fwd+bwd tkv; plumbing/optimizer 6.4/6.0/3.6 s vs torch 0.63/0.62/0.55 s). Trước P5.2/P5.3 **không gate nào chạy attention GEMM với `simd=1`** → nay `gpt2_tests` thêm 7 assert `simd=1` vs fixture PyTorch (≤2.4e-7), `gpt2_full_tests` thêm `SIMD logits/loss` 124M (2.6e-6/0.0) + attention n=192 (đa ô 3×3) fwd/bwd simd-vs-scalar ≤3.6e-5 + **backward toàn bộ 124M `simd=1` vs fixture PyTorch** (5 grad ≤8.3e-7). Số ở `docs/perf-plan-simd-vs-pytorch.md` (mục P5.2 + P5.3) |
 
+| **PARITY vs PyTorch** (2026-10-20 — **MỤC TIÊU MỚI của chủ khoa: BẰNG rồi NHANH HƠN PyTorch**, thay mục ~20×) | 🔄 ĐANG LÀM: P5.4 bỏ 2 transpose n²/head + dw=xᵀ·gy (−8.8%), P5.5 backward dùng saves, bỏ forward recompute (−16.0%, bit-exact 0.0 — probe `simd_probe_as`) → full step seq8/256/1024 = **17.5/32.6/118.6 s** vs torch 0.934/1.404/3.542 = **18.7×/23.2×/33.5×**, 84/84 gate. **Sàn đơn luồng ~37 s > 3.542 s → đa luồng là điều kiện cần.** Ladder P5.6 (cache block-fwd) → P5.7 (lm-head) → P5.8 (kernel GEMM) → **P6 đa luồng** → P7 mixed precision: `docs/perf-plan-triz-roadmap.md` §12 |
+
 ### Kết quả G0
 
 | Việc | Kết quả |
@@ -290,8 +292,11 @@ một thiết bị đã chứng minh được thuật toán. Chỉ làm khi th�
 
 - Backend GPU, CUDA, OpenCL (chỉ làm seam).
 - Phân tán nhiều node.
-- Tối ưu tốc độ, đa luồng hoá GEMM. (Phần "dùng SIMD để tăng tốc" đã xong
-  2026-10-19 — xem mục TRẠNG THÁI "SIMD train": `simd_matmul.tkv`, gate 20/20.)
+- ~~Tối ưu tốc độ, đa luồng hoá GEMM.~~ **ĐÃ CHO PHÉP LẠI (2026-10-20, chủ khoa):**
+  mục tiêu mới là BẰNG rồi NHANH HƠN PyTorch → đa luồng GEMM là ĐIỀU KIỆN CẦN
+  (sàn đơn luồng ~37 s > torch 3.542 s @seq1024 — xem
+  `docs/perf-plan-triz-roadmap.md` §12). SIMD GEMM đã xong 2026-10-19
+  (mục TRẠNG THÁI "SIMD train", gate 20/20).
 - Quantization trong huấn luyện (QLoRA).
 - Sinh văn bản sau huấn luyện chất lượng.
 

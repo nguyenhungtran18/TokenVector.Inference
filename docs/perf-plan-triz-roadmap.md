@@ -2,7 +2,7 @@
 
 **Ngày:** 2026-10-20 · **Baseline:** P5.3 consolidated (commit `f85ea3d`) — tkv `simd=1` (P5.1+P5.2+P5.3) vs PyTorch 2.14.0+cpu (14 threads)
 **Máy:** Xeon E5-2695 v3 14C · **Cùng ngày, cùng máy, cùng token/config** cho mọi phép đo.
-**Mục tiêu:** seq1024 full step **154.234 s (43.5× vs torch)** → **~85 s (~20×)** mà vẫn giữ 84/84 parity assertions.
+**Mục tiêu (CẬP NHẬT 2026-10-20, chủ khoa):** seq1024 full step phải **BẰNG rồi NHANH HƠN PyTorch** (≤3.542 s = 1.0×, rồi ≤0.8×) trên **cả 3 seq**, vẫn giữ 84/84 parity assertions. Mốc dọc đường (đã đạt): 154.234 s (43.5×) → 141.219 (P5.4) → **118.641 s (33.5×, P5.5)**. Ladder + phân tích sàn đơn/đa luồng: **§12** (mục ~20× bên dưới bị thay thế).
 
 Chi tiết số đo gốc: `docs/perf-plan-simd-vs-pytorch.md` (mục P5.2 + P5.3). Bàn giao: `HANDOFF.md` mục 0.13 + mục 7.
 
@@ -189,14 +189,18 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 |---|---|---|---|
 | seq1024 fwd+bwd | 150.625 s | **~70 s** | ≈ 53% giảm |
 | seq1024 full step | **154.234 s** | **~85 s** | ≈ 45% giảm |
-| **Tỉ lệ tkv/torch (full step)** | **43.5×** | **~20×** | "thua nặng" → "khác được" |
+| **Tỉ lệ tkv/torch (full step)** | **43.5×** | ~~20×~~ **1.0× rồi <1.0× (chủ khoa 2026-10-20, xem §12)** | "thua nặng" → **bằng/nhanh hơn torch** |
 | seq256 vs P5.1-only | 2.65× | **≥ 3.5×** | |
 | 84/84 assertions | Pass | **Pass** | Không hồi quy |
 | Loss vs PyTorch fixture | ≤2.4e-7 logits / ≤8.3e-7 124M grad | **Không đổi** | Parity duy trì |
 
 **Cập nhật 2026-10-20 sau P5.4 (§10):** full step seq1024 **141.219 s → 39.9×** (từ 154.234 s / 43.5×); seq8 20.7×, seq256 26.9×.
 
-**Cập nhật 2026-10-20 sau P5.5 (§11):** full step seq1024 **118.641 s → 33.5×** (gộp forward, −16.0%); seq8 18.7×, seq256 23.2×. Còn lại để tới ~20× (~85 s): cache attn-fwd + MLP fwd trong block_bwd (~50 s → cắt dần), Phase 2 flatten (~2 s thật, nhỏ hơn dự kiến), lm-head.
+**Cập nhật 2026-10-20 sau P5.5 (§11):** full step seq1024 **118.641 s → 33.5×** (gộp forward, −16.0%); seq8 18.7×, seq256 23.2×.
+
+**Cập nhật 2026-10-20 sau P5.6 (§12, dòng P5.6):** full step seq1024 **99.719 s → 28.2×** (cache attn-fwd trong `block_bwd`, −16.0%; bit-exact 0.0); seq8 18.1×, seq256 21.2×. Bwd còn 68.2 s: ATTN_BWD 41.5 / MLP_BWD 16.0 / LHEAD 11.5 — mục tiêu kế P5.7.
+
+**Mục tiêu mới 2026-10-20 (chủ khoa) — THAY "~20×":** **BẰNG PyTorch (1.0×) rồi NHANH HƠN (≤0.8×)** trên cả 3 seq, giữ 84/84. Ladder đầy đủ + phân tích sàn: **§12**.
 
 ## 8. RỦI RO + CONTINGENCY
 
@@ -206,6 +210,9 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 | Lazy materialize phá parity | Trung bình | Gate từng stage; revert op về eager materialize |
 | Thắng seq256 không transfer sang seq8 | Trung bình | Benchmark đủ 3 seq mỗi lần; giữ `simd=0` mặc định |
 | Trượt tiến độ 3 tháng | Cao (codebase phức tạp) | Phase 1 đã mang ~50% giảm → dừng vẫn có giá trị |
+| **tkvc không có primitive thread → P6 (đa luồng) bị chặn** | Trung bình-Cao | Hỏi compiler team ngay (quyết định ⓐ §12); trong lúc chờ: P5.6-P5.8 đơn luồng + thiết kế song song deterministic (gộp tile theo thứ tự cố định) |
+| Drift nhiệt/thermal khi chạy đa luồng làm số đo bay | Cao | A/B cùng phiên + best-of + control; luôn ghi drift trong bench |
+| Mixed precision phá parity fp32 (nếu làm P7) | Cao (nếu làm) | Amendment numerics-contract + gate AMP riêng; fp32 master weights |
 | Policy adaptiv thêm latency | Thấp | Bake policy vào compile-time constant nếu cần |
 
 ## 9. FILE MỚI (dự kiến tạo)
@@ -226,6 +233,8 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 | `tv/tests/simd_probe_at.tkv` | Phân giải `now_ms`/`now_us` (~15.6 ms — bài học đo) |
 | `tv/tests/simd_probe_au.tkv` | Test ngôn ngữ `<=` + if/else lớn |
 | `tv/tests/simd_probe_as.tkv` | Bit-exact saves-vs-recompute + đo fwd_saved overhead (P5.5) |
+
+---
 
 ---
 
@@ -266,3 +275,29 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 - **84/84 gate**; tỉ lệ vs torch 39.9× → **33.5×** (seq8 18.7×, seq256 23.2×).
 - Lưu ý đo: máy drift ~5-8% trong ngày → % A/B bench có thể lệch vài điểm; ground truth cùng tiến trình: probe AS bwd @n8 −16.8%, AQ TOTAL_bwd −18.9 s @1024.
 - Ứng viên kế (theo AQ mới): cache attn-fwd + MLP fwd trong `block_bwd` (P5.6), lm-head, Phase 2 flatten (thực chất chỉ ~2 s).
+
+---
+
+## 12. KẾ HOẠCH TỚI PARITY — "BẰNG RỒI NHANH HƠN PYTORCH" (2026-10-20, chủ khoa)
+
+**Mục tiêu mới (thay mục ~20×):** full step ≤ torch (1.0×) rồi **nhanh hơn (≤0.8×)** trên **cả 3 seq**, giữ 84/84 parity assertions (fp32 contract).
+
+**Phân tích sàn trung thực (số đo 2026-10-20):** ~560 GFLOP/fwd+bwd @seq1024 (ước tính kiến trúc: 12 layer × 12h² × 3 (fwd+bwd) + lm-head + attention n²); torch 3.542 s với **14 thread** ≈ 190 GFLOP/s tổng. tkv đơn luồng 118.6 s ≈ 4.7 GFLOP/s. Sàn lý tưởng **đơn luồng** với kernel f32 AVX2 hoàn hảo (~15 GFLOP/s thực dụng) ≈ **37 s — VẪN > 3.542 s** → **đa luồng là ĐIỀU KIỆN CẦN**, không phải tùy chọn; kernel đơn luồng tốt nhất chỉ đưa ~33.5× xuống ~5-7×.
+
+| Bước | Nội dung | Ước @seq1024 | Tỉ lệ |
+|---|---|---|---|
+| **P5.6** ✅ **XONG 2026-10-20** | Cache attn-fwd trong `block_bwd` (rs trong saves) — **đo: −18.9 s @1024** (ước ban đầu −8-10 s; full step 118.641 → **99.719 s**), bit-exact 0.0, 84/84 | −18.9 s | **28.2×** |
+| **P5.7** | Lm-head bwd 11.7 s: vectorize softmax-grad, dw/dxf GEMM | −5-8 s | ~26× |
+| **P5.8** | Kernel GEMM v2: register tiling, prefetch, dispatch bề rộng AVX, tối ưu ô theo m/n/k (P13 làm tay — đo A/B từng bước, bài học §10) | GEMM ~2× | ~13-16× |
+| **P6** | **Đa luồng GEMM — ĐIỀU KIỆN CẦN** (quyết định ⓐ) | hiệu dụng ×5-10 trên pha GEMM | **~2-4×** |
+| **P7** | Mixed precision: bf16/tf32 GEMM + tích luỹ fp32 + fp32 master (quyết định ⓑ) | ×2-3 | **≤1.0× → <1.0×** |
+
+**Song song — seq8 riêng:** hiện 18.7×; threads ít giúp (GEMM quá nhỏ, overhead interpreter chiếm chủ yếu) → cần specialise batch nhỏ: unroll, fuse loop, giảm vật liệu hoá trung gian. Theo dõi KPI seq8 riêng, không hòa lẫn seq1024.
+
+**Quyết định cần chủ khoa / compiler team:**
+
+- ⓐ **tkvc có primitive thread không?** Nếu không → gửi yêu cầu compiler team ngay (P6 là blocker đường tới parity); trong lúc chờ làm P5.6-P5.8 + thiết kế parallel reduction đúng hợp đồng số (thu tu tich luy co dinh → chia tile rồi gộp theo thứ tự tile CỐ ĐỊNH, deterministic trên mọi máy).
+- ⓑ **Parity so ở precision nào?** fp32-vs-fp32 (fair fight) hay tkv-bf16 vs torch-fp32 (torch CPU fp32 không dùng AMX — tkv bf16+VNNI/AVX512 có thể thắng, nhưng phải sửa numerics-contract + thêm gate AMP riêng).
+- ⓒ **"Nhanh hơn" cụ thể bao nhiêu, giữ bao nhiêu gate?** Đề xuất: ≤0.8× full step cả 3 seq, 84/84 fp32 giữ nguyên + gate AMP mới (nếu ⓑ = mixed).
+
+**Rủi ro riêng P6/P7:** xem §8 (blocked threads, thermal drift, contract precision).

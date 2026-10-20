@@ -244,6 +244,32 @@ def gpt2_block(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
         out.data[i] = r.data[i] + m.data[i]
     return out
 
+# ---- P5.6 (2026-10-20): block forward + tra them residual r ----------------
+# Chi gpt2_forward_saved dung; gpt2_block giu nguyen -> moi caller cu khong doi.
+# r = x + attn_out (residual sau attention) — block_bwd can NO de khoi recompute
+# ca 1 lan gpt2_attention fwd (~15.4s @seq1024, probe AQ).
+def gpt2_block_saved(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
+                     w_qkv: "Tensor", b_qkv: "Tensor", w_proj: "Tensor", b_proj: "Tensor",
+                     ln2_g: "Tensor", ln2_b: "Tensor",
+                     w1: "Tensor", b1: "Tensor", w2: "Tensor", b2: "Tensor",
+                     simd: 'i32' = 0) -> 'list[Tensor]':
+    n = _sh0(x)
+    h = _sh1(x)
+    a = gpt2_layernorm(x, ln1_g, ln1_b)
+    a = gpt2_attention(a, w_qkv, b_qkv, w_proj, b_proj, n, simd)
+    r = t_zeros([n, h])
+    for i in range(n * h):
+        r.data[i] = x.data[i] + a.data[i]
+    m = gpt2_layernorm(r, ln2_g, ln2_b)
+    m = gpt2_mlp(m, w1, b1, w2, b2, n, simd)
+    out = t_zeros([n, h])
+    for i in range(n * h):
+        out.data[i] = r.data[i] + m.data[i]
+    res = []
+    res.append(out)
+    res.append(r)
+    return res
+
 # ---- Full forward: embed -> N block -> ln_f -> LM head (tie wte) ----------
 def gpt2_forward(ids: 'list[i64]', pos: 'list[i64]',
                  wte: "Tensor", wpe: "Tensor",
@@ -277,9 +303,10 @@ def gpt2_forward(ids: 'list[i64]', pos: 'list[i64]',
 # Tra ve list[Tensor]:
 #   [0] logits (z)  [1] xf (ln_f out)  [2] xf_in (out block cuoi)
 #   [3 .. 3+NLayers-1] xins[i] (dau vao block i)
+#   [3+NLayers .. 3+2NLayers-1] rs[i] (residual sau attention layer i)  # P5.6
 # Dung kem gpt2_backward(..., saves=...) de bo forward recompute (~19.1s
-# @seq1024 = 15% bwd, probe AQ). Cung phep voi gpt2_forward -> cung BIT
-# (deterministic cung input) -> grad bit-exact.
+# @seq1024 = 15% bwd, probe AQ) + bo attention fwd recompute trong block_bwd
+# (P5.6, ~15.4s). Cung phep voi gpt2_forward -> cung BIT -> grad bit-exact.
 def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
                        wte: "Tensor", wpe: "Tensor",
                        ln1_g: 'list[Tensor]', ln1_b: 'list[Tensor]',
@@ -293,10 +320,13 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
     h = HiddenSize
     x = gpt2_embed(ids, pos, wte, wpe)
     xins = []
+    rsin = []
     for i in range(NLayers):
         xins.append(x)
-        x = gpt2_block(x, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
-                       ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i], simd)
+        rb = gpt2_block_saved(x, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
+                              ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i], simd)
+        x = rb[0]
+        rsin.append(rb[1])
     xf_in = x
     xf = gpt2_layernorm(x, lnf_g, lnf_b)
     if simd == 1:
@@ -315,6 +345,8 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
     out.append(xf_in)
     for i in range(NLayers):
         out.append(xins[i])
+    for i in range(NLayers):
+        out.append(rsin[i])
     return out
 
 # ---- Cross entropy (F.cross_entropy mean = mean_i(lse_i - logit[i, y_i]))
@@ -701,7 +733,8 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
                    ln2_g: "Tensor", ln2_b: "Tensor",
                    w1: "Tensor", b1: "Tensor", w2: "Tensor", b2: "Tensor",
                    gout: "Tensor", simd: 'i32' = 0,
-                   gflat: 'list[f32]' = None, offs: 'list[i64]' = None) -> 'list[Tensor]':
+                   gflat: 'list[f32]' = None, offs: 'list[i64]' = None,
+                   save_r: "Tensor" = None) -> 'list[Tensor]':
     # offs = 12 offset flat theo layout layer (0 ln1_g 1 ln1_b 2 w_qkv
     # 3 b_qkv 4 w_proj 5 b_proj 6 ln2_g 7 ln2_b 8 w1 9 b1 10 w2 11 b2);
     # rong = off (duong cu, parity nguyen ven).
@@ -735,10 +768,16 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
     n = _sh0(x)
     h = _sh1(x)
     a = gpt2_layernorm(x, ln1_g, ln1_b)
-    attn_out = gpt2_attention(a, w_qkv, b_qkv, w_proj, b_proj, n, simd)
-    r = t_zeros([n, h])
-    for i in range(n * h):
-        r.data[i] = x.data[i] + attn_out.data[i]
+    # P5.6 (2026-10-20): save_r != None -> lay r tu forward_saved, BO HAN
+    # gpt2_attention fwd recompute (~15.4s @seq1024, probe AQ). save_r la
+    # x + attn_out tinh trong forward — cung gia tri TUNG BIT -> grad bit-exact.
+    if save_r == None:
+        attn_out = gpt2_attention(a, w_qkv, b_qkv, w_proj, b_proj, n, simd)
+        r = t_zeros([n, h])
+        for i in range(n * h):
+            r.data[i] = x.data[i] + attn_out.data[i]
+    else:
+        r = save_r
     m = gpt2_layernorm(r, ln2_g, ln2_b)
     # out = r + mlp(m)
     rmlp = gpt2_mlp_bwd(m, w1, b1, w2, b2, n, gout, simd, gflat, o_w1, o_b1, o_w2, o_b2)
@@ -943,10 +982,18 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
         if use_flat == 1:
             for j in range(12):
                 lo.append(poff[4 + li * 12 + j])
-        rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
-                            w_qkv[li], b_qkv[li], w_proj[li], b_proj[li],
-                            ln2_g[li], ln2_b[li],
-                            w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo)
+        # P5.6: saves co rs[i] -> block_bwd dung lai r, khong recompute attn fwd.
+        if saves == None:
+            rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
+                                w_qkv[li], b_qkv[li], w_proj[li], b_proj[li],
+                                ln2_g[li], ln2_b[li],
+                                w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo)
+        else:
+            rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
+                                w_qkv[li], b_qkv[li], w_proj[li], b_proj[li],
+                                ln2_g[li], ln2_b[li],
+                                w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo,
+                                saves[3 + NLayers + li])
         gx = rb[0]
         for j in range(1, 13):
             rblocks.append(rb[j])
