@@ -152,6 +152,9 @@ def smm_transpose(t: "Tensor", rows: 'i64', cols: 'i64') -> "Tensor":
     out = t_zeros([cols, rows])
     od = out.data
     d = t.data
+    # P5.7 (2026-10-20, probe AW): DA THU blocked 64x64 — CHAM HON 2.7x
+    # ([1024,50257]: 4375ms vs 1625ms; vong 4 tang thong dich dat hon loi
+    # cache) -> REVERT ve ban vong 2 tang. Bai hoc: chi do moi chot.
     i = 0
     while i < rows:
         j = 0

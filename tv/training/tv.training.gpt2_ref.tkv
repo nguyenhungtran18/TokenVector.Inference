@@ -939,7 +939,11 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
                 gg.data[base + o] = ggv
         dxf = smm_fwd(gg, wte, n, h, VocabSize)
         # dwte[o,k] = sum_t ggT[o,t]*xf[t,k] — gg luu [token][vocab], can ggT [vocab][token];
-        # smm_fwd(ggT, xf) tra luon dwte [Vocab][h], khong can transpose sau
+        # smm_fwd(ggT, xf) tra luon dwte [Vocab][h], khong can transpose sau.
+        # P5.7 (2026-10-20): DA THU duong xfT/dwteT + transpose nguoc (dung
+        # probe AV: GEMM 2360 < 3062ms) — nhung transpose nguoc h x V = 38.6M
+        # ptu CO DINH, trong khi ggT chi n x V (nho khi seq nho) -> REGRESSION
+        # seq8 +22%, seq256 +17.6% (loss van bit-exact). REVERT, giu ggT.
         ggT = smm_transpose(gg, n, VocabSize)
         dwte = smm_fwd(ggT, xf, VocabSize, h, n)
     if simd == 0:

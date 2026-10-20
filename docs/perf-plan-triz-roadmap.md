@@ -233,6 +233,8 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 | `tv/tests/simd_probe_at.tkv` | Phân giải `now_ms`/`now_us` (~15.6 ms — bài học đo) |
 | `tv/tests/simd_probe_au.tkv` | Test ngôn ngữ `<=` + if/else lớn |
 | `tv/tests/simd_probe_as.tkv` | Bit-exact saves-vs-recompute + đo fwd_saved overhead (P5.5) |
+| `tv/tests/simd_probe_av.tkv` | Tách LHEAD @seq: softmax-grad / transpose / 2 GEMM (P5.7) |
+| `tv/tests/simd_probe_aw.tkv` | Micro-bench transpose blocked-vs-plain (P5.7 — blocked chậm 2.7×) |
 
 ---
 
@@ -287,8 +289,8 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 | Bước | Nội dung | Ước @seq1024 | Tỉ lệ |
 |---|---|---|---|
 | **P5.6** ✅ **XONG 2026-10-20** | Cache attn-fwd trong `block_bwd` (rs trong saves) — **đo: −18.9 s @1024** (ước ban đầu −8-10 s; full step 118.641 → **99.719 s**), bit-exact 0.0, 84/84 | −18.9 s | **28.2×** |
-| **P5.7** | Lm-head bwd 11.7 s: vectorize softmax-grad, dw/dxf GEMM | −5-8 s | ~26× |
-| **P5.8** | Kernel GEMM v2: register tiling, prefetch, dispatch bề rộng AVX, tối ưu ô theo m/n/k (P13 làm tay — đo A/B từng bước, bài học §10) | GEMM ~2× | ~13-16× |
+| **P5.7** ❌ **THỬ 2026-10-20, ĐO BÁC BỎ** | Lm-head bwd: tách phần (probe AV/AW): softmax-grad 1.33 s, transpose ggT 1.56 s, dxf 2.44 s, dwte 3.06 s. Thử (a) dwteT tránh transpose → **regression seq8 +22%/seq256 +17.6%**; (b) transpose blocked → **chậm 2.7×** → revert. **Cần kernel API** (A-transposed + beta) — chuyển yêu cầu sang P5.8 | 0 (chờ kernel) | 28.2× giữ nguyên |
+| **P5.8** | Kernel GEMM v2 — **yêu cầu ĐO ĐƯỢC từ P5.7**: (a) **A-transposed** (bỏ 1.56 s transpose ggT @1024); (b) **beta / tích lũy in-place** (bỏ copy Ct + 52M vòng tích lũy thông dịch — chiếm phần lớn overhead T=64 của attention 41.5 s); (c) register tiling/prefetch/dispatch AVX. Giữ determinism (tích lũy theo thứ tự cố định) | GEMM ~2× (+ LHEAD −4-6 s) | ~13-16× |
 | **P6** | **Đa luồng GEMM — ĐIỀU KIỆN CẦN** (quyết định ⓐ) | hiệu dụng ×5-10 trên pha GEMM | **~2-4×** |
 | **P7** | Mixed precision: bf16/tf32 GEMM + tích luỹ fp32 + fp32 master (quyết định ⓑ) | ×2-3 | **≤1.0× → <1.0×** |
 

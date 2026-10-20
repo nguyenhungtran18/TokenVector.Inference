@@ -19,6 +19,8 @@ la dieu kien can (P6). Ladder + phan tich: `docs/perf-plan-triz-roadmap.md`
 bit-exact — xem 0.15.**
 **P5.6 (2026-10-20) cache attention-fwd trong block_bwd: 118.641 ->
 99.719 s (28.2x), 84/84, bit-exact — xem 0.16.**
+**P5.7 (2026-10-20): lm-head — 2 huong thu deu bi DO bac bo (regression /
+cham hon); LHEAD can kernel API moi (trans-A + beta) — xem 0.17.**
 
 ---
 
@@ -751,6 +753,38 @@ chua commit/push.
 roi P5.8 kernel GEMM v2; P6 da luong / P7 precision van cho quyet dinh chu khoa.
 
 **Trang thai git:** 5 gpt2_ref sua — chua commit.
+
+### 0.17 P5.7 — LM-HEAD: 2 HUONG THU, DO BAC BO (2026-10-20) — code hoat dong = P5.6
+
+**Probe moi:**
+
+- `tv/tests/simd_probe_av.tkv` — tach LHEAD @1024 (seq tu `_seq_cfg`):
+  SOFTMAX_GRAD **1328 ms** | TRANSPOSE_ggT **1562 ms** (51.5M ptu) |
+  GEMM_dxf **2437 ms** | GEMM_dwte **3062 ms** | SUM 8389 ms. (AQ LHEAD 11.5 s
+  con ~3 s la logits GEMM — `_aq_lhead` khong nhan saves.)
+- `tv/tests/simd_probe_aw.tkv` — micro-bench transpose: [1024,50257]
+  BLOCKED 4375 vs PLAIN 1625 ms; [768,50257] 3328 vs 1235 ms.
+
+**Thu 1 — dwteT (bo transpose ggT):** xfT (15 ms) -> dwteT GEMM (2360 <
+3062 ms) -> transpose NGUOC. Bit-exact (probe AS 0.0, loss khop) NHUNG
+**REGRESSION**: seq8 full step 16.937 -> **20.688 s (+22%)**, seq256 29.735 ->
+**34.984 s (+17.6%)** — transpose nguoc h×V = 38.6M ptu CO DINH, trong khi
+ggT chi n×V (nho khi n nho). **REVERT** (giu ggT).
+
+**Thu 2 — transpose blocked 64×64:** **CHAM HON 2.7×** (4375 vs 1625 ms) —
+vong 4 tang thong dich dat hon loi cache. **REVERT** (giu vong 2 tang).
+
+**Ket luan (do, khong doan):** LHEAD 11.5 s KHONG cat duoc voi API kernel
+hien tai (chi smm_fwd/smm_dot: khong trans-A, khong beta). Yeu cau cho P5.8:
+(a) kernel nhan **A transposed** -> bo 1.56 s transpose ggT; (b) **beta /
+tich luy in-place** -> bo copy Ct + 52M vong tich luy thong dich; (c) bo alloc
+dwte thua 154MB khi ghi thang gflat. Khi co du 3: LHEAD ~4-5 s.
+
+**Trang thai:** code hoat dong = P5.6 (chi them comment bai hoc vao
+`gpt2_ref`/`simd_matmul`). Bench lai xac nhan: seq8 17.031 s (noise),
+seq256 29.750 s, @1024 fwd+bwd 95.797 / bwd **70.688 s** = P5.6; mode1
+102.641 s (+2.9 s drift nhiet o pha optimizer — fwd/bwd khong doi).
+Bit-exact 0.0, **84/84** gate.
 
 ---
 
