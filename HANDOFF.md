@@ -1,11 +1,16 @@
 # HANDOFF — TokenVector.Inference (Pure .TKV) — 2026-10-20
 
 Verified: compiler build 23:58 (2026-10-17) — B-01..B-07 fixed + SIMD GEMM updates.
-Repo HEAD: `b28bdb7` (registry kernel + numerics-contract); G3 tokenizer `8ac487d`, G3 pack `d8a203a`.
+Repo HEAD: `f85ea3d` (P5.3 consolidation — benchmark full seq + recorded figures).
+Truoc do: `b28bdb7` (registry kernel + numerics-contract); G3 tokenizer `8ac487d`, G3 pack `d8a203a`.
 Not staged: `COMPILER-NOTES-2026-10-16.md` (official compiler team update, not ours).
 
 **Luu y:** muc 1..6 ben duoi la snapshot 2026-10-17 (truoc G2/G3). Trang thai
 hien tai cua G3 nam o muc 0 ngay duoi day.
+
+**Dinh huong hien tai (2026-10-20):** muc 7 (TRIZ roadmap) + file
+`docs/perf-plan-triz-roadmap.md` — muc tieu seq1024 full step 154.234 s
+(43.5x vs torch) -> ~85 s (~20x), giữ nguyên 84/84 parity assertions.
 
 ---
 
@@ -624,7 +629,7 @@ So chi tiet: `docs/perf-plan-simd-vs-pytorch.md` (muc **P5.2 + P5.3**),
 `docs/linux-portability-spike.md`: WSL/mono test results.
 `docs/G1_RESULT_STATE.md`: G1 verification results.
 `docs/numerics-contract.md`: updated from proposal to verified (DUYET).
-`docs/ROADMAP_TRAIN.md`: updated status + next steps.
+`ROADMAP_TRAIN.md` (repo root): updated status + next steps.
 `ROADMAP_TRAIN.md`: included in commit message.
 `HANDOFF.md`: updated (section 4.1 closed list, 4.2 fixed, 4.3 workarounds, 6 remaining items, 7 quick commands, 5 important notes).
 
@@ -718,3 +723,78 @@ Skeleton complete; fixtures exist for 4 parity + 20 gradient + 8 tape + 7 gradch
 2. Generate architecture-level fixtures from `transformers.gpt2` (small config: same architecture, vocab 256, hidden 64, heads 4, layers 2, seq 32); fixtures include hidden-state stats per layer + loss + logits + gradients per parameter group.
 3. Write architecture-level parity (`gpt2_tests.tkv`) comparing 1-layer forward and backward against fixtures.
 4. Verify no regression: full `run_cases` (26/26 + gap + parity + grad + tape + gc), `--verify-all` 55/55, build Inference Completed.
+
+---
+
+## 7. TRIZ OPTIMIZATION ROADMAP (2026-10-20) — tu "thua" sang "khac"
+
+**Context:** P5.3 consolidated (commit `f85ea3d`). Benchmark re-record cung may /
+cung ngay tren seq 8/256/1024. tkv **van thua** PyTorch nhung gap da hep nhieu:
+full step seq1024 **154.234 s vs 3.542 s = 43.5×** (truoc P5.3: 114.5× fwd+bwd).
+
+### 7.1 Benchmark chot (2026-10-20, torch chay 2 lan/seq spread ≤3%)
+
+| seq | tkv fwd+bwd | torch fwd+bwd | tkv full step | torch full step | **full step ty le** |
+|---|---|---|---|---|---|
+| 8 | 15.812 s | 0.302 s | **22.219 s** | 0.934 s | **23.8×** |
+| 256 | 35.172 s | 0.782 s | **41.218 s** | 1.404 s | **29.4×** |
+| 1024 | 150.625 s (fwd 25.281 + bwd 125.344) | 2.987 s | **154.234 s** | 3.542 s | **43.5×** |
+
+### 7.2 Doc so (cai gi can sua)
+
+- **Backward chiem 83-88%** fwd+bwd cua tkv — sau P5.3, **attention khong con la
+  nut that**; nut that la backward KHONG attention (LN / gelu / embed-LM-head).
+- **Plumbing/optimizer nang hon torch ~10×**: tkv 6.4 / 6.0 / 3.6 s vs torch
+  0.63 / 0.62 / 0.55 s — gan nhieu khong phu thuoc seq, o seq8 no chiem **29%**
+  ca buoc (day la ly do ty le full step seq8 thap hon ty le compute).
+- **seq256 la bang chung P5.x khong chi co o seq1024**: 109.4 s (P5.1-only) →
+  41.2 s = **2.65×**; ty le vs torch 76.7× → **29.4×**.
+- **Loss van khop tung chu so** (`10.760399 → 13.442912`) ⇒ cung thuat toan,
+  chi khac FMA/thu tu tich luy.
+- Ty le fwd+bwd gan phang **45-52×** theo seq; ty le full step tang dan
+  23.8 → 43.5× (optimizer co dinh cua torch che phan compute o seq nho).
+
+### 7.3 Huong sua theo TRIZ
+
+| TRIZ principle | Huong di | Ky vong |
+|---|---|---|
+| **Segmentation (1)** | Tach backward thanh stage rieng: `ln_bwd` / `gelu_bwd` / `proj_bwd` — moi stage toi uu doc lap | Lon nhat — backward = 83-88% chi phi |
+| **Asymmetry (15)** | Khac phuong phap theo stage: attention da GEMM (xong); LN bwd → FMA tiled; gelu bwd → erf approx (trong numerics contract); optimizer → fused | Rl cua LN/gelu chua GEMM hoa la lon nhat con lai |
+| **Merging (25)** | Lazy materialize (chi copy `ps → opt.p` 1 lan truoc `opt.step()`); fused AdamW (gop momentum + WD vao 1 vong lap) | Rl lon — plumbing dang ~10× torch, khong nen vay |
+| **Nature of invention (40)** | Policy adaptiv theo stage: FMA neu co hardware, scalar fallback; FP16 accumulate + rescale FP32 truoc softmax neu throughput giu trong loss tolerance | Trung binh, sau khi segmentation + merging xong |
+
+### 7.4 Loi trinh muc tieu (3 thang, CHUA commit)
+
+- **Phase 1 (6 tuan)** — backward LN + gelu + fusion proj: seq1024 fwd+bwd
+  150.6 s → **~70 s**, full step → **~85 s**, ty le **43.5× → ~24×**.
+- **Phase 2 (5 tuan)** — lazy materialize + fused AdamW: plumbing
+  6.4/6.0/3.6 s → **~2/1.9/1.1 s**, full step → **~80 s**, ty le **~23×**.
+- **Phase 3 (2 tuan)** — policy adaptiv + mixed precision: them **5-10%**,
+  ty le **~20-22×**.
+- **Muc tieu chung: ty le tkv/torch ~20× o seq1024 full step** (tu 43.5× hien tai)
+  — tuc "thua nang" sang "khac duoc".
+
+### 7.5 Parity phai giu (khong duoc break)
+
+| Gate | Truoc P5.2/P5.3 | Nay |
+|---|---|---|
+| `simd_matmul_tests` | 20/20 | **20/20** |
+| `gpt2_tests` | 10/10 | **17/17** (+7 assert `simd=1` vs fixture PyTorch ≤2.4e-7) |
+| `gpt2_scope_tests` | 9/9 | **9/9** |
+| `gpt2_train_tests` | 5/5 | **5/5** (loss bit-exact) |
+| `gpt2_full_tests` | 20/20 | **33/33** (+SIMD logits/loss 124M 2.6e-6/0.0; +attention n=192 3×3 fwd/bwd ≤3.6e-5; +backward TOAN BO 124M `simd=1` vs PyTorch, 5 grad ≤8.3e-7) |
+
+### 7.6 Rui ro + contingency
+
+| Rui ro | Contingency |
+|---|---|
+| GELU erf approx vuot 2.4e-7 logits | Default dung erf khong approx; chi giu tanh-approx lam duong debug |
+| Lazy materialize lam vo parity (tai dung gradient giua cac buoc) | Gate tung stage: `gpt2_train_tests` phai 5/5 bit-exact; revert tung op ve eager materialize |
+| Chien thang seq256 khong transfer sang seq8 | Benchmark ca 3 seq moi ung vien; giu mac dinh `simd=0` cho den khi chung minh net win tren ca 3 seq |
+| Policy adaptiv them latency kiem tra moi call | Do chi phi policy; neu qua lon, bake policy vao hang compile-time constant |
+
+---
+
+*Cap nhat 2026-10-20 · Hanh dong tiep theo: Phase 1 — trien khai `layernorm_bwd` FMA tiled.
+Chi tiet day du: `docs/perf-plan-simd-vs-pytorch.md` (muc P5.2 + P5.3) va
+`docs/perf-plan-triz-roadmap.md`.*
