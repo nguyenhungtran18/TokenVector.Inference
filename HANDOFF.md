@@ -1,4 +1,4 @@
-# HANDOFF — TokenVector.Inference (Pure .TKV) — 2026-10-19
+# HANDOFF — TokenVector.Inference (Pure .TKV) — 2026-10-20
 
 Verified: compiler build 23:58 (2026-10-17) — B-01..B-07 fixed + SIMD GEMM updates.
 Repo HEAD: `b28bdb7` (registry kernel + numerics-contract); G3 tokenizer `8ac487d`, G3 pack `d8a203a`.
@@ -481,6 +481,114 @@ import gpt2_train vi gpt2_fwd_ps gan voi ban nho),
 dong 1 = seq, dong 2 = mode 0=fwd+bwd / 1=full step, dong 3 = steps),
 `tools/probe_threads.py` (do cpu/wall cua tien trinh con = so luong that),
 `tv/tests/simd_probe_ap.tkv` (P5a: tach attention theo vung + prototype GEMM).
+
+---
+
+### 0.13 P5.2 + P5.3 — ATTENTION VE GEMM (2026-10-20) — XANH 84/84
+
+Lam tiec tieu perf-plan P5. Doan `gpt2_attention` / `gpt2_attention_bwd` —
+5 ban mirror (3 x 124M + 2 x nho) da dong bo, khac nhau **chi 6 hang thong so**
+(cung quy uoc nhu HEAD):
+
+- **P5.2** score/ctx theo tung head → `smm_dot(Q,K)` + scale `1/sqrt(hd)` +
+  mask causal (`u > t` → 0) + softmax hang + `smm_fwd(S,V)`.
+  **Vong head phai NGOAI vong token** — ban draft 2026-10-20 chen no *trong*
+  vong token ⇒ moi `(t, head)` tinh ca ma tran n×n → **O(n³)**, thieu scale,
+  thieu mask, va `import math` long trong vong lap.
+- **P5.3** `dp/ds/dqkv` theo tung head → `smm`:
+  `P = softmax_causal(inv·Q·Kᵀ)`, `dp = dctx·Vᵀ`,
+  `dot[t] = Σ_d dctx[t,d]·ctx[t,d]` (ong thuc cung `Σ_u P·dp` nhung chi
+  O(n·hd), va `ctx` da can cho `dw_proj`), `ds = P∘(dp − dot)`, roi
+  `dq = inv·ds·K`, `dk = inv·dsᵀ·Q`, `dv = Pᵀ·dctx`.
+  Ban draft cu sai 4 cho: doc `sc.data` tren mot **list** cuc bo (list khong co
+  `.data`), truyen `dctxT [n,h]` vao `smm_dot` voi `k = hd` (sai stride), dao
+  chu/dk, va **bo luon nhánh `dw_proj/db_proj` GEMM cua P5.1** → `simd=1` cho
+  gradient `w_proj` = 0.
+- Duong **scalar (`simd=0`) giu NGUYEN VANC**: chi bo 2 lo `if simd == 0/1`
+  boc quanh code (simd=1 ra khoi ham bang `return` som) — cac cau thuc chay
+  giong het → parity 1e-5 cua gate cu van xanh.
+
+**Do A/B/C — cung process, cung trong so, cung dau vao**
+(`tv/tests/_bench_p53.tkv`; A = 2 ham `gpt2_attention(_bwd)` chuyen **nguyen van**
+tu `git HEAD` chi doi ten `def`; B = ma hien tai `simd=1`; C = `simd=0`),
+attention **1 layer 124M**:
+
+| seq | A: P5.1-only | B: P5.1+P5.2+P5.3 | **B/A** | C: scalar | B/C |
+|---|---|---|---|---|---|
+| 8 | 227.7 ms | 232.4 ms | **0.98×** | 725.8 ms | 3.12× |
+| 32 | 285.3 ms | 279.3 ms | 1.02× | 2 908 ms | 10.4× |
+| 64 | 398.5 ms | 347.8 ms | 1.15× | 5 902 ms | 17.0× |
+| 128 | 679.5 ms | 492.0 ms | 1.38× | 11 328 ms | 23.0× |
+| **1024** | **20 390** | **5 437** | **3.75×** | 110 016 ms | 20.2× |
+
+seq1024 tach doi: **fwd (P5.2) 4 937 → 1 281 ms = 3.85×**;
+**bwd (P5.3) 15 453 → 4 156 ms = 3.72×**. Giao diem ≈ seq 16-32; duoi do lo
+~2% (4.7 ms/layer = +0.25% mot buoc seq8 ca 12 tang) — mac dinh van `simd=0`.
+Self-check `|A−B|`/`|B−C|` ≤ 3.3e-8 (ca ba tinh cung mot phep). seq8/32/64
+trung binh 40/8/4 lan vi `now_ms()` chi do duoc 15.6 ms.
+
+**Do thang CA BUOC seq1024** — 2 lan chay cung binary `simd_bench_124m_seq`,
+cung config `1024/1/1`, **chi khac 2 ham attention** (tam `git show 4a14acc:`
+ve 2 mirror 124M roi tu khôi phục bang trap EXIT; `diff` xac nhan khôi phục
+nguyen ven, backup da xoa):
+
+| Chuan ma | full step seq1024 | ty le |
+|---|---|---|
+| P5.1-only (`4a14acc`) | **420.6 s** | — |
+| P5.1 + P5.2 + P5.3 | **157.1 s** | **2.68×** (**−263.5 s**) |
+
+Loss khop toi chu so cuoi (`10.760399 -> 13.44291` / `13.442912`) → hai chuan
+tinh cung mot phep. Torch cung may cung ngay (`tools/bench_torch.py d 1024`):
+fwd+bwd **3.084 s**, full step **3.672 s** → ty le tkv/torch **49.9× / 42.8×**
+(truoc P5.3: 114.5×).
+
+**Bench lai TOAN DAI seq (2026-10-20, lan 2 — `simd_bench_124m_seq` rebuild tu
+nguon hien tai vs `bench_torch.py d <seq>`, torch chay 2 lan/seq spread ≤3%):**
+
+| seq | tkv fwd+bwd | torch fwd+bwd | tkv full step | torch full step | **full step ty le** |
+|---|---|---|---|---|---|
+| 8 | 15.812 s | 0.302 s | **22.219 s** | 0.934 s | **23.8×** |
+| 256 | 35.172 s | 0.782 s | **41.218 s** | 1.404 s | **29.4×** |
+| 1024 | 150.625 s (fwd 25.281 + bwd 125.344) | 2.987 s | **154.234 s** | 3.542 s | **43.5×** |
+
+- Loss `simd=1` khop tung chu so voi lan do truoc trong ngay (`10.572291` /
+  `10.756927` / `10.760399`) — cung chuan ma, chi khac trang thai may. So seq1024
+  lan do sang (153.8 / 157.1 s) cao hon ~2% — trong dao dong may; bang tren la so
+  chot.
+- **Backward chiem 83-88%** fwd+bwd cua tkv; **plumbing/optimizer** = full step −
+  fwd+bwd = **6.4 / 6.0 / 3.6 s** (torch AdamW 124M: 0.63 / 0.62 / 0.55 s — tkv
+  nang hon ~10×, gan nhu khong phu thuoc seq). O seq8 no chiem **29%** ca buoc.
+- Ty le fwd+bwd gan phang **45-52×**, ty le full step tang dan 23.8 → 43.5× theo
+  seq (optimizer co dinh cua torch che phan compute o seq nho).
+- **seq256: 109.4 s (P5.1-only, dau ngay) → 41.2 s = 2.65×** nho P5.2+P5.3,
+  ty le vs torch 76.7× → **29.4×** — hieu nang P5.x khong chi co o seq1024.
+
+**Cach doc so:** bang A/B/C cô lap tren (3.75×, −179.5 s) cho so **thap hon**
+do ca buoc (2.68×, −263.5 s) — do mot ham roi khoi allocator/cache cua pipeline
+lam uoc luong thap. **So 420.6 → 157.1 la so quyet dinh.** Con lai 157.1 s chua
+tach duoc attention / khong-attention bang do truc tiep (uoc theo ty le bang cô
+lap ≈ 96 s attention / 61 s khac — **chua chot**); muon chon dung muc tieu tiep
+hay chay `simd_bench_124m_profile` (do tung pha) truoc.
+
+**Tat ca gate XANH — 84/84, fails=0.** Chay (tu goc repo):
+
+```
+D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/<gate>.tkv out/<gate>.exe main
+./out/<gate>.exe
+```
+
+| Gate | Truoc P5.2/P5.3 | Nay |
+|---|---|---|
+| `simd_matmul_tests` | 20/20 | **20/20** |
+| `gpt2_tests` | 10/10 | **17/17** (+7 assert `simd=1` doi chieu **ngay fixture PyTorch**, ≤2.4e-7) |
+| `gpt2_scope_tests` | 9/9 | **9/9** |
+| `gpt2_train_tests` | 5/5 | **5/5** |
+| `gpt2_full_tests` | 20/20 | **33/33** (+`SIMD logits/loss` 124M = 2.6e-6 / 0.0; +attention **n=192** da o 3×3 fwd/bwd simd-vs-scalar ≤3.6e-5; +**backward TOAN BO 124M `simd=1` vs fixture PyTorch** — 5 grad ≤8.3e-7) |
+
+**Diem quan trong cho nguoi ke:** truoc P5.2/P5.3 **khong gate nao chay
+attention GEMM voi `simd=1`** — nen ban draft hong van “xanh” vi khong ai do no.
+So chi tiet: `docs/perf-plan-simd-vs-pytorch.md` (muc **P5.2 + P5.3**),
+`ROADMAP_TRAIN.md` (dong “SIMD train”).
 
 ---
 

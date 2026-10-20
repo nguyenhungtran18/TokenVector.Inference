@@ -112,6 +112,67 @@ def gpt2_attention(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
     # scalar van giu list cuc bo `ctx` => BIT-EXACT nhu truoc.
     ctxT = t_zeros([n, h])
     inv = 1.0 / sqrt(float(hd))
+    if simd == 1:
+        # ---- P5.2 (perf-plan): score/ctx theo TUNG HEAD bang GEMM --------
+        # VONG HEAD PHAI LA NGOAI vong token: moi head tinh DUY NHAT mot lan
+        # ma tran n x n -> O(n^2*hd). (Ban draft 2026-10-20 chen no TRONG vong
+        # token: moi (t, head) tinh ca ma tran -> O(n^3) va con sai mask.
+        # Ban do cung thieu scale 1/sqrt(hd), thieu mask causal, va dung
+        # `import math` long trong vong lap.)
+        for head in range(NHeads):
+            ho = head * hd
+            # Q/K/V cua head nay: n x hd (Q [0,h), K [h,2h), V [2h,3h))
+            gQ = t_zeros([n, hd])
+            gK = t_zeros([n, hd])
+            gV = t_zeros([n, hd])
+            for t2 in range(n):
+                s0 = t2 * 3 * h + ho
+                for d in range(hd):
+                    gQ.data[t2 * hd + d] = qkv.data[s0 + d]
+                    gK.data[t2 * hd + d] = qkv.data[s0 + h + d]
+                    gV.data[t2 * hd + d] = qkv.data[s0 + 2 * h + d]
+            # Smat[t,u] = dot(Q[t,:], K[u,:]) — ma tran n x n, chua scale
+            Smat = smm_dot(gQ, gK, n, n, hd)
+            # scale 1/sqrt(hd) + mask causal (u > t) + softmax theo hang.
+            # Duong tam giac duoi dat 0 (khong dung -inf): GEMM ctx sau tinh
+            # sum_u deu, vi tri u > t co he so 0 -> giong mask.
+            for t2 in range(n):
+                b0 = t2 * n
+                m0 = Smat.data[b0] * inv
+                Smat.data[b0] = m0
+                mxv = m0
+                for u in range(1, t2 + 1):
+                    m0 = Smat.data[b0 + u] * inv
+                    Smat.data[b0 + u] = m0
+                    if m0 > mxv:
+                        mxv = m0
+                totv = 0.0
+                for u in range(t2 + 1):
+                    e = exp(Smat.data[b0 + u] - mxv)
+                    Smat.data[b0 + u] = e
+                    totv = totv + e
+                ivv = 1.0 / totv
+                for u in range(t2 + 1):
+                    Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
+                for u in range(t2 + 1, n):
+                    Smat.data[b0 + u] = 0.0
+            # ctx[t,:] = sum_u Smat[t,u] * V[u,:]  (n x hd)
+            gCtx = smm_fwd(Smat, gV, n, hd, n)
+            for t2 in range(n):
+                d0 = t2 * hd
+                c0 = t2 * h + ho
+                for d in range(hd):
+                    ctxT.data[c0 + d] = gCtx.data[d0 + d]
+        # P5.1: proj = ctxT @ Wproj (GEMM) + bproj
+        outg = smm_fwd(ctxT, w_proj, n, h, h)
+        ogd = outg.data
+        od = out.data
+        for i in range(n):
+            base = i * h
+            for o in range(h):
+                od[base + o] = ogd[base + o] + b_proj.data[o]
+        return out
+    # ---- duong scalar (mac dinh): nguyen ven, BIT-EXACT nhu truoc --------
     for t in range(n):
         # ctx luu ket qua attention cua TAT CA head truoc khi proj
         ctx = []
@@ -148,21 +209,11 @@ def gpt2_attention(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                 ctx[ho + d] = acc * inv_tot
                 ctxT.data[t * h + ho + d] = acc * inv_tot
         # project: ctx @ Wproj + bproj (Wproj [h, h])
-        if simd == 0:
-            for o in range(h):
-                acc = b_proj.data[o]
-                for r in range(h):
-                    acc = acc + ctx[r] * w_proj.data[r * h + o]
-                out.data[t * h + o] = acc
-    if simd == 1:
-        # P5.1: proj = ctxT @ Wproj (GEMM) + bproj
-        outg = smm_fwd(ctxT, w_proj, n, h, h)
-        ogd = outg.data
-        od = out.data
-        for i in range(n):
-            base = i * h
-            for o in range(h):
-                od[base + o] = ogd[base + o] + b_proj.data[o]
+        for o in range(h):
+            acc = b_proj.data[o]
+            for r in range(h):
+                acc = acc + ctx[r] * w_proj.data[r * h + o]
+            out.data[t * h + o] = acc
     return out
 
 # ---- MLP: linear -> gelu(erf) -> linear ------------------------------------
@@ -386,19 +437,127 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
     # P5.1 (perf-plan): dctx theo hang [n, h] + ctx theo hang [n, h] (cho
     # dw_proj GEMM). Duong scalar van giu list cuc bo => BIT-EXACT nhu truoc.
     ctxT = t_zeros([n, h])
+    dctxT = t_zeros([n, h])
     if simd == 1:
         # dctx[t,r] = sum_o gout[t,o]*w_proj[r,o] -> smm_dot (thay vong n*h^2)
         dctxT = smm_dot(gout, w_proj, n, h, h)
-    else:
-        dctxT = t_zeros([n, h])
+        # ---- P5.3 (perf-plan): dp/ds/dqkv theo TUNG HEAD bang GEMM -------
+        # Cong thuc (identical vs duong scalar, chi thu tu tich luy khac):
+        #   P[t,u]   = softmax causal cua inv * Q[t].K[u]      (u > t -> 0)
+        #   dp[t,u]  = sum_d dctx[t,d] * V[u,d]
+        #   dot[t]   = sum_u P[t,u]*dp[t,u] = sum_d dctx[t,d]*ctx[t,d]
+        #   ds[t,u]  = P[t,u] * (dp[t,u] - dot[t])
+        #   dq = inv * ds . K  |  dk = inv * ds^T . Q  |  dv = P^T . dctx
+        # Ban draft 2026-10-20 khong chay duoc: doc `sc.data` tren mot list
+        # cuc bo (list khong co .data), truyen dctxT [n,h] vao smm_dot voi
+        # k = hd (sai bo tri), dao chu/dk, va khong tinh dw_proj/db_proj nua.
+        # Vong head LA NGOAI vong token -> moi head mot lan n x n, O(n^2*hd).
+        for head in range(NHeads):
+            ho = head * hd
+            gQ = t_zeros([n, hd])
+            gK = t_zeros([n, hd])
+            gV = t_zeros([n, hd])
+            gDc = t_zeros([n, hd])
+            for t2 in range(n):
+                s0 = t2 * 3 * h + ho
+                c0 = t2 * h + ho
+                for d in range(hd):
+                    gQ.data[t2 * hd + d] = qkv.data[s0 + d]
+                    gK.data[t2 * hd + d] = qkv.data[s0 + h + d]
+                    gV.data[t2 * hd + d] = qkv.data[s0 + 2 * h + d]
+                    gDc.data[t2 * hd + d] = dctxT.data[c0 + d]
+            # P = softmax causal (cach tinh giong draft forward)
+            Smat = smm_dot(gQ, gK, n, n, hd)
+            for t2 in range(n):
+                b0 = t2 * n
+                m0 = Smat.data[b0] * inv
+                Smat.data[b0] = m0
+                mxv = m0
+                for u in range(1, t2 + 1):
+                    m0 = Smat.data[b0 + u] * inv
+                    Smat.data[b0 + u] = m0
+                    if m0 > mxv:
+                        mxv = m0
+                totv = 0.0
+                for u in range(t2 + 1):
+                    e = exp(Smat.data[b0 + u] - mxv)
+                    Smat.data[b0 + u] = e
+                    totv = totv + e
+                ivv = 1.0 / totv
+                for u in range(t2 + 1):
+                    Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
+                for u in range(t2 + 1, n):
+                    Smat.data[b0 + u] = 0.0
+            # ctx_head[t,:] = sum_u P[t,u]*V[u,:] — can cho dot + dw_proj
+            gCtx = smm_fwd(Smat, gV, n, hd, n)
+            for t2 in range(n):
+                d0 = t2 * hd
+                c0 = t2 * h + ho
+                for d in range(hd):
+                    ctxT.data[c0 + d] = gCtx.data[d0 + d]
+            # dp[t,u] = sum_d dctx[t,d] * V[u,d]  -> smm_dot
+            gDp = smm_dot(gDc, gV, n, n, hd)
+            # ds[t,u] = P[t,u] * (dp[t,u] - dot[t]); u > t = 0
+            gDs = t_zeros([n, n])
+            for t2 in range(n):
+                b0 = t2 * n
+                d0 = t2 * hd
+                dotv = 0.0
+                for d in range(hd):
+                    dotv = dotv + gDc.data[d0 + d] * gCtx.data[d0 + d]
+                for u in range(t2 + 1):
+                    gDs.data[b0 + u] = Smat.data[b0 + u] * (gDp.data[b0 + u] - dotv)
+                for u in range(t2 + 1, n):
+                    gDs.data[b0 + u] = 0.0
+            # dq[t,d] = inv * sum_u ds[t,u] * K[u,d]
+            gDq = smm_fwd(gDs, gK, n, hd, n)
+            # dk[u,d] = inv * sum_t ds[t,u] * Q[t,d]
+            gDts = smm_transpose(gDs, n, n)
+            gDk = smm_fwd(gDts, gQ, n, hd, n)
+            # dv[u,d] = sum_t P[t,u] * dctx[t,d]
+            gPts = smm_transpose(Smat, n, n)
+            gDv = smm_fwd(gPts, gDc, n, hd, n)
+            # dong bo vao dqkv — vi tri (t, head, d) la duy nhat -> '=' duoc
+            for t2 in range(n):
+                d0 = t2 * hd
+                r0 = t2 * 3 * h + ho
+                for d in range(hd):
+                    dqkv.data[r0 + d] = gDq.data[d0 + d] * inv
+                    dqkv.data[r0 + h + d] = gDk.data[d0 + d] * inv
+                    dqkv.data[r0 + 2 * h + d] = gDv.data[d0 + d]
+        # P5.1: dw_proj[r,o] = sum_t ctxT[t,r]*gout[t,o] -> GEMM (ctxT^T @ gout)
+        # + db_proj[o] = sum_t gout[t,o] (thay vong scalar n*h^2)
+        ctxTt = smm_transpose(ctxT, n, h)
+        dwG = smm_fwd(ctxTt, gout, h, h, n)
+        for o in range(h):
+            acc = 0.0
+            for t2 in range(n):
+                acc = acc + gout.data[t2 * h + o]
+            if o_bproj >= 0:
+                gflat[o_bproj + o] = gflat[o_bproj + o] + acc
+            else:
+                db_proj.data[o] = db_proj.data[o] + acc
+        for r in range(h):
+            for o in range(h):
+                if o_proj >= 0:
+                    gflat[o_proj + r * h + o] = gflat[o_proj + r * h + o] + dwG.data[r * h + o]
+                else:
+                    dw_proj.data[r * h + o] = dw_proj.data[r * h + o] + dwG.data[r * h + o]
+        rq = gpt2_linear_bwd(x, w_qkv, dqkv, n, h, 3 * h, simd, gflat, o_qkv, o_bqkv)
+        # dw_proj / db_proj placeholder khi ghi thang
+        if o_proj >= 0:
+            dw_proj = t_zeros([0])
+        if o_bproj >= 0:
+            db_proj = t_zeros([0])
+        return [rq[0], rq[1], rq[2], dw_proj, db_proj]
+    # ---- duong scalar (mac dinh): nguyen ven, BIT-EXACT nhu truoc --------
     for t in range(n):
-        if simd == 0:
-            # dctx[r] = sum_o gout[t,o] * w_proj[r,o]
-            for r in range(h):
-                acc = 0.0
-                for o in range(h):
-                    acc = acc + gout.data[t * h + o] * w_proj.data[r * h + o]
-                dctxT.data[t * h + r] = acc
+        # dctx[r] = sum_o gout[t,o] * w_proj[r,o]
+        for r in range(h):
+            acc = 0.0
+            for o in range(h):
+                acc = acc + gout.data[t * h + o] * w_proj.data[r * h + o]
+            dctxT.data[t * h + r] = acc
         # tinh lai ctx (cung head) can cho dw_proj
         ctx = []
         for r in range(h):
@@ -448,38 +607,18 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                     dqkv.data[t * 3 * h + ho + d] = dqkv.data[t * 3 * h + ho + d] + ds * inv * qkv.data[u * 3 * h + h + ho + d]
                     dqkv.data[u * 3 * h + h + ho + d] = dqkv.data[u * 3 * h + h + ho + d] + ds * inv * qv[d]
                     dqkv.data[u * 3 * h + 2 * h + ho + d] = dqkv.data[u * 3 * h + 2 * h + ho + d] + sc[u] * dctxT.data[t * h + ho + d]
-        if simd == 0:
-            # dw_proj / db_proj tu ctx va gout
-            for o in range(h):
-                gg = gout.data[t * h + o]
-                if o_bproj >= 0:
-                    gflat[o_bproj + o] = gflat[o_bproj + o] + gg
-                else:
-                    db_proj.data[o] = db_proj.data[o] + gg
-                for r in range(h):
-                    if o_proj >= 0:
-                        gflat[o_proj + r * h + o] = gflat[o_proj + r * h + o] + ctx[r] * gg
-                    else:
-                        dw_proj.data[r * h + o] = dw_proj.data[r * h + o] + ctx[r] * gg
-    if simd == 1:
-        # P5.1: dw_proj[r,o] = sum_t ctxT[t,r]*gout[t,o] -> GEMM (ctxT^T @ gout)
-        # + db_proj[o] = sum_t gout[t,o] (thay vong scalar n*h^2)
-        ctxTt = smm_transpose(ctxT, n, h)
-        dwG = smm_fwd(ctxTt, gout, h, h, n)
+        # dw_proj / db_proj tu ctx va gout
         for o in range(h):
-            acc = 0.0
-            for t2 in range(n):
-                acc = acc + gout.data[t2 * h + o]
+            gg = gout.data[t * h + o]
             if o_bproj >= 0:
-                gflat[o_bproj + o] = gflat[o_bproj + o] + acc
+                gflat[o_bproj + o] = gflat[o_bproj + o] + gg
             else:
-                db_proj.data[o] = db_proj.data[o] + acc
-        for r in range(h):
-            for o in range(h):
+                db_proj.data[o] = db_proj.data[o] + gg
+            for r in range(h):
                 if o_proj >= 0:
-                    gflat[o_proj + r * h + o] = gflat[o_proj + r * h + o] + dwG.data[r * h + o]
+                    gflat[o_proj + r * h + o] = gflat[o_proj + r * h + o] + ctx[r] * gg
                 else:
-                    dw_proj.data[r * h + o] = dw_proj.data[r * h + o] + dwG.data[r * h + o]
+                    dw_proj.data[r * h + o] = dw_proj.data[r * h + o] + ctx[r] * gg
     rq = gpt2_linear_bwd(x, w_qkv, dqkv, n, h, 3 * h, simd, gflat, o_qkv, o_bqkv)
     # dw_proj / db_proj placeholder khi ghi thang
     if o_proj >= 0:

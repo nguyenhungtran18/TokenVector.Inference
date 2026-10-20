@@ -237,5 +237,74 @@ def main() -> 'i32':
     fails = fails + report("grad lnf_g",
                            diff(dlnf_g.data, ref_glnf), TOL_HID)
 
+    # ==== P5.2/P5.3 — duong SIMD (simd=1) ===================================
+    # (a) forward toan bo 12 tang voi attention/proj/LM-head bang GEMM, doi
+    #     chieu NGAY voi fixture PyTorch. Truoc P5.2/P5.3 khong gate nao chay
+    #     simd=1 tren 124M. dung sai 1e-4 = chot cho SIMD (khong bit-exact:
+    #     FMA + thu tu tich luy — xem simd_matmul.tkv).
+    sv = gpt2_forward(ids, pos, wte, wpe,
+                      ln1_g, ln1_b, w_qkv, b_qkv, w_proj, b_proj,
+                      ln2_g, ln2_b, w1, b1, w2, b2, lnf_g, lnf_b, 1)
+    cases = cases + 1
+    fails = fails + report("SIMD logits vs PyTorch",
+                           diff(sv.data, load_fx(d, sk, "logits")), TOL_HID)
+    cases = cases + 1
+    fails = fails + report("SIMD loss vs PyTorch",
+                           _abs(gpt2_loss(sv, ids) - load_fx(d, sk, "loss")[0]), TOL_LOSS)
+
+    # (b) attention MOT layer 124M o n=192: simd vs scalar. Day la chinh
+    #     P5.2 (score/ctx) + P5.3 (dp/ds/dqkv) — n=192 > 64 nen GEMM chay
+    #     DA O (T=64 -> 3x3 o) va mask causal co 192 hang; o n=8 (fixture)
+    #     thi chi mot o, khong kiem thuoc tile.
+    #     Goi TRUC TIEP 2 ham da sua — khong qua MLP/LN/LM-head (khong doi).
+    NS = 192
+    xa = t_zeros([NS, H])
+    for i in range(NS * H):
+        xa.data[i] = ((float((i * 13 + 7) % 97) - 48.0) / 48.0) * 0.02
+    ga = t_zeros([NS, H])
+    for i in range(NS * H):
+        ga.data[i] = 0.1
+    o_s = gpt2_attention(xa, w_qkv[0], b_qkv[0], w_proj[0], b_proj[0], NS, 0)
+    o_v = gpt2_attention(xa, w_qkv[0], b_qkv[0], w_proj[0], b_proj[0], NS, 1)
+    cases = cases + 1
+    fails = fails + report("P5.2 attn fwd n=192: simd vs scalar",
+                           diff(o_s.data, o_v.data), TOL_HID)
+    r_s = gpt2_attention_bwd(xa, w_qkv[0], b_qkv[0], w_proj[0], b_proj[0], NS, ga, 0)
+    r_v = gpt2_attention_bwd(xa, w_qkv[0], b_qkv[0], w_proj[0], b_proj[0], NS, ga, 1)
+    # 5 ket qua: [0] dx  [1] dw_qkv  [2] db_qkv  [3] dw_proj  [4] db_proj
+    for k in range(5):
+        a_s = r_s[k]
+        a_v = r_v[k]
+        cases = cases + 1
+        fails = fails + report("P5.3 attn bwd n=192 [" + str(k) + "]: simd vs scalar",
+                               diff(a_s.data, a_v.data), TOL_HID)
+
+    # (c) backward TOAN BO 124M voi simd=1 — 5 mau grad doi chieu NGAY vao
+    #     CUNG fixture PyTorch. Chay SAU khi 5 mau scalar da so xong de giam
+    #     dinh cao bo nho (124M grad ~526 MB/ban; ghi chu OOM tai 0.9).
+    sg = gpt2_backward(ids, pos, wte, wpe,
+                       ln1_g, ln1_b, w_qkv, b_qkv, w_proj, b_proj,
+                       ln2_g, ln2_b, w1, b1, w2, b2, lnf_g, lnf_b, 1)
+    sgwte = sg[0]
+    sglnf_g = sg[2]
+    sgln1_g0 = sg[4]
+    sgattn_w0 = sg[6]
+    sgmlp_w1_0 = sg[12]
+    cases = cases + 1
+    fails = fails + report("SIMD grad wte (embed + lmhead tie) vs PyTorch",
+                           diff(sgwte.data, ref_gwte), TOL_HID)
+    cases = cases + 1
+    fails = fails + report("SIMD grad ln1_g[0] vs PyTorch",
+                           diff(sgln1_g0.data, ref_gln1), TOL_HID)
+    cases = cases + 1
+    fails = fails + report("SIMD grad attn_w[0] (c_attn) vs PyTorch",
+                           diff(sgattn_w0.data, ref_gattn), TOL_HID)
+    cases = cases + 1
+    fails = fails + report("SIMD grad mlp_w1[0] (c_fc) vs PyTorch",
+                           diff(sgmlp_w1_0.data, ref_gmlp), TOL_HID)
+    cases = cases + 1
+    fails = fails + report("SIMD grad lnf_g vs PyTorch",
+                           diff(sglnf_g.data, ref_glnf), TOL_HID)
+
     print("=== GPT-2 full cases=" + str(cases) + " fails=" + str(fails) + " ===")
     return fails

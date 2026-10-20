@@ -1,0 +1,348 @@
+﻿# BENCH P53 — A/B/C attention 124M: P5.1 vs P5.1+P5.2+P5.3 vs scalar
+# ----------------------------------------------------------------------------
+# A = attn_a / attnb_a     : ban HEAD (chi P5.1)            , simd = 1
+# B = gpt2_attention(_bwd) : ban hien tai (P5.1 + P5.2/P5.3), simd = 1
+# C = gpt2_attention(_bwd) : duong scalar                    , simd = 0
+#
+# Cung process, cung trong so, cung dau vao -> moi bien chinh la P5.2/P5.3.
+# A duoc chen NGUYEN VANC tu commit BASELINE_COMMIT = 4a14acc (chi doi ten
+# def) -> chan sai so copy. Doi bang cach chay lai _gen_bench.py (co pin SHA; KHONG
+# dung `HEAD` vi sau khi commit P5.3 thi HEAD = ma moi).
+# Timing dat toan bo trong main (bug compiler #8: now_ms() trong local ham
+# doc SAI) — xem docs/perf-plan-simd-vs-pytorch.md.
+#
+# Nguon seq: tv/tests/_seq_cfg.txt dong 1.
+#   printf "1024\n0\n1\n" > tv/tests/_seq_cfg.txt
+#   tkvc tv/tests/_bench_p53.tkv out/b53.exe main && ./out/b53.exe
+import tv.training.gpt2_ref124
+import tv.training.simd_matmul
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def _read_n(path: 'str') -> 'i64':
+    txt = read_file(path)
+    lines = txt.split("\n")
+    ln = lines[0]
+    if _is_comment(ln) == 1:
+        return 8
+    toks = ln.split(" ")
+    for j in range(len(toks)):
+        if len(toks[j]) > 0:
+            return int(float(toks[j]))
+    return 8
+
+# now_ms() co do phan giai ~15.6 ms (Windows) -> o seq8 mot lan do vo nghia
+# (perf-plan, bai hoc 1). Dong 4 = so lan lap de TRUNG BINH.
+def _read_reps(path: 'str') -> 'i64':
+    txt = read_file(path)
+    lines = txt.split("\n")
+    if len(lines) < 4:
+        return 1
+    ln = lines[3]
+    if _is_comment(ln) == 1:
+        return 1
+    toks = ln.split(" ")
+    for j in range(len(toks)):
+        if len(toks[j]) > 0:
+            r = int(float(toks[j]))
+            if r < 1:
+                return 1
+            return r
+    return 1
+
+def _mdiff(a: "Tensor", b: "Tensor") -> 'f32':
+    da = a.data
+    db = b.data
+    n = len(da)
+    if len(db) < n:
+        n = len(db)
+    m = 0.0
+    for i in range(n):
+        d = da[i] - db[i]
+        if d < 0.0:
+            d = -d
+        if d > m:
+            m = d
+    return m
+
+def attn_a(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
+                   w_proj: "Tensor", b_proj: "Tensor", n: 'i64', simd: 'i32' = 0) -> "Tensor":
+    h = HiddenSize
+    hd = HeadDim
+    qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h, simd)
+    out = t_zeros([n, h])
+    # P5.1 (perf-plan): ctx theo hang [n, h] — duong SIMD lam proj bang GEMM
+    # (smm_fwd) thay vong scalar n*h^2 (do: 3970 ms/layer @seq1024). Duong
+    # scalar van giu list cuc bo `ctx` => BIT-EXACT nhu truoc.
+    ctxT = t_zeros([n, h])
+    inv = 1.0 / sqrt(float(hd))
+    for t in range(n):
+        # ctx luu ket qua attention cua TAT CA head truoc khi proj
+        ctx = []
+        for d in range(h):
+            ctx.append(0.0)
+        for head in range(NHeads):
+            ho = head * hd
+            # q cua token t tren head nay
+            qv = []
+            for d in range(hd):
+                qv.append(qkv.data[t * 3 * h + ho + d])
+            # causal: token t chi thay token u <= t; score theo head_dim
+            scores = []
+            for u in range(t + 1):
+                s = 0.0
+                for d in range(hd):
+                    s = s + qv[d] * qkv.data[u * 3 * h + h + ho + d]
+                scores.append(s * inv)
+            mx = scores[0]
+            for u in range(1, t + 1):
+                if scores[u] > mx:
+                    mx = scores[u]
+            tot = 0.0
+            for u in range(t + 1):
+                e = exp(scores[u] - mx)
+                scores[u] = e
+                tot = tot + e
+            inv_tot = 1.0 / tot
+            # context = sum_u p[t,u] * v_u (V cua token u, khong phai token t)
+            for d in range(hd):
+                acc = 0.0
+                for u in range(t + 1):
+                    acc = acc + scores[u] * qkv.data[u * 3 * h + 2 * h + ho + d]
+                ctx[ho + d] = acc * inv_tot
+                ctxT.data[t * h + ho + d] = acc * inv_tot
+        # project: ctx @ Wproj + bproj (Wproj [h, h])
+        if simd == 0:
+            for o in range(h):
+                acc = b_proj.data[o]
+                for r in range(h):
+                    acc = acc + ctx[r] * w_proj.data[r * h + o]
+                out.data[t * h + o] = acc
+    if simd == 1:
+        # P5.1: proj = ctxT @ Wproj (GEMM) + bproj
+        outg = smm_fwd(ctxT, w_proj, n, h, h)
+        ogd = outg.data
+        od = out.data
+        for i in range(n):
+            base = i * h
+            for o in range(h):
+                od[base + o] = ogd[base + o] + b_proj.data[o]
+    return out
+
+def attnb_a(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
+                       w_proj: "Tensor", b_proj: "Tensor", n: 'i64', gout: "Tensor", simd: 'i32' = 0,
+                       gflat: 'list[f32]' = None, o_qkv: 'i64' = -1, o_bqkv: 'i64' = -1,
+                       o_proj: 'i64' = -1, o_bproj: 'i64' = -1) -> 'list[Tensor]':
+    h = HiddenSize
+    hd = HeadDim
+    qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h, simd)
+    inv = 1.0 / sqrt(float(hd))
+    dqkv = t_zeros([n, 3 * h])
+    dw_proj = t_zeros([h, h])
+    db_proj = t_zeros([h])
+    # P5.1 (perf-plan): dctx theo hang [n, h] + ctx theo hang [n, h] (cho
+    # dw_proj GEMM). Duong scalar van giu list cuc bo => BIT-EXACT nhu truoc.
+    ctxT = t_zeros([n, h])
+    if simd == 1:
+        # dctx[t,r] = sum_o gout[t,o]*w_proj[r,o] -> smm_dot (thay vong n*h^2)
+        dctxT = smm_dot(gout, w_proj, n, h, h)
+    else:
+        dctxT = t_zeros([n, h])
+    for t in range(n):
+        if simd == 0:
+            # dctx[r] = sum_o gout[t,o] * w_proj[r,o]
+            for r in range(h):
+                acc = 0.0
+                for o in range(h):
+                    acc = acc + gout.data[t * h + o] * w_proj.data[r * h + o]
+                dctxT.data[t * h + r] = acc
+        # tinh lai ctx (cung head) can cho dw_proj
+        ctx = []
+        for r in range(h):
+            ctx.append(0.0)
+        for head in range(NHeads):
+            ho = head * hd
+            qv = []
+            for d in range(hd):
+                qv.append(qkv.data[t * 3 * h + ho + d])
+            sc = []
+            for u in range(t + 1):
+                s = 0.0
+                for d in range(hd):
+                    s = s + qv[d] * qkv.data[u * 3 * h + h + ho + d]
+                sc.append(s * inv)
+            mx = sc[0]
+            for u in range(1, t + 1):
+                if sc[u] > mx:
+                    mx = sc[u]
+            tot = 0.0
+            for u in range(t + 1):
+                e = exp(sc[u] - mx)
+                sc[u] = e
+                tot = tot + e
+            inv_tot = 1.0 / tot
+            for u in range(t + 1):
+                sc[u] = sc[u] * inv_tot
+            for d in range(hd):
+                acc = 0.0
+                for u in range(t + 1):
+                    acc = acc + sc[u] * qkv.data[u * 3 * h + 2 * h + ho + d]
+                ctx[ho + d] = acc
+                ctxT.data[t * h + ho + d] = acc
+            # dp[u] = sum_d dctx[ho+d] * v_u[d]
+            dp = []
+            for u in range(t + 1):
+                acc = 0.0
+                for d in range(hd):
+                    acc = acc + dctxT.data[t * h + ho + d] * qkv.data[u * 3 * h + 2 * h + ho + d]
+                dp.append(acc)
+            dot = 0.0
+            for u in range(t + 1):
+                dot = dot + sc[u] * dp[u]
+            for u in range(t + 1):
+                ds = sc[u] * (dp[u] - dot)
+                for d in range(hd):
+                    dqkv.data[t * 3 * h + ho + d] = dqkv.data[t * 3 * h + ho + d] + ds * inv * qkv.data[u * 3 * h + h + ho + d]
+                    dqkv.data[u * 3 * h + h + ho + d] = dqkv.data[u * 3 * h + h + ho + d] + ds * inv * qv[d]
+                    dqkv.data[u * 3 * h + 2 * h + ho + d] = dqkv.data[u * 3 * h + 2 * h + ho + d] + sc[u] * dctxT.data[t * h + ho + d]
+        if simd == 0:
+            # dw_proj / db_proj tu ctx va gout
+            for o in range(h):
+                gg = gout.data[t * h + o]
+                if o_bproj >= 0:
+                    gflat[o_bproj + o] = gflat[o_bproj + o] + gg
+                else:
+                    db_proj.data[o] = db_proj.data[o] + gg
+                for r in range(h):
+                    if o_proj >= 0:
+                        gflat[o_proj + r * h + o] = gflat[o_proj + r * h + o] + ctx[r] * gg
+                    else:
+                        dw_proj.data[r * h + o] = dw_proj.data[r * h + o] + ctx[r] * gg
+    if simd == 1:
+        # P5.1: dw_proj[r,o] = sum_t ctxT[t,r]*gout[t,o] -> GEMM (ctxT^T @ gout)
+        # + db_proj[o] = sum_t gout[t,o] (thay vong scalar n*h^2)
+        ctxTt = smm_transpose(ctxT, n, h)
+        dwG = smm_fwd(ctxTt, gout, h, h, n)
+        for o in range(h):
+            acc = 0.0
+            for t2 in range(n):
+                acc = acc + gout.data[t2 * h + o]
+            if o_bproj >= 0:
+                gflat[o_bproj + o] = gflat[o_bproj + o] + acc
+            else:
+                db_proj.data[o] = db_proj.data[o] + acc
+        for r in range(h):
+            for o in range(h):
+                if o_proj >= 0:
+                    gflat[o_proj + r * h + o] = gflat[o_proj + r * h + o] + dwG.data[r * h + o]
+                else:
+                    dw_proj.data[r * h + o] = dw_proj.data[r * h + o] + dwG.data[r * h + o]
+    rq = gpt2_linear_bwd(x, w_qkv, dqkv, n, h, 3 * h, simd, gflat, o_qkv, o_bqkv)
+    # dw_proj / db_proj placeholder khi ghi thang
+    if o_proj >= 0:
+        dw_proj = t_zeros([0])
+    if o_bproj >= 0:
+        db_proj = t_zeros([0])
+    return [rq[0], rq[1], rq[2], dw_proj, db_proj]
+
+
+def main() -> 'i32':
+    n = _read_n("tv/tests/_seq_cfg.txt")
+    reps = _read_reps("tv/tests/_seq_cfg.txt")
+    h = HiddenSize
+    hd = HeadDim
+    print("BENCH P53 seq n=" + str(n) + " h=" + str(h) + " hd=" + str(hd)
+          + " NHeads=" + str(NHeads) + " reps=" + str(reps))
+
+    # ---- trong so + dau vao, sinh dinh dang (khong gpt2_init -> nhe) ------
+    w_qkv = t_zeros([h, 3 * h])
+    b_qkv = t_zeros([3 * h])
+    w_proj = t_zeros([h, h])
+    b_proj = t_zeros([h])
+    for i in range(h * 3 * h):
+        w_qkv.data[i] = ((float((i * 13 + 7) % 97) - 48.0) / 48.0) * 0.02
+    for i in range(3 * h):
+        b_qkv.data[i] = ((float((i * 5 + 3) % 53) - 26.0) / 26.0) * 0.01
+    for i in range(h * h):
+        w_proj.data[i] = ((float((i * 11 + 5) % 89) - 44.0) / 44.0) * 0.02
+    for i in range(h):
+        b_proj.data[i] = ((float((i * 3 + 1) % 47) - 23.0) / 23.0) * 0.01
+    x = t_zeros([n, h])
+    for i in range(n * h):
+        x.data[i] = ((float((i * 13 + 7) % 97) - 48.0) / 48.0) * 0.02
+    gout = t_zeros([n, h])
+    for i in range(n * h):
+        gout.data[i] = 0.1
+
+    # ---- A: P5.1 only (ban HEAD), warmup 1 + do 1 ------------------------
+    wA = attn_a(x, w_qkv, b_qkv, w_proj, b_proj, n, 1)
+    wAb = attnb_a(x, w_qkv, b_qkv, w_proj, b_proj, n, gout, 1)
+    t0 = now_ms()
+    for rep in range(reps):
+        oA = attn_a(x, w_qkv, b_qkv, w_proj, b_proj, n, 1)
+    t1 = now_ms()
+    t0b = now_ms()
+    for rep in range(reps):
+        rA = attnb_a(x, w_qkv, b_qkv, w_proj, b_proj, n, gout, 1)
+    t1b = now_ms()
+    dt_Af = (t1 - t0) / float(reps)
+    dt_Ab = (t1b - t0b) / float(reps)
+
+    # ---- B: hien tai P5.1+P5.2+P5.3, simd=1, warmup 1 + do 1 ------------
+    wB = gpt2_attention(x, w_qkv, b_qkv, w_proj, b_proj, n, 1)
+    wBb = gpt2_attention_bwd(x, w_qkv, b_qkv, w_proj, b_proj, n, gout, 1)
+    t0 = now_ms()
+    for rep in range(reps):
+        oB = gpt2_attention(x, w_qkv, b_qkv, w_proj, b_proj, n, 1)
+    t1 = now_ms()
+    t0b = now_ms()
+    for rep in range(reps):
+        rB = gpt2_attention_bwd(x, w_qkv, b_qkv, w_proj, b_proj, n, gout, 1)
+    t1b = now_ms()
+    dt_Bf = (t1 - t0) / float(reps)
+    dt_Bb = (t1b - t0b) / float(reps)
+
+    # ---- C: scalar, khong warmup rieng (process da am) --------------------
+    t0 = now_ms()
+    for rep in range(reps):
+        oC = gpt2_attention(x, w_qkv, b_qkv, w_proj, b_proj, n, 0)
+    t1 = now_ms()
+    t0b = now_ms()
+    for rep in range(reps):
+        rC = gpt2_attention_bwd(x, w_qkv, b_qkv, w_proj, b_proj, n, gout, 0)
+    t1b = now_ms()
+    dt_Cf = (t1 - t0) / float(reps)
+    dt_Cb = (t1b - t0b) / float(reps)
+
+    # ---- self-check: A, B, C phai tinh cung mot ket qua (SIMD lech ULP) ---
+    print("BENCH selfcheck fwd  |A-B|=" + str(_mdiff(oA, oB))
+          + "  |B-C|=" + str(_mdiff(oB, oC)))
+    dA = rA[0]
+    dB = rB[0]
+    dC = rC[0]
+    print("BENCH selfcheck bwd dx |A-B|=" + str(_mdiff(dA, dB))
+          + "  |B-C|=" + str(_mdiff(dB, dC)))
+    wA2 = rA[1]
+    wB2 = rB[1]
+    print("BENCH selfcheck bwd dw_qkv |A-B|=" + str(_mdiff(wA2, wB2)))
+
+    # ---- bao cao ----------------------------------------------------------
+    print("BENCH A P5.1-only simd : fwd=" + str(dt_Af) + " ms  bwd=" + str(dt_Ab)
+          + " ms  tong=" + str(dt_Af + dt_Ab) + " ms")
+    print("BENCH B P5.1+P5.2+P5.3 : fwd=" + str(dt_Bf) + " ms  bwd=" + str(dt_Bb)
+          + " ms  tong=" + str(dt_Bf + dt_Bb) + " ms")
+    print("BENCH C scalar          : fwd=" + str(dt_Cf) + " ms  bwd=" + str(dt_Cb)
+          + " ms  tong=" + str(dt_Cf + dt_Cb) + " ms")
+    if dt_Bf + dt_Bb > 0.0:
+        print("BENCH speedup B vs A (P5.2+P5.3) = "
+              + str((dt_Af + dt_Ab) / (dt_Bf + dt_Bb)) + "x")
+    if dt_Cf + dt_Cb > 0.0:
+        print("BENCH speedup B vs C (SIMD vs scalar) = "
+              + str((dt_Cf + dt_Cb) / (dt_Bf + dt_Bb)) + "x")
+    print("BENCH done")
+    return 0

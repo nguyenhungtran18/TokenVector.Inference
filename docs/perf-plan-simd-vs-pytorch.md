@@ -322,6 +322,127 @@ khi scalar thật chỉ **~134 MMAC/s** (đóng hộp f64, 1 luồng — đúng 
 3. Không đo từng token (3 now_ms/token × 1024 token → lỗi lũy cộng hàng
    trăm ms): đo **cả hàm** rồi tách bằng biến `mode`.
 
+### P5.2 + P5.3 — **HOÀN THÀNH 2026-10-20** (đo thật + gate xanh)
+
+**P5.2** — score/ctx theo **từng head** → `smm_dot(Q,K)` + scale `1/sqrt(hd)`
++ mask causal (`u > t` → 0) + softmax theo hàng + `smm_fwd(S,V)`.
+**Vòng head phải NGOÀI vòng token.** Bản draft 2026-10-20 không dùng được:
+chèn nó *trong* vòng token ⇒ mỗi `(t, head)` tính cả ma trận n×n → **O(n³)**,
+thiếu scale `inv`, thiếu mask causal, và `import math` lồng trong vòng lặp.
+
+**P5.3** (`dp/ds/dqkv` → `smm`) — cùng cấu trúc vòng head ngoài:
+`P = softmax_causal(inv·Q·Kᵀ)`, `dp = dctx·Vᵀ`,
+`dot[t] = Σ_d dctx[t,d]·ctx[t,d]` (đồng nhất với `Σ_u P·dp` nhưng chỉ O(n·hd),
+và `ctx` đã cần cho `dw_proj`), `ds = P∘(dp − dot)`, rồi
+`dq = inv·ds·K`, `dk = inv·dsᵀ·Q`, `dv = Pᵀ·dctx`.
+Bản draft cũ sai 4 chỗ: đọc `sc.data` trên **list** cục bộ (list không có
+`.data`), truyền `dctxT [n,h]` vào `smm_dot` với `k = hd` (sai stride), đảo
+chu/dk, và bỏ luôn nhánh `dw_proj/db_proj` GEMM của P5.1 → `simd=1` cho
+gradient `w_proj` = 0.
+
+**Đo A/B/C — cùng process, cùng trọng số, cùng đầu vào**
+(`tv/tests/_bench_p53.tkv`; A = 2 hàm `gpt2_attention(_bwd)` chép **nguyên văn**
+từ `git HEAD`, chỉ đổi tên `def`; B = mã hiện tại `simd=1`; C = `simd=0`):
+
+| seq | A: P5.1-only | B: P5.1+P5.2+P5.3 | **B/A** | C: scalar | **B/C** |
+|---|---|---|---|---|---|
+| 8 | 227.7 ms | 232.4 ms | **0.98×** | 725.8 ms | 3.12× |
+| 32 | 285.3 ms | 279.3 ms | 1.02× | 2 908 ms | 10.4× |
+| 64 | 398.5 ms | 347.8 ms | 1.15× | 5 902 ms | 17.0× |
+| 128 | 679.5 ms | 492.0 ms | 1.38× | 11 328 ms | 23.0× |
+| **1024** | **20 390 ms** | **5 437 ms** | **3.75×** | 110 016 ms | 20.2× |
+
+Số = attention fwd+bwd của **1 layer 124M**. Tách đôi ở seq1024:
+**fwd (P5.2) 4 937 → 1 281 ms = 3.85×**; **bwd (P5.3) 15 453 → 4 156 ms =
+3.72×**. seq8/32/64 trung bình 40/8/4 lần (bài học 1 ở trên), seq128/1024
+1-2 lần.
+
+- **Giao điểm ≈ seq 16-32.** Dưới đó GEMM lỗ ~2% (tile T=64 bù 0 cho n=8 →
+  ~256× dư thừa việc); cái lỗ 4.7 ms/layer = **+56 ms/12 layer ≈ +0.25%** một
+  bước train seq8 → không đáng kể. Mặc định vẫn `simd=0`, gate cũ nguyên vẹn.
+- **Self-check A≈B≈C**: `|A−B| ≤ 1.9e-9` (fwd), `1.6e-8` (dx), `7.1e-9`
+  (dw_qkv); `|B−C| ≤ 6.1e-9` (fwd), `3.3e-8` (dx) → cả ba tính cùng một phép,
+  chỉ khác FMA/thu tu tích lũy.
+
+**Gate** — trước P5.2/P5.3 **không gate nào chạy attention GEMM với `simd=1`**
+(nên bản draft sai vẫn “xanh” vì không ai đo nó):
+
+- `gpt2_tests` **10/10 → 17/17**: thêm 7 assert `simd=1` đối chiếu **ngay fixture
+  PyTorch** (logits/loss + 5 grad) ≤ 2.4e-7.
+- `gpt2_full_tests` **20/20 → 33/33**: thêm `SIMD logits/loss vs PyTorch` 124M
+  = 2.6e-6 / 0.0; `P5.2 attn fwd n=192` = 1.1e-9; 6 assert `P5.3 attn bwd n=192
+  [0..4]` ≤ 3.6e-5. **n=192 > 64 → GEMM chạy đa ô 3×3** (khác hẳn n=8 fixture),
+  gọi trực tiếp 2 hàm đã sửa; và **backward TOAN BO 124M `simd=1`** đối chiếu
+  ngay 5 mẫu grad vào fixture PyTorch ≤ 8.3e-7 (chạy sau phần scalar để giảm
+  đỉnh bộ nhớ — ghi chú OOM ở mục 0.9).
+- Không hồi quy: `simd_matmul_tests` 20/20, `gpt2_scope_tests` 9/9,
+  `gpt2_train_tests` 5/5.
+
+**Đo cả buớc seq1024** — `simd_bench_124m_seq` mode 0 (fwd+bwd, không
+optimizer), 2026-10-20, cùng máy với bảng A/B/C:
+
+- **fwd 25 328 ms + bwd 128 453 ms = 153 781 ms (153.8 s)** với P5.1+P5.2+P5.3.
+- Chỉ sửa 2 hàm `gpt2_attention(_bwd)` ⇒ phần **không** attention không đổi —
+  đây là nền cho phép A/B cả buớc bên dưới (một biến duy nhất).
+- **Không so trực tiếp với số 666.2 s / 674.6 s ở mục P4**: chính mục P4 mô tả
+  nút thắt là “proj (n·h² **scalar**)” ⇒ thời điểm đo (commit `0d81a02`)
+  **chưa có P5.1**, khác chuẩn mã. Đã đo lại **cùng ngày, cùng máy** bên dưới.
+
+**Bench lại TOÀN DẢI seq — cùng ngày / cùng máy (2026-10-20, lần 2)** — tkv
+`simd_bench_124m_seq` (warmup 1 + 1 buớc, `out/bseq.exe` build lại từ nguồn
+hiện tại), torch `tools/bench_torch.py d <seq>` (warmup 1 + median n=2, chạy
+**2 lần/seq**, spread ≤3%). Cùng token (`ids[i]=(i*37+11)%50257`, `pos[i]=i`),
+cùng shapes (vocab 50257 / 12 layer / 768 / 12 head), cùng lr 0.0025 wd 0:
+
+| seq | tkv fwd | tkv bwd | tkv fwd+bwd | torch fwd+bwd | fwd+bwd tỉ lệ | tkv full step | torch full step | **full step tỉ lệ** |
+|---|---|---|---|---|---|---|---|---|
+| 8 | 1.922 s | 13.890 s | **15.812 s** | 0.302 s | **52.4×** | **22.219 s** | 0.934 s | **23.8×** |
+| 256 | 5.719 s | 29.453 s | **35.172 s** | 0.782 s | **45.0×** | **41.218 s** | 1.404 s | **29.4×** |
+| 1024 | 25.281 s | 125.344 s | **150.625 s** | 2.987 s | **50.4×** | **154.234 s** | 3.542 s | **43.5×** |
+
+Loss đầu `simd=1` khớp từng chữ số với lần đo trước trong ngày (`10.572291` /
+`10.756927` / `10.760399`), buớc 2 seq1024 `13.442912` — cùng chuẩn mã, chỉ khác
+trạng thái máy. Số seq1024 lần đo sáng (153.8 / 157.1 s) cao hơn ~2% — nằm
+trong dao động máy; **bảng trên là số chốt**.
+
+Đọc thêm từ bảng:
+
+1. **Backward chiếm 83-88%** fwd+bwd của tkv (13.9 / 29.5 / 125.3 s trên
+   15.8 / 35.2 / 150.6); torch fwd:bwd đo cùng ngày = 1.05 / 2.03 s (66%).
+   Nút thắt tiếp theo nằm ở backward KHÔNG phải attention (LN/gelu/embed-LM-head
+   bwd) — đã ghi ở mục P5.3.
+2. **Plumbing/optimizer** = full step − fwd+bwd = **6.4 / 6.0 / 3.6 s** (tkv)
+   so với **0.63 / 0.62 / 0.55 s** (torch AdamW 124M) — gần như không phụ thuộc
+   seq ở cả hai phía, tkv nặng hơn ~10×; ở seq8 nó chiếm **29%** cả buớc tkv.
+3. Tỉ lệ fwd+bwd gần phẳng **45-52×** theo seq, còn tỉ lệ full step tăng dần
+   23.8 → 43.5× — vì optimizer cố định của torch che bớt phần compute ở seq nhỏ.
+4. **seq256: 109.4 s (P5.1-only, đầu ngày) → 41.2 s = 2.65×** nhờ P5.2+P5.3,
+   tỉ lệ vs torch 76.7× → **29.4×** — hiệu năng P5.x không chỉ có ở seq1024.
+
+**Đo thẳng A/B cả buớc (2026-10-20)** — hai lần chạy **cùng binary
+`simd_bench_124m_seq`**, cùng config `1024/1/1`, chỉ khác 2 hàm attention
+(tạm `git show 4a14acc:` về 2 mirror 124M rồi tự khôi phục; `diff` xác nhận
+khôi phục nguyên vẹn, backup đã xoá):
+
+| Chuẩn mã | full step seq1024 | tỉ lệ |
+|---|---|---|
+| P5.1-only (`4a14acc`) | **420.6 s** | — |
+| P5.1 + P5.2 + P5.3 | **157.1 s** | **2.68×** (**−263.5 s**) |
+
+Loss hai lần chạy khớp tới chữ số cuối (`10.760399 → 13.44291` /
+`13.442912`) → hai chuẩn **tính cùng một phép**, chỉ khác FMA/thu tu tích lũy.
+
+**Phương pháp (đọc số cho đúng):** bảng A/B/C cô lập ở trên (3.75×,
+−179.5 s) cho số **thấp hơn** đo cả buớc (2.68×, −263.5 s) — đo một hàm rời
+khỏi allocator/cache của pipeline làm ước lượng thấp. **Số 420.6 → 157.1 là
+số quyết định**; bảng A/B/C chỉ để tách đóng góp từng nửa (fwd/bwd) và tìm
+giao điểm theo seq.
+
+Còn lại **157.1 s**: chưa tách được attention / không-attention bằng đo trực
+tiếp. Ước theo tỉ lệ A/B của bảng cô lập → attention ≈ 96 s (≈ 61% buớc),
+phần còn lại ≈ 61 s — **con số này CHƯA chốt**, muốn chọn đúng mục tiêu tiếp
+hãy chạy `simd_bench_124m_profile` (đo từng pha) trước khi kết luận.
+
 ### Kỳ vọng trung thực
 
 | Mốc | Bước 124M |
@@ -330,8 +451,10 @@ khi scalar thật chỉ **~134 MMAC/s** (đóng hộp f64, 1 luồng — đúng 
 | **sau P0 (đo thật 2026-10-19)** | **~24.2-24.5 s** |
 | **sau P1.1 (đo thật: −1.4 s)** | **22.78 s** (seq8) |
 | **đo thật seq256 (2026-10-20)** | **109.4 s** (torch 1.4262 s → 76.7×) |
-| **đo thật seq1024 (2026-10-20)** | **674.6 s** (torch 3.8401 s → 175.7×) |
-| PyTorch (seq8 / 256 / 1024) | 1.0216 / 1.4262 / 3.8401 s |
+| **đo thật seq1024 (2026-10-20, commit `0d81a02` — TRƯỚC P5.1, proj còn scalar)** | **674.6 s** (torch 3.8401 s → 175.7×) |
+| **sau P5.1 — seq1024 (đo thật 2026-10-20)** | xem mục P5.2 + P5.3 (đo lại A/B/C cùng process) |
+| **sau P5.2+P5.3 — seq8 / 256 / 1024 (đo lại toàn dải 2026-10-20, cùng máy với torch)** | fwd+bwd **15.8 / 35.2 / 150.6 s** · full step **22.2 / 41.2 / 154.2 s** |
+| PyTorch (seq8 / 256 / 1024, đo lại 2026-10-20) | fwd+bwd **0.302 / 0.782 / 2.987 s** · full step **0.934 / 1.404 / 3.542 s** → tỉ lệ full step **23.8× / 29.4× / 43.5×** (số cũ 1.0216 / 1.4262 / 3.8401 s) |
 
 Khoảng cách còn lại đến PyTorch là **cấu trúc**: MKL đọc thẳng strided (không
 copy), 14 luồng, kernel native không boxing per-element. P3/P4 đã **đo** được

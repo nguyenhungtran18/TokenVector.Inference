@@ -11,6 +11,10 @@ import tv.training.gpt2_ref
 
 FIX_DIR = "tv/tests/fixtures/"
 TOL = 1e-5
+# SIMD (simd=1) khong bit-exact: FMA + thu tu tich luy khac -> dung sai chot
+# 1e-4, cung nguong parity 124M (xem tv/training/simd_matmul.tkv +
+# docs/numerics-contract.md). Duong scalar van 1e-5 nhu cu.
+TOL_SIMD = 1e-4
 
 def _is_comment(ln: 'str') -> 'i32':
     if len(ln) < 1:
@@ -167,6 +171,45 @@ def main() -> 'i32':
     cases = cases + 1
     fails = fails + report("grad lnf_g",
                            diff(dlnf_g.data, load_floats(FIX_DIR + "g2_grad_lnf_g.txt")), TOL)
+
+    # ---- duong SIMD (simd=1) vs CUNG fixture PyTorch ------------------------
+    # Gate nay la canh xac minh cho P5.2/P5.3 (attention + proj bang GEMM):
+    # truoc do khong gate nao chay simd=1 tren model nay. Goi toi da vi tri
+    # (giong cu) — khong bo qua so khong dung.
+    sv = gpt2_forward(ids, pos, wte, wpe,
+                      ln1_g, ln1_b, w_qkv, b_qkv, w_proj, b_proj,
+                      ln2_g, ln2_b, w1, b1, w2, b2, lnf_g, lnf_b, 1)
+    cases = cases + 1
+    fails = fails + report("SIMD logits vs PyTorch",
+                           diff(sv.data, load_floats(FIX_DIR + "g2_logits.txt")), TOL_SIMD)
+    sv_loss = gpt2_loss(sv, ids)
+    cases = cases + 1
+    fails = fails + report("SIMD loss vs PyTorch",
+                           _abs(sv_loss - load_floats(FIX_DIR + "g2_loss.txt")[0]), TOL_SIMD)
+    sg = gpt2_backward(ids, pos, wte, wpe,
+                       ln1_g, ln1_b, w_qkv, b_qkv, w_proj, b_proj,
+                       ln2_g, ln2_b, w1, b1, w2, b2, lnf_g, lnf_b, 1)
+    # cung layout chi so nhu duong scalar o tren
+    sgwte = sg[0]
+    sglnf_g = sg[2]
+    sgln1_g0 = sg[4]
+    sgattn_w0 = sg[6]
+    sgmlp_w1_0 = sg[12]
+    cases = cases + 1
+    fails = fails + report("SIMD grad wte vs PyTorch",
+                           diff(sgwte.data, load_floats(FIX_DIR + "g2_grad_wte.txt")), TOL_SIMD)
+    cases = cases + 1
+    fails = fails + report("SIMD grad ln1_g[0] vs PyTorch",
+                           diff(sgln1_g0.data, load_floats(FIX_DIR + "g2_grad_ln1_g0.txt")), TOL_SIMD)
+    cases = cases + 1
+    fails = fails + report("SIMD grad attn_w[0] vs PyTorch",
+                           diff(sgattn_w0.data, load_floats(FIX_DIR + "g2_grad_attn_w0.txt")), TOL_SIMD)
+    cases = cases + 1
+    fails = fails + report("SIMD grad mlp_w1[0] vs PyTorch",
+                           diff(sgmlp_w1_0.data, load_floats(FIX_DIR + "g2_grad_mlp_w1_0.txt")), TOL_SIMD)
+    cases = cases + 1
+    fails = fails + report("SIMD grad lnf_g vs PyTorch",
+                           diff(sglnf_g.data, load_floats(FIX_DIR + "g2_grad_lnf_g.txt")), TOL_SIMD)
 
     print("=== GPT-2 cases=" + str(cases) + " fails=" + str(fails) + " ===")
     return fails
