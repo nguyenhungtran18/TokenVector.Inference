@@ -1,0 +1,95 @@
+# PROBE AW — micro-bench transpose: BLOCKED (smm_transpose hien tai) vs PLAIN
+# Hinh thu: [1024][50257] (ggT @seq1024) va [768][50257] (dwteT->dwte).
+# Muc dich: P5.7 — xac dinh blocked co that su nhanh hon khong, truoc khi giu.
+# Chay (tu goc repo):
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_aw.tkv out/aw.exe main
+#   ./out/aw.exe
+import tv.training.gpt2_ref124
+import tv.training.simd_matmul
+
+def _mn(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+def _tr_plain(t: "Tensor", rows: 'i64', cols: 'i64') -> "Tensor":
+    out = t_zeros([cols, rows])
+    od = out.data
+    d = t.data
+    i = 0
+    while i < rows:
+        b0 = i * cols
+        j = 0
+        while j < cols:
+            od[j * rows + i] = d[b0 + j]
+            j = j + 1
+        i = i + 1
+    return out
+
+def main() -> 'i32':
+    # tao tensor nguon [rows][cols] gia
+    rows_a = 1024
+    rows_b = 768
+    cols = 50257
+    a = t_zeros([rows_a, cols])
+    ad = a.data
+    i = 0
+    while i < rows_a * cols:
+        ad[i] = (float((i * 7 + 13) % 97) - 48.0) / 48.0
+        i = i + 1
+    b = t_zeros([rows_b, cols])
+    bd = b.data
+    i = 0
+    while i < rows_b * cols:
+        bd[i] = (float((i * 11 + 5) % 89) - 44.0) / 44.0
+        i = i + 1
+    print("AW tensors ready")
+
+    # warmup
+    p = smm_transpose(a, rows_a, cols)
+    rs = 3
+
+    v_blk_a = 1.0e18
+    v_pln_a = 1.0e18
+    k = 0
+    while k < rs:
+        t0 = now_ms()
+        q1 = smm_transpose(a, rows_a, cols)
+        t1 = now_ms()
+        v_blk_a = _mn(v_blk_a, t1 - t0)
+        t0 = now_ms()
+        q2 = _tr_plain(a, rows_a, cols)
+        t1 = now_ms()
+        v_pln_a = _mn(v_pln_a, t1 - t0)
+        k = k + 1
+    # kiem tra ket qua giong nhau (bit)
+    d1 = q1.data
+    d2 = q2.data
+    mx = 0.0
+    i = 0
+    while i < rows_a * cols:
+        dd = d1[i] - d2[i]
+        if dd < 0.0:
+            dd = 0.0 - dd
+        if dd > mx:
+            mx = dd
+        i = i + 1
+    print("AW [1024,50257] BLOCKED = " + str(v_blk_a) + " ms  PLAIN = " + str(v_pln_a)
+          + " ms  maxdiff=" + str(mx))
+
+    v_blk_b = 1.0e18
+    v_pln_b = 1.0e18
+    k = 0
+    while k < rs:
+        t0 = now_ms()
+        q3 = smm_transpose(b, rows_b, cols)
+        t1 = now_ms()
+        v_blk_b = _mn(v_blk_b, t1 - t0)
+        t0 = now_ms()
+        q4 = _tr_plain(b, rows_b, cols)
+        t1 = now_ms()
+        v_pln_b = _mn(v_pln_b, t1 - t0)
+        k = k + 1
+    print("AW [768,50257]  BLOCKED = " + str(v_blk_b) + " ms  PLAIN = " + str(v_pln_b) + " ms")
+    print("AW done")
+    return 0
