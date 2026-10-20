@@ -2,7 +2,8 @@
 #   A: linear 768->2304 fwd+bwd, 256 token        (GEMM lon — giong gate simd [9])
 #   B: GPT-2 nho  2/4/64  vocab256 seq8 train step (giong gate simd [8])
 #   C: GPT-2 124M (12/12/768) train step, cung 8 token fixture
-# Chay (tu goc repo):  python tools/bench_torch.py [a|b|c|all]
+#   D: GPT-2 124M o seq thuc (P4): python tools/bench_torch.py d [seq=1024]
+# Chay (tu goc repo):  python tools/bench_torch.py [a|b|c|d|all] [seq]
 # Hop dong so: fp32, dropout=0, AdamW eps=1e-8 betas=(0.9,0.999) wd=0 — cung
 # tham so hop dong cua tkv (_mk_opt). Moi lan do = forward + backward (+ step).
 import sys
@@ -105,13 +106,53 @@ def tier_c():
                  "C torch GPT-2 124M train step seq8 (12/12/768)")
 
 
+def tier_d(seq=1024):
+    """124M o seq thuc (P4) — CUNG token voi tv/tests/simd_bench_124m_seq.tkv
+    (ids[i] = (i*37+11) % 50257, pos[i] = i) de so sanh apple-to-apple.
+    Do 2 phan: fwd+bwd (doi chieu tkv mode 0) va full step (mode 1)."""
+    from transformers import GPT2Config
+    from transformers import GPT2LMHeadModel
+    ids_l = [(i * 37 + 11) % 50257 for i in range(seq)]
+    pos_l = list(range(seq))
+    ids = torch.tensor([ids_l], dtype=torch.long)
+    pos = torch.tensor([pos_l], dtype=torch.long)
+    cfg = GPT2Config(vocab_size=50257, n_positions=1024, n_embd=768, n_head=12,
+                     n_layer=12, resid_pdrop=0.0, embd_pdrop=0.0, attn_pdrop=0.0)
+    torch.manual_seed(7)
+    model = GPT2LMHeadModel(cfg)
+    npar = sum(p.numel() for p in model.parameters())
+    opt = torch.optim.AdamW(model.parameters(), lr=0.0025, betas=(0.9, 0.999),
+                            eps=1e-8, weight_decay=0.0)
+
+    def loss_fn():
+        logits = model(ids, position_ids=pos).logits
+        return F.cross_entropy(logits.view(-1, 50257), ids.view(-1))
+
+    l0 = loss_fn().item()
+
+    def fb():
+        opt.zero_grad(set_to_none=True)
+        loss_fn().backward()
+
+    def step():
+        opt.zero_grad(set_to_none=True)
+        loss_fn().backward()
+        opt.step()
+
+    report("D torch GPT-2 124M fwd+bwd seq%d" % seq, timeit(fb, 1, 2),
+           "loss=%.4f params=%d" % (l0, npar))
+    report("D torch GPT-2 124M full step seq%d" % seq, timeit(step, 1, 2),
+           "loss=%.4f params=%d" % (l0, npar))
+
+
 def main():
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
+    seq = int(sys.argv[2]) if len(sys.argv) > 2 else 1024
     # chap nhan "all" hoac chuoi chu giup hop ("ab", "a", "bc", ...)
-    tiers = {"a", "b", "c"} if which == "all" else set(which)
-    unknown = tiers - {"a", "b", "c"}
+    tiers = {"a", "b", "c", "d"} if which == "all" else set(which)
+    unknown = tiers - {"a", "b", "c", "d"}
     if unknown:
-        print("BENCH unknown tier(s): %s — dung a|b|c|all" % sorted(unknown))
+        print("BENCH unknown tier(s): %s — dung a|b|c|d|all" % sorted(unknown))
         sys.exit(2)
     print("BENCH env: torch %s threads=%d"
           % (torch.__version__, torch.get_num_threads()))
@@ -122,6 +163,8 @@ def main():
         tier_b()
     if "c" in tiers:
         tier_c()
+    if "d" in tiers:
+        tier_d(seq)
     print("BENCH done")
 
 

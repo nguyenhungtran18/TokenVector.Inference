@@ -1,0 +1,363 @@
+# PROBE AP — P5a: phan rach ATTENTION 124M theo VUNG o seq THAT, + prototype GEMM
+#
+# Cau hinh (tv/tests/_seq_cfg.txt dong 1 = n/seq):
+#   printf "1024\n0\n1\n" > tv/tests/_seq_cfg.txt
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_ap.tkv out/ap.exe main
+#   ./out/ap.exe
+#
+# Muc dich: P4 do duoc gap vs torch NỞ RỘNG theo seq; gia thuyet: phan lon
+# thoi gian seq1024 la SCALAR 1 luong trong attention (score/ctx O(n^2)) va
+# proj (n*h^2). Probe nay DO CHINH XAC phan tach:
+#   FWD:  qkv linear (SIMD) | core scalar O(n^2) | proj scalar n*h^2
+#   BWD:  qkv linear (SIMD) | dctx scalar n*h^2 | core scalar O(n^2)
+#         | dw_proj scalar n*h^2 | linear_bwd (SIMD)
+# va do prototype GEMM (smm) cho tung phan de biet P5 (chuyen attention/proj
+# ve smm) co loi bao nhieu.
+#
+# KY Luat (quan trong — do that, khong doan):
+#   1. TOAN BO timing dat trong `main` (bug compiler #8). Ham phu chi TINH.
+#   2. Copy vong lap phai DUNG CACH truy cap cua library: library dung LIST
+#      cuc bo (`ctx[r]`, `qv[d]`, `scores[u]`), KHONG dung `tensor.data[...]`
+#      trong vong hot. Do lai 2026-10-20: ban copy dung tensor.data CHAM HON
+#      ~1.8x -> phep "differencing" cho core_am = total - qkv - proj ra so AM.
+#   3. KHONG do tung-token: now_ms() co overhead ~1 ms/call (do o cua probe) =>
+#      192 call (3/token) lam sai ~+300 ms o n=64. Do ca HAM (1 cap now_ms)
+#      va tach bang BIEN THEO (mode) — xem _attn_fwd_probe / _attn_bwd_probe.
+#   4. Self-check: copy mode 0 phai bang library (attn_total) trong ~5%.
+import tv.training.gpt2_ref124
+import tv.training.simd_matmul
+
+CFG = "tv/tests/_seq_cfg.txt"
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_ints(path: 'str') -> 'list[i64]':
+    txt = read_file(path)
+    lines = txt.split("\n")
+    out = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                out.append(int(float(toks[j])))
+    return out
+
+# ---- FWD: copy dung gpt2_attention, mode 0 = day du, mode 1 = bo core -----
+def _attn_fwd_probe(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
+                    w_proj: "Tensor", b_proj: "Tensor", n: 'i64',
+                    mode: 'i32') -> "Tensor":
+    h = HiddenSize
+    hd = HeadDim
+    qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h, 1)
+    out = t_zeros([n, h])
+    inv = 1.0 / sqrt(float(hd))
+    for t in range(n):
+        ctx = []
+        for d in range(h):
+            ctx.append(0.0)
+        if mode == 0:
+            for head in range(NHeads):
+                ho = head * hd
+                qv = []
+                for d in range(hd):
+                    qv.append(qkv.data[t * 3 * h + ho + d])
+                scores = []
+                for u in range(t + 1):
+                    s = 0.0
+                    for d in range(hd):
+                        s = s + qv[d] * qkv.data[u * 3 * h + h + ho + d]
+                    scores.append(s * inv)
+                mx = scores[0]
+                for u in range(1, t + 1):
+                    if scores[u] > mx:
+                        mx = scores[u]
+                tot = 0.0
+                for u in range(t + 1):
+                    e = exp(scores[u] - mx)
+                    scores[u] = e
+                    tot = tot + e
+                inv_tot = 1.0 / tot
+                for d in range(hd):
+                    acc = 0.0
+                    for u in range(t + 1):
+                        acc = acc + scores[u] * qkv.data[u * 3 * h + 2 * h + ho + d]
+                    ctx[ho + d] = acc * inv_tot
+        for o in range(h):
+            acc = b_proj.data[o]
+            for r in range(h):
+                acc = acc + ctx[r] * w_proj.data[r * h + o]
+            out.data[t * h + o] = acc
+    return out
+
+# ---- BWD: copy dung gpt2_attention_bwd -------------------------------------
+# mode 0 = day du | 1 = bo core | 2 = bo core + bo dctx | 3 = bo core + bo dwproj
+def _attn_bwd_probe(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
+                    w_proj: "Tensor", b_proj: "Tensor", n: 'i64',
+                    gout: "Tensor", mode: 'i32', dqkv: "Tensor",
+                    dw_proj: "Tensor", db_proj: "Tensor") -> 'i32':
+    h = HiddenSize
+    hd = HeadDim
+    qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h, 1)
+    inv = 1.0 / sqrt(float(hd))
+    for t in range(n):
+        dctx = []
+        for r in range(h):
+            acc = 0.0
+            if mode != 2:
+                for o in range(h):
+                    acc = acc + gout.data[t * h + o] * w_proj.data[r * h + o]
+            dctx.append(acc)
+        ctx = []
+        for d in range(h):
+            ctx.append(0.0)
+        if mode == 0:
+            for head in range(NHeads):
+                ho = head * hd
+                qv = []
+                for d in range(hd):
+                    qv.append(qkv.data[t * 3 * h + ho + d])
+                sc = []
+                for u in range(t + 1):
+                    s = 0.0
+                    for d in range(hd):
+                        s = s + qv[d] * qkv.data[u * 3 * h + h + ho + d]
+                    sc.append(s * inv)
+                mx = sc[0]
+                for u in range(1, t + 1):
+                    if sc[u] > mx:
+                        mx = sc[u]
+                tot = 0.0
+                for u in range(t + 1):
+                    e = exp(sc[u] - mx)
+                    sc[u] = e
+                    tot = tot + e
+                inv_tot = 1.0 / tot
+                for u in range(t + 1):
+                    sc[u] = sc[u] * inv_tot
+                for d in range(hd):
+                    acc = 0.0
+                    for u in range(t + 1):
+                        acc = acc + sc[u] * qkv.data[u * 3 * h + 2 * h + ho + d]
+                    ctx[ho + d] = acc
+                dp = []
+                for u in range(t + 1):
+                    acc = 0.0
+                    for d in range(hd):
+                        acc = acc + dctx[ho + d] * qkv.data[u * 3 * h + 2 * h + ho + d]
+                    dp.append(acc)
+                dot = 0.0
+                for u in range(t + 1):
+                    dot = dot + sc[u] * dp[u]
+                for u in range(t + 1):
+                    ds = sc[u] * (dp[u] - dot)
+                    for d in range(hd):
+                        dqkv.data[t * 3 * h + ho + d] = dqkv.data[t * 3 * h + ho + d] + ds * inv * qkv.data[u * 3 * h + h + ho + d]
+                        dqkv.data[u * 3 * h + h + ho + d] = dqkv.data[u * 3 * h + h + ho + d] + ds * inv * qv[d]
+                        dqkv.data[u * 3 * h + 2 * h + ho + d] = dqkv.data[u * 3 * h + 2 * h + ho + d] + sc[u] * dctx[ho + d]
+        if mode != 3:
+            for o in range(h):
+                gg = gout.data[t * h + o]
+                db_proj.data[o] = db_proj.data[o] + gg
+                for r in range(h):
+                    dw_proj.data[r * h + o] = dw_proj.data[r * h + o] + ctx[r] * gg
+    rq = gpt2_linear_bwd(x, w_qkv, dqkv, n, h, 3 * h, 1)
+    return 0
+
+# ---- gather 1 head tu qkv [n, 3h] sang [n, hd] -----------------------------
+def _gather_head(qkv: "Tensor", base: 'i64', ho: 'i64', hd: 'i64',
+                 n: 'i64', out: "Tensor") -> 'i32':
+    h = HiddenSize
+    for t in range(n):
+        src = t * 3 * h + base + ho
+        dst = t * hd
+        for d in range(hd):
+            out.data[dst + d] = qkv.data[src + d]
+    return 0
+
+def main() -> 'i32':
+    cfg = load_ints(CFG)
+    n = cfg[0]
+    ps = gpt2_init(7)
+    h = HiddenSize
+    hd = HeadDim
+    base = 4 + 6 * 12
+    w_qkv = ps[base + 2]
+    b_qkv = ps[base + 3]
+    w_proj = ps[base + 4]
+    b_proj = ps[base + 5]
+    print("AP n=" + str(n) + " h=" + str(h) + " hd=" + str(hd) + " NHeads=" + str(NHeads))
+
+    x = t_zeros([n, h])
+    i = 0
+    while i < n * h:
+        x.data[i] = ((float((i * 13 + 7) % 97) - 48.0) / 48.0) * 0.02
+        i = i + 1
+    gout = t_zeros([n, h])
+    i = 0
+    while i < n * h:
+        gout.data[i] = 0.1
+        i = i + 1
+    ctxbuf = t_zeros([n, h])
+    dqkv = t_zeros([n, 3 * h])
+    dwp = t_zeros([h, h])
+    dbp = t_zeros([h])
+
+    # ---- overhead cua now_ms() (1000 call) ----
+    t0 = now_ms()
+    i = 0
+    acc = 0.0
+    while i < 1000:
+        acc = acc + now_ms()
+        i = i + 1
+    t1 = now_ms()
+    print("AP now_ms overhead 1000 call = " + str(t1 - t0) + " ms (chk " + str(acc > 0.0) + ")")
+
+    # ---------- FWD ----------
+    # DO DAI now_ms() = ~15.6 ms (Windows clock) -> o n=8 moi do duoc bang
+    # TRUNG BINH nhieu lan. reps = dong 4 cua _seq_cfg.txt (mac dinh 1).
+    reps = 1
+    if len(cfg) >= 4:
+        reps = cfg[3]
+    if reps < 1:
+        reps = 1
+    print("AP reps = " + str(reps))
+    t_qkv = 0.0
+    t_attn_total = 0.0
+    t_fwd_full = 0.0
+    t_fwd_nocore = 0.0
+    t_proj_simd = 0.0
+    r = 0
+    while r < reps:
+        t0 = now_ms()
+        qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h, 1)
+        t1 = now_ms()
+        t_qkv = t_qkv + (t1 - t0)
+        t0 = now_ms()
+        attn_out = gpt2_attention(x, w_qkv, b_qkv, w_proj, b_proj, n, 1)
+        t1 = now_ms()
+        t_attn_total = t_attn_total + (t1 - t0)
+        t0 = now_ms()
+        f0 = _attn_fwd_probe(x, w_qkv, b_qkv, w_proj, b_proj, n, 0)
+        t1 = now_ms()
+        t_fwd_full = t_fwd_full + (t1 - t0)
+        t0 = now_ms()
+        f1 = _attn_fwd_probe(x, w_qkv, b_qkv, w_proj, b_proj, n, 1)
+        t1 = now_ms()
+        t_fwd_nocore = t_fwd_nocore + (t1 - t0)
+        t0 = now_ms()
+        out_simd = smm_fwd(ctxbuf, w_proj, n, h, h)
+        t1 = now_ms()
+        t_proj_simd = t_proj_simd + (t1 - t0)
+        r = r + 1
+    fr = float(reps)
+    t_qkv = t_qkv / fr
+    t_attn_total = t_attn_total / fr
+    t_fwd_full = t_fwd_full / fr
+    t_fwd_nocore = t_fwd_nocore / fr
+    t_proj_simd = t_proj_simd / fr
+
+    t_core_fwd = t_fwd_full - t_fwd_nocore
+    t_proj = t_fwd_nocore - t_qkv
+
+    # ---------- BWD ----------
+    t_attnb_total = 0.0
+    t_bwd_full = 0.0
+    t_bwd_nocore = 0.0
+    t_bwd_nodctx = 0.0
+    t_bwd_nodw = 0.0
+    t_dctx_simd = 0.0
+    t_dwproj_simd = 0.0
+    r = 0
+    while r < reps:
+        t0 = now_ms()
+        attn_bwd = gpt2_attention_bwd(x, w_qkv, b_qkv, w_proj, b_proj, n, gout, 1)
+        t1 = now_ms()
+        t_attnb_total = t_attnb_total + (t1 - t0)
+        t0 = now_ms()
+        _attn_bwd_probe(x, w_qkv, b_qkv, w_proj, b_proj, n, gout, 0, dqkv, dwp, dbp)
+        t1 = now_ms()
+        t_bwd_full = t_bwd_full + (t1 - t0)
+        t0 = now_ms()
+        _attn_bwd_probe(x, w_qkv, b_qkv, w_proj, b_proj, n, gout, 1, dqkv, dwp, dbp)
+        t1 = now_ms()
+        t_bwd_nocore = t_bwd_nocore + (t1 - t0)
+        t0 = now_ms()
+        _attn_bwd_probe(x, w_qkv, b_qkv, w_proj, b_proj, n, gout, 2, dqkv, dwp, dbp)
+        t1 = now_ms()
+        t_bwd_nodctx = t_bwd_nodctx + (t1 - t0)
+        t0 = now_ms()
+        _attn_bwd_probe(x, w_qkv, b_qkv, w_proj, b_proj, n, gout, 3, dqkv, dwp, dbp)
+        t1 = now_ms()
+        t_bwd_nodw = t_bwd_nodw + (t1 - t0)
+        t0 = now_ms()
+        dctx_simd = smm_dot(gout, w_proj, n, h, h)
+        t1 = now_ms()
+        t_dctx_simd = t_dctx_simd + (t1 - t0)
+        t0 = now_ms()
+        ctxT = smm_transpose(ctxbuf, n, h)
+        dw_simd = smm_fwd(ctxT, gout, h, h, n)
+        t1 = now_ms()
+        t_dwproj_simd = t_dwproj_simd + (t1 - t0)
+        r = r + 1
+    t_attnb_total = t_attnb_total / fr
+    t_bwd_full = t_bwd_full / fr
+    t_bwd_nocore = t_bwd_nocore / fr
+    t_bwd_nodctx = t_bwd_nodctx / fr
+    t_bwd_nodw = t_bwd_nodw / fr
+    t_dctx_simd = t_dctx_simd / fr
+    t_dwproj_simd = t_dwproj_simd / fr
+
+    t_core_bwd = t_bwd_full - t_bwd_nocore
+    t_dctx = t_bwd_nocore - t_bwd_nodctx
+    t_dwproj = t_bwd_nocore - t_bwd_nodw
+
+    # ---------- CORE prototype: 1 head bang GEMM ----------
+    qh = t_zeros([n, hd])
+    kh = t_zeros([n, hd])
+    vh = t_zeros([n, hd])
+    t0 = now_ms()
+    _gather_head(qkv, 0, 0, hd, n, qh)
+    _gather_head(qkv, h, 0, hd, n, kh)
+    _gather_head(qkv, 2 * h, 0, hd, n, vh)
+    t1 = now_ms()
+    t_gather = t1 - t0
+    t0 = now_ms()
+    sc_h = smm_dot(qh, kh, n, n, hd)
+    t1 = now_ms()
+    t_score_head = t1 - t0
+    t0 = now_ms()
+    ctx_h = smm_fwd(sc_h, vh, n, hd, n)
+    t1 = now_ms()
+    t_ctx_head = t1 - t0
+
+    print("AP FWD qkv_linear_simd = " + str(t_qkv) + " ms")
+    print("AP FWD lib_total       = " + str(t_attn_total) + " ms")
+    print("AP FWD copy_full       = " + str(t_fwd_full) + " ms (self-check vs lib)")
+    print("AP FWD copy_nocore     = " + str(t_fwd_nocore) + " ms")
+    print("AP FWD core_scalar_O2  = " + str(t_core_fwd) + " ms")
+    print("AP FWD proj_scalar     = " + str(t_proj) + " ms")
+    print("AP BWD lib_total       = " + str(t_attnb_total) + " ms")
+    print("AP BWD copy_full       = " + str(t_bwd_full) + " ms (self-check vs lib)")
+    print("AP BWD copy_nocore     = " + str(t_bwd_nocore) + " ms")
+    print("AP BWD core_scalar_O2  = " + str(t_core_bwd) + " ms")
+    print("AP BWD dctx_scalar     = " + str(t_dctx) + " ms")
+    print("AP BWD dwproj_scalar   = " + str(t_dwproj) + " ms")
+    print("AP PROTO proj_gemm     = " + str(t_proj_simd) + " ms")
+    print("AP PROTO dctx_gemm     = " + str(t_dctx_simd) + " ms")
+    print("AP PROTO dwproj_gemm   = " + str(t_dwproj_simd) + " ms")
+    print("AP PROTO head_gather   = " + str(t_gather) + " ms (3 heads)")
+    print("AP PROTO head_score    = " + str(t_score_head) + " ms (1 head smm_dot n x n x hd)")
+    print("AP PROTO head_ctx      = " + str(t_ctx_head) + " ms (1 head smm_fwd n x hd x n)")
+    t_core_simd_12 = 12.0 * (t_score_head + t_ctx_head + t_gather / 3.0)
+    print("AP PROTO core_12head   = " + str(t_core_simd_12) + " ms")
+    print("AP P5 fwd_saving_est   = " + str((t_core_fwd + t_proj) - (t_core_simd_12 + t_proj_simd)) + " ms/layer/fwd")
+    print("AP P5 bwd_saving_est   = " + str((t_core_bwd + t_dctx + t_dwproj) - (t_core_simd_12 + t_dctx_simd + t_dwproj_simd)) + " ms/layer/bwd")
+    print("AP done")
+    return 0

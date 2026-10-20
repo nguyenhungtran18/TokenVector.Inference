@@ -396,9 +396,72 @@ Bao cao day du: **`reports/bench-simd-vs-pytorch-20261019.md`**. So chinh
     BWD). **Scalar residue <5%** (attention scalar dctx+dw_proj ≈ 1ms/block)
     → KHONG con vung scalar >1s de sua. "Bwd 4.5x fwd" = GEMM volume 3x
     (moi linear_bwd = dx+dw+fwd-linear), khong phai residue.
-  - **TIEP THEO**: **P4 seq1024 uu tien cao** (head skinny GEMM m=8 chi
-    ~232 GFLOPS = 4.3s/buoc — seq1024 sua tu nhien); P3 do luong simd_gemm;
-    GC/boxing 8GB/buoc can native buffer tu compiler team.
+  - **PROBE AN (P4a) — XONG**: chi phi 124M that theo seq (best-of-2; do lai
+    2026-10-20, cung xu huong, +-10%):
+    | n | block fwd | block bwd | head logits GEMM | head GFLOPS (flop huu ich) |
+    | 8 | 125 ms | 657 ms | 531 ms | 1.16 |
+    | 64 | 406 ms | 1578 ms | 1031 ms | 4.79 |
+    | 256 | 1375 ms | 5062 ms | 1187 ms | 16.65 |
+    => head GEMM **build-bound** (chi phi gan nhat hang theo seq) -> hieu suat
+    huu ich tang **14x** khi seq x32. XAC NHAN gia thuyet P2: seq1024 het la
+    nut that cua head.
+  - **PROBE AO (P3) — XONG, gia thuyet bi bac bo**: do bang
+    `tools/probe_threads.py` (poll `psutil.Process.cpu_times()` cua tien trinh
+    con -> cpu/wall = so core dang chay THAT; control scalar ratio 0.97):
+    | Pha | wall | cpu | ratio |
+    | pure simd_gemm 768^3 x800 | 1.397 s | 29.63 s | **21.20 luong** (539 GFLOPS) |
+    | pure simd_gemm 64^3 x200000 (shape that cua seq8) | 2.178 s | 2.16 s | **0.99 (1 luong, 49 GFLOPS)** |
+    | 1 buoc 124M seq8 (fwd+bwd) | 28.77 s | 28.77 s | **1.00 (1 luong)** |
+    => gemm **DA da luong** khi tile lon (768^3), nhung **tile nho 64^3 (shape
+    that cua seq8) lai 1 luong**; **ca buoc hieu 1 luong** => phan ngoai gemm
+    (dung tile/append, attention scalar, AdamW) chiem phan lon wall time.
+    Moi toi uu sau phai nham phan 1 luong.
+  - **P4 — XONG, KET LUAN DAO NGUOC** (bench `tv/tests/simd_bench_124m_seq.tkv`
+    doc cau hinh seq qua `tv/tests/_seq_cfg.txt`; doi chieu torch tier `d` cua
+    `tools/bench_torch.py`, CUNG data ids[i]=(i*37+11)%50257, pos[i]=i):
+
+    | seq | tkv SIMD full step | torch full step | tỉ lệ |
+    |---|---|---|---|
+    | 8 | 22.78 s | 1.0216 s | 22.3× |
+    | 256 | **109.4 s** | 1.4262 s | 76.7× |
+    | 1024 | **674.6 s** | 3.8401 s | **175.7×** |
+
+    (tkv mode 0 = fwd+bwd: **666.2 s** @1024 = fwd 120.0 + bwd 546.2 → plumbing
+    optimizer chi 8.4 s, khong phu thuoc seq. torch fwd+bwd: 0.8228 s @256,
+    3.2387 s @1024 → tỉ lệ fwd+bwd 205.7×.) **Khoảng cách KHÔNG thu hẹp
+    mà NỞ RỘNG theo seq** — nguyên nhân (đo được): o seq1024 phan lon thoi gian
+    cua tkv la **scalar O(n^2) 1 luong** (attention + proj + dung tile), trong
+    khi gemm native da chay da luong (P3) va torch vectorize het. Buoc seq1024
+    ton ~6.1 GB RAM (may 12.7 GB) — chay duoc, nhung can 12-13 GB cho 1 buoc.
+  - **PROBE AP (P5a) — XONG, XAC NHAN CO LOI** (`tv/tests/simd_probe_ap.tkv`;
+    124M thật, layer 6, 2 bản copy **giống hệt** code library + biến `mode`
+    tắt từng vùng, self-check copy-vs-library; cấu hình `tv/tests/_seq_cfg.txt`
+    dong 1 = n, dong 4 = reps):
+    | Vùng (ms/layer) | n=8 fwd | n=8 bwd | n=1024 fwd | n=1024 bwd | proto GEMM @1024 |
+    |---|---|---|---|---|---|
+    | qkv linear (SIMD) | 26 | 26 | 187 | 187 | — |
+    | core O(n^2) scalar | ~0 | ~1 | **5858** | **15999** | 756 (12 head) |
+    | proj scalar (n·h^2) | **31** | — | **3970** | — | **78** |
+    | dctx scalar (n·h^2) | — | **19** | — | **2204** | **47** |
+    | dw_proj scalar (n·h^2) | — | **51** | — | **7032** | **78** |
+    | attention total (library) | 54 | 225 | 9188 | 24703 | — |
+    Cross-check: vung n·h^2 scale **tuyen tinh** theo n (proj 3970/128 = 31.0 vs
+    do 31.1) => do dung. **Tiet kiem P5.1**: seq8 **0.75 s/buoc (3.3%)**,
+    seq1024 **279 s/buoc (41%)** (chi P5.1; `dp/ds/dqkv` 10141 ms/layer van
+    scalar). seq1024: attention scalar = 406 s / 666 s fwd+bwd = **61%**.
+    **SUA ƯỚC LƯỢNG SAI CỦA P2**: "dctx/dw_proj chi loi ~1ms/block" **SAI ~6x**
+    (thuc 70 ms/layer @n=8) — uoc luong cu sai vi "10M MAC ≈ 1 ms"; scalar
+    thuc chi **~134 MMAC/s** (boxed f64, 1 luong — dung P3).
+  - **TIEP THEO**: **P5.1 — code proj/dctx/dw_proj → `smm`** (khong can
+    compiler team, `smm` co san). Sau do **P5.2** (score/ctx theo head → `smm`
+    + mask causal). Gate moi thay doi: `simd_matmul_tests` 20/20 + 4 suite hoi
+    quy + bench lai seq8 (22.78 s) va seq1024 (674.6 s).
+    **BAI HOC DO (probe AP)**: (1) `now_ms()` do phan giai **~15.6 ms** → o
+    seq8 phai trung binh N lan (reps), mot lan do vo nghia; (2) vong hot cua
+    library dung **LIST cuc bo** (`ctx[r]`), KHONG dung `tensor.data[...]` → ban
+    copy dung tensor indexing cham ~1.8x → phep "total - qkv - proj" ra so
+    **AM**; (3) do ca ham roi tach bang bien `mode`, khong do tung token.
+    GC/boxing 8GB/buoc van can native buffer tu compiler team.
   - `t_zeros`/zero-init: list-multiplication `[0.0]*n` CHAM 9× append (probe
     AF) — giu append; `reserve` co trong REFERENCE 2.13 (chua dung).
   - So cu + 2 buoc toi uu ban dau (chua lam): cache/reuse tile, vectorize
@@ -411,9 +474,13 @@ Bao cao day du: **`reports/bench-simd-vs-pytorch-20261019.md`**. So chinh
   P2 floor scalar (phu thuoc compiler team), P3 do/sua so luong simd_gemm,
   P4 bench lai seq1024. Ky vong trung thuc: 31s -> ~19-21s sau P0+P1.
 
-File: `tools/bench_torch.py` (torch A/B/C), `tv/tests/simd_bench.tkv` (nho),
+File: `tools/bench_torch.py` (torch A/B/C + tier `d` = seq thực), `tv/tests/simd_bench.tkv` (nho),
 `tv/tests/simd_bench_124m.tkv` (124M — import `gpt2_ref124` + `trainer`, khong
-import gpt2_train vi gpt2_fwd_ps gan voi ban nho).
+import gpt2_train vi gpt2_fwd_ps gan voi ban nho),
+`tv/tests/simd_bench_124m_seq.tkv` (124M theo seq — cau hinh `_seq_cfg.txt`:
+dong 1 = seq, dong 2 = mode 0=fwd+bwd / 1=full step, dong 3 = steps),
+`tools/probe_threads.py` (do cpu/wall cua tien trinh con = so luong that),
+`tv/tests/simd_probe_ap.tkv` (P5a: tach attention theo vung + prototype GEMM).
 
 ---
 

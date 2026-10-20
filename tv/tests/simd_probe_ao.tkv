@@ -1,0 +1,203 @@
+# PROBE AO — P3: SO LUONG THREAD THAT cua simd_gemm (va cua ca 1 buoc train)
+# Do bang wrapper python (tools/probe_threads.py) do CPU-time (user+sys) cua
+# tien trinh con roi chia cho wall time -> ratio = so core dang chay that.
+#   ratio ~1  = 1 luong;  ratio ~14 = da luong 14 core.
+#
+# Che do (doc tu tv/tests/_thr_cfg.txt):
+#   0 = PURE simd_gemm (tile 768x768 dung san, lap 800 lan)   -> do pha gemm
+#   1 = PURE scalar loop (vong 20e6)                          -> doi chung (control)
+#   2 = 1 BUOC train 124M seq8 (simd)                        -> do ca buoc
+#
+# Chay: tkvc tv/tests/simd_probe_ao.tkv out/ao.exe main && out/ao.exe
+import tv.training.gpt2_ref124
+import tv.training.trainer
+import tv.training.simd_matmul
+
+CFG = "tv/tests/_thr_cfg.txt"
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_ints(path: 'str') -> 'list[i64]':
+    txt = read_file(path)
+    lines = txt.split("\n")
+    out = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                out.append(int(float(toks[j])))
+    return out
+
+# ---- tile 768x768 list[f32] (append BIEU THUC de compiler ep List[Single]) --
+def _tile(T: 'i64', seed: 'i64') -> 'list[f32]':
+    out = []
+    d = float(seed)
+    i = 0
+    while i < T * T:
+        out.append((d - 0.0) / 1.0)
+        d = d + 0.0000001
+        i = i + 1
+    return out
+
+def _n_param(ps: 'list[Tensor]') -> 'i64':
+    n = 0
+    for i in range(len(ps)):
+        t = ps[i]
+        d = t.data
+        n = n + len(d)
+    return n
+
+def _groups(ps: 'list[Tensor]') -> 'list[i64]':
+    out = []
+    for i in range(len(ps)):
+        t = ps[i]
+        d = t.data
+        out.append(len(d))
+    return out
+
+def _mk_opt(n: 'i64', groups: 'list[i64]', total: 'i64') -> "AdamW":
+    return new_adamw_g(n, groups, 2, total, 0.05, 0.0025, 0.9, 0.999,
+                       0.00000001, 0.0, 1.0)
+
+def _fwd_loss(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32') -> 'f32':
+    ln1_g = []
+    ln1_b = []
+    wq = []
+    bq = []
+    wp = []
+    bp = []
+    ln2_g = []
+    ln2_b = []
+    w1 = []
+    b1 = []
+    w2 = []
+    b2 = []
+    for li in range(NLayers):
+        base = 4 + li * 12
+        ln1_g.append(ps[base + 0])
+        ln1_b.append(ps[base + 1])
+        wq.append(ps[base + 2])
+        bq.append(ps[base + 3])
+        wp.append(ps[base + 4])
+        bp.append(ps[base + 5])
+        ln2_g.append(ps[base + 6])
+        ln2_b.append(ps[base + 7])
+        w1.append(ps[base + 8])
+        b1.append(ps[base + 9])
+        w2.append(ps[base + 10])
+        b2.append(ps[base + 11])
+    z = gpt2_forward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                     ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd)
+    return gpt2_loss(z, ids)
+
+def _bwd(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32',
+         gflat: 'list[f32]') -> 'i32':
+    ln1_g = []
+    ln1_b = []
+    wq = []
+    bq = []
+    wp = []
+    bp = []
+    ln2_g = []
+    ln2_b = []
+    w1 = []
+    b1 = []
+    w2 = []
+    b2 = []
+    for li in range(NLayers):
+        base = 4 + li * 12
+        ln1_g.append(ps[base + 0])
+        ln1_b.append(ps[base + 1])
+        wq.append(ps[base + 2])
+        bq.append(ps[base + 3])
+        wp.append(ps[base + 4])
+        bp.append(ps[base + 5])
+        ln2_g.append(ps[base + 6])
+        ln2_b.append(ps[base + 7])
+        w1.append(ps[base + 8])
+        b1.append(ps[base + 9])
+        w2.append(ps[base + 10])
+        b2.append(ps[base + 11])
+    gr = gpt2_backward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                       ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd, gflat)
+    return len(gr)
+
+def main() -> 'i32':
+    cfg = load_ints(CFG)
+    mode = cfg[0]
+    if mode == 3:
+        # baseline: chi khoi dong runtime (de truoc chi pho khoi dong cua process)
+        print("AO BASELINE (khong lam gi)")
+        return 0
+    if mode == 0:
+        T = 768
+        At = _tile(T, 1)
+        Bt = _tile(T, 2)
+        Ct = _tile(T, 3)
+        t0 = now_ms()
+        i = 0
+        while i < 800:
+            simd_gemm(At, Bt, Ct, T)
+            i = i + 1
+        t1 = now_ms()
+        print("AO PURE_GEMM 800x768^3 ms=" + str(t1 - t0) + " GFLOPS="
+              + str(800.0 * 2.0 * 768.0 * 768.0 * 768.0 / ((t1 - t0) * 1000000.0)))
+        return 0
+    if mode == 4:
+        # tile 64^3 — DUNG SHAPE THAT cua P0.4 khi m=8 (seq8): T=64
+        T = 64
+        At = _tile(T, 11)
+        Bt = _tile(T, 12)
+        Ct = _tile(T, 13)
+        t0 = now_ms()
+        i = 0
+        while i < 200000:
+            simd_gemm(At, Bt, Ct, T)
+            i = i + 1
+        t1 = now_ms()
+        print("AO PURE_GEMM 200000x64^3 ms=" + str(t1 - t0) + " GFLOPS="
+              + str(200000.0 * 2.0 * 64.0 * 64.0 * 64.0 / ((t1 - t0) * 1000000.0)))
+        return 0
+    if mode == 1:
+        t0 = now_ms()
+        s = 0.0
+        i = 0
+        while i < 20000000:
+            s = s + float(i) * 0.5
+            i = i + 1
+        t1 = now_ms()
+        print("AO PURE_SCALAR 20e6 ms=" + str(t1 - t0) + " chk=" + str(s))
+        return 0
+    # mode 2: 1 buoc train 124M seq8
+    ids = []
+    pos = []
+    i = 0
+    while i < 8:
+        ids.append((i * 37 + 11) % 50257)
+        pos.append(i)
+        i = i + 1
+    ps = gpt2_init(7)
+    n = _n_param(ps)
+    groups = _groups(ps)
+    opt = _mk_opt(n, groups, 2)
+    off = 0
+    for i in range(len(ps)):
+        t = ps[i]
+        d = t.data
+        for j in range(len(d)):
+            opt.p[off + j] = d[j]
+        off = off + len(d)
+    t0 = now_ms()
+    l = _fwd_loss(ps, ids, pos, 1)
+    t1 = now_ms()
+    _bwd(ps, ids, pos, 1, opt.g)
+    t2 = now_ms()
+    print("AO STEP_FWD ms=" + str(t1 - t0) + " STEP_BWD ms=" + str(t2 - t1) + " loss=" + str(l))
+    return 0

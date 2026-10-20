@@ -120,19 +120,142 @@ Phân rã block_bwd 124M (best-of-3, layer 6, n=8):
 2. **GC/boxing ~8GB/bước** (probe AJ) — phụ thuộc native/f32 buffer từ compiler team.
 3. GEMM volume itself → native kernels (compiler team).
 
-### P3 — Số luồng simd_gemm
+### P3 — Số luồng simd_gemm — **ĐÃ PROBE (simd_probe_ao): GIẢ THUYẾT BỊ BÁC BỎ**
 
-- Probe: lặp `simd_gemm` trên CÙNG tile đã dựng (không build xen vào), đo
-  cpu/wall như probe Y → biết thật sự dùng bao nhiêu luồng.
-- Nếu <14: ghi issue cho compiler team (knob luồng trong dll) — **phụ thuộc
-  ngoài**; sau P0 pha gemm chiếm tỉ trọng lớn hơn nên đây là nút thật.
+Đo bằng `tools/probe_threads.py` (poll `psutil.Process.cpu_times()` của tiến
+trình con → cpu/wall = số core đang chạy THẬT; control scalar chứng minh
+phương pháp đúng):
 
-### P4 — Mức seq thực (1024)
+| Pha | wall | cpu | ratio | Ý nghĩa |
+|---|---|---|---|---|
+| **pure `simd_gemm` 768³ × 800** (tile dựng sẵn) | **1.397 s** | **29.63 s** | **21.20** | gemm **ĐÃ đa luồng** (~21 luồng trên 14C/28T) — 539 GFLOPS (flop của tile) |
+| **pure `simd_gemm` 64³ × 200 000** (tile đúng shape seq8) | **2.178 s** | **2.156 s** | **0.99** | tile NHỎ → gemm **1 luồng**, chỉ 49.3 GFLOPS (11× chậm hơn 768³) |
+| pure scalar 20e6 (control) | 0.369 s | 0.359 s | 0.97 | 1 luồng ✓ (control) |
+| **1 bước 124M seq8 (fwd+bwd)** | **28.77 s** | **28.77 s** | **1.00** | **CẢ BƯỚC hiệu 1 luồng** (fwd 2.09 s + bwd 14.83 s) |
 
-- Sau P0/P1: chạy lại bench C với seq1024 (1024× flop, tile m'=1024 → build
- /flop giảm mạnh, tỉ trọng gemm tăng, floor scalar ×seq). Kỳ vọng khoảng cách
-  vs torch **thu hẹp rõ**; scalar ở seq1024 không khả thi (ước tính >1 giờ/bước)
-  — simd là đường duy nhất.
+(Đo lại 2026-10-20, best-of-3; lần đo đầu 1.395 s / 29.14 s / 20.9 — khớp
+trong ±3% ⇒ phương pháp ổn định.)
+
+Kết luận (đảo ngược giả thuyết ban đầu):
+
+- **KHÔNG cần issue “gemm chỉ 1 luồng”** cho compiler team — native gemm đã
+  dùng ~21 luồng khi tile đủ lớn (768³).
+- **Nhưng ở seq8, P0.4 chọn T=64 (min(m,n) m=8) ⇒ tile 64³ ⇒ gemm rơi về 1
+  luồng, 49.3 GFLOPS.** Đây là điểm giao giữa “tối ưu build” và “đa luồng”:
+  thể tích build gần như không đổi khi đổi T (V(T) = (⌈m/T⌉+⌈n/T⌉)⌈k/T⌉T²),
+  nên có thể nâng T lên (vd 768) để gemm chạy đa luồng mà không tăng build
+  nhiều — **cần probe riêng** (P5).
+- Nút thắt ở seq8 là **mọi phần NGOÀI gemm đều 1 luồng**: dựng tile
+  (`append`), attention vòng scalar, AdamW/grad-copy. Ratio 1.00 của cả bước
+  ⇒ phần gemm chỉ ~4% wall time (45 GFLOP tile ÷ 49.3 GFLOPS ≈ 0.9 s).
+- Hệ quả cho các mục sau: **mọi tối ưu tiếp phải nhắm phần 1 luồng** (giảm
+  số phần tử phải append/boxing, hoặc đẩy chúng xuống native) — không phải
+  tăng luồng cho gemm (đã hết đường).
+
+### P4 — Mức seq thực (1024) — **ĐÃ ĐO (bench seq256/seq1024 + torch tier D)**
+
+Bench: `tv/tests/simd_bench_124m_seq.tkv` (cau hinh seq qua
+`tv/tests/_seq_cfg.txt` — 1 file .tkv cho moi seq) + `tools/bench_torch.py`
+tier `d` (cung data: `ids[i] = (i*37+11) % 50257`, `pos[i] = i`).
+
+| seq | tkv SIMD (full step) | torch (full step) | **tỉ lệ** | tkv fwd+bwd | torch fwd+bwd | tỉ lệ fwd+bwd |
+|---|---|---|---|---|---|---|
+| 8 | 22.78 s | 1.0216 s | 22.3× | — | — | — |
+| 256 | **109.4 s** | 1.4262 s | **76.7×** | — | 0.8228 s | — |
+| 1024 | **674.6 s** | 3.8401 s | **175.7×** | **666.2 s** (fwd 120.0 + bwd 546.2) | 3.2387 s | **205.7×** |
+
+(Số torch: median 2-3 lần chạy, tier `d`/`c`; lần đo đầu 1.000 / 1.529 /
+3.846 s — khớp trong ±2% ⇒ tỉ lệ ổn định. Ghi chú: plumbing optimizer của tkv
+= 674.6 − 666.2 = **8.4 s** — khớp với ~5.5-7 s đo ở seq8 ⇒ phần này **không
+phụ thuộc seq**.)
+
+**Kết luận P4 (đảo ngược giả thuyết “khoảng cách thu hẹp rõ”):**
+
+- **Khoảng cách KHÔNG thu hẹp mà NỞ RỘNG theo seq**: 22.3× → 76.7× → 175.7×.
+  Torch ở seq8 còn overhead-bound (1.02 s cho 8 token) nên seq1024 chỉ 3.84 s
+  (3.76×); tkv nhân 30× (22.78 → 674.6 s).
+- **Xác nhận giả thuyết P2 về head GEMM** (probe AN, 124M thật, best-of-2):
+
+  | n | block fwd | block bwd | head logits GEMM | head GFLOPS (flop hữu ích) |
+  |---|---|---|---|---|
+  | 8 | 125 ms | 657 ms | 531 ms | 1.16 |
+  | 64 | 406 ms | 1578 ms | 1031 ms | 4.79 |
+  | 256 | 1375 ms | 5062 ms | 1187 ms | 16.65 |
+
+  Head GEMM **build-bound** (dựng tile), không phải flop-bound: seq ×32 thì
+  thời gian chỉ ×2.2, hiệu suất hữu ích ×14. Ở seq1024 head **không còn là
+  nút thắt**. (Đo lại 2026-10-20: lần đầu 125/719/563, 453/1844/1171,
+  1610/5984/1266 — cùng xu hướng, ±10% do nhiễu máy.)
+- **Nút thắt thật ở seq1024 là phần scalar O(n²)**: attention (vòng per-head
+  scalar) + proj (n·h² scalar) + build tile + plumbing — tất cả **1 luồng**
+  (P3). Torch làm chúng bằng kernel vectorized/đa luồng ⇒ gap nở rộng.
+- Hệ quả: **ưu tiên tối ưu tiếp theo = đưa attention/proj về GEMM (smm) hoặc
+  native**, không phải chỉnh gemm (đã đa luồng, P3).
+
+### P5 — Đưa attention + proj về `smm` — **ĐÃ PROBE (simd_probe_ap): XÁC NHẬN, CÓ LỢI**
+
+Probe `tv/tests/simd_probe_ap.tkv` (124M thật, layer 6, **2 bản copy giống hệt**
+code library + biến `mode` để tắt từng vùng, tự kiểm bằng self-check
+copy-vs-library). Cấu hình: `tv/tests/_seq_cfg.txt` (dong 1 = n, dong 4 = số
+lần lặp để trung bình).
+
+**Kết quả (ms / layer / 1 lần attention):**
+
+| Vùng | n=8 fwd | n=8 bwd | n=1024 fwd | n=1024 bwd | **Prototype GEMM (n=1024)** |
+|---|---|---|---|---|---|
+| qkv linear (SIMD) | 26 | 26 | 187 | 187 | — |
+| **core O(n²) scalar** | ~0 | ~1 | **5 858** | **15 999** | 756 (12 head: score 16 + ctx 47) |
+| **proj scalar (n·h²)** | **31** | — | **3 970** | — | **78** |
+| **dctx scalar (n·h²)** | — | **19** | — | **2 204** | **47** |
+| **dw_proj scalar (n·h²)** | — | **51** | — | **7 032** | **78** |
+| attention total (library) | 54 | 225 | 9 188 | 24 703 | — |
+
+**Tính đúng (self-check):** copy mode 0 = library (n=8: 54.0 vs 54.1; n=1024:
+10 015 vs 9 188 — chênh 9% do nhánh `mode` trong vòng hot). Tổng các vùng
+= tổng library ✓.
+
+**Cross-check scale (xác nhận đo đúng):** các vùng n·h² scale **tuyến tính**
+theo n → proj 3 970/128 = 31.0 ms ở n=8, đo được **31.1 ms** ✓; dctx
+17.2 vs 19.0 ✓; dw_proj 54.9 vs 51.4 ✓.
+
+**Tiết kiệm P5 (thành thật):**
+
+| seq | fwd/layer | bwd/layer | **tổng 12 layer** | % của bước |
+|---|---|---|---|---|
+| 8 | 22.7 ms | 39.8 ms | **0.75 s** | 3.3% (22.78 → ~22.0 s) |
+| 1024 | 8 994 ms | 14 213 ms | **279 s** | **41%** (674.6 → ~395 s) |
+
+- fwd: (5 858−756) + (3 970−78) = 8 994 ms/layer.
+- bwd: (5 858−756) + (2 204−47) + (7 032−78) = 14 213 ms/layer.
+- **CẢNH BÁO**: phần `dp/ds/dqkv` của core bwd (15 999 − 5 858 = **10 141
+  ms/layer**) **VẪN SCALAR** nếu chỉ làm P5.1 — con số 41% là trần của
+  P5.1, không phải của P5 đầy đủ.
+- Ở seq1024, attention scalar = 12 × (9 188 + 24 703) = **406 s / 666 s
+  fwd+bwd = 61%** ✓ đúng gia thuyết P4.
+
+**SỬA ƯỚC LƯỢNG SAI CỦA P2:** P2 kết luận “sửa scalar attention (dctx/dw_proj
+→ smm) chỉ lời ~1 ms/block — không làm”. **SAI ~6×**: probe AP đo được 70
+ms/layer ở n=8 (dctx 19 + dw_proj 51) ⇒ ~5.8 ms/block, tức ~0.5 s trong bwd
+124M. Nguyên nhân: ước lượng cũ dùng “10M MAC ≈ 1 ms” (≈10 GMAC/s) trong
+khi scalar thật chỉ **~134 MMAC/s** (đóng hộp f64, 1 luồng — đúng P3).
+
+**Kết luận P5: ĐÚNG — làm.** Đây là nút thắt lớn nhất còn lại trong repo
+(attention scalar 1 luồng), và **không cần compiler team** (chỉ cần `smm`
+đã có). Chia 2 bước:
+- **P5.1** (ít rủi ro): proj / dctx / dw_proj → `smm` (n·h²).
+- **P5.2** (rủi ro cao hơn): score/ctx theo từng head → `smm` + softmax
+  nhân mask causal (core O(n²)); phần `dp/ds/dqkv` vẫn scalar.
+
+### Bài học về đo (từ probe AP — áp dụng cho mọi probe sau)
+
+1. **`now_ms()` có độ phân giải ~15.6 ms** (đồng hồ Windows) → ở seq8, một
+   lần đo là vô nghĩa (mọi số đều là bội số 15.6). Phải **trung bình N
+   lần** (probe AP đọc `reps` ở dong 4 config) — 24 lần ở n=8 cho số sạch.
+2. **Vòng hot của library dùng LIST cục bộ** (`ctx[r]`, `qv[d]`), KHÔNG dùng
+   `tensor.data[...]` → bản copy dùng tensor indexing **chậm ~1.8×** → phép
+   “total − qkv − proj” ra số **ÂM**. Copy phải giống hệt cách truy cập.
+3. Không đo từng token (3 now_ms/token × 1024 token → lỗi lũy cộng hàng
+   trăm ms): đo **cả hàm** rồi tách bằng biến `mode`.
 
 ### Kỳ vọng trung thực
 
@@ -140,13 +263,17 @@ Phân rã block_bwd 124M (best-of-3, layer 6, n=8):
 |---|---|
 | trước P0 | 31.3 s |
 | **sau P0 (đo thật 2026-10-19)** | **~24.2-24.5 s** |
-| **sau P1.1 (đo thật: −1.4 s)** | **22.78 s** |
-| sau P2+P3 (nếu compiler team cộng tác) | ~12-15 s |
-| PyTorch | 1.0 s |
+| **sau P1.1 (đo thật: −1.4 s)** | **22.78 s** (seq8) |
+| **đo thật seq256 (2026-10-20)** | **109.4 s** (torch 1.4262 s → 76.7×) |
+| **đo thật seq1024 (2026-10-20)** | **674.6 s** (torch 3.8401 s → 175.7×) |
+| PyTorch (seq8 / 256 / 1024) | 1.0216 / 1.4262 / 3.8401 s |
 
 Khoảng cách còn lại đến PyTorch là **cấu trúc**: MKL đọc thẳng strided (không
-copy), 14 luồng, kernel native không boxing per-element. Đóng nốt cần native
-kernels từ compiler team — ghi rõ trong HANDOFF khi tiếp.
+copy), 14 luồng, kernel native không boxing per-element. P3/P4 đã **đo** được
+cơ chế cụ thể: ở seq1024 phần lớn thời gian của tkv là **scalar 1 luồng**
+(attention O(n²) + proj + dựng tile + plumbing), trong khi gemm native đã chạy
+đa luồng. Đóng nốt cần **native kernels** (compiler team) hoặc chuyển
+attention/proj sang GEMM (P5) — ghi rõ trong HANDOFF khi tiếp.
 
 ## 3. Thứ tự thực thi
 
@@ -156,7 +283,20 @@ kernels từ compiler team — ghi rõ trong HANDOFF khi tiếp.
    = grads parity old-vs-flat, probe AJ = GC breakdown).
 4. ✅ P2 — probe AM phân rã xong: scalar residue <5% (LN 0ms, attn scalar
    ~1ms/block) → bỏ ý định sửa scalar; nút thật = head skinny GEMM → P4.
-5. P3 probe luồng; P4 bench seq1024 (ưu tiên cao — sửa luôn head m=8).
+5. ✅ P3 — probe AO (`tools/probe_threads.py`): gemm **ĐÃ đa luồng ~21 luồng**
+   (768³, 546 GFLOPS); cả bước 124M seq8 **ratio cpu/wall = 1.00 (1 luồng)**
+   ⇒ **không** có issue "gemm 1 luồng"; mọi tối ưu sau nhắm phần 1 luồng.
+6. ✅ P4 — probe AN + bench seq256/seq1024 + torch tier D: head GEMM **hết là
+   nút thắt** (build-bound, hiệu suất hữu ích ×14 khi seq ×32), nhưng gap vs
+   torch **nở rộng** theo seq (22.8× → 71.6× → 175.4×) vì attention/proj
+   scalar O(n²) 1 luồng.
+7. ⏭ P5 — **ĐÃ PROBE (simd_probe_ap): xác nhận có lợi** (mục P5). Bước kế
+   tiếp: **P5.1** (proj/dctx/dw_proj → `smm`) rồi **P5.2** (score/ctx theo
+   head → `smm` + mask). Mỗi bước = gate `simd_matmul_tests` 20/20 + 4 suite
+   hồi quy + bench lại.
 
 Probe còn dùng được: `simd_probe_x` (build vs gemm), `simd_bench_124m_profile`
-(phase), `simd_probe_z` (bwd tách), `simd_probe_y` (luồng).
+(phase), `simd_probe_z` (bwd tách), `simd_probe_y` (luồng), `simd_probe_am`
+(block_bwd theo vung), `simd_probe_an` (chi phi theo seq), `simd_probe_ao`
+(so luong gemm vs ca buoc), `simd_probe_ap` (attention theo vung + prototype
+GEMM).

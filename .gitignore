@@ -30,6 +30,14 @@ $RECYCLE.BIN/
 # Scratch output cua test (pack_tests.tkv ghi shard vao day)
 /tv/tests/_tmp_*/
 
+# Cau hinh runtime cho bench/probe theo seq va probe do luong (ghi de khi
+# chay — khong commit; xem header cua file .tkv de biet cach tao)
+/tv/tests/_seq_cfg.txt
+/tv/tests/_thr_cfg.txt
+
+# Build output cua probe/bench (exe + IL + log), 25 MB
+/out/
+
 # Distribution output: a full duplicate of the source tree plus a bundled
 # compiler .exe (which *.exe already excludes, so committing it would produce
 # an incomplete package). Kept as a local directory, not in git.

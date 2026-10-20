@@ -1,0 +1,104 @@
+# PROBE AN — P4a: (1) hieu suot GEMM " dau theo m (8/64/256)
+#                    (2) chi phi 1 block fwd/bwd 124M theo seq (8/64/256)
+# Muc dich: kiem chung gia thuyet P2 ("P4 seq1024 sua head skinny GEMM tu nhien")
+# bang SO DO THAT, va lay duong cong chi phi de du doan buoc seq1024.
+# Chay: tkvc tv/tests/simd_probe_an.tkv out/an.exe main && out/an.exe
+import tv.training.gpt2_ref124
+import tv.training.simd_matmul
+
+def _mn(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+def _mk_ids(n: 'i64') -> 'list[i64]':
+    ids = []
+    i = 0
+    while i < n:
+        ids.append((i * 37 + 11) % 50257)
+        i = i + 1
+    return ids
+
+def _mk_pos(n: 'i64') -> 'list[i64]':
+    pos = []
+    i = 0
+    while i < n:
+        pos.append(i)
+        i = i + 1
+    return pos
+
+def main() -> 'i32':
+    ps = gpt2_init(7)
+    h = HiddenSize
+    print("AN h=" + str(h) + " NLayers=" + str(NLayers) + " Vocab=" + str(VocabSize))
+    wte = ps[0]
+    base = 4 + 6 * 12
+    w_qkv = ps[base + 2]
+    b_qkv = ps[base + 3]
+    w_proj = ps[base + 4]
+    b_proj = ps[base + 5]
+    w1 = ps[base + 8]
+    b1 = ps[base + 9]
+    w2 = ps[base + 10]
+    b2 = ps[base + 11]
+    ln1g = ps[base + 0]
+    ln1b = ps[base + 1]
+    ln2g = ps[base + 6]
+    ln2b = ps[base + 7]
+
+    # n = 8 / 64 / 256
+    ns = [8, 64, 256]
+    k = 0
+    while k < len(ns):
+        n = ns[k]
+        ids = _mk_ids(n)
+        pos = _mk_pos(n)
+        # x vao block: [n, h]
+        x = t_zeros([n, h])
+        xd = x.data
+        i = 0
+        while i < n * h:
+            xd[i] = ((float((i * 13 + 7) % 97) - 48.0) / 48.0) * 0.02
+            i = i + 1
+        gy = t_zeros([n, h])
+        i = 0
+        while i < n * h:
+            gy.data[i] = 0.1
+            i = i + 1
+        # --- 1) BLOCK FWD (best-of-2) ---
+        bf = 1.0e9
+        r = 0
+        while r < 2:
+            t0 = now_ms()
+            ob = gpt2_block(x, ln1g, ln1b, w_qkv, b_qkv, w_proj, b_proj,
+                            ln2g, ln2b, w1, b1, w2, b2, 1)
+            t1 = now_ms()
+            bf = _mn(bf, t1 - t0)
+            r = r + 1
+        # --- 2) BLOCK BWD (best-of-2) ---
+        bb = 1.0e9
+        r = 0
+        while r < 2:
+            t0 = now_ms()
+            rb = gpt2_block_bwd(x, ln1g, ln1b, w_qkv, b_qkv, w_proj, b_proj,
+                                ln2g, ln2b, w1, b1, w2, b2, gy, 1)
+            t1 = now_ms()
+            bb = _mn(bb, t1 - t0)
+            r = r + 1
+        # --- 3) HEAD GEMM: logits = xf @ wte^T  (m=n, n=50257, k=768) ---
+        hg = 1.0e9
+        r = 0
+        while r < 2:
+            t0 = now_ms()
+            lg = smm_dot(x, wte, n, 50257, h)
+            t1 = now_ms()
+            hg = _mn(hg, t1 - t0)
+            r = r + 1
+        # flop = 2*m*n*k ; thoi gian ms -> GFLOPS
+        flops = 2.0 * float(n) * 50257.0 * float(h)
+        gflops = flops / (hg * 1000000.0)
+        print("AN n=" + str(n) + " block_fwd=" + str(bf) + " ms  block_bwd=" + str(bb)
+              + " ms  head_logits=" + str(hg) + " ms  head_GFLOPS=" + str(gflops))
+        k = k + 1
+    print("AN done")
+    return 0
