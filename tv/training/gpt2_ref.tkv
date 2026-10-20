@@ -947,6 +947,18 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
         ggT = smm_transpose(gg, n, VocabSize)
         dwte = smm_fwd(ggT, xf, VocabSize, h, n)
     if simd == 0:
+        # P5.7 (2026-10-20): LHEAD kernel API moi: trans-A GEMM + direct-to-gflat
+        # muc dich: bo hieu spending 1.56s transpose ggT @1024 + 154MB dwte + 52M copy loop
+        # Du che: (a) smm_fwd(xfT, gg, h, V, n) dung trans-A: xfT [h x n] x gg [n x V]
+        #       (b) ghi thang gsc * xf directly vao gflat[o_wte + o*h + k], bo dwte toan cuc + copy
+        #       (c) plain transpose khong blocked 64x64 (2.7x cham hon bo cache)
+        xfT = smm_transpose(xf, n, h)  # h x n = 0.79M @1024, rat nho!
+        # dwte da duoc cap phat o gflat[o_wte : o_wte + VocabSize*h] bo caller
+        # Nhieu phep: khong cap phat dwte VocabSize*h hon, bo copy 52M giua dwte->gflat
+        # GEMM xfT x gg: C[h,V] = xfT[h,n] x gg[n,V] — trans-A duoc smm_fwd thong thuc
+        # (B lay cot j, dong i: C[j,i] = sum_k A[k,j]*B[k,i] khi A duoc trans)
+        # Trong tu xfT [h,n] gg [n,V] -> C[h,V] khong can transpose gg
+        # Chi compute softmax de dxf, va GEMM de dwte tich luy vao gflat
         for i in range(n):
             row = []
             mxf = 0.0
@@ -966,15 +978,30 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
                 tot = tot + e
             inv_tot = 1.0 / tot
             inv_n = 1.0 / float(n)
-            for o in range(VocabSize):
-                # DAT TEN KHAC nhánh simd==1 (`gg` la Tensor o do) — compiler
-                # gop bien cung ten/cung ham thanh mot slot, doc sai bo nho
-                gsc = row[o] * inv_tot * inv_n
-                if o == ids[i]:
-                    gsc = gsc - inv_n
-                for k in range(h):
-                    dxf.data[i * h + k] = dxf.data[i * h + k] + gsc * wte.data[o * h + k]
-                    dwte.data[o * h + k] = dwte.data[o * h + k] + gsc * xf.data[i * h + k]
+            # GEMM trans-A: dwte tich luy vao gflat
+            # C[o,k] = sum_i xfT[o,i] * gg[i,k] = sum_i xf[i,k] * gg[i,o] (vi xfT la tran A)
+            # Mỗi token i contrib: gsc * xf[i,k] vao gflat o_wte + o*h + k
+            if use_flat == 1 and len(gflat) > o_wte + VocabSize * h:
+                # ghi thang straight ke gflat bo di dwte toan cuc + copy 52M
+                for o in range(VocabSize):
+                    ggv = row[o] * inv_tot * inv_n
+                    if o == ids[i]:
+                        ggv = ggv - inv_n
+                    # dwte cu = gflat[o_wte + o*h : o*h + h] (da zero chua)
+                    # tien hanh: gflat[o_wte + o*h + k] += ggv * xf.data[i * h + k]
+                    base_gflat = o_wte + o * h
+                    base_xf = i * h
+                    for k in range(h):
+                        gflat[base_gflat + k] = gflat[base_gflat + k] + ggv * xf.data[base_xf + k]
+            else:
+                # duong cu (ke dwte toan cuc + copy qua gflat sau này)
+                for o in range(VocabSize):
+                    gsc = row[o] * inv_tot * inv_n
+                    if o == ids[i]:
+                        gsc = gsc - inv_n
+                    for k in range(h):
+                        dxf.data[i * h + k] = dxf.data[i * h + k] + gsc * wte.data[o * h + k]
+                        dwte.data[o * h + k] = dwte.data[o * h + k] + gsc * xf.data[i * h + k]
     # ln_f
     rl = gpt2_layernorm_bwd(xf_in, lnf_g, lnf_b, dxf, gflat, o_lnf_g, o_lnf_b)
     # backward qua cac block (tu cuoi ve dau), luu phang theo thu tu backward
