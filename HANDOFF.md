@@ -1206,6 +1206,62 @@ duoc ca 2 bien the; + unflatten 0.78 + zero 0.27 — chua cham), LHEAD 9.5s,
 gelu fwd con du (seg alloc an ~60% loi do probe — caching seg la ung vien
 nho). Muc <=1.0x van can P7 (xem canh bao ⓑ Haswell o 0.22).
 
+### 0.24 P6 GIAI DOAN 5 — ATTENTION PACKED BUFFERS (2026-10-21) — 135/135, BIT-EXACT, seq1024 −9.8%
+
+Tiep 0.23 ("Con lai": ATTN_BWD 15.9s = 47% bwd, worker ~2.3× du). DO TRUOC
+bang probe BN (`tv/tests/simd_probe_bn.tkv`) — phan rac 1 layer @n=1024
+(copy worker/merge NGUYEN VAN tu gpt2_ref, o_* = -1, timing o main):
+
+| Thanh phan | ms | Ghi chu |
+|---|---|---|
+| whole attn_bwd | 1453 | |
+| qkv recompute | 109 | |
+| dctx GEMM | 47 | |
+| **alloc 12 ctxo + 12 dqo** | **359** | 37.2M zero-fill = **25% moi layer** |
+| spawn+join 12 worker | 516 | serial ref 4468 -> **efficiency 8.66×** |
+| merge x12 | ~0 | |
+| dw_proj | 78 | |
+| linear_bwd | 235 | |
+| sum vs whole | chk −7.5% | do loi do |
+
+**KHAC GIA THUYET:** worker khong yeu (8.66×); serial GEMM chain cung nho
+(P6 GĐ3 builder fix da lam GEMM nhanh) — chu dich la **PHI ZERO-FILL**: moi
+worker chi ghi 1 head (n*hd ctx + n*3*hd dq = 262K ptu) nhung driver alloc
+buffer FULL n*h / n*3h (3.1M ptu/worker) — 11/12 du lieu bi zero-fill roi
+merge con copy luon phan zero do.
+
+**Stage A — wire packed buffer (BIT-EXACT: gia tri/ thu tu tich luy khong
+ doi, chi vi tri trong buffer doi):**
+- `_attn_hb_one` (bwd worker): ctx_out ghi `[t2*hd+d]`, dq_out ghi
+  `[t2*3*hd + {d, hd+d, 2hd+d}]`
+- `_attn_hb_merge`: doc packed -> ghi ctxT/dqkv tai (t, head, d) nguyen van
+- driver bwd: ctxo = `n*hd`, dqo = `n*3*hd`/worker (37.7M -> 3.15M zero-fill)
+- **FWD cung benh** (co0..11 = t_zeros([n,h]), 92% lang phi): `_attn_f_one`
+  + `_attn_f_merge` + driver cung n*hd — cung pattern.
+- Serial path n<128 NGUYEN VEN khong doi (seq8 khong doi hanh vi).
+- Mirror: gpt2_ref x3 (md5 giong het).
+
+**Ket qua:**
+- Gate **135/135** (9 suite 102 + gpt2_full 33). LUU Y: lan chay dau tien
+  gpt2_full crash tam thoi `ArgumentOutOfRangeException` trong String.Split
+  khi load fixture grad 230MB (truoc moi PASS nao) — chay lai CUNG binary
+  33/33 toan bo => transient IO/GC, khong lien quan code GĐ5.
+- Bench A/B (best-of-2, loss khop EXACT ca 3 seq):
+
+| seq | GĐ4 | GĐ5 | Δ |
+|---|---|---|---|
+| 8 | 15.062 | 15.187 | +0.8% (drift nhiet — code giong het, duong serial n<128) |
+| 256 | 25.406 | **23.625** | −7.0% |
+| 1024 | 50.875 | **45.890** | **−9.8%** |
+
+- AQ @1024: **ATTN_BWD 15.9→11.4s (−28.7%)**, FWD_BODY 9.13→7.78 (−14.7%),
+  **TOTAL_bwd 33.5→29.7s (−11.5%)**.
+- Tỉ lệ vs torch: **16.3× / 16.8× / 13.0×**.
+
+**"Con lai" sau GĐ5 (AQ):** ATTN_BWD 11.4s (worker wall 516ms + serial
+469ms/layer — eff da 8.66×, con kho 20-30%), MLP_BWD 11.8s, LHEAD 9.3s,
+AdamW/plumbing ~4.9s (GĐ4 da do: adamw_loop 3.9s khong song song duoc).
+
 ---
 
 ---

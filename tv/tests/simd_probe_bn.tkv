@@ -1,0 +1,400 @@
+# PROBE BN — P6 GĐ5: PHAN RAC ATTN_BWD (2026-10-21)
+#
+# Muc dich: giai thich ATTN_BWD 15922ms @1024 (AQ — 47% bwd, ~1327ms/layer,
+# sau P6 GĐ1 parallel theo head chi duoc 2.29x). Gia thuyet tu doc code:
+# SERIAL CHAIN (qkv recompute ~3.6 + dctx ~1.2 + linear_bwd ~7.2 + dw_proj
+# ~1.2 GFLOP) ~= hoac lon hon phan song song (~9.7 GFLOP 6 GEMM/head) ->
+# worker efficiency khong phai chu dich. Probe DO TRUC TIPE tung thanh phan
+# (mot layer, n=1024, du lieu synthetic nong — khong denormal):
+#   BN[1] whole  = gpt2_attention_bwd(...) x2 best
+#   BN[2] t_qkv  = gpt2_linear x recompute (input cua worker)
+#   BN[3] t_dctx = smm_dot(gout, w_proj)
+#   BN[4] t_alloc= 12 ctxo + 12 dqo zeros (ctxo n*h, dqo n*3h)
+#   BN[5] t_par  = spawn 12 worker + join (xong) ; t_merge = 12 merge goi
+#   BN[6] t_pser = 12 worker chay SERIAL trong main (cung buffers) ->
+#                  parallel efficiency = t_pser / t_par
+#   BN[7] t_dw   = transpose ctxT + dwG GEMM + db + pack
+#   BN[8] t_lbwd = gpt2_linear_bwd (dx + dw_qkv + db)
+#   chk = |sum7 - whole| / whole (nhu BK — do loi do)
+# Worker/merge COPY NGUYEN VAN tu gpt2_ref (_attn_hb_one / _attn_hb_merge)
+# de goi duoc tu probe (ten private khong export). o_* = -1 (materialize) —
+# GEMM cung kich thuoc voi duong bench (o >= 0 chi khac cho gflat).
+# Toan bo timing o MAIN (bug #8).
+#
+# Chay (tu goc repo):
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_bn.tkv out/bn.exe main
+#   ./out/bn.exe
+
+import tv.training.gpt2_ref124
+import tv.training.simd_matmul
+
+def _bn_div(a: 'i64', b: 'i64') -> 'i64':
+    if a < b:
+        return 0
+    q = 0
+    r = a
+    while r >= b:
+        step = b
+        add = 1
+        while (step + step) <= r:
+            step = step + step
+            add = add + add
+        r = r - step
+        q = q + add
+    return q
+
+def _bn_smt(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+# ---- fill (moi ham MOT list phang — quy tac bug compiler #2) ---------------
+def _bn_fx(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(float(((i * 131) % 97) - 48) * 0.011)
+    return out
+
+def _bn_fwq(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(float(((i * 77) % 89) - 44) * 0.0091)
+    return out
+
+def _bn_fbq(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(float(((i * 53) % 83) - 41) * 0.0071)
+    return out
+
+def _bn_fwp(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(float(((i * 149) % 101) - 50) * 0.0083)
+    return out
+
+def _bn_fbp(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(float(((i * 61) % 79) - 39) * 0.0067)
+    return out
+
+def _bn_fg(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(float(((i * 173) % 103) - 51) * 0.013)
+    return out
+
+# ---- worker copy NGUYEN VAN tu gpt2_ref (_AtnJob + _attn_hb_one) ----------
+class _BnAJob:
+    qkvl: "list[f32]"
+    dctxl: "list[f32]"
+    ctx_out: "list[f32]"
+    dq_out: "list[f32]"
+    n: 'i64'
+    hlo: 'i64'
+    hhi: 'i64'
+    inv: 'f64'
+    def __init__(self, qkvl: "list[f32]", dctxl: "list[f32]", ctx_out: "list[f32]", dq_out: "list[f32]", n: 'i64', hlo: 'i64', hhi: 'i64', inv: 'f64'):
+        self.qkvl = qkvl
+        self.dctxl = dctxl
+        self.ctx_out = ctx_out
+        self.dq_out = dq_out
+        self.n = n
+        self.hlo = hlo
+        self.hhi = hhi
+        self.inv = inv
+
+def _bn_attn_one(j: "_BnAJob") -> 'i64':
+    if j.hlo >= NHeads:
+        return 0
+    h = HiddenSize
+    hd = HeadDim
+    n = j.n
+    inv = j.inv
+    for head in range(j.hlo, j.hhi):
+        ho = head * hd
+        gQ = t_zeros([n, hd])
+        gK = t_zeros([n, hd])
+        gV = t_zeros([n, hd])
+        gDc = t_zeros([n, hd])
+        for t2 in range(n):
+            s0 = t2 * 3 * h + ho
+            c0 = t2 * h + ho
+            for d in range(hd):
+                gQ.data[t2 * hd + d] = j.qkvl[s0 + d]
+                gK.data[t2 * hd + d] = j.qkvl[s0 + h + d]
+                gV.data[t2 * hd + d] = j.qkvl[s0 + 2 * h + d]
+                gDc.data[t2 * hd + d] = j.dctxl[c0 + d]
+        Smat = smm_dot(gQ, gK, n, n, hd)
+        for t2 in range(n):
+            b0 = t2 * n
+            m0 = Smat.data[b0] * inv
+            Smat.data[b0] = m0
+            mxv = m0
+            for u in range(1, t2 + 1):
+                m0 = Smat.data[b0 + u] * inv
+                Smat.data[b0 + u] = m0
+                if m0 > mxv:
+                    mxv = m0
+            totv = 0.0
+            for u in range(t2 + 1):
+                e = exp(Smat.data[b0 + u] - mxv)
+                Smat.data[b0 + u] = e
+                totv = totv + e
+            ivv = 1.0 / totv
+            for u in range(t2 + 1):
+                Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
+            for u in range(t2 + 1, n):
+                Smat.data[b0 + u] = 0.0
+        gCtx = smm_fwd(Smat, gV, n, hd, n)
+        for t2 in range(n):
+            d0 = t2 * hd
+            c0 = t2 * h + ho
+            for d in range(hd):
+                j.ctx_out[c0 + d] = gCtx.data[d0 + d]
+        gDp = smm_dot(gDc, gV, n, n, hd)
+        gDs = t_zeros([n, n])
+        for t2 in range(n):
+            b0 = t2 * n
+            d0 = t2 * hd
+            dotv = 0.0
+            for d in range(hd):
+                dotv = dotv + gDc.data[d0 + d] * gCtx.data[d0 + d]
+            for u in range(t2 + 1):
+                gDs.data[b0 + u] = Smat.data[b0 + u] * (gDp.data[b0 + u] - dotv)
+            for u in range(t2 + 1, n):
+                gDs.data[b0 + u] = 0.0
+        gDq = smm_fwd(gDs, gK, n, hd, n)
+        gQt = smm_transpose(gQ, n, hd)
+        gDkT = smm_fwd(gQt, gDs, hd, n, n)
+        gDcT = smm_transpose(gDc, n, hd)
+        gDvT = smm_fwd(gDcT, Smat, hd, n, n)
+        for t2 in range(n):
+            d0 = t2 * hd
+            r0 = t2 * 3 * h + ho
+            for d in range(hd):
+                j.dq_out[r0 + d] = gDq.data[d0 + d] * inv
+                j.dq_out[r0 + h + d] = gDkT.data[d * n + t2] * inv
+                j.dq_out[r0 + 2 * h + d] = gDvT.data[d * n + t2]
+    return j.hhi - j.hlo
+
+# ---- merge copy NGUYEN VAN tu gpt2_ref (_attn_hb_merge) -------------------
+def _bn_merge(co: "list[f32]", qo: "list[f32]", ct: "list[f32]", dq: "list[f32]", n: 'i64', h: 'i64', hd: 'i64', hlo: 'i64', hhi: 'i64') -> 'i64':
+    if hlo >= NHeads:
+        return 0
+    for head in range(hlo, hhi):
+        ho = head * hd
+        for t2 in range(n):
+            c0 = t2 * h + ho
+            d0 = t2 * hd
+            r0 = t2 * 3 * h + ho
+            for d in range(hd):
+                ct[c0 + d] = co[c0 + d]
+                dq[r0 + d] = qo[r0 + d]
+                dq[r0 + h + d] = qo[r0 + h + d]
+                dq[r0 + 2 * h + d] = qo[r0 + 2 * h + d]
+    return hhi - hlo
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    hd = HeadDim
+    inv = 1.0 / sqrt(float(hd))
+    nh = NHeads
+
+    # ---- setup -------------------------------------------------------------
+    t0 = now_ms()
+    x = _bn_fx(n * h)
+    w_qkv = _bn_fwq(h * 3 * h)
+    b_qkv = _bn_fbq(3 * h)
+    w_proj = _bn_fwp(h * h)
+    b_proj = _bn_fbp(h)
+    gout = _bn_fg(n * h)
+    xt = t_new(x, [n, h])
+    wqkvt = t_new(w_qkv, [h, 3 * h])
+    bqkvt = t_new(b_qkv, [3 * h])
+    wprojt = t_new(w_proj, [h, h])
+    bprojt = t_new(b_proj, [h])
+    goutt = t_new(gout, [n, h])
+    print("BN setup = " + str(now_ms() - t0) + " ms")
+
+    # ---- BN[1] WHOLE -------------------------------------------------------
+    v1 = 1.0e18
+    krep = 0
+    while krep < 2:
+        t0 = now_ms()
+        rq = gpt2_attention_bwd(xt, wqkvt, bqkvt, wprojt, bprojt, n, goutt, 1)
+        d1 = now_ms() - t0
+        v1 = _bn_smt(v1, d1)
+        krep = krep + 1
+    print("BN[1] whole attn_bwd = " + str(v1) + " ms")
+
+    # ---- BN[2] qkv recompute (input cua worker) ----------------------------
+    v2 = 1.0e18
+    krep = 0
+    while krep < 2:
+        t0 = now_ms()
+        qkv = gpt2_linear(xt, wqkvt, bqkvt, n, h, 3 * h, 1)
+        d2 = now_ms() - t0
+        v2 = _bn_smt(v2, d2)
+        krep = krep + 1
+    print("BN[2] qkv recompute GEMM = " + str(v2) + " ms")
+
+    # ---- BN[3] dctx GEMM ---------------------------------------------------
+    v3 = 1.0e18
+    krep = 0
+    while krep < 2:
+        t0 = now_ms()
+        dctx = smm_dot(goutt, wprojt, n, h, h)
+        d3 = now_ms() - t0
+        v3 = _bn_smt(v3, d3)
+        krep = krep + 1
+    print("BN[3] dctx GEMM = " + str(v3) + " ms")
+
+    # ---- BN[4] alloc 12 ctxo + 12 dqo (ctxo n*h, dqo n*3h) ----------------
+    v4 = 1.0e18
+    krep = 0
+    while krep < 2:
+        t0 = now_ms()
+        c0 = t_zeros([n * h]).data
+        c1 = t_zeros([n * h]).data
+        c2 = t_zeros([n * h]).data
+        c3 = t_zeros([n * h]).data
+        c4 = t_zeros([n * h]).data
+        c5 = t_zeros([n * h]).data
+        c6 = t_zeros([n * h]).data
+        c7 = t_zeros([n * h]).data
+        c8 = t_zeros([n * h]).data
+        c9 = t_zeros([n * h]).data
+        c10 = t_zeros([n * h]).data
+        c11 = t_zeros([n * h]).data
+        d0o = t_zeros([n * 3 * h]).data
+        d1o = t_zeros([n * 3 * h]).data
+        d2o = t_zeros([n * 3 * h]).data
+        d3o = t_zeros([n * 3 * h]).data
+        d4o = t_zeros([n * 3 * h]).data
+        d5o = t_zeros([n * 3 * h]).data
+        d6o = t_zeros([n * 3 * h]).data
+        d7o = t_zeros([n * 3 * h]).data
+        d8o = t_zeros([n * 3 * h]).data
+        d9o = t_zeros([n * 3 * h]).data
+        d10o = t_zeros([n * 3 * h]).data
+        d11o = t_zeros([n * 3 * h]).data
+        d4 = now_ms() - t0
+        v4 = _bn_smt(v4, d4)
+        krep = krep + 1
+    print("BN[4] alloc 12 ctxo + 12 dqo = " + str(v4) + " ms")
+
+    # ---- BN[5] parallel: spawn 12 + join ; merge x12 -----------------------
+    ql = qkv.data
+    dl = dctx.data
+    v5 = 1.0e18
+    v5m = 1.0e18
+    krep = 0
+    while krep < 2:
+        t0 = now_ms()
+        h0 = thread_spawn(_bn_attn_one, _BnAJob(ql, dl, c0, d0o, n, 0, 1, inv))
+        h1 = thread_spawn(_bn_attn_one, _BnAJob(ql, dl, c1, d1o, n, 1, 2, inv))
+        h2 = thread_spawn(_bn_attn_one, _BnAJob(ql, dl, c2, d2o, n, 2, 3, inv))
+        h3 = thread_spawn(_bn_attn_one, _BnAJob(ql, dl, c3, d3o, n, 3, 4, inv))
+        h4 = thread_spawn(_bn_attn_one, _BnAJob(ql, dl, c4, d4o, n, 4, 5, inv))
+        h5 = thread_spawn(_bn_attn_one, _BnAJob(ql, dl, c5, d5o, n, 5, 6, inv))
+        h6 = thread_spawn(_bn_attn_one, _BnAJob(ql, dl, c6, d6o, n, 6, 7, inv))
+        h7 = thread_spawn(_bn_attn_one, _BnAJob(ql, dl, c7, d7o, n, 7, 8, inv))
+        h8 = thread_spawn(_bn_attn_one, _BnAJob(ql, dl, c8, d8o, n, 8, 9, inv))
+        h9 = thread_spawn(_bn_attn_one, _BnAJob(ql, dl, c9, d9o, n, 9, 10, inv))
+        h10 = thread_spawn(_bn_attn_one, _BnAJob(ql, dl, c10, d10o, n, 10, 11, inv))
+        h11 = thread_spawn(_bn_attn_one, _BnAJob(ql, dl, c11, d11o, n, 11, 12, inv))
+        r0 = thread_join(h0)
+        r1 = thread_join(h1)
+        r2 = thread_join(h2)
+        r3 = thread_join(h3)
+        r4 = thread_join(h4)
+        r5 = thread_join(h5)
+        r6 = thread_join(h6)
+        r7 = thread_join(h7)
+        r8 = thread_join(h8)
+        r9 = thread_join(h9)
+        r10 = thread_join(h10)
+        r11 = thread_join(h11)
+        d5 = now_ms() - t0
+        v5 = _bn_smt(v5, d5)
+        t0 = now_ms()
+        m0 = _bn_merge(c0, d0o, c0, d0o, n, h, hd, 0, 1)
+        m1 = _bn_merge(c1, d1o, c1, d1o, n, h, hd, 1, 2)
+        m2 = _bn_merge(c2, d2o, c2, d2o, n, h, hd, 2, 3)
+        m3 = _bn_merge(c3, d3o, c3, d3o, n, h, hd, 3, 4)
+        m4 = _bn_merge(c4, d4o, c4, d4o, n, h, hd, 4, 5)
+        m5 = _bn_merge(c5, d5o, c5, d5o, n, h, hd, 5, 6)
+        m6 = _bn_merge(c6, d6o, c6, d6o, n, h, hd, 6, 7)
+        m7 = _bn_merge(c7, d7o, c7, d7o, n, h, hd, 7, 8)
+        m8 = _bn_merge(c8, d8o, c8, d8o, n, h, hd, 8, 9)
+        m9 = _bn_merge(c9, d9o, c9, d9o, n, h, hd, 9, 10)
+        m10 = _bn_merge(c10, d10o, c10, d10o, n, h, hd, 10, 11)
+        m11 = _bn_merge(c11, d11o, c11, d11o, n, h, hd, 11, 12)
+        d5m = now_ms() - t0
+        v5m = _bn_smt(v5m, d5m)
+        krep = krep + 1
+    print("BN[5] spawn+join 12 worker = " + str(v5) + " ms  merge x12 = " + str(v5m) + " ms")
+
+    # ---- BN[6] SERIAL reference: 12 worker chay loi trong main -------------
+    # (cung buffers — moi worker ghi vao cot rieng nen chay lieng duoc)
+    t0 = now_ms()
+    s0 = _bn_attn_one(_BnAJob(ql, dl, c0, d0o, n, 0, 1, inv))
+    s1 = _bn_attn_one(_BnAJob(ql, dl, c1, d1o, n, 1, 2, inv))
+    s2 = _bn_attn_one(_BnAJob(ql, dl, c2, d2o, n, 2, 3, inv))
+    s3 = _bn_attn_one(_BnAJob(ql, dl, c3, d3o, n, 3, 4, inv))
+    s4 = _bn_attn_one(_BnAJob(ql, dl, c4, d4o, n, 4, 5, inv))
+    s5 = _bn_attn_one(_BnAJob(ql, dl, c5, d5o, n, 5, 6, inv))
+    s6 = _bn_attn_one(_BnAJob(ql, dl, c6, d6o, n, 6, 7, inv))
+    s7 = _bn_attn_one(_BnAJob(ql, dl, c7, d7o, n, 7, 8, inv))
+    s8 = _bn_attn_one(_BnAJob(ql, dl, c8, d8o, n, 8, 9, inv))
+    s9 = _bn_attn_one(_BnAJob(ql, dl, c9, d9o, n, 9, 10, inv))
+    s10 = _bn_attn_one(_BnAJob(ql, dl, c10, d10o, n, 10, 11, inv))
+    s11 = _bn_attn_one(_BnAJob(ql, dl, c11, d11o, n, 11, 12, inv))
+    v6 = now_ms() - t0
+    print("BN[6] serial 12 head (worker doc lap) = " + str(v6)
+          + " ms  -> efficiency = " + str(v6 / v5))
+
+    # ---- BN[7] dw_proj: transpose + GEMM + db + pack -----------------------
+    ctxT = t_new(c0, [n, h])
+    v7 = 1.0e18
+    krep = 0
+    while krep < 2:
+        t0 = now_ms()
+        ctxTt = smm_transpose(ctxT, n, h)
+        dwG = smm_fwd(ctxTt, goutt, h, h, n)
+        dbp = t_zeros([h])
+        for o in range(h):
+            acc = 0.0
+            for t2 in range(n):
+                acc = acc + goutt.data[t2 * h + o]
+            dbp.data[o] = dbp.data[o] + acc
+        dw_proj = t_zeros([h, h])
+        for r in range(h):
+            for o in range(h):
+                dw_proj.data[r * h + o] = dw_proj.data[r * h + o] + dwG.data[r * h + o]
+        d7 = now_ms() - t0
+        v7 = _bn_smt(v7, d7)
+        krep = krep + 1
+    print("BN[7] dw_proj (transpose+GEMM+db+pack) = " + str(v7) + " ms")
+
+    # ---- BN[8] linear_bwd (dx + dw_qkv + db) -------------------------------
+    dqkv = t_new(d0o, [n, 3 * h])
+    v8 = 1.0e18
+    krep = 0
+    while krep < 2:
+        t0 = now_ms()
+        rq8 = gpt2_linear_bwd(xt, wqkvt, dqkv, n, h, 3 * h, 1)
+        d8 = now_ms() - t0
+        v8 = _bn_smt(v8, d8)
+        krep = krep + 1
+    print("BN[8] linear_bwd (dx+dw_qkv+db) = " + str(v8) + " ms")
+
+    # ---- chk ---------------------------------------------------------------
+    sum7 = v2 + v3 + v4 + v5 + v5m + v7 + v8
+    print("BN sum = " + str(sum7) + " ms  whole = " + str(v1)
+          + " ms  chk = " + str((sum7 - v1) / v1))
+    print("BN done")
+    return 0

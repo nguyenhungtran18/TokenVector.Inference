@@ -166,15 +166,16 @@ def _attn_f_one(j: "_AtnFJob") -> 'i64':
                 Smat.data[b0 + u] = 0.0
         # ctx[t,:] = sum_u Smat[t,u] * V[u,:]
         gCtx = smm_fwd(Smat, gV, n, hd, n)
+        # P6 GĐ5 (probe BN): ghi PACKED [t2*hd+d] — bo 11/12 zero-fill
         for t2 in range(n):
             d0 = t2 * hd
-            c0 = t2 * h + ho
             for d in range(hd):
-                j.ctx_out[c0 + d] = gCtx.data[d0 + d]
+                j.ctx_out[d0 + d] = gCtx.data[d0 + d]
     return j.hhi - j.hlo
 
 def _attn_f_merge(co: "list[f32]", ct: "list[f32]", n: 'i64', h: 'i64', hd: 'i64', hlo: 'i64', hhi: 'i64') -> 'i64':
-    # gop output rieng vao ctxT (1 thread) — vi tri duy nhat/head
+    # gop output rieng PACKED (P6 GĐ5: co/[t2*hd]) vao ctxT — gia tri khong
+    # doi -> BIT-EXACT. cham NHeads (giong worker).
     if hlo >= NHeads:
         return 0
     for head in range(hlo, hhi):
@@ -183,7 +184,7 @@ def _attn_f_merge(co: "list[f32]", ct: "list[f32]", n: 'i64', h: 'i64', hd: 'i64
             c0 = t2 * h + ho
             d0 = t2 * hd
             for d in range(hd):
-                ct[c0 + d] = co[c0 + d]
+                ct[c0 + d] = co[d0 + d]
     return hhi - hlo
 
 # ---- Attention: multi-head, causal mask, softmax fp32, proj ---------------
@@ -211,18 +212,19 @@ def gpt2_attention(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
         # Proj T >= 96 (g_job) van chay main thread sau join.
         # n < 128: roi vong sequential duoi day — duong cu NGUYEN.
         if n >= 128:
-            co0 = t_zeros([n, h])
-            co1 = t_zeros([n, h])
-            co2 = t_zeros([n, h])
-            co3 = t_zeros([n, h])
-            co4 = t_zeros([n, h])
-            co5 = t_zeros([n, h])
-            co6 = t_zeros([n, h])
-            co7 = t_zeros([n, h])
-            co8 = t_zeros([n, h])
-            co9 = t_zeros([n, h])
-            co10 = t_zeros([n, h])
-            co11 = t_zeros([n, h])
+            # P6 GĐ5: buffer PACKED n*hd/worker (bo 11/12 zero-fill)
+            co0 = t_zeros([n, hd])
+            co1 = t_zeros([n, hd])
+            co2 = t_zeros([n, hd])
+            co3 = t_zeros([n, hd])
+            co4 = t_zeros([n, hd])
+            co5 = t_zeros([n, hd])
+            co6 = t_zeros([n, hd])
+            co7 = t_zeros([n, hd])
+            co8 = t_zeros([n, hd])
+            co9 = t_zeros([n, hd])
+            co10 = t_zeros([n, hd])
+            co11 = t_zeros([n, hd])
             hb0 = thread_spawn(_attn_f_one, _AtnFJob(qkv.data, co0.data, n, 0, 1, inv))
             hb1 = thread_spawn(_attn_f_one, _AtnFJob(qkv.data, co1.data, n, 1, 2, inv))
             hb2 = thread_spawn(_attn_f_one, _AtnFJob(qkv.data, co2.data, n, 2, 3, inv))
@@ -986,11 +988,12 @@ def _attn_hb_one(j: "_AtnJob") -> 'i64':
                 Smat.data[b0 + u] = 0.0
         # ctx_head[t,:] = sum_u P[t,u]*V[u,:] — can cho dot + dw_proj
         gCtx = smm_fwd(Smat, gV, n, hd, n)
+        # P6 GĐ5 (probe BN): ghi PACKED theo head [t2*hd+d] — buffer rieng
+        # n*hd/worker (truoc do n*h voi 11/12 phan bi zero-fill lan merge)
         for t2 in range(n):
             d0 = t2 * hd
-            c0 = t2 * h + ho
             for d in range(hd):
-                j.ctx_out[c0 + d] = gCtx.data[d0 + d]
+                j.ctx_out[d0 + d] = gCtx.data[d0 + d]
         # dp[t,u] = sum_d dctx[t,d] * V[u,d]  -> smm_dot
         gDp = smm_dot(gDc, gV, n, n, hd)
         # ds[t,u] = P[t,u] * (dp[t,u] - dot[t]); u > t = 0
@@ -1021,16 +1024,17 @@ def _attn_hb_one(j: "_AtnJob") -> 'i64':
         # dong bo vao dqkv — vi tri (t, head, d) la duy nhat -> '=' duoc
         for t2 in range(n):
             d0 = t2 * hd
-            r0 = t2 * 3 * h + ho
+            p0 = t2 * 3 * hd
             for d in range(hd):
-                j.dq_out[r0 + d] = gDq.data[d0 + d] * inv
+                j.dq_out[p0 + d] = gDq.data[d0 + d] * inv
                 # gDkT/gDvT luu [d hang][t cot] -> doc strided [d*n + t2]
-                j.dq_out[r0 + h + d] = gDkT.data[d * n + t2] * inv
-                j.dq_out[r0 + 2 * h + d] = gDvT.data[d * n + t2]
+                j.dq_out[p0 + hd + d] = gDkT.data[d * n + t2] * inv
+                j.dq_out[p0 + 2 * hd + d] = gDvT.data[d * n + t2]
     return j.hhi - j.hlo
 
 def _attn_hb_merge(co: "list[f32]", qo: "list[f32]", ct: "list[f32]", dq: "list[f32]", n: 'i64', h: 'i64', hd: 'i64', hlo: 'i64', hhi: 'i64') -> 'i64':
-    # gop output rieng vao ctxT/dqkv (1 thread) — vi tri duy nhat/head
+    # gop output rieng PACKED (P6 GĐ5: co/[t2*hd], qo/[t2*3*hd]) vao
+    # ctxT/dqkv theo vi tri (t, head, d) — gia tri khong doi -> BIT-EXACT.
     # P6 GĐ2: cham NHeads (giong _attn_hb_one) — doc/ghi ngoai hang ban nho.
     if hlo >= NHeads:
         return 0
@@ -1038,13 +1042,13 @@ def _attn_hb_merge(co: "list[f32]", qo: "list[f32]", ct: "list[f32]", dq: "list[
         ho = head * hd
         for t2 in range(n):
             c0 = t2 * h + ho
-            d0 = t2 * hd
+            p0 = t2 * 3 * hd
             r0 = t2 * 3 * h + ho
             for d in range(hd):
-                ct[c0 + d] = co[c0 + d]
-                dq[r0 + d] = qo[r0 + d]
-                dq[r0 + h + d] = qo[r0 + h + d]
-                dq[r0 + 2 * h + d] = qo[r0 + 2 * h + d]
+                ct[c0 + d] = co[t2 * hd + d]
+                dq[r0 + d] = qo[p0 + d]
+                dq[r0 + h + d] = qo[p0 + hd + d]
+                dq[r0 + 2 * h + d] = qo[p0 + 2 * hd + d]
     return hhi - hlo
 def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                        w_proj: "Tensor", b_proj: "Tensor", n: 'i64', gout: "Tensor", simd: 'i32' = 0,
@@ -1158,30 +1162,32 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                         dqkv.data[r0 + h + d] = gDkT.data[d * n + t2] * inv
                         dqkv.data[r0 + 2 * h + d] = gDvT.data[d * n + t2]
         else:
-            ctxo0 = _attn_hb_zlist(n * h)
-            ctxo1 = _attn_hb_zlist(n * h)
-            ctxo2 = _attn_hb_zlist(n * h)
-            ctxo3 = _attn_hb_zlist(n * h)
-            ctxo4 = _attn_hb_zlist(n * h)
-            ctxo5 = _attn_hb_zlist(n * h)
-            ctxo6 = _attn_hb_zlist(n * h)
-            ctxo7 = _attn_hb_zlist(n * h)
-            ctxo8 = _attn_hb_zlist(n * h)
-            ctxo9 = _attn_hb_zlist(n * h)
-            ctxo10 = _attn_hb_zlist(n * h)
-            ctxo11 = _attn_hb_zlist(n * h)
-            dqo0 = _attn_hb_zlist(n * 3 * h)
-            dqo1 = _attn_hb_zlist(n * 3 * h)
-            dqo2 = _attn_hb_zlist(n * 3 * h)
-            dqo3 = _attn_hb_zlist(n * 3 * h)
-            dqo4 = _attn_hb_zlist(n * 3 * h)
-            dqo5 = _attn_hb_zlist(n * 3 * h)
-            dqo6 = _attn_hb_zlist(n * 3 * h)
-            dqo7 = _attn_hb_zlist(n * 3 * h)
-            dqo8 = _attn_hb_zlist(n * 3 * h)
-            dqo9 = _attn_hb_zlist(n * 3 * h)
-            dqo10 = _attn_hb_zlist(n * 3 * h)
-            dqo11 = _attn_hb_zlist(n * 3 * h)
+            # P6 GĐ5 (probe BN): buffer PACKED n*hd (ctx) + n*3*hd (dq)
+            # per worker — bo ~330ms/layer zero-fill (37.2M -> 3.15M ptu)
+            ctxo0 = _attn_hb_zlist(n * hd)
+            ctxo1 = _attn_hb_zlist(n * hd)
+            ctxo2 = _attn_hb_zlist(n * hd)
+            ctxo3 = _attn_hb_zlist(n * hd)
+            ctxo4 = _attn_hb_zlist(n * hd)
+            ctxo5 = _attn_hb_zlist(n * hd)
+            ctxo6 = _attn_hb_zlist(n * hd)
+            ctxo7 = _attn_hb_zlist(n * hd)
+            ctxo8 = _attn_hb_zlist(n * hd)
+            ctxo9 = _attn_hb_zlist(n * hd)
+            ctxo10 = _attn_hb_zlist(n * hd)
+            ctxo11 = _attn_hb_zlist(n * hd)
+            dqo0 = _attn_hb_zlist(n * 3 * hd)
+            dqo1 = _attn_hb_zlist(n * 3 * hd)
+            dqo2 = _attn_hb_zlist(n * 3 * hd)
+            dqo3 = _attn_hb_zlist(n * 3 * hd)
+            dqo4 = _attn_hb_zlist(n * 3 * hd)
+            dqo5 = _attn_hb_zlist(n * 3 * hd)
+            dqo6 = _attn_hb_zlist(n * 3 * hd)
+            dqo7 = _attn_hb_zlist(n * 3 * hd)
+            dqo8 = _attn_hb_zlist(n * 3 * hd)
+            dqo9 = _attn_hb_zlist(n * 3 * hd)
+            dqo10 = _attn_hb_zlist(n * 3 * hd)
+            dqo11 = _attn_hb_zlist(n * 3 * hd)
             hb0 = thread_spawn(_attn_hb_one, _AtnJob(qkv.data, dctxT.data, ctxo0, dqo0, n, 0, 1, inv))
             hb1 = thread_spawn(_attn_hb_one, _AtnJob(qkv.data, dctxT.data, ctxo1, dqo1, n, 1, 2, inv))
             hb2 = thread_spawn(_attn_hb_one, _AtnJob(qkv.data, dctxT.data, ctxo2, dqo2, n, 2, 3, inv))
