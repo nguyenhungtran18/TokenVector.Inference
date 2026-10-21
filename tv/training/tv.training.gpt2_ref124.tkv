@@ -845,12 +845,13 @@ def gpt2_linear_bwd(x: "Tensor", w: "Tensor", gy: "Tensor", n: 'i64', in_d: 'i64
         # dx[i,k] = sum_o gy[i,o]*w[k,o] -> smm_dot(gy, w): B=w luu [in_d hang]
         # [out_d cot] dung ngay bo tri [n hang][k giam]
         dx = smm_dot(gy, w, n, in_d, out_d)
-        # P5.4 (2026-10-20): dw = x^T . gy TRUC TIEP [in_d][out_d] — chi chuyen
-        # vi x (n x in_d) thay vi gyT (n x out_d) + transpose dwT (in_d x out_d):
-        # seq1024 qkv: 4.13M copy -> 0.79M copy/layer (probe AR P12).
-        # Cung tich luy theo i TANG DAN (p-tile ascending) -> BIT-EXACT.
-        xT = smm_transpose(x, n, in_d)
-        dw = smm_fwd(xT, gy, in_d, out_d, n)
+        # P5.4 (2026-10-20): dw = x^T . gy TRUC TIEP [in_d][out_d].
+        # P6 GĐ6 (2026-10-21, probe BP[1a/b] maxdiff 0.0): smm_fwd_at doc x
+        # truc tiep (x luu [k=n hang][m=in_d cot] = dang A^T cho trans-A) —
+        # bo luon phep smm_transpose (BO: xT2 94 + xT1 15 ms/layer MLP +
+        # xT h*n trong attn): dw 234 -> 157 ms (r2 shape), 141 -> 125 (r1).
+        # Thu tu tich luy p0 tang dan NGUYEN -> BIT-EXACT (P5.8 AX + BP).
+        dw = smm_fwd_at(x, gy, in_d, out_d, n)
         db = t_zeros([out_d])
         for i in range(n):
             base = i * out_d
@@ -1017,10 +1018,10 @@ def _attn_hb_one(j: "_AtnJob") -> 'i64':
         #   dkT[d,u] = sum_t Q[t,d] * ds[t,u]    = (Q^T . ds)[d,u]
         #   dvT[d,u] = sum_t dctx[t,d] * P[t,u]  = (dctx^T . P)[d,u]
         # Cung tich lep theo t TANG DAN (p-tile ascending) -> BIT-EXACT.
-        gQt = smm_transpose(gQ, n, hd)
-        gDkT = smm_fwd(gQt, gDs, hd, n, n)
-        gDcT = smm_transpose(gDc, n, hd)
-        gDvT = smm_fwd(gDcT, Smat, hd, n, n)
+        # P6 GĐ6: smm_fwd_at (T=64<96 — worker van an toan nhu smm_fwd
+        # truoc do; bit-exact nhu linear_bwd) — bo 2 transpose nho
+        gDkT = smm_fwd_at(gQ, gDs, hd, n, n)
+        gDvT = smm_fwd_at(gDc, Smat, hd, n, n)
         # dong bo vao dqkv — vi tri (t, head, d) la duy nhat -> '=' duoc
         for t2 in range(n):
             d0 = t2 * hd
@@ -1328,20 +1329,83 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
 
 # [dx, dw1, db1, dw2, db2] — MLP gelu erf
 # P1.1: gflat + o_w1/o_w2 — ghi thang dw1/dw2 qua linear_bwd.
+# ==== P6 GĐ6 (2026-10-21, probe BO/BP): MLP_BWD split — geluB worker ===========
+# BO @1024: whole mlp_bwd 1000ms/layer = r2 391 (dx2 140 + xT2 94 + dw2 156)
+# + r1 313 (dx1 125 + xT1 15 + dw1 125) + geluB 62 + inner 94 + bias/alloc...
+# BP: (a) smm_fwd_at thay xT+smm_fwd BIT-EXACT 0.0 (da wire trong
+# gpt2_linear_bwd); (b) geluB chay worker DONG THOI main chay dw2 GEMM:
+# 187 vs 266 ms serial (maxdiff 0.0 — nested spawn (op_gelu_erf_bwd noi bo
+# spawn 12) an toan tu worker thread). An toan du lieu: worker doc inner/dx2
+# read-only, ghi outd RIENG; gelu khong goi simd_gemm -> khong chia se
+# g_job voi dw2 main. Thu tu tinh dx -> dw -> db -> pack NGUYEN (gflat cung
+# thu tu, cung gia tri) -> BIT-EXACT. Chi simd==1; duong cu simd==0 nguyen ven.
+class _MlpGJob:
+    ind: "list[f32]"
+    gyd: "list[f32]"
+    outd: "list[f32]"
+    nn: 'i64'
+    def __init__(self, ind: "list[f32]", gyd: "list[f32]", outd: "list[f32]", nn: 'i64'):
+        self.ind = ind
+        self.gyd = gyd
+        self.outd = outd
+        self.nn = nn
+
+# worker: dA = gelu'(inner) * dx2 — record khong nhan Tensor -> t_new tu
+# list field, copy ket qua ve outd (3.15M copy ~15ms, an duoi dw2 GEMM)
+def _mlp_gelu_one(j: "_MlpGJob") -> 'i64':
+    xt2 = t_new(j.ind, [j.nn])
+    gt2 = t_new(j.gyd, [j.nn])
+    r = op_gelu_erf_bwd(xt2, gt2)
+    for i in range(j.nn):
+        j.outd[i] = r.data[i]
+    return 0
+
 def gpt2_mlp_bwd(x: "Tensor", w1: "Tensor", b1: "Tensor",
                  w2: "Tensor", b2: "Tensor", n: 'i64', gout: "Tensor", simd: 'i32' = 0,
                  gflat: 'list[f32]' = None, o_w1: 'i64' = -1, o_b1: 'i64' = -1,
                  o_w2: 'i64' = -1, o_b2: 'i64' = -1) -> 'list[Tensor]':
     h = HiddenSize
-    inner = gpt2_linear(x, w1, b1, n, h, 4 * h, simd)
-    a = t_zeros([n * 4 * h])
+    ih = 4 * h
+    inner = gpt2_linear(x, w1, b1, n, h, ih, simd)
+    a = t_zeros([n * ih])
     # P6 GĐ4: gelu recompute parallel (tuong tu fwd — vao a.data rieng)
-    gf = _gelu_fwd_par(inner.data, a.data, n * 4 * h, simd)
-    r2 = gpt2_linear_bwd(a, w2, gout, n, 4 * h, h, simd, gflat, o_w2, o_b2)
-    # dA cung shape voi inner [n, 4h] — khong truc tiep gout [n, h]
-    d_inner = op_gelu_erf_bwd(inner, r2[0])
-    r1 = gpt2_linear_bwd(x, w1, d_inner, n, h, 4 * h, simd, gflat, o_w1, o_b1)
-    return [r1[0], r1[1], r1[2], r2[1], r2[2]]
+    gf = _gelu_fwd_par(inner.data, a.data, n * ih, simd)
+    if simd != 1:
+        r2 = gpt2_linear_bwd(a, w2, gout, n, ih, h, simd, gflat, o_w2, o_b2)
+        d_inner = op_gelu_erf_bwd(inner, r2[0])
+        r1 = gpt2_linear_bwd(x, w1, d_inner, n, h, ih, simd, gflat, o_w1, o_b1)
+        return [r1[0], r1[1], r1[2], r2[1], r2[2]]
+    # duong simd==1: tach r2 — dx xong -> spawn geluB worker, main chay dw2
+    # DONG THOI (probe BP[2]: 266 -> 187 ms, maxdiff 0.0)
+    dx2 = smm_dot(gout, w2, n, ih, h)
+    outd = t_zeros([n * ih])
+    hb = thread_spawn(_mlp_gelu_one, _MlpGJob(inner.data, dx2.data, outd.data, n * ih))
+    dw2 = smm_fwd_at(a, gout, ih, h, n)
+    rj = thread_join(hb)
+    # db2 — copy NGUYEN VAN gpt2_linear_bwd (dboff path) — cung thu tu
+    if o_b2 >= 0:
+        for i in range(n):
+            base = i * h
+            for o in range(h):
+                gflat[o_b2 + o] = gflat[o_b2 + o] + gout.data[base + o]
+        rdb = t_zeros([0])
+    else:
+        db2 = t_zeros([h])
+        for i in range(n):
+            base = i * h
+            for o in range(h):
+                db2.data[o] = db2.data[o] + gout.data[base + o]
+        rdb = db2
+    # dw2 -> gflat (goff path) — copy NGUYEN VAN
+    if o_w2 >= 0:
+        for k in range(ih * h):
+            gflat[o_w2 + k] = gflat[o_w2 + k] + dw2.data[k]
+        rdw = t_zeros([0])
+    else:
+        rdw = dw2
+    d_inner = t_new(outd.data, [n, ih])
+    r1 = gpt2_linear_bwd(x, w1, d_inner, n, h, ih, simd, gflat, o_w1, o_b1)
+    return [r1[0], r1[1], r1[2], rdw, rdb]
 
 # [dx, dln1_g, dln1_b, dw_qkv, db_qkv, dw_proj, db_proj,
 #  dln2_g, dln2_b, dw1, db1, dw2, db2]

@@ -1262,6 +1262,68 @@ merge con copy luon phan zero do.
 469ms/layer — eff da 8.66×, con kho 20-30%), MLP_BWD 11.8s, LHEAD 9.3s,
 AdamW/plumbing ~4.9s (GĐ4 da do: adamw_loop 3.9s khong song song duoc).
 
+### 0.25 P6 GIAI DOAN 6 — MLP_BWD: smm_fwd_at + GELU OVERLAP (2026-10-21) — 135/135, BIT-EXACT, seq1024 −1.9%
+
+Tiep 0.24 ("Con lai": MLP_BWD 11.8s = pha lon nhat). DO TRUOC bang 2 probe:
+
+**Probe BO** (`tv/tests/simd_probe_bo.tkv`) — phan rac mlp_bwd 1 layer
+@1024 (simd=1, gflat + goff/dboff >= 0 cung duong bench; whole = 1000ms
+khop AQ 986, chk1 −1.5%):
+
+| Thanh phan | ms | Ghi chu |
+|---|---|---|
+| inner GEMM + bias | 94 + 15 | GEMM ~51 GFLOPS — near-peak AVX2 |
+| alloc a [n*4h] | 16 | |
+| geluF (proxy serial) | 94 | production parallel ~thap hon |
+| **r2 linear_bwd** | **391** | dx2 140 + **xT2 94** + dw2 156 + db/pack ~0 |
+| geluB | 62 | serial, truoc r1 |
+| **r1 linear_bwd** | **313** | dx1 125 + **xT1 15** + dw1 125 + db1 16 |
+
+GEMM 640ms/layer da near-peak (padding T=768 nhu nhau) -> chu dich la
+PHI va SERI: **transpose 109ms/layer** (xT = smm_transpose truoc dw) va
+**geluB 62ms chay serial**.
+
+**Probe BP** (`tv/tests/simd_probe_bp.tkv`) — xac thuc 2 ung vien:
+- BP[1a/b]: `dw = smm_fwd_at(x, gy, in_d, out_d, n)` (doc x truc tiep —
+  x luu [k=n hang][m=in_d cot] = dang A^T) thay `xT + smm_fwd`: r2 dw
+  234→157ms, r1 dw 141→125ms, **maxdiff = 0.0 ca 2 shape** (P5.8 AX da
+  chung minh thu tu tich luy p0 tang dan nguyen).
+- BP[2]: geluB chay worker DONG THOI main chay dw2: 266→187ms,
+  **maxdiff 0.0 — nested spawn AN TOAN** (op_gelu_erf_bwd noi bo spawn
+  12 tu worker thread). Gelu khong goi simd_gemm -> khong chia se g_job.
+
+**Wire (gpt2_ref x3 mirror, md5 sync):**
+- `gpt2_linear_bwd` (simd==1): `xT = smm_transpose; dw = smm_fwd` →
+  `dw = smm_fwd_at` — LOI MOI caller (mlp r1/r2 + attn dqkv/dproj).
+- attn worker `_attn_hb_one`: gDkT/gDvT cung smm_fwd_at (T=64<96 — worker
+  van an toan) — bo 2 transpose nho/worker.
+- `gpt2_mlp_bwd` (simd==1): tach r2 = dx smm_dot → **spawn geluB worker**,
+  main chay dw2 smm_fwd_at DONG THOI → join → db2 → pack dw2→gflat → r1;
+  thu tu dx→dw→db→pack + gflat cung thu tu NGUYEN → BIT-EXACT. Duong
+  simd==0 nguyen ven.
+
+**Ket qua:**
+- Gate **135/135** (9 suite nho + gpt2_full 33, fails=0).
+- Bench A/B (best-of-2, loss khop EXACT ca 3 seq):
+
+| seq | GĐ5 | GĐ6 | Δ |
+|---|---|---|---|
+| 8 | 15.187 | 15.313 | +0.8% (drift nhiet — FWD_BODY cung +2.3% phien nay) |
+| 256 | 23.625 | **23.516** | −0.5% |
+| 1024 | 45.890 | **45.000** | **−1.9%** |
+
+- AQ @1024: **MLP_BWD 11828→10890ms (−8.0%)**, TOTAL_bwd 29.7→28.8s
+  (−3.0%). ATTN_BWD 11.4s bit trong (transpose worker micro-win ~46ms).
+- Tỉ lệ vs torch: **16.4× / 16.7× / 12.7×**.
+
+**Ghi chu do:** phien nay may nong (FWD_BODY +2.3%, seq8 +0.8% — cung
+binary, duong serial khong doi) — so hoi 2.2s ly thuyet (transpose 109 +
+geluB 62 x 12 layer) thuc te ~0.9s + nhieu nhiet.
+
+**"Con lai" sau GĐ6 (AQ):** MLP_BWD 10.9s (GEMM 640ms/layer near-peak —
+den han), ATTN_BWD 11.3s (serial chain + worker 516ms), LHEAD 9.6s,
+AdamW/plumbing ~4.9s. P7 mixed precision van cho quyet dinh ⓑ (Haswell).
+
 ---
 
 ---
