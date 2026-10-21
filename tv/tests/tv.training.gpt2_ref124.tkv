@@ -485,7 +485,7 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
     xf_in = x
     xf = gpt2_layernorm(x, lnf_g, lnf_b)
     if simd == 1:
-        logits = smm_dot(xf, wte, n, VocabSize, h)
+        logits = smm_dot_pd(xf, wte, n, VocabSize, h)
     else:
         logits = t_zeros([n, VocabSize])
         for i in range(n):
@@ -1274,7 +1274,7 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
         # P5.5: saves[0] = logits da tinh trong forward_saved -> bo lai GEMM nay.
         logits_t = xf
         if saves == None:
-            logits_t = smm_dot(xf, wte, n, VocabSize, h)
+            logits_t = smm_dot_pd(xf, wte, n, VocabSize, h)
         else:
             logits_t = saves[0]
         gg = t_zeros([n, VocabSize])
@@ -1296,7 +1296,7 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
                 if o == ids[i]:
                     ggv = ggv - inv_n
                 gg.data[base + o] = ggv
-        dxf = smm_fwd(gg, wte, n, h, VocabSize)
+        dxf = smm_fwd_pd(gg, wte, n, h, VocabSize)
         # dwte[o,k] = sum_t gg[o,t]*xf[t,k] — trans-A: smm_fwd_at nhan truc
         # tiep gg [n][V] nhu A^T, khong materialize ggT.
         # P5.7 (2026-10-20): DA THU duong xfT/dwteT + transpose nguoc (dung
@@ -1308,7 +1308,7 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
         # @1024 so voi duong ggT + smm_fwd cu.
         # KHAC P5.7: dxf van giu smm_fwd nguyen (P5.7 bo qua dxf -> bug gradient,
         # hunk do da revert ve pre-6bf4a1c truoc khi wire).
-        dwte = smm_fwd_at(gg, xf, VocabSize, h, n)
+        dwte = smm_fwd_at_pd(gg, xf, VocabSize, h, n)
     if simd == 0:
         for i in range(n):
             row = []

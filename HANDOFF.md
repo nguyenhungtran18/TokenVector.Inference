@@ -1048,8 +1048,82 @@ chot an toan native, implement, do.
 **Con lai (theo AQ moi @1024):** ATTN_BWD 17.8s (40% cua bwd 43.9s — con
 du, GĐ3?), MLP_BWD 15.9s (chua cham), LHEAD 10.9s, FWD_BODY 11.1s (con
 ~4-5s attention fwd + ln/mlp), AdamW + plumbing ~7s. Muc tieu chu khoa
-(<=1.0x torch = 3.542s @1024) can tiep nhieu buoc: parallel con lai +
-P7 mixed precision.
+(<=1.0x torch = 3.542s @1024)can tiep nhieu buoc: parallel con lai + P7 mixed precision.
+
+### 0.22 P6 GIAI DOAN 3 — BUILDER FIX + WAVE-PARALLEL TILE-BUILD (2026-10-21) — 84/84, BIT-EXACT, seq1024 -13.0%
+
+Tiep 0.21 ("Con lai": ATTN_BWD 17.8 / MLP_BWD 15.9 chua cham / LHEAD 10.9).
+Nguyen tac repo: DO TRUOC, chon dich theo so do.
+
+**1. AQ @1024 TRUOC:** ATTN_BWD 18016 · MLP_BWD 16484 · LHEAD 11766 ·
+FWD_BODY 11234 · TOTAL_bwd 44922 ms.
+
+**2. PROBE BH (`tv/tests/simd_probe_bh.tkv`, MOI — prototype P6 GĐ3):**
+worker build tile RIENG (indexed write vao buffer main pre-alloc, KHONG append,
+KHONG simd_gemm), main replay gemm theo DUNG thu tu i0->p0->j0. Ket qua THAT:
+
+- **BIT-EXACT 0.0** ca 5 shape 124M + 3 shape nho (LIB-vs-PAR), fails=0;
+  BH[0] spawn+join x100 < 15.6ms (reps negligible).
+- **Stage A (phat hien 1): builder append -> indexed write vao buffer TAI SU
+  DUNG** — append List capacity-doubling ton ~23ns/ptu: LIB vs SER dxf
+  2468/1203, dwte 3813/1984, logits 2469/1781 ms -> **1.4-2x MOI GEMM, khong
+  can thread**.
+- **Stage B (phat hien 2): wave-parallel chi loi o shape vocab** — PAR dxf 766,
+  dwte 1187, logits 1156 ms (3.2/3.2/2.1x); shape MLP S1/S2 PAR CHAM HON SER
+  (140/172 vs 109/78 — overhead 24 buffer 78ms + spawn) -> route: vol =
+  n_i*n_p*n_j*T*T < 40M -> serial, >= 40M -> wave 12 (chi 3 GEMM vocab cua
+  lm-head dat nguong).
+- **BH[3] phan rach MLP_BWD 1 layer @1024 (sum vs whole = 1.2%):** inner_fwd
+  156 + gelu_fwd 125 + r2(dx2+dw2+db2) 469 + gelu_bwd 187 + r1(dx1+dw1+db1)
+  391 = 1297/1312 ms -> **gelu scalar = 24% MLP_BWD — ung vien GĐ4**.
+
+**3. IMPLEMENT:**
+- `tv/training/simd_matmul.tkv` (+2 mirror, md5 giong): them
+  `_tile_a_w/_tile_b_w/_tile_a_at_w` (viet DAY DU T^2 — buffer tai su dung nen
+  vung pad cung phai ghi lai); `_smm_core` + `_p58_core_simple` dung 2 buffer
+  rieng At/Bt; them `_smm_core_pd` + export `smm_fwd_pd/smm_dot_pd/
+  smm_fwd_at_pd` (route tu dong serial<->wave). Worker `_pd_one` CHI build tile
+  — T >= 96 ma goi simd_gemm dong thieu se cham vao g_job global khong lock ->
+  CAM worker goi gemm (ghi ro trong comment).
+- 5 file `gpt2_ref`: 4 site lm-head -> pd (`logits = smm_dot_pd` trong
+  forward_saved, `logits_t = smm_dot_pd`, `dxf = smm_fwd_pd`,
+  `dwte = smm_fwd_at_pd`). Attention worker khong goi gpt2_linear* (chi smm_*
+  thuong T=64) -> khong co nested spawn.
+
+**4. KET QUA:**
+- **Gate 84/84** (20+17+9+5+33, fails=0); SIMD loss vs PyTorch 0.0; SIMD grad
+  wte 8.3e-07.
+- **Bench A/B (mode1, 2 lan/seq; loss khop EXACT tung chu so voi GĐ2 ca 3 seq):**
+
+| seq | A = P6 GĐ2 | B = P6 GĐ3 | d |
+|---|---|---|---|
+| 8 | 17.078 s | **16.109 s** | -5.7% |
+| 256 | 26.141 s | **25.922 s** | -0.8% |
+| 1024 | 63.781 s | **55.469 s** | **-13.0%** |
+
+- **AQ @1024 SAU:** FWD_BODY 9390 (-16%), ATTN_BWD 15843 (-12%), MLP_BWD 14297
+  (-13%), **TOTAL_bwd 44922 -> 36484 ms (-18.8%)**. GHI CHU: LHEAD trong AQ la
+  ban sao copy trong probe CHUA wire pd -> duong library that con thap hon;
+  ground truth = TOTAL_bwd + bench.
+- Ty le vs torch (0.934/1.404/3.542 — khong do lai): **17.2x / 18.5x / 15.7x**
+  (truoc: 18.3/18.6/18.0).
+- **Seq256 loi it (do, khong doan):** tai n=256 vol cua GEMM vocab = 38.6M <
+  40M -> di serial (chi builder fix); PAR tai T=256 CHUA do -> neu can thang
+  thi probe A/B rieng truoc.
+
+**5. DOC:** plan §12 dong P6 GĐ3 + §9 (probe BH); ROADMAP dong PARITY.
+
+**Trang thai file (CHUA COMMIT):** simd_matmul x3, gpt2_ref x5,
+`tv/tests/simd_probe_bh.tkv` (moi, untracked), plan §12, ROADMAP, HANDOFF
+(chuong nay), `_seq_cfg.txt` = 1024.
+
+**Con lai (theo AQ moi @1024):** ATTN_BWD 15.8s (43% cua bwd — GĐ4? hieu
+suat worker hien van ~2.3x), MLP_BWD 14.3s (gelu scalar ~3.3s = ung vien re
+nhat), LHEAD duong pd ~7s, AdamW + plumbing ~7s (chua cham tu dau). Muc tieu
+chu khoa <=1.0x (3.542s) van can P7 — **CAN XET LAI ⓑ: may nay Xeon
+E5-2695 v3 = Haswell, chi AVX2 — KHONG AVX512/VNNI/BF16/AMX -> bf16/tf32 khong
+co toan tu hardware; torch fp32 cung AVX2 -> P7 co the KHONG mang duoc x2-3
+nhu ly thuyet tren may AMX.**
 
 ---
 

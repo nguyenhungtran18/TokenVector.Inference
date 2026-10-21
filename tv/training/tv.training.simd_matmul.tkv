@@ -96,6 +96,77 @@ def _tile_b(b: "Tensor", ndim: 'i64', p0: 'i64', pw: 'i64', r0: 'i64', br: 'i64'
         i = i + 1
     return out
 
+# ==== P6 GĐ3 (2026-10-21, probe BH): tile builder VIET TRUC TIEP vao buffer
+# tai su dung — bo append (List capacity-doubling ton ~23ns/ptu).
+# Do A/B probe BH (ALL BIT-EXACT 0.0 — day du ghi de T^2 moi tile -> noi dung
+# tile GIONG HET ban append cu):
+#   [1024x768x50257] append 2468 -> buffer 1203 ms; [50257x768x1024]
+#   3813 -> 1984 ms; [1024x50257x768] 2469 -> 1781 ms.
+# Buffer do GOI CHU tao (locals), moi luong/worker so huu buffer RIENG ->
+# khong chia se, an toan khi attention worker goi smm_* binh thuong.
+
+def _tile_a_w(out: "list[f32]", d: "list[f32]", kdim: 'i64', i0: 'i64',
+              ib: 'i64', p0: 'i64', pw: 'i64', T: 'i64') -> 'i64':
+    # A luu [m hang][k cot]: tile[i,j] = A[i0+i, p0+j] khi i<ib, j<pw — nguoc
+    # lai = 0 (buffer bi tai su dung -> PHAI ghi day du T^2 moi tile)
+    z = (float(0) - 0.0) / 1.0
+    i = 0
+    while i < T:
+        j = 0
+        while j < T:
+            if i < ib:
+                if j < pw:
+                    out[i * T + j] = (d[(i0 + i) * kdim + (p0 + j)] - 0.0) / 1.0
+                else:
+                    out[i * T + j] = z
+            else:
+                out[i * T + j] = z
+            j = j + 1
+        i = i + 1
+    return 0
+
+# B: trans_b=0 -> B luu [k hang][n cot]; trans_b=1 -> B luu [n hang][k cot]
+def _tile_b_w(out: "list[f32]", d: "list[f32]", ndim: 'i64', p0: 'i64',
+              pw: 'i64', r0: 'i64', br: 'i64', T: 'i64', trans_b: 'i32') -> 'i64':
+    z = (float(0) - 0.0) / 1.0
+    i = 0
+    while i < T:
+        j = 0
+        while j < T:
+            if i < pw:
+                if j < br:
+                    if trans_b == 1:
+                        out[i * T + j] = (d[(r0 + j) * ndim + (p0 + i)] - 0.0) / 1.0
+                    else:
+                        out[i * T + j] = (d[(p0 + i) * ndim + (r0 + j)] - 0.0) / 1.0
+                else:
+                    out[i * T + j] = z
+            else:
+                out[i * T + j] = z
+            j = j + 1
+        i = i + 1
+    return 0
+
+# trans-A: a luu [k hang][m cot] (=A^T) — giong _p58_tile_a_at nhung viet
+# vao buffer co san (At[r][t] = A_stored[(p0+t)*mdim + (i0+r)])
+def _tile_a_at_w(out: "list[f32]", d: "list[f32]", mdim: 'i64', i0: 'i64',
+                 ib: 'i64', p0: 'i64', pw: 'i64', T: 'i64') -> 'i64':
+    z = (float(0) - 0.0) / 1.0
+    r = 0
+    while r < T:
+        t = 0
+        while t < T:
+            if r < ib:
+                if t < pw:
+                    out[r * T + t] = (d[(p0 + t) * mdim + (i0 + r)] - 0.0) / 1.0
+                else:
+                    out[r * T + t] = z
+            else:
+                out[r * T + t] = z
+            t = t + 1
+        r = r + 1
+    return 0
+
 # ---- core: C = A x B (trans_b=0) hoac A x B^T (trans_b=1), tiled -----------
 def _smm_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32') -> "Tensor":
     # P0.4 (perf-plan): T = min(_tilek(k), roundup64(min(m,n))) — truoc do T
@@ -109,6 +180,9 @@ def _smm_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64
     # P0.1 (perf-plan): Ct DUY NHAT 1 lan/call — simd_gemm ghi de toan bo
     # (r = a x b, GAN khong tich luy) nen khong can sinh/dung lai moi combo.
     Ct = _zeros_list(T * T)
+    # P6 GĐ3: At/Bt cung dung 1 buffer tai su dung (viet day du T^2 moi tile)
+    AtB = _zeros_list(T * T)
+    BtB = _zeros_list(T * T)
     i0 = 0
     while i0 < m:
         ib = _imin(T, m - i0)
@@ -118,13 +192,13 @@ def _smm_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64
         p0 = 0
         while p0 < k:
             pw = _imin(T, k - p0)
-            At = _tile_a(a, k, i0, ib, p0, pw, T)
+            rva = _tile_a_w(AtB, a.data, k, i0, ib, p0, pw, T)
             j0 = 0
             while j0 < n:
                 jb = _imin(T, n - j0)
-                Bt = _tile_b(b, ndim, p0, pw, j0, jb, T, trans_b)
+                rvb = _tile_b_w(BtB, b.data, ndim, p0, pw, j0, jb, T, trans_b)
                 # quirk: simd_gemm can 3 BIEN mang rank 1 (khong nhan bieu thuc)
-                simd_gemm(At, Bt, Ct, T)
+                simd_gemm(AtB, BtB, Ct, T)
                 # tich luy vung that cua Ct vao C ngay sau moi goi
                 r = 0
                 while r < ib:
@@ -212,6 +286,9 @@ def _p58_core_simple(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndi
     C = t_zeros([m, n])
     cd = C.data
     Ct = _zeros_list(T * T)
+    # P6 GĐ3: buffer tai su dung (xem ghi chu _tile_a_w o tren)
+    AtB = _zeros_list(T * T)
+    BtB = _zeros_list(T * T)
     i0 = 0
     while i0 < m:
         ib = _imin(T, m - i0)
@@ -219,14 +296,14 @@ def _p58_core_simple(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndi
         while p0 < k:
             pw = _imin(T, k - p0)
             if trans_a == 1:
-                At = _p58_tile_a_at(a, m, i0, ib, p0, pw, T)
+                rva = _tile_a_at_w(AtB, a.data, m, i0, ib, p0, pw, T)
             else:
-                At = _tile_a(a, k, i0, ib, p0, pw, T)
+                rva = _tile_a_w(AtB, a.data, k, i0, ib, p0, pw, T)
             j0 = 0
             while j0 < n:
                 jb = _imin(T, n - j0)
-                Bt = _tile_b(b, ndim, p0, pw, j0, jb, T, trans_b)
-                simd_gemm(At, Bt, Ct, T)
+                rvb = _tile_b_w(BtB, b.data, ndim, p0, pw, j0, jb, T, trans_b)
+                simd_gemm(AtB, BtB, Ct, T)
                 r = 0
                 while r < ib:
                     bc = (i0 + r) * n + j0
@@ -266,3 +343,364 @@ def smm_dot_v2(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tenso
 #   -> smm_fwd_at(gg, xf, V, h, n) — chi transpose theo o T x T khi build.
 def smm_fwd_at(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
     return _p58_core(a, b, m, n, k, n, 0, 1)
+
+# ==== P6 GĐ3 (2026-10-21, probe BH): smm_*_pd — WAVE PARALLEL TILE-BUILD ====
+# Do duoc probe BH (ALL BIT-EXACT 0.0): build tile interpreted la phan lon chi
+# phi cua GEMM lon (append ~23ns/ptu do List capacity-doubling):
+#   [1024x768x50257] LIB 2468 -> serial+buffer 1203 -> PAR 766 ms (3.2x)
+#   [50257x768x1024] LIB 3813 -> 1984 -> 1187 ms (3.2x)
+#   [1024x50257x768] LIB 2469 -> 1781 -> 1156 ms (2.1x)
+# Co che: 12 worker build tile RIENG (indexed write vao buffer main pre-alloc,
+# KHONG append, KHONG goi simd_gemm — T>=96 ma goi dong thieu se cham vao
+# g_job global KHONG CO LOCK), MAIN replay gemm + accumulate theo DUNG thu tu
+# i0 -> p0 -> j0 -> cung tile, cung thu tu tich lu -> BIT-EXACT.
+# Do BH[0]: spawn+join x100 < 15.6ms -> overhead spawn negligible.
+#
+# Route theo kich thuoc: vol = n_i*n_p*n_j*T*T < 40M -> SERIAL (da fix builder;
+# 24 buffer78ms + spawn lam cham shape nho — BH S1/S2: PAR 140/172 vs SER
+# 109/78). Lon hon -> wave 12 (chi shape vocab 50257 cua lm-head dat nguong).
+# CHI GOI TU MAIN THREAD (attention worker chi goi smm_fwd/smm_dot thuong —
+# gpt2_linear/gpt2_linear_bwd/duong lm-head deu nam tren main).
+#
+# Quy uoc ghi ma: 1 list phang/ham, khong gan lai bien module, timing o main.
+
+def _pd_ceil(x: 'i64', T: 'i64') -> 'i64':
+    q = 0
+    r = 0
+    while r < x:
+        r = r + T
+        q = q + 1
+    return q
+
+# chia nguyen — tranh phu thuoc semanrics '/' cua i64; g < 0 -> 0
+# (slot kem truyen gidx = -1 de worker no-op van tinh duoc params an toan)
+def _pd_gq(g: 'i64', stride: 'i64') -> 'i64':
+    if g < 0:
+        return 0
+    q = 0
+    s = g
+    while s >= stride:
+        s = s - stride
+        q = q + 1
+    return q
+
+# gidx -> i0/p0/j0 theo thu tu i0 ngoai, p0, j0 — khop vong _smm_core
+# (gidx = i0idx*(n_p*n_j) + p0idx*n_j + j0idx)
+def _pd_i0(g: 'i64', stride: 'i64', T: 'i64') -> 'i64':
+    return _pd_gq(g, stride) * T
+
+def _pd_p0(g: 'i64', stride: 'i64', n_j: 'i64', T: 'i64') -> 'i64':
+    i0idx = _pd_gq(g, stride)
+    rem = g - i0idx * stride
+    return _pd_gq(rem, n_j) * T
+
+def _pd_j0(g: 'i64', stride: 'i64', n_j: 'i64', T: 'i64') -> 'i64':
+    i0idx = _pd_gq(g, stride)
+    rem = g - i0idx * stride
+    p0idx = _pd_gq(rem, n_j)
+    return (rem - p0idx * n_j) * T
+
+# worker spec — record field chi nhan scalar/container/class-cung-file;
+# Tensor KHONG truyen duoc -> day data list + dims
+
+class _PdJob:
+    gidx: 'i64'
+    ad: "list[f32]"
+    bd: "list[f32]"
+    kdim: 'i64'
+    mdim: 'i64'
+    ndim: 'i64'
+    T: 'i64'
+    trans_a: 'i32'
+    trans_b: 'i32'
+    i0: 'i64'
+    ib: 'i64'
+    p0: 'i64'
+    pw: 'i64'
+    j0: 'i64'
+    jb: 'i64'
+    ta: "list[f32]"
+    tb: "list[f32]"
+    def __init__(self, gidx: 'i64', ad: "list[f32]", bd: "list[f32]",
+                  kdim: 'i64', mdim: 'i64', ndim: 'i64', T: 'i64',
+                  trans_a: 'i32', trans_b: 'i32',
+                  i0: 'i64', ib: 'i64', p0: 'i64', pw: 'i64',
+                  j0: 'i64', jb: 'i64', ta: "list[f32]", tb: "list[f32]"):
+        self.gidx = gidx
+        self.ad = ad
+        self.bd = bd
+        self.kdim = kdim
+        self.mdim = mdim
+        self.ndim = ndim
+        self.T = T
+        self.trans_a = trans_a
+        self.trans_b = trans_b
+        self.i0 = i0
+        self.ib = ib
+        self.p0 = p0
+        self.pw = pw
+        self.j0 = j0
+        self.jb = jb
+        self.ta = ta
+        self.tb = tb
+
+def _pd_one(j: "_PdJob") -> 'i64':
+    # worker: build 1 cap tile (At + Bt) cho 1 gemm-call — KHONG simd_gemm,
+    # KHONG append (buffer main pre-alloc) -> an toan concurrent
+    if j.gidx < 0:
+        return 0
+    rv = 0
+    if j.trans_a == 1:
+        rv = _tile_a_at_w(j.ta, j.ad, j.mdim, j.i0, j.ib, j.p0, j.pw, j.T)
+    else:
+        rv = _tile_a_w(j.ta, j.ad, j.kdim, j.i0, j.ib, j.p0, j.pw, j.T)
+    rv2 = _tile_b_w(j.tb, j.bd, j.ndim, j.p0, j.pw, j.j0, j.jb, j.T, j.trans_b)
+    return rv + rv2
+
+# gemm 1 goi + accumulate vung that vao C — thu tu goi = thu tu tich lu
+
+def _pd_do(Ct: "list[f32]", ta: "list[f32]", tb: "list[f32]", T: 'i64',
+           cd: "list[f32]", i0: 'i64', ib: 'i64', j0: 'i64', jb: 'i64',
+           n: 'i64') -> 'i64':
+    simd_gemm(ta, tb, Ct, T)
+    r = 0
+    while r < ib:
+        bc = (i0 + r) * n + j0
+        bt = r * T
+        c = 0
+        while c < jb:
+            cd[bc + c] = cd[bc + c] + Ct[bt + c]
+            c = c + 1
+        r = r + 1
+    return 0
+
+def _smm_core_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64',
+                 ndim: 'i64', trans_b: 'i32', trans_a: 'i32') -> "Tensor":
+    T = _imin(_tilek(k), _roundup64(_imin(m, n)))
+    n_i = _pd_ceil(m, T)
+    n_p = _pd_ceil(k, T)
+    n_j = _pd_ceil(n, T)
+    if n_i * n_p * n_j * T * T < 40000000:
+        # shape nho (MLP/attention/gate): serial da fix builder — overhead
+        # 24 buffer (BH[2] 78ms) + spawn lam cham (BH S1/S2)
+        if trans_a == 1:
+            return _p58_core_simple(a, b, m, n, k, ndim, trans_b, 1)
+        return _smm_core(a, b, m, n, k, ndim, trans_b)
+    C = t_zeros([m, n])
+    cd = C.data
+    Ct = _zeros_list(T * T)
+    ta0 = _zeros_list(T * T)
+    ta1 = _zeros_list(T * T)
+    ta2 = _zeros_list(T * T)
+    ta3 = _zeros_list(T * T)
+    ta4 = _zeros_list(T * T)
+    ta5 = _zeros_list(T * T)
+    ta6 = _zeros_list(T * T)
+    ta7 = _zeros_list(T * T)
+    ta8 = _zeros_list(T * T)
+    ta9 = _zeros_list(T * T)
+    ta10 = _zeros_list(T * T)
+    ta11 = _zeros_list(T * T)
+    tb0 = _zeros_list(T * T)
+    tb1 = _zeros_list(T * T)
+    tb2 = _zeros_list(T * T)
+    tb3 = _zeros_list(T * T)
+    tb4 = _zeros_list(T * T)
+    tb5 = _zeros_list(T * T)
+    tb6 = _zeros_list(T * T)
+    tb7 = _zeros_list(T * T)
+    tb8 = _zeros_list(T * T)
+    tb9 = _zeros_list(T * T)
+    tb10 = _zeros_list(T * T)
+    tb11 = _zeros_list(T * T)
+    stride = n_p * n_j
+    ng = n_i * stride
+    wave = 0
+    while wave * 12 < ng:
+        # ---- derive guse + spec slot 0..11 --------------------------------
+        g0 = -1
+        if wave * 12 + 0 < ng:
+            g0 = wave * 12 + 0
+        i0_0 = _pd_i0(g0, stride, T)
+        ib_0 = _imin(T, m - i0_0)
+        p0_0 = _pd_p0(g0, stride, n_j, T)
+        pw_0 = _imin(T, k - p0_0)
+        j0_0 = _pd_j0(g0, stride, n_j, T)
+        jb_0 = _imin(T, n - j0_0)
+
+        g1 = -1
+        if wave * 12 + 1 < ng:
+            g1 = wave * 12 + 1
+        i0_1 = _pd_i0(g1, stride, T)
+        ib_1 = _imin(T, m - i0_1)
+        p0_1 = _pd_p0(g1, stride, n_j, T)
+        pw_1 = _imin(T, k - p0_1)
+        j0_1 = _pd_j0(g1, stride, n_j, T)
+        jb_1 = _imin(T, n - j0_1)
+
+        g2 = -1
+        if wave * 12 + 2 < ng:
+            g2 = wave * 12 + 2
+        i0_2 = _pd_i0(g2, stride, T)
+        ib_2 = _imin(T, m - i0_2)
+        p0_2 = _pd_p0(g2, stride, n_j, T)
+        pw_2 = _imin(T, k - p0_2)
+        j0_2 = _pd_j0(g2, stride, n_j, T)
+        jb_2 = _imin(T, n - j0_2)
+
+        g3 = -1
+        if wave * 12 + 3 < ng:
+            g3 = wave * 12 + 3
+        i0_3 = _pd_i0(g3, stride, T)
+        ib_3 = _imin(T, m - i0_3)
+        p0_3 = _pd_p0(g3, stride, n_j, T)
+        pw_3 = _imin(T, k - p0_3)
+        j0_3 = _pd_j0(g3, stride, n_j, T)
+        jb_3 = _imin(T, n - j0_3)
+
+        g4 = -1
+        if wave * 12 + 4 < ng:
+            g4 = wave * 12 + 4
+        i0_4 = _pd_i0(g4, stride, T)
+        ib_4 = _imin(T, m - i0_4)
+        p0_4 = _pd_p0(g4, stride, n_j, T)
+        pw_4 = _imin(T, k - p0_4)
+        j0_4 = _pd_j0(g4, stride, n_j, T)
+        jb_4 = _imin(T, n - j0_4)
+
+        g5 = -1
+        if wave * 12 + 5 < ng:
+            g5 = wave * 12 + 5
+        i0_5 = _pd_i0(g5, stride, T)
+        ib_5 = _imin(T, m - i0_5)
+        p0_5 = _pd_p0(g5, stride, n_j, T)
+        pw_5 = _imin(T, k - p0_5)
+        j0_5 = _pd_j0(g5, stride, n_j, T)
+        jb_5 = _imin(T, n - j0_5)
+
+        g6 = -1
+        if wave * 12 + 6 < ng:
+            g6 = wave * 12 + 6
+        i0_6 = _pd_i0(g6, stride, T)
+        ib_6 = _imin(T, m - i0_6)
+        p0_6 = _pd_p0(g6, stride, n_j, T)
+        pw_6 = _imin(T, k - p0_6)
+        j0_6 = _pd_j0(g6, stride, n_j, T)
+        jb_6 = _imin(T, n - j0_6)
+
+        g7 = -1
+        if wave * 12 + 7 < ng:
+            g7 = wave * 12 + 7
+        i0_7 = _pd_i0(g7, stride, T)
+        ib_7 = _imin(T, m - i0_7)
+        p0_7 = _pd_p0(g7, stride, n_j, T)
+        pw_7 = _imin(T, k - p0_7)
+        j0_7 = _pd_j0(g7, stride, n_j, T)
+        jb_7 = _imin(T, n - j0_7)
+
+        g8 = -1
+        if wave * 12 + 8 < ng:
+            g8 = wave * 12 + 8
+        i0_8 = _pd_i0(g8, stride, T)
+        ib_8 = _imin(T, m - i0_8)
+        p0_8 = _pd_p0(g8, stride, n_j, T)
+        pw_8 = _imin(T, k - p0_8)
+        j0_8 = _pd_j0(g8, stride, n_j, T)
+        jb_8 = _imin(T, n - j0_8)
+
+        g9 = -1
+        if wave * 12 + 9 < ng:
+            g9 = wave * 12 + 9
+        i0_9 = _pd_i0(g9, stride, T)
+        ib_9 = _imin(T, m - i0_9)
+        p0_9 = _pd_p0(g9, stride, n_j, T)
+        pw_9 = _imin(T, k - p0_9)
+        j0_9 = _pd_j0(g9, stride, n_j, T)
+        jb_9 = _imin(T, n - j0_9)
+
+        g10 = -1
+        if wave * 12 + 10 < ng:
+            g10 = wave * 12 + 10
+        i0_10 = _pd_i0(g10, stride, T)
+        ib_10 = _imin(T, m - i0_10)
+        p0_10 = _pd_p0(g10, stride, n_j, T)
+        pw_10 = _imin(T, k - p0_10)
+        j0_10 = _pd_j0(g10, stride, n_j, T)
+        jb_10 = _imin(T, n - j0_10)
+
+        g11 = -1
+        if wave * 12 + 11 < ng:
+            g11 = wave * 12 + 11
+        i0_11 = _pd_i0(g11, stride, T)
+        ib_11 = _imin(T, m - i0_11)
+        p0_11 = _pd_p0(g11, stride, n_j, T)
+        pw_11 = _imin(T, k - p0_11)
+        j0_11 = _pd_j0(g11, stride, n_j, T)
+        jb_11 = _imin(T, n - j0_11)
+
+        # ---- spawn 12 worker (unrolled — chung minh tu P6 GĐ1/GĐ2) --------
+        hb0 = thread_spawn(_pd_one, _PdJob(g0, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_0, ib_0, p0_0, pw_0, j0_0, jb_0, ta0, tb0))
+        hb1 = thread_spawn(_pd_one, _PdJob(g1, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_1, ib_1, p0_1, pw_1, j0_1, jb_1, ta1, tb1))
+        hb2 = thread_spawn(_pd_one, _PdJob(g2, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_2, ib_2, p0_2, pw_2, j0_2, jb_2, ta2, tb2))
+        hb3 = thread_spawn(_pd_one, _PdJob(g3, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_3, ib_3, p0_3, pw_3, j0_3, jb_3, ta3, tb3))
+        hb4 = thread_spawn(_pd_one, _PdJob(g4, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_4, ib_4, p0_4, pw_4, j0_4, jb_4, ta4, tb4))
+        hb5 = thread_spawn(_pd_one, _PdJob(g5, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_5, ib_5, p0_5, pw_5, j0_5, jb_5, ta5, tb5))
+        hb6 = thread_spawn(_pd_one, _PdJob(g6, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_6, ib_6, p0_6, pw_6, j0_6, jb_6, ta6, tb6))
+        hb7 = thread_spawn(_pd_one, _PdJob(g7, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_7, ib_7, p0_7, pw_7, j0_7, jb_7, ta7, tb7))
+        hb8 = thread_spawn(_pd_one, _PdJob(g8, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_8, ib_8, p0_8, pw_8, j0_8, jb_8, ta8, tb8))
+        hb9 = thread_spawn(_pd_one, _PdJob(g9, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_9, ib_9, p0_9, pw_9, j0_9, jb_9, ta9, tb9))
+        hb10 = thread_spawn(_pd_one, _PdJob(g10, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_10, ib_10, p0_10, pw_10, j0_10, jb_10, ta10, tb10))
+        hb11 = thread_spawn(_pd_one, _PdJob(g11, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_11, ib_11, p0_11, pw_11, j0_11, jb_11, ta11, tb11))
+
+        # ---- join (phai gan bien — quirk P6 GĐ1) ---------------------------
+        rj0 = thread_join(hb0)
+        rj1 = thread_join(hb1)
+        rj2 = thread_join(hb2)
+        rj3 = thread_join(hb3)
+        rj4 = thread_join(hb4)
+        rj5 = thread_join(hb5)
+        rj6 = thread_join(hb6)
+        rj7 = thread_join(hb7)
+        rj8 = thread_join(hb8)
+        rj9 = thread_join(hb9)
+        rj10 = thread_join(hb10)
+        rj11 = thread_join(hb11)
+
+        # ---- replay gemm DUNG thu tu i0 -> p0 -> j0 (bit-exact) -----------
+        if g0 >= 0:
+            rrp0 = _pd_do(Ct, ta0, tb0, T, cd, i0_0, ib_0, j0_0, jb_0, n)
+        if g1 >= 0:
+            rrp1 = _pd_do(Ct, ta1, tb1, T, cd, i0_1, ib_1, j0_1, jb_1, n)
+        if g2 >= 0:
+            rrp2 = _pd_do(Ct, ta2, tb2, T, cd, i0_2, ib_2, j0_2, jb_2, n)
+        if g3 >= 0:
+            rrp3 = _pd_do(Ct, ta3, tb3, T, cd, i0_3, ib_3, j0_3, jb_3, n)
+        if g4 >= 0:
+            rrp4 = _pd_do(Ct, ta4, tb4, T, cd, i0_4, ib_4, j0_4, jb_4, n)
+        if g5 >= 0:
+            rrp5 = _pd_do(Ct, ta5, tb5, T, cd, i0_5, ib_5, j0_5, jb_5, n)
+        if g6 >= 0:
+            rrp6 = _pd_do(Ct, ta6, tb6, T, cd, i0_6, ib_6, j0_6, jb_6, n)
+        if g7 >= 0:
+            rrp7 = _pd_do(Ct, ta7, tb7, T, cd, i0_7, ib_7, j0_7, jb_7, n)
+        if g8 >= 0:
+            rrp8 = _pd_do(Ct, ta8, tb8, T, cd, i0_8, ib_8, j0_8, jb_8, n)
+        if g9 >= 0:
+            rrp9 = _pd_do(Ct, ta9, tb9, T, cd, i0_9, ib_9, j0_9, jb_9, n)
+        if g10 >= 0:
+            rrp10 = _pd_do(Ct, ta10, tb10, T, cd, i0_10, ib_10, j0_10, jb_10, n)
+        if g11 >= 0:
+            rrp11 = _pd_do(Ct, ta11, tb11, T, cd, i0_11, ib_11, j0_11, jb_11, n)
+
+        wave = wave + 1
+    return C
+
+# export: duong PD (route tu dong serial<->wave theo nguong 40M)
+def smm_fwd_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
+    return _smm_core_pd(a, b, m, n, k, n, 0, 0)
+
+def smm_dot_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
+    return _smm_core_pd(a, b, m, n, k, k, 1, 0)
+
+def smm_fwd_at_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
+    return _smm_core_pd(a, b, m, n, k, n, 0, 1)
