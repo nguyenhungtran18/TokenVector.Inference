@@ -99,6 +99,93 @@ def gpt2_linear(x: "Tensor", w: "Tensor", b: "Tensor", n: 'i64', in_d: 'i64', ou
             y.data[i * out_d + o] = acc
     return y
 
+# ==== P6 GĐ2 (2026-10-21): SONG SONG THEO HEAD — attention FWD simd==1 ====
+# Giong P6 GĐ1 (_attn_hb_*): worker tu tinh vao output RIENG, MAIN merge
+# (probe BG2: ghi disjoint vao list chung chi 1.24x, list rieng 5.2x).
+# Doc qkv read-only; moi head ghi vi tri (t, head, d) duy nhat -> khong
+# phu thuoc thu tu -> BIT-EXACT. Worker gemm T=64 < 96 (ghi chu trong
+# gpt2_attention) -> gemm_rows_f32 thread-local, khong dung g_job khong lock.
+# `hlo >= NHeads` cham nhat cho ban nho (NHeads=4, driver van spawn 12) —
+# moi nhom worker la [k, k+1) nen kiem tra hlo la du.
+class _AtnFJob:
+    qkvl: "list[f32]"
+    ctx_out: "list[f32]"
+    n: 'i64'
+    hlo: 'i64'
+    hhi: 'i64'
+    inv: 'f64'
+    def __init__(self, qkvl: "list[f32]", ctx_out: "list[f32]", n: 'i64', hlo: 'i64', hhi: 'i64', inv: 'f64'):
+        self.qkvl = qkvl
+        self.ctx_out = ctx_out
+        self.n = n
+        self.hlo = hlo
+        self.hhi = hhi
+        self.inv = inv
+
+def _attn_f_one(j: "_AtnFJob") -> 'i64':
+    # worker: attention fwd cua head-range [hlo, hhi), doc qkv read-only
+    if j.hlo >= NHeads:
+        return 0
+    h = HiddenSize
+    hd = HeadDim
+    n = j.n
+    inv = j.inv
+    for head in range(j.hlo, j.hhi):
+        ho = head * hd
+        gQ = t_zeros([n, hd])
+        gK = t_zeros([n, hd])
+        gV = t_zeros([n, hd])
+        for t2 in range(n):
+            s0 = t2 * 3 * h + ho
+            for d in range(hd):
+                gQ.data[t2 * hd + d] = j.qkvl[s0 + d]
+                gK.data[t2 * hd + d] = j.qkvl[s0 + h + d]
+                gV.data[t2 * hd + d] = j.qkvl[s0 + 2 * h + d]
+        # Smat[t,u] = dot(Q[t,:], K[u,:]) — giong duong sequential
+        Smat = smm_dot(gQ, gK, n, n, hd)
+        # scale 1/sqrt(hd) + mask causal + softmax theo hang
+        for t2 in range(n):
+            b0 = t2 * n
+            m0 = Smat.data[b0] * inv
+            Smat.data[b0] = m0
+            mxv = m0
+            for u in range(1, t2 + 1):
+                m0 = Smat.data[b0 + u] * inv
+                Smat.data[b0 + u] = m0
+                if m0 > mxv:
+                    mxv = m0
+            totv = 0.0
+            for u in range(t2 + 1):
+                e = exp(Smat.data[b0 + u] - mxv)
+                Smat.data[b0 + u] = e
+                totv = totv + e
+            ivv = 1.0 / totv
+            for u in range(t2 + 1):
+                Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
+            for u in range(t2 + 1, n):
+                Smat.data[b0 + u] = 0.0
+        # ctx[t,:] = sum_u Smat[t,u] * V[u,:]
+        gCtx = smm_fwd(Smat, gV, n, hd, n)
+        for t2 in range(n):
+            d0 = t2 * hd
+            c0 = t2 * h + ho
+            for d in range(hd):
+                j.ctx_out[c0 + d] = gCtx.data[d0 + d]
+    return j.hhi - j.hlo
+
+def _attn_f_merge(co: "list[f32]", ct: "list[f32]", n: 'i64', h: 'i64', hd: 'i64', hlo: 'i64', hhi: 'i64') -> 'i64':
+    # gop output rieng vao ctxT (1 thread) — vi tri duy nhat/head
+    if hlo >= NHeads:
+        return 0
+    for head in range(hlo, hhi):
+        ho = head * hd
+        for t2 in range(n):
+            c0 = t2 * h + ho
+            d0 = t2 * hd
+            for d in range(hd):
+                ct[c0 + d] = co[c0 + d]
+    return hhi - hlo
+
 # ---- Attention: multi-head, causal mask, softmax fp32, proj ---------------
 # QKV layout: qkv[t, 0:h)=Q, [h,2h)=K, [2h,3h)=V; moi head lien tiep HeadDim.
 def gpt2_attention(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
@@ -113,6 +200,74 @@ def gpt2_attention(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
     ctxT = t_zeros([n, h])
     inv = 1.0 / sqrt(float(hd))
     if simd == 1:
+        # P6 GĐ2 (2026-10-21): SONG SONG THEO HEAD — attention FWD.
+        # Giong P6 GĐ1 (gpt2_attention_bwd): worker rieng + main merge (BG2:
+        # ghi list RIENG 5.2x vs list CHUNG 1.24x); moi head ghi vi tri
+        # (t, head, d) doc lap -> khong phu thuoc thu tu -> BIT-EXACT.
+        # An toan gemm: Smat = smm_dot(n,n,hd) -> T = min(64, roundup64(n))
+        # = 64; gCtx = smm_fwd(n,hd,n) -> T = min(_tilek(n), roundup64(hd))
+        # = 64 — ca hai T=64 < 96 -> simd_gemm di gemm_rows_f32 thread-local
+        # (bp __declspec(thread)), KHONG dung g_job global khong lock.
+        # Proj T >= 96 (g_job) van chay main thread sau join.
+        # n < 128: roi vong sequential duoi day — duong cu NGUYEN.
+        if n >= 128:
+            co0 = t_zeros([n, h])
+            co1 = t_zeros([n, h])
+            co2 = t_zeros([n, h])
+            co3 = t_zeros([n, h])
+            co4 = t_zeros([n, h])
+            co5 = t_zeros([n, h])
+            co6 = t_zeros([n, h])
+            co7 = t_zeros([n, h])
+            co8 = t_zeros([n, h])
+            co9 = t_zeros([n, h])
+            co10 = t_zeros([n, h])
+            co11 = t_zeros([n, h])
+            hb0 = thread_spawn(_attn_f_one, _AtnFJob(qkv.data, co0.data, n, 0, 1, inv))
+            hb1 = thread_spawn(_attn_f_one, _AtnFJob(qkv.data, co1.data, n, 1, 2, inv))
+            hb2 = thread_spawn(_attn_f_one, _AtnFJob(qkv.data, co2.data, n, 2, 3, inv))
+            hb3 = thread_spawn(_attn_f_one, _AtnFJob(qkv.data, co3.data, n, 3, 4, inv))
+            hb4 = thread_spawn(_attn_f_one, _AtnFJob(qkv.data, co4.data, n, 4, 5, inv))
+            hb5 = thread_spawn(_attn_f_one, _AtnFJob(qkv.data, co5.data, n, 5, 6, inv))
+            hb6 = thread_spawn(_attn_f_one, _AtnFJob(qkv.data, co6.data, n, 6, 7, inv))
+            hb7 = thread_spawn(_attn_f_one, _AtnFJob(qkv.data, co7.data, n, 7, 8, inv))
+            hb8 = thread_spawn(_attn_f_one, _AtnFJob(qkv.data, co8.data, n, 8, 9, inv))
+            hb9 = thread_spawn(_attn_f_one, _AtnFJob(qkv.data, co9.data, n, 9, 10, inv))
+            hb10 = thread_spawn(_attn_f_one, _AtnFJob(qkv.data, co10.data, n, 10, 11, inv))
+            hb11 = thread_spawn(_attn_f_one, _AtnFJob(qkv.data, co11.data, n, 11, 12, inv))
+            rb0 = thread_join(hb0)
+            rb1 = thread_join(hb1)
+            rb2 = thread_join(hb2)
+            rb3 = thread_join(hb3)
+            rb4 = thread_join(hb4)
+            rb5 = thread_join(hb5)
+            rb6 = thread_join(hb6)
+            rb7 = thread_join(hb7)
+            rb8 = thread_join(hb8)
+            rb9 = thread_join(hb9)
+            rb10 = thread_join(hb10)
+            rb11 = thread_join(hb11)
+            _attn_f_merge(co0.data, ctxT.data, n, h, hd, 0, 1)
+            _attn_f_merge(co1.data, ctxT.data, n, h, hd, 1, 2)
+            _attn_f_merge(co2.data, ctxT.data, n, h, hd, 2, 3)
+            _attn_f_merge(co3.data, ctxT.data, n, h, hd, 3, 4)
+            _attn_f_merge(co4.data, ctxT.data, n, h, hd, 4, 5)
+            _attn_f_merge(co5.data, ctxT.data, n, h, hd, 5, 6)
+            _attn_f_merge(co6.data, ctxT.data, n, h, hd, 6, 7)
+            _attn_f_merge(co7.data, ctxT.data, n, h, hd, 7, 8)
+            _attn_f_merge(co8.data, ctxT.data, n, h, hd, 8, 9)
+            _attn_f_merge(co9.data, ctxT.data, n, h, hd, 9, 10)
+            _attn_f_merge(co10.data, ctxT.data, n, h, hd, 10, 11)
+            _attn_f_merge(co11.data, ctxT.data, n, h, hd, 11, 12)
+            # P5.1: proj = ctxT @ Wproj (GEMM) + bproj — giong duong sequential
+            outg = smm_fwd(ctxT, w_proj, n, h, h)
+            ogd = outg.data
+            od = out.data
+            for i in range(n):
+                base = i * h
+                for o in range(h):
+                    od[base + o] = ogd[base + o] + b_proj.data[o]
+            return out
         # ---- P5.2 (perf-plan): score/ctx theo TUNG HEAD bang GEMM --------
         # VONG HEAD PHAI LA NGOAI vong token: moi head tinh DUY NHAT mot lan
         # ma tran n x n -> O(n^2*hd). (Ban draft 2026-10-20 chen no TRONG vong
@@ -532,6 +687,11 @@ def _attn_hb_zlist(sz: 'i64') -> "list[f32]":
 
 def _attn_hb_one(j: "_AtnJob") -> 'i64':
     # worker: head-range [hlo, hhi) doc qkv/dctx read-only, ghi rieng
+    # P6 GĐ2: cham NHeads — ban nho (NHeads=4) van driver spawn 12 nhom
+    # [k,k+1); head >= NHeads se ghi ngoai hang (gio han chua trigger gate
+    # vi gate nho deu n < 128, nhung OOB neu chay) -> thoat som.
+    if j.hlo >= NHeads:
+        return 0
     h = HiddenSize
     hd = HeadDim
     n = j.n
@@ -619,6 +779,9 @@ def _attn_hb_one(j: "_AtnJob") -> 'i64':
 
 def _attn_hb_merge(co: "list[f32]", qo: "list[f32]", ct: "list[f32]", dq: "list[f32]", n: 'i64', h: 'i64', hd: 'i64', hlo: 'i64', hhi: 'i64') -> 'i64':
     # gop output rieng vao ctxT/dqkv (1 thread) — vi tri duy nhat/head
+    # P6 GĐ2: cham NHeads (giong _attn_hb_one) — doc/ghi ngoai hang ban nho.
+    if hlo >= NHeads:
+        return 0
     for head in range(hlo, hhi):
         ho = head * hd
         for t2 in range(n):

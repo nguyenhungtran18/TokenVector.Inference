@@ -992,6 +992,65 @@ Tiep HANDOFF 0.19 ("con lai: P6"). Thu tu lam: do truoc, chon dich theo so do.
 (5) hieu suat merge/worker hien ~2.3x cho attention (40.7->17.8) — con
 duoc toi uu (W=12 vs4, doc qkv share...).
 
+### 0.21 P6 GIAI DOAN 2 — SONG SONG attention FWD THEO HEAD (2026-10-21) — 84/84, BIT-EXACT, seq1024 -15.3%
+
+Tiep 0.20 (danh sach "Con lai cho P6 GĐ2" muc (1)). Thu tu: doc code truoc,
+chot an toan native, implement, do.
+
+**1. CHOT AN TOAN (doc lai tkv_simd_native + simd_matmul.tkv):**
+- `SgemmF32` chi tach giua n < TKV_GEMM_MIN_N(96) (`gemm_rows_f32`, bp
+  `__declspec(thread)` — an toan concurrent) va n >= 96 (`tkv_run_mt` dung
+  `g_job[]` GLOBAL khong lock — RACE neu goi dong thieu).
+- Trong worker attention FWD co 2 GEMM, ca hai deu T = 64 < 96:
+  `Smat = smm_dot(gQ,gK,n,n,hd)` -> T = min(_tilek(hd)=64, roundup64(n)) = 64;
+  `gCtx = smm_fwd(Smat,gV,n,hd,n)` -> T = min(_tilek(n), roundup64(hd)) = 64.
+- Proj `smm_fwd(ctxT,w_proj,n,h,h)` co T >= 96 -> giu NGOAI worker, chay main
+  thread sau join (giong truoc, khong doi).
+
+**2. IMPLEMENT (5 file gpt2_ref, dong ho — 3 file 124M byte-identical, 2 file nho byte-identical, +163 dong/file):**
+- Class `_AtnFJob` (qkvl, ctx_out, n, hlo, hhi, inv) + worker `_attn_f_one`
+  (gather Q/K/V + smm_dot + scale/mask/softmax + smm_fwd gCtx, ghi vao
+  ctx_out RIENG) + `_attn_f_merge` (main gop vao ctxT) — dat TRUOC
+  `gpt2_attention` (khong forward-ref).
+- Driver `gpt2_attention` simd==1: `if n >= 128` -> 12 spawn + join + merge +
+  proj + `return out`; roi vong sequential cu = duong fallback NGUYEN.
+- **SUA LATENT OOB**: guard `if j.hlo >= NHeads: return 0` vua day vao
+  `_attn_f_one`/`_attn_f_merge` (fwd) LAI CUNG `_attn_hb_one`/`_attn_hb_merge`
+  (bwd GĐ1): mirror nho NHeads=4 van driver spawn 12 nhom [k,k+1) — head >= 4
+  doc/ghi vi tri ngoai hang. Gate nho khong trigger (deu n < 128), nhung n >= 128
+  tren ban nho se corrupt/OOB. Guard khong doi gi tren duong da test (124M:
+  hlo 0..11 < NHeads=12 -> khong cham; ban nho: worker khong chay).
+
+**3. KET QUA:**
+- **Gate 84/84** (20+17+9+5+33, fails=0); gate n=192 `P5.2 attn fwd` (duong
+  parallel MOI) = **1.0986696e-09** vs scalar; `SIMD loss vs PyTorch 0.0`.
+- **Bench A/B (mode1, best-of, cung ngay cung may):**
+
+| seq | A = P6 GĐ1 | B = P6 GĐ2 | d |
+|---|---|---|---|
+| 8 | 17.015 s | 17.078 s (fallback n<128, khong doi duong chay) | +0.4% (noise) |
+| 256 | 28.671 | **26.141** | **-8.8%** |
+| 1024 | 75.297 | **63.781** (lan 2: 64.406) | **-15.3%** |
+
+- Loss: seq8 10.572291->7.0119243, seq256 10.756927->11.807251, seq1024
+  **10.760399 -> 13.442912 KHOP EXACT** tung chu so voi GĐ1/P5.4 -> bit-exact.
+- AQ @1024: **FWD_BODY 20.8 -> 11.063 s (-9.7 s, -47%)**; ATTN_BWD 17.844
+  (giu nguyen — dung, bwd khong doi), MLP_BWD 15.937, LHEAD 10.891,
+  TOTAL_bwd 43.907, chk SUM-vs-TOTAL = 1.05e-4 <= 0.8.
+- Ty le vs torch (0.934/1.404/3.542): **18.3x / 18.6x / 18.0x**
+  (truoc GĐ2: 18.2x / 20.4x / 21.3x).
+
+**4. DOC:** plan §12 row P6 GĐ2 + ghi chu ⓐ bo sung GĐ2; ROADMAP dong PARITY.
+
+**Trang thai file (CHUA COMMIT):** gpt2_ref x5, plan §12, ROADMAP, HANDOFF
+(chuong nay), `_seq_cfg.txt` = 1024.
+
+**Con lai (theo AQ moi @1024):** ATTN_BWD 17.8s (40% cua bwd 43.9s — con
+du, GĐ3?), MLP_BWD 15.9s (chua cham), LHEAD 10.9s, FWD_BODY 11.1s (con
+~4-5s attention fwd + ln/mlp), AdamW + plumbing ~7s. Muc tieu chu khoa
+(<=1.0x torch = 3.542s @1024) can tiep nhieu buoc: parallel con lai +
+P7 mixed precision.
+
 ---
 
 ---
