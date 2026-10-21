@@ -1125,6 +1125,87 @@ E5-2695 v3 = Haswell, chi AVX2 — KHONG AVX512/VNNI/BF16/AMX -> bf16/tf32 khong
 co toan tu hardware; torch fp32 cung AVX2 -> P7 co the KHONG mang duoc x2-3
 nhu ly thuyet tren may AMX.**
 
+### 0.23 P6 GIAI DOAN 4 — PLUMBING + GELU PARALLEL (2026-10-21) — 135/135, BIT-EXACT, seq1024 −8.3%
+
+Tiep 0.22 ("Con lai": AdamW+plumbing ~6.6s seq-independent, gelu scalar 24%
+MLP_BWD). Phuong phap: DO TRUOC — probe BK (phan rac full-step) -> probe BL
+(test parallel AdamW) -> probe BM (prototype ung vien) -> wire theo so do.
+
+**Probe BK** (`tv/tests/simd_probe_bk.tkv`): full step @1024 = adamw_loop 3906
++ grad_norm 1047 + unflatten 782 + loss 671 + zero_grad 266 ms (~6.6s, KHONG
+phu thuoc seq — o seq8 no ~30% buoc) + GC +2.5GB/buoc.
+
+**Probe BL** (`tv/tests/simd_probe_bl.tkv`) — cau hoi BG2 o quy 124.4M
+(AdamW copy NGUYEN cong thuc trainer.step):
+
+| Bien the | Ket qua | Ket luan |
+|---|---|---|
+| SHARED-12 (ghi disjoint vao cung list) | 11859 ms vs serial 4218 = **0.36x** | CHET — 2.8x cham hon serial |
+| OWN+MERGE (372M copy) | 14625 ms (worker 0.5s nhung **merge 11.7s**) | CHET — merge qua dat |
+| grad_norm PAR12 | 1016 -> 453 ms = **2.24x** | BIT=0.0 THANG |
+
+-> **AdamW parallel BO** (da do ca 2 bien the); worker compute van scale tuyet
+voi (3.9s -> 0.5s) — chi viec ghi/merge o quy lon mat.
+
+**Probe BM** (`tv/tests/simd_probe_bm.tkv`) — 4 ung vien + nguyen nhan, ALL BIT-EXACT:
+
+| Test | Serial | PAR12 | Speedup |
+|---|---|---|---|
+| _norm_groups (148 nhom THAT) | 1047 ms | 375 | **2.79x** |
+| gpt2_loss n=1024 (51.5M ptu) | 719 ms | 141 | **5.10x** |
+| gpt2_loss n=256 | 187 ms | 63 | 3.0x |
+| gelu_fwd 3.14M | 110 ms | 15 | **7.33x** |
+| gelu_fwd 786K | 15 ms | 16 | ~1x (break-even -> guard 2M) |
+| gelu_bwd 3.14M | 156 ms | 31 | **5.03x** |
+| copy thuan 12M SHARED12 | 328 ms | 109 | **3.0x** |
+
+**Bai hoc quyet dinh (khong doan):**
+1. **Ghi chung KHONG bi container-lock** (BM[5]: copy shared 3.0x) — BL[2]
+   0.36x la do vong AdamW f64-boxing 124M + ghi chung, khong phai lock.
+   → parallel chi THANG cho copy/thinh thuan; vong phep toan boxing lon o
+   quy 124M co the lat (canh bao cho future shared-write).
+2. **Own-seg + merge chi thang khi merge RE** (gelu/loss/norm: seg nho;
+   AdamW 372M copy = 11.7s chet).
+3. **Guard theo do:** gelu 786K break-even (seq256 khong song song gelu),
+   loss guard n*V >= 4M (seq8 = 402K -> serial), norm guard tong >= 4M.
+4. **Bug compiler MOI (probe BM):** (a) nested list — `lst.append(seg)` voi
+   seg list[f32] o top-level main nem `ArrayTypeMismatchException` (list[f64]
+   thi duoc; trong while-loop thi duoc) → merge phai goi helper copy phang
+   UNROLLED; (b) main() qua lon (~900 dong) → `BadImageFormat` (0x8007000B)
+   → tach thanh ham rieng.
+
+**Wire (guard + bit-exact, 10 file):**
+- `_norm_groups` x4 file trainer (canonical + 3 mirror): 12 worker tinh s
+  tung nhom, main gop DUNG thu tu nhom; guard tong < 4M -> serial.
+- `gpt2_loss` (trainer canonical + gpt2_ref x3): 12 worker row, seg f64 rieng,
+  main gop DUNG thu tu row; guard n*V < 4M -> serial.
+- `_gelu_fwd_par` (gpt2_ref x3, 2 site: mlp fwd + bwd recompute): own-seg +
+  merge vao dst (dst==src in-place an toan — doc xong join moi merge);
+  guard simd==0 hoac cnt < 2M -> serial.
+- `op_gelu_erf_bwd` (ops x3): giong tren, guard n < 2M -> serial.
+
+**Ket qua:**
+- **Gate 135/135** (9 suite nho = 102 assert + gpt2_full 33, fails=0;
+  SIMD loss vs PyTorch = 0.0)
+- Bench A/B (best-of-2, loss khop EXACT ca 3 seq):
+
+| seq | GĐ3 | GĐ4 | Δ |
+|---|---|---|---|
+| 8 | 16.109 | **15.062** | −6.5% |
+| 256 | 25.922 | **25.406** | −2.0% |
+| 1024 | 55.469 | **50.875** | **−8.3%** |
+
+- AQ @1024: **TOTAL_bwd 36.5→33.5s (−8.0%)**, MLP_BWD 14.3→12.3 (−14%),
+  FWD_BODY 9.39→9.13, ATTN_BWD 15.9 (khong doi), LHEAD 9.5.
+- Tỉ lệ vs torch: **16.1× / 18.1× / 14.4×**.
+- **CHUA COMMIT** — 10 file sua + 3 probe moi (BK/BL/BM) — cho duyet.
+
+**"Con lai" sau GĐ4 (theo so do):** ATTN_BWD 15.9s (47% bwd, worker hieu suat
+~2.3× con du), AdamW con lai ~4.9s (adamw_loop 3.9s DA DO — khong song song
+duoc ca 2 bien the; + unflatten 0.78 + zero 0.27 — chua cham), LHEAD 9.5s,
+gelu fwd con du (seg alloc an ~60% loi do probe — caching seg la ung vien
+nho). Muc <=1.0x van can P7 (xem canh bao ⓑ Haswell o 0.22).
+
 ---
 
 ---

@@ -222,11 +222,169 @@ class Sampler:
         self.draws = self.draws + 1
         return idx
 
+# ==== P6 GĐ4 (2026-10-21): _norm_groups + gpt2_loss PARALLEL 12 WORKER ====
+# Do probe BM (simd_probe_bm, layout THAT 148 nhom / n=1024) — tat ca BIT=0.0:
+#   _norm_groups: serial 984-1141ms -> PAR12 375-406ms (2.5-2.9x)
+#   gpt2_loss : n=1024 (51.5M ptu) serial 703-766ms -> PAR12 109-187ms
+#                 (3.9-6.7x); n=256 4-5.5x; n=8 ~ 0ms (guard bo qua).
+# Mau: worker tinh vao seg RIENG (norm: ssl[f64] 1 ptu/nhom — 148 ptu disjoint;
+# loss: seg f64 tung worker), main gop DUNG thu tu (nhom/row) -> cung phep +
+# thu tu voi serial -> BIT-EXACT. Guard vol nho (< 4M ptu) -> serial nguyen ban
+# (gate nho khong doi hanh vi).
+# CHU Y compiler (probe BM): KHONG dung nested list (list cua list) — append
+# list[f32] vao list o top-level main nem ArrayTypeMismatchException; merge goi
+# helper copy phang, goi UNROLLED.
+
+class _TnJob:
+    gl: "list[f32]"
+    grl: "list[i64]"
+    ssl: "list[f64]"
+    glo: 'i64'
+    ghi: 'i64'
+    def __init__(self, gl: "list[f32]", grl: "list[i64]", ssl: "list[f64]",
+                  glo: 'i64', ghi: 'i64'):
+        self.gl = gl
+        self.grl = grl
+        self.ssl = ssl
+        self.glo = glo
+        self.ghi = ghi
+
+def _tn_div(a: 'i64', b: 'i64') -> 'i64':
+    # chia nhi phan (khong dung '/' cua i64)
+    if a < b:
+        return 0
+    q = 0
+    r = a
+    while r >= b:
+        step = b
+        add = 1
+        while (step + step) <= r:
+            step = step + step
+            add = add + add
+        r = r - step
+        q = q + add
+    return q
+
+def _tn_zeros(n: 'i64') -> 'list[f64]':
+    out = []
+    for i in range(n):
+        out.append(0.0)
+    return out
+
+def _tn_one(j: "_TnJob") -> 'i64':
+    # worker norm: tinh s moi nhom [glo, ghi) dung thu tu phan tu
+    off = 0
+    k = 0
+    while k < j.glo:
+        off = off + j.grl[k]
+        k = k + 1
+    kk = j.glo
+    while kk < j.ghi:
+        cnt = j.grl[kk]
+        s = 0.0
+        i = 0
+        while i < cnt:
+            s = s + j.gl[off + i] * j.gl[off + i]
+            i = i + 1
+        j.ssl[kk] = s
+        off = off + cnt
+        kk = kk + 1
+    return 0
+
+# worker loss: row-doc-lap [rlo, rhi), ghi row-loss vao seg RIENG
+# (moi worker 86 row nho — false-sharing te, do BM do duoc)
+class _LsJob:
+    xl: "list[f32]"
+    idl: "list[i64]"
+    seg: "list[f64]"
+    rlo: 'i64'
+    rhi: 'i64'
+    def __init__(self, xl: "list[f32]", idl: "list[i64]", seg: "list[f64]",
+                  rlo: 'i64', rhi: 'i64'):
+        self.xl = xl
+        self.idl = idl
+        self.seg = seg
+        self.rlo = rlo
+        self.rhi = rhi
+
+def _ls_one(j: "_LsJob") -> 'i64':
+    V = VocabSize
+    k = 0
+    i = j.rlo
+    while i < j.rhi:
+        base = i * V
+        mx = j.xl[base]
+        o = 1
+        while o < V:
+            if j.xl[base + o] > mx:
+                mx = j.xl[base + o]
+            o = o + 1
+        s = 0.0
+        o = 0
+        while o < V:
+            s = s + exp(j.xl[base + o] - mx)
+            o = o + 1
+        lse = mx + log(s)
+        j.seg[k] = lse - j.xl[base + j.idl[i]]
+        k = k + 1
+        i = i + 1
+    return 0
+
 def _norm_groups(g: 'list[f32]', groups: 'list[i64]') -> 'f32':
     # PyTorch clip_grad_norm_: norm = L2( norm(g1), norm(g2), ... )
+    # P6 GĐ4: parallel 12 worker + main gop DUNG thu tu nhom (probe BM[1]:
+    # 2.5-2.9x @124M, BIT=0.0). Guard tong < 4M ptu -> serial nguyen ban.
+    ng = len(groups)
+    tot_elem = 0
+    for k in range(ng):
+        tot_elem = tot_elem + groups[k]
+    if tot_elem >= 4000000:
+        ssl = _tn_zeros(ng)
+        b0 = _tn_div(0 * ng, 12)
+        b1 = _tn_div(1 * ng, 12)
+        b2 = _tn_div(2 * ng, 12)
+        b3 = _tn_div(3 * ng, 12)
+        b4 = _tn_div(4 * ng, 12)
+        b5 = _tn_div(5 * ng, 12)
+        b6 = _tn_div(6 * ng, 12)
+        b7 = _tn_div(7 * ng, 12)
+        b8 = _tn_div(8 * ng, 12)
+        b9 = _tn_div(9 * ng, 12)
+        b10 = _tn_div(10 * ng, 12)
+        b11 = _tn_div(11 * ng, 12)
+        h0 = thread_spawn(_tn_one, _TnJob(g, groups, ssl, b0, b1))
+        h1 = thread_spawn(_tn_one, _TnJob(g, groups, ssl, b1, b2))
+        h2 = thread_spawn(_tn_one, _TnJob(g, groups, ssl, b2, b3))
+        h3 = thread_spawn(_tn_one, _TnJob(g, groups, ssl, b3, b4))
+        h4 = thread_spawn(_tn_one, _TnJob(g, groups, ssl, b4, b5))
+        h5 = thread_spawn(_tn_one, _TnJob(g, groups, ssl, b5, b6))
+        h6 = thread_spawn(_tn_one, _TnJob(g, groups, ssl, b6, b7))
+        h7 = thread_spawn(_tn_one, _TnJob(g, groups, ssl, b7, b8))
+        h8 = thread_spawn(_tn_one, _TnJob(g, groups, ssl, b8, b9))
+        h9 = thread_spawn(_tn_one, _TnJob(g, groups, ssl, b9, b10))
+        h10 = thread_spawn(_tn_one, _TnJob(g, groups, ssl, b10, b11))
+        h11 = thread_spawn(_tn_one, _TnJob(g, groups, ssl, b11, ng))
+        j0 = thread_join(h0)
+        j1 = thread_join(h1)
+        j2 = thread_join(h2)
+        j3 = thread_join(h3)
+        j4 = thread_join(h4)
+        j5 = thread_join(h5)
+        j6 = thread_join(h6)
+        j7 = thread_join(h7)
+        j8 = thread_join(h8)
+        j9 = thread_join(h9)
+        j10 = thread_join(h10)
+        j11 = thread_join(h11)
+        # main gop DUNG thu tu nhom (giong serial: tot += nrm*nrm)
+        tot = 0.0
+        for k in range(ng):
+            nrm = sqrt(ssl[k])
+            tot = tot + nrm * nrm
+        return sqrt(tot)
     tot = 0.0
     off = 0
-    for k in range(len(groups)):
+    for k in range(ng):
         cnt = groups[k]
         s = 0.0
         for i in range(cnt):
@@ -307,7 +465,87 @@ def gpt2_forward(ids: 'list[i64]', pos: 'list[i64]',
     return logits
 
 def gpt2_loss(logits: "Tensor", ids: 'list[i64]') -> 'f32':
+    # P6 GĐ4: parallel 12 worker theo row (probe BM[2a]: 3.9-6.7x @n=1024,
+    # BIT=0.0 — row doc lap, main gop DUNG thu tu row). Guard n*V < 4M ->
+    # serial nguyen ban (seq8: 402K ptu).
     n = _sh0(logits)
+    if n * VocabSize >= 4000000:
+        xl = logits.data
+        r0 = _tn_div(0 * n, 12)
+        r1 = _tn_div(1 * n, 12)
+        r2 = _tn_div(2 * n, 12)
+        r3 = _tn_div(3 * n, 12)
+        r4 = _tn_div(4 * n, 12)
+        r5 = _tn_div(5 * n, 12)
+        r6 = _tn_div(6 * n, 12)
+        r7 = _tn_div(7 * n, 12)
+        r8 = _tn_div(8 * n, 12)
+        r9 = _tn_div(9 * n, 12)
+        r10 = _tn_div(10 * n, 12)
+        r11 = _tn_div(11 * n, 12)
+        s0 = _tn_zeros(r1 - r0)
+        s1 = _tn_zeros(r2 - r1)
+        s2 = _tn_zeros(r3 - r2)
+        s3 = _tn_zeros(r4 - r3)
+        s4 = _tn_zeros(r5 - r4)
+        s5 = _tn_zeros(r6 - r5)
+        s6 = _tn_zeros(r7 - r6)
+        s7 = _tn_zeros(r8 - r7)
+        s8 = _tn_zeros(r9 - r8)
+        s9 = _tn_zeros(r10 - r9)
+        s10 = _tn_zeros(r11 - r10)
+        s11 = _tn_zeros(n - r11)
+        h0 = thread_spawn(_ls_one, _LsJob(xl, ids, s0, r0, r1))
+        h1 = thread_spawn(_ls_one, _LsJob(xl, ids, s1, r1, r2))
+        h2 = thread_spawn(_ls_one, _LsJob(xl, ids, s2, r2, r3))
+        h3 = thread_spawn(_ls_one, _LsJob(xl, ids, s3, r3, r4))
+        h4 = thread_spawn(_ls_one, _LsJob(xl, ids, s4, r4, r5))
+        h5 = thread_spawn(_ls_one, _LsJob(xl, ids, s5, r5, r6))
+        h6 = thread_spawn(_ls_one, _LsJob(xl, ids, s6, r6, r7))
+        h7 = thread_spawn(_ls_one, _LsJob(xl, ids, s7, r7, r8))
+        h8 = thread_spawn(_ls_one, _LsJob(xl, ids, s8, r8, r9))
+        h9 = thread_spawn(_ls_one, _LsJob(xl, ids, s9, r9, r10))
+        h10 = thread_spawn(_ls_one, _LsJob(xl, ids, s10, r10, r11))
+        h11 = thread_spawn(_ls_one, _LsJob(xl, ids, s11, r11, n))
+        j0 = thread_join(h0)
+        j1 = thread_join(h1)
+        j2 = thread_join(h2)
+        j3 = thread_join(h3)
+        j4 = thread_join(h4)
+        j5 = thread_join(h5)
+        j6 = thread_join(h6)
+        j7 = thread_join(h7)
+        j8 = thread_join(h8)
+        j9 = thread_join(h9)
+        j10 = thread_join(h10)
+        j11 = thread_join(h11)
+        # main gop DUNG thu tu row (cung phep + thu tu voi serial)
+        tot = 0.0
+        for i2 in range(r1 - r0):
+            tot = tot + s0[i2]
+        for i2 in range(r2 - r1):
+            tot = tot + s1[i2]
+        for i2 in range(r3 - r2):
+            tot = tot + s2[i2]
+        for i2 in range(r4 - r3):
+            tot = tot + s3[i2]
+        for i2 in range(r5 - r4):
+            tot = tot + s4[i2]
+        for i2 in range(r6 - r5):
+            tot = tot + s5[i2]
+        for i2 in range(r7 - r6):
+            tot = tot + s6[i2]
+        for i2 in range(r8 - r7):
+            tot = tot + s7[i2]
+        for i2 in range(r9 - r8):
+            tot = tot + s8[i2]
+        for i2 in range(r10 - r9):
+            tot = tot + s9[i2]
+        for i2 in range(r11 - r10):
+            tot = tot + s10[i2]
+        for i2 in range(n - r11):
+            tot = tot + s11[i2]
+        return tot / float(n)
     tot = 0.0
     for i in range(n):
         base = i * VocabSize

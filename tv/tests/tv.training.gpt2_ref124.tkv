@@ -371,13 +371,123 @@ def gpt2_attention(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
             out.data[t * h + o] = acc
     return out
 
+# ==== P6 GĐ4 (2026-10-21): GELU erf PARALLEL 12 WORKER (own-seg + merge) ===
+# Do probe BM[3]/[4] (BIT=0.0): 3.14M (n=1024) fwd 110 -> 15ms (7.3x),
+# bwd 156 -> 31ms (5.0x); 786K (n=256) break-even (15 vs 16ms) -> guard 2M,
+# duoi do dung vong serial nguyen ban (gate nho khong doi hanh vi).
+# Worker: doc src [lo,hi), ghi vao seg RIENG; main merge vao dst DUNG thu tu
+# ptu (dst co the == src: in-place, worker doc xong join moi merge -> an toan).
+# KHONG dung nested list (bug compiler — probe BM): merge = _gf_mcopy phang.
+class _GfJob:
+    sl: "list[f32]"
+    seg: "list[f32]"
+    lo: 'i64'
+    hi: 'i64'
+    def __init__(self, sl: "list[f32]", seg: "list[f32]", lo: 'i64', hi: 'i64'):
+        self.sl = sl
+        self.seg = seg
+        self.lo = lo
+        self.hi = hi
+
+def _gf_div(a: 'i64', b: 'i64') -> 'i64':
+    # chia nhi phan (khong dung '/' cua i64)
+    if a < b:
+        return 0
+    q = 0
+    r = a
+    while r >= b:
+        step = b
+        add = 1
+        while (step + step) <= r:
+            step = step + step
+            add = add + add
+        r = r - step
+        q = q + add
+    return q
+
+def _gf_zeros(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(0.0)
+    return out
+
+def _gf_one(j: "_GfJob") -> 'i64':
+    k = 0
+    i = j.lo
+    while i < j.hi:
+        j.seg[k] = gelu_erf(j.sl[i])
+        k = k + 1
+        i = i + 1
+    return 0
+
+def _gf_mcopy(dst: 'list[f32]', sg: 'list[f32]', lo: 'i64', cnt: 'i64') -> 'i32':
+    for i in range(cnt):
+        dst[lo + i] = sg[i]
+    return 0
+
+def _gelu_fwd_par(sl: 'list[f32]', dl: 'list[f32]', cnt: 'i64', simd: 'i32') -> 'i32':
+    if simd == 0 or cnt < 2000000:
+        for i in range(cnt):
+            dl[i] = gelu_erf(sl[i])
+        return 0
+    sz = _gf_div(cnt, 12)
+    t0 = _gf_zeros(sz)
+    t1 = _gf_zeros(sz)
+    t2 = _gf_zeros(sz)
+    t3 = _gf_zeros(sz)
+    t4 = _gf_zeros(sz)
+    t5 = _gf_zeros(sz)
+    t6 = _gf_zeros(sz)
+    t7 = _gf_zeros(sz)
+    t8 = _gf_zeros(sz)
+    t9 = _gf_zeros(sz)
+    t10 = _gf_zeros(sz)
+    t11 = _gf_zeros(cnt - 11 * sz)
+    h0 = thread_spawn(_gf_one, _GfJob(sl, t0, 0, sz))
+    h1 = thread_spawn(_gf_one, _GfJob(sl, t1, sz, 2 * sz))
+    h2 = thread_spawn(_gf_one, _GfJob(sl, t2, 2 * sz, 3 * sz))
+    h3 = thread_spawn(_gf_one, _GfJob(sl, t3, 3 * sz, 4 * sz))
+    h4 = thread_spawn(_gf_one, _GfJob(sl, t4, 4 * sz, 5 * sz))
+    h5 = thread_spawn(_gf_one, _GfJob(sl, t5, 5 * sz, 6 * sz))
+    h6 = thread_spawn(_gf_one, _GfJob(sl, t6, 6 * sz, 7 * sz))
+    h7 = thread_spawn(_gf_one, _GfJob(sl, t7, 7 * sz, 8 * sz))
+    h8 = thread_spawn(_gf_one, _GfJob(sl, t8, 8 * sz, 9 * sz))
+    h9 = thread_spawn(_gf_one, _GfJob(sl, t9, 9 * sz, 10 * sz))
+    h10 = thread_spawn(_gf_one, _GfJob(sl, t10, 10 * sz, 11 * sz))
+    h11 = thread_spawn(_gf_one, _GfJob(sl, t11, 11 * sz, cnt))
+    j0 = thread_join(h0)
+    j1 = thread_join(h1)
+    j2 = thread_join(h2)
+    j3 = thread_join(h3)
+    j4 = thread_join(h4)
+    j5 = thread_join(h5)
+    j6 = thread_join(h6)
+    j7 = thread_join(h7)
+    j8 = thread_join(h8)
+    j9 = thread_join(h9)
+    j10 = thread_join(h10)
+    j11 = thread_join(h11)
+    g0 = _gf_mcopy(dl, t0, 0, sz)
+    g1 = _gf_mcopy(dl, t1, sz, sz)
+    g2 = _gf_mcopy(dl, t2, 2 * sz, sz)
+    g3 = _gf_mcopy(dl, t3, 3 * sz, sz)
+    g4 = _gf_mcopy(dl, t4, 4 * sz, sz)
+    g5 = _gf_mcopy(dl, t5, 5 * sz, sz)
+    g6 = _gf_mcopy(dl, t6, 6 * sz, sz)
+    g7 = _gf_mcopy(dl, t7, 7 * sz, sz)
+    g8 = _gf_mcopy(dl, t8, 8 * sz, sz)
+    g9 = _gf_mcopy(dl, t9, 9 * sz, sz)
+    g10 = _gf_mcopy(dl, t10, 10 * sz, sz)
+    g11 = _gf_mcopy(dl, t11, 11 * sz, cnt - 11 * sz)
+    return 0
+
 # ---- MLP: linear -> gelu(erf) -> linear ------------------------------------
 def gpt2_mlp(x: "Tensor", w1: "Tensor", b1: "Tensor",
              w2: "Tensor", b2: "Tensor", n: 'i64', simd: 'i32' = 0) -> "Tensor":
     h = HiddenSize
     inner = gpt2_linear(x, w1, b1, n, h, 4 * h, simd)
-    for i in range(n * 4 * h):
-        inner.data[i] = gelu_erf(inner.data[i])
+    # P6 GĐ4: gelu parallel (guard 2M + simd==1 — probe BM[3]: 7.3x @3.14M)
+    gf = _gelu_fwd_par(inner.data, inner.data, n * 4 * h, simd)
     return gpt2_linear(inner, w2, b2, n, 4 * h, h, simd)
 
 # ---- Block: ln -> attn -> add -> ln -> mlp -> add -------------------------
@@ -504,11 +614,153 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
         out.append(rsin[i])
     return out
 
+# ==== P6 GĐ4 (2026-10-21): gpt2_loss PARALLEL 12 WORKER theo ROW ===========
+# Do probe BM[2a] (BIT=0.0): n=1024 (51.5M ptu) serial 703-766ms -> PAR12
+# 109-187ms (3.9-6.7x); n=256 3-5.5x; n=8 ~ 0ms (guard bo qua).
+# Worker: row doc-lap, ghi row-loss vao seg f64 RIENG; main gop DUNG thu tu
+# row -> cung phep + thu tu voi serial -> BIT-EXACT. Guard n*V < 4M -> serial.
+class _LsJob:
+    xl: "list[f32]"
+    idl: "list[i64]"
+    seg: "list[f64]"
+    rlo: 'i64'
+    rhi: 'i64'
+    def __init__(self, xl: "list[f32]", idl: "list[i64]", seg: "list[f64]",
+                  rlo: 'i64', rhi: 'i64'):
+        self.xl = xl
+        self.idl = idl
+        self.seg = seg
+        self.rlo = rlo
+        self.rhi = rhi
+
+def _ls_div(a: 'i64', b: 'i64') -> 'i64':
+    # chia nhi phan (khong dung '/' cua i64)
+    if a < b:
+        return 0
+    q = 0
+    r = a
+    while r >= b:
+        step = b
+        add = 1
+        while (step + step) <= r:
+            step = step + step
+            add = add + add
+        r = r - step
+        q = q + add
+    return q
+
+def _ls_zeros(n: 'i64') -> 'list[f64]':
+    out = []
+    for i in range(n):
+        out.append(0.0)
+    return out
+
+def _ls_one(j: "_LsJob") -> 'i64':
+    V = VocabSize
+    k = 0
+    i = j.rlo
+    while i < j.rhi:
+        base = i * V
+        mx = j.xl[base]
+        o = 1
+        while o < V:
+            if j.xl[base + o] > mx:
+                mx = j.xl[base + o]
+            o = o + 1
+        s = 0.0
+        o = 0
+        while o < V:
+            s = s + exp(j.xl[base + o] - mx)
+            o = o + 1
+        lse = mx + log(s)
+        j.seg[k] = lse - j.xl[base + j.idl[i]]
+        k = k + 1
+        i = i + 1
+    return 0
+
 # ---- Cross entropy (F.cross_entropy mean = mean_i(lse_i - logit[i, y_i]))
 # NOT op_ce_fwd: op do mask theo TRUC LOAI va chia /cnt — dung cho parity op,
 # khong phai cong thuc mean toan bo token cua PyTorch.
 def gpt2_loss(logits: "Tensor", ids: 'list[i64]') -> 'f32':
+    # P6 GĐ4: parallel 12 worker theo row (probe BM[2a]: 3.9-6.7x, BIT=0.0)
     n = _sh0(logits)
+    if n * VocabSize >= 4000000:
+        xl = logits.data
+        r0 = _ls_div(0 * n, 12)
+        r1 = _ls_div(1 * n, 12)
+        r2 = _ls_div(2 * n, 12)
+        r3 = _ls_div(3 * n, 12)
+        r4 = _ls_div(4 * n, 12)
+        r5 = _ls_div(5 * n, 12)
+        r6 = _ls_div(6 * n, 12)
+        r7 = _ls_div(7 * n, 12)
+        r8 = _ls_div(8 * n, 12)
+        r9 = _ls_div(9 * n, 12)
+        r10 = _ls_div(10 * n, 12)
+        r11 = _ls_div(11 * n, 12)
+        s0 = _ls_zeros(r1 - r0)
+        s1 = _ls_zeros(r2 - r1)
+        s2 = _ls_zeros(r3 - r2)
+        s3 = _ls_zeros(r4 - r3)
+        s4 = _ls_zeros(r5 - r4)
+        s5 = _ls_zeros(r6 - r5)
+        s6 = _ls_zeros(r7 - r6)
+        s7 = _ls_zeros(r8 - r7)
+        s8 = _ls_zeros(r9 - r8)
+        s9 = _ls_zeros(r10 - r9)
+        s10 = _ls_zeros(r11 - r10)
+        s11 = _ls_zeros(n - r11)
+        h0 = thread_spawn(_ls_one, _LsJob(xl, ids, s0, r0, r1))
+        h1 = thread_spawn(_ls_one, _LsJob(xl, ids, s1, r1, r2))
+        h2 = thread_spawn(_ls_one, _LsJob(xl, ids, s2, r2, r3))
+        h3 = thread_spawn(_ls_one, _LsJob(xl, ids, s3, r3, r4))
+        h4 = thread_spawn(_ls_one, _LsJob(xl, ids, s4, r4, r5))
+        h5 = thread_spawn(_ls_one, _LsJob(xl, ids, s5, r5, r6))
+        h6 = thread_spawn(_ls_one, _LsJob(xl, ids, s6, r6, r7))
+        h7 = thread_spawn(_ls_one, _LsJob(xl, ids, s7, r7, r8))
+        h8 = thread_spawn(_ls_one, _LsJob(xl, ids, s8, r8, r9))
+        h9 = thread_spawn(_ls_one, _LsJob(xl, ids, s9, r9, r10))
+        h10 = thread_spawn(_ls_one, _LsJob(xl, ids, s10, r10, r11))
+        h11 = thread_spawn(_ls_one, _LsJob(xl, ids, s11, r11, n))
+        j0 = thread_join(h0)
+        j1 = thread_join(h1)
+        j2 = thread_join(h2)
+        j3 = thread_join(h3)
+        j4 = thread_join(h4)
+        j5 = thread_join(h5)
+        j6 = thread_join(h6)
+        j7 = thread_join(h7)
+        j8 = thread_join(h8)
+        j9 = thread_join(h9)
+        j10 = thread_join(h10)
+        j11 = thread_join(h11)
+        # main gop DUNG thu tu row (cung phep + thu tu voi serial)
+        tot = 0.0
+        for i2 in range(r1 - r0):
+            tot = tot + s0[i2]
+        for i2 in range(r2 - r1):
+            tot = tot + s1[i2]
+        for i2 in range(r3 - r2):
+            tot = tot + s2[i2]
+        for i2 in range(r4 - r3):
+            tot = tot + s3[i2]
+        for i2 in range(r5 - r4):
+            tot = tot + s4[i2]
+        for i2 in range(r6 - r5):
+            tot = tot + s5[i2]
+        for i2 in range(r7 - r6):
+            tot = tot + s6[i2]
+        for i2 in range(r8 - r7):
+            tot = tot + s7[i2]
+        for i2 in range(r9 - r8):
+            tot = tot + s8[i2]
+        for i2 in range(r10 - r9):
+            tot = tot + s9[i2]
+        for i2 in range(r11 - r10):
+            tot = tot + s10[i2]
+        for i2 in range(n - r11):
+            tot = tot + s11[i2]
+        return tot / float(n)
     tot = 0.0
     for i in range(n):
         base = i * VocabSize
@@ -1077,8 +1329,8 @@ def gpt2_mlp_bwd(x: "Tensor", w1: "Tensor", b1: "Tensor",
     h = HiddenSize
     inner = gpt2_linear(x, w1, b1, n, h, 4 * h, simd)
     a = t_zeros([n * 4 * h])
-    for i in range(n * 4 * h):
-        a.data[i] = gelu_erf(inner.data[i])
+    # P6 GĐ4: gelu recompute parallel (tuong tu fwd — vao a.data rieng)
+    gf = _gelu_fwd_par(inner.data, a.data, n * 4 * h, simd)
     r2 = gpt2_linear_bwd(a, w2, gout, n, 4 * h, h, simd, gflat, o_w2, o_b2)
     # dA cung shape voi inner [n, 4h] — khong truc tiep gout [n, h]
     d_inner = op_gelu_erf_bwd(inner, r2[0])

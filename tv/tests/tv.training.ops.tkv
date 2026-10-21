@@ -172,14 +172,128 @@ def op_gelu_erf_fwd(x: "Tensor") -> "Tensor":
         y.data[i] = gelu_erf(x.data[i])
     return y
 
+# ==== P6 GĐ4 (2026-10-21): op_gelu_erf_bwd PARALLEL 12 WORKER =============
+# Dong bo voi canonical ops.tkv. Do probe BM[4] (BIT=0.0): 3.14M serial 156ms
+# -> PAR12 31ms (5.0x); 786K break-even -> guard 2M, duoi do serial nguyen ban
+# (autograd/tape nho khong doi hanh vi). Worker doc x/gy, ghi seg RIENG; main
+# merge vao g.data DUNG thu tu ptu. Ten helper rieng _ogb_* (khong trung
+# _gf_* cua gpt2_ref).
+class _OpGbJob:
+    xl: "list[f32]"
+    gyl: "list[f32]"
+    seg: "list[f32]"
+    lo: 'i64'
+    hi: 'i64'
+    def __init__(self, xl: "list[f32]", gyl: "list[f32]", seg: "list[f32]",
+                  lo: 'i64', hi: 'i64'):
+        self.xl = xl
+        self.gyl = gyl
+        self.seg = seg
+        self.lo = lo
+        self.hi = hi
+
+def _ogb_div(a: 'i64', b: 'i64') -> 'i64':
+    # chia nhi phan (khong dung '/' cua i64)
+    if a < b:
+        return 0
+    q = 0
+    r = a
+    while r >= b:
+        step = b
+        add = 1
+        while (step + step) <= r:
+            step = step + step
+            add = add + add
+        r = r - step
+        q = q + add
+    return q
+
+def _ogb_zeros(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(0.0)
+    return out
+
+def _ogb_one(j: "_OpGbJob") -> 'i64':
+    s = 1.4142135623730951
+    k = 0
+    i = j.lo
+    while i < j.hi:
+        v = j.xl[i]
+        dgelu = 0.5 * (1.0 + erf(v / s)) + v * 0.3989422804014327 * exp(-0.5 * v * v)
+        j.seg[k] = j.gyl[i] * dgelu
+        k = k + 1
+        i = i + 1
+    return 0
+
+def _ogb_mcopy(dst: 'list[f32]', sg: 'list[f32]', lo: 'i64', cnt: 'i64') -> 'i32':
+    for i in range(cnt):
+        dst[lo + i] = sg[i]
+    return 0
+
 def op_gelu_erf_bwd(x: "Tensor", gy: "Tensor") -> "Tensor":
     n = len(x.data)
     g = t_zeros([n])
-    s = 1.4142135623730951
-    for i in range(n):
-        v = x.data[i]
-        dgelu = 0.5 * (1.0 + erf(v / s)) + v * 0.3989422804014327 * exp(-0.5 * v * v)
-        g.data[i] = gy.data[i] * dgelu
+    if n < 2000000:
+        s = 1.4142135623730951
+        for i in range(n):
+            v = x.data[i]
+            dgelu = 0.5 * (1.0 + erf(v / s)) + v * 0.3989422804014327 * exp(-0.5 * v * v)
+            g.data[i] = gy.data[i] * dgelu
+        return g
+    # P6 GĐ4: parallel 12 worker own-seg + merge (probe BM[4]: 5.0x, BIT=0.0)
+    xl = x.data
+    gyl = gy.data
+    sz = _ogb_div(n, 12)
+    t0 = _ogb_zeros(sz)
+    t1 = _ogb_zeros(sz)
+    t2 = _ogb_zeros(sz)
+    t3 = _ogb_zeros(sz)
+    t4 = _ogb_zeros(sz)
+    t5 = _ogb_zeros(sz)
+    t6 = _ogb_zeros(sz)
+    t7 = _ogb_zeros(sz)
+    t8 = _ogb_zeros(sz)
+    t9 = _ogb_zeros(sz)
+    t10 = _ogb_zeros(sz)
+    t11 = _ogb_zeros(n - 11 * sz)
+    h0 = thread_spawn(_ogb_one, _OpGbJob(xl, gyl, t0, 0, sz))
+    h1 = thread_spawn(_ogb_one, _OpGbJob(xl, gyl, t1, sz, 2 * sz))
+    h2 = thread_spawn(_ogb_one, _OpGbJob(xl, gyl, t2, 2 * sz, 3 * sz))
+    h3 = thread_spawn(_ogb_one, _OpGbJob(xl, gyl, t3, 3 * sz, 4 * sz))
+    h4 = thread_spawn(_ogb_one, _OpGbJob(xl, gyl, t4, 4 * sz, 5 * sz))
+    h5 = thread_spawn(_ogb_one, _OpGbJob(xl, gyl, t5, 5 * sz, 6 * sz))
+    h6 = thread_spawn(_ogb_one, _OpGbJob(xl, gyl, t6, 6 * sz, 7 * sz))
+    h7 = thread_spawn(_ogb_one, _OpGbJob(xl, gyl, t7, 7 * sz, 8 * sz))
+    h8 = thread_spawn(_ogb_one, _OpGbJob(xl, gyl, t8, 8 * sz, 9 * sz))
+    h9 = thread_spawn(_ogb_one, _OpGbJob(xl, gyl, t9, 9 * sz, 10 * sz))
+    h10 = thread_spawn(_ogb_one, _OpGbJob(xl, gyl, t10, 10 * sz, 11 * sz))
+    h11 = thread_spawn(_ogb_one, _OpGbJob(xl, gyl, t11, 11 * sz, n))
+    j0 = thread_join(h0)
+    j1 = thread_join(h1)
+    j2 = thread_join(h2)
+    j3 = thread_join(h3)
+    j4 = thread_join(h4)
+    j5 = thread_join(h5)
+    j6 = thread_join(h6)
+    j7 = thread_join(h7)
+    j8 = thread_join(h8)
+    j9 = thread_join(h9)
+    j10 = thread_join(h10)
+    j11 = thread_join(h11)
+    gd = g.data
+    m0 = _ogb_mcopy(gd, t0, 0, sz)
+    m1 = _ogb_mcopy(gd, t1, sz, sz)
+    m2 = _ogb_mcopy(gd, t2, 2 * sz, sz)
+    m3 = _ogb_mcopy(gd, t3, 3 * sz, sz)
+    m4 = _ogb_mcopy(gd, t4, 4 * sz, sz)
+    m5 = _ogb_mcopy(gd, t5, 5 * sz, sz)
+    m6 = _ogb_mcopy(gd, t6, 6 * sz, sz)
+    m7 = _ogb_mcopy(gd, t7, 7 * sz, sz)
+    m8 = _ogb_mcopy(gd, t8, 8 * sz, sz)
+    m9 = _ogb_mcopy(gd, t9, 9 * sz, sz)
+    m10 = _ogb_mcopy(gd, t10, 10 * sz, sz)
+    m11 = _ogb_mcopy(gd, t11, 11 * sz, n - 11 * sz)
     return g
 
 def op_gelu_tanh_fwd(x: "Tensor") -> "Tensor":
