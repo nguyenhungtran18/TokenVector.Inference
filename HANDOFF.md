@@ -855,6 +855,145 @@ dong bo 5 mirror gpt2_ref; (4) wire vao lm-head (dwte = smm_fwd_at bo
 transpose ggT) va cac call site do duoc loi; (5) gate 84/84 + bench
 seq8/256/1024 A/B; (6) cap nhat plan §12 + ROADMAP + chuong nay.
 
+### 0.19 P5.8 — KERNEL GEMM v2 HOAN THANH (2026-10-21) — 84/84, BIT-EXACT, TRANS-A DA WIRE
+
+Tat ca 6 viec o 0.18 da xong. Tom tat ket qua:
+
+**1. NGUYEN NHAN v2 cham 2.5x DA CHOT (probe BC — 2/2 gia thuyet xac nhan):**
+call site `simd_add`/`simd_sub` (System.Numerics) trong CUNG function voi vong
+lap scalar lam compiler codegen vong do cham 2.5-4x — DU KHONG CHAY:
+- BC-v5 = v3 + chi nhanh use_acc + goi simd_add/sub (use_acc=0): 156-172ms
+- BC-v6 = copy nguyen van `_p58_core` vao probe: 156-171ms
+- BC-v1 (clone v1): 63ms — ca hai bit-exact 0.0 -> NOI DUNG function, khong
+  phai vi tri/checkbox module simd_matmul.
+
+**2. Split + do + chon (tv/training/simd_matmul.tkv, 3 file dong ho):**
+- `_p58_core_simple` — v1 loop nest + trans_a, KHONG call site simd_add/sub.
+- `_p58_core_acc` — DA XOA sau khi DO: @1024 CHAM HON (dxf [1024,50257]
+  3000 vs 2703ms; simd_add allocate ~16B/element — SIMD_NOTES P2-2); ctx/score
+  nho 31 = 31 khong do duoc lech. Khong co shape nao acc nhanh hon.
+- `_p58_core` dispatch TOAN BO -> simple; exports `smm_fwd_v2`/`smm_dot_v2`/
+  `smm_fwd_at` giu nguyen. Determism: p0 tang dan, cung gia tri p-tile.
+- AX chay lai ca @256 va @1024: **ALL BIT-EXACT 0.0**. Dwte trans-A loi ro:
+  @256 1578 vs 2000 cu, @1024 3938-4109 vs 4797-5078 (~400-900ms); dxf/
+  logits/qkv/score/ctx = ngang cu trong noise ±250ms (cu tu no cung doi
+  2609 -> 2328 giua 2 lan chay).
+
+**3. Revert hunk P5.7 (commit `6bf4a1c`, bug dxf):** reverse-apply patch —
+canonical `gpt2_ref.tkv` == pre-6bf4a1c == ref124 mirror (byte-strips).
+2 mirror `tv.training.gpt2_ref` la test-variant CONSTANTS 256/64 CO Y (tu
+dau, giu nguyen — code da khop). Hunk P5.7 bo qua tich luy `dxf` khi
+`use_flat=1` (dxf=0 -> grad ln_f/sau do sai toan bo) + `xfT` tinh roi khong dung.
+
+**4. Wire lm-head (ca 5 file gpt2_ref):** `dwte = smm_fwd_at(gg, xf,
+VocabSize, h, n)` thay `ggT = smm_transpose + smm_fwd` (bo transpose
+~1.5s @1024). `dxf` van `smm_fwd` nguyen — KHAC P5.7 (khong dot vao dxf).
+Cac call site `smm_transpose` khac (xT/gQt/gDcT/ctxTt) KHONG doi — khong do
+duoc loi nao cho chung.
+
+**5. Gate 84/84 XANH** (20+17+9+5+33, fails=0) — gom `SIMD grad wte vs
+PyTorch 8.3e-07` (wire smm_fwd_at duoc kiem chung parity) + `SIMD loss 0.0`.
+Loss seq1024 10.760399 -> 13.442912 KHOP EXACT tung chu so voi P5.4 — backward
+chay dung duong P5.x sach.
+
+**6. Bench A/B full step (mode1, `simd_bench_124m_seq`, best-of):**
+
+| seq | A = P5.6 | B = P5.8 | Δ |
+|---|---|---|---|
+| 8 | 16.937 s | 17.156 s (3 lan: 17.58/17.16/17.20, loss deterministic) | +1.3% (drift nhiet) |
+| 256 | 29.735 | 29.641 | −0.3% |
+| 1024 | 99.719 | **98.203** | **−1.5%** |
+
+Ty le vs torch (0.934/1.404/3.542): **18.4x / 21.1x / 27.7x**.
+
+**7. Docs:** plan §12 (P5.8 row ✅ XONG + so do), ROADMAP_TRAIN dong PARITY
+(ladder P5.6 ✅ / P5.7 ❌ / P5.8 ✅) da cap nhat trong chuong nay.
+
+**Trang thai file (CHUA COMMIT):** simd_matmul ×3, gpt2_ref ×5,
+`tv/tests/simd_probe_bc.tkv` (moi, untracked), `_seq_cfg.txt` = 8
+(untracked, bench config). `out/*.exe` da build lai tu nguon hien tai.
+
+**Con lai:** (a) commit neu chu khoa cho phep; (b) P6 — da luong GEMM
+(dieu kien can toi parity, xem plan §12 quyet dinh a); (c) seq8 batch nho
+chua chuyen doi (18.4x — overhead interpreter, rieng biet voi seq1024).
+
+---
+
+
+### 0.20 P6 GIAI DOAN1 — SONG SONG attention_bwd THEO HEAD (2026-10-21) — 84/84, BIT-EXACT, seq1024 −23.3%
+
+Tiep HANDOFF 0.19 ("con lai: P6"). Thu tu lam: do truoc, chon dich theo so do.
+
+**1. SO DO CHON DICH (profile fixture n=8 + AQ @1024):**
+- n=8: BWD 10.2s (53%), ADAMW 5.0s (26%), plumbing ~10%.
+- @1024: ATTN_BWD_x12 **40.7s** (59% cua bwd 68.8s), MLP_BWD 16.2s,
+  LHEAD_BWD 11.5s, FWD_BODY 20.8s, embed 0.9s.
+- **BAC BO**: env `TKV_GEMM_MIN_N=64/48` (nho hon96 de tile T=64 cham native
+  MT) — seq256 30.75/30.44s vs control 29.67s = SLOWER (dung ly do native
+  chon96); loss khong doi.
+
+**2. KHAI NIEM DA LUONG — probe BF/BG/BG2 (moi, untracked):**
+- BF: `thread_spawn(fn, record)` + `thread_join` dung gia tri; record field
+  chi nhan scalar/container/class-cung-file (**Tensor bi tu choi** -> truyen
+  `list[f32]` = Tensor.data); ghi DISJOINT vao list chung bit-exact 0.0;
+  NHUNG 4w = 0.35x so voi 1w (cpu ratio 3.1 -> thread THAT dang chay, moi
+  worker cham ~10x).
+- BG: pure-local worker (4 lan cong viec, cung wall ~1x) = ~3.7x hieu luc
+  thuc; doc list chung ~3x.
+- **BG2 — CHOT**: ghi disjoint vao CUNG list = **1.24x** (78->63ms), moi
+  worker list RIENG = **5.2x** (15ms). => QUY TAC P6: worker tu tinh vao
+  output RIENG, MAIN thread gop (merge khong chanh vi chi1 thread).
+- `thread_join` phai GAN bien (dung lenh doc lap bi loi il_codegen);
+  import `tv.training.tensor` truc tiep (khong di qua gpt2_ref124).
+
+**3. AN TOAN NATIVE (doc tkv_simd_native.c):**
+- `SgemmF32`: n < TKV_GEMM_MIN_N(96) -> `gemm_rows_f32` truc tiep, buffer
+  pack `static __declspec(thread)` -> **AN TOAN concurrent**.
+- n >= 96 -> `tkv_run_mt` dung `g_job[]` GLOBAL **KHONG CO LOCK** -> GOI
+  DONG THIEU = RACE. => worker P6 chi duoc cham vao gemm T=64<96 (attention
+  dung dung T=64) — minh chet day du.
+
+**4. IMPLEMENT (5 file gpt2_ref, dong ho):**
+- Module-level: class `_AtnJob` (qkvl/dctxl/ctx_out/dq_out list[f32] + n/hlo/
+  hhi/inv), `_attn_hb_zlist`, worker `_attn_hb_one` (body head cu, ghi vao
+  output rieng), `_attn_hb_merge` (gop1 head, main thread).
+- Driver `gpt2_attention_bwd` simd==1: `if n < 128` -> vong cu NGUYEN;
+  `else` -> spawn 12 worker (1/head) + join + merge. Doc qkv/dctx read-only,
+  moi head ghi vi tri (t, head, d) DUY NHAT khong tich luy chéo -> khong
+  phu thuoc thu tu -> **BIT-EXACT**.
+- Bug sua trong qua trinh: thay chuoi `qkv.data` an substring trong
+  `dqkv.data` -> `dj.qkvl` (3 dong) -> sua thanh `j.dq_out`.
+
+**5. KET QUA:**
+- **Gate 84/84** (20+17+9+5+33); gate n=192 attn bwd simd-vs-scalar digits
+  GIONG HET truoc P6; loss moi bench khop exact (10.760399 -> 13.442912).
+- **Bench A/B (mode1, best-of):**
+
+| seq | A = P5.8 | B = P6 GĐ1 | Δ |
+|---|---|---|---|
+| 8 | 17.156 s | 17.015 s (fallback n<128, loss identical) | −0.8% |
+| 256 | 29.641 | 28.671 | −3.3% |
+| 1024 | 98.203 | **75.297** (lan 2: 76.4) | **−23.3%** |
+
+- AQ @1024: **ATTN_BWD 40.7 -> 17.8 s (−56%)**, TOTAL_bwd 68.8 -> 44.3 s.
+- Ty le vs torch: 18.2x / 20.4x / **21.3x** (truoc 18.4/21.1/27.7).
+
+**6. DOC:** plan §12 row P6 GĐ1 ✅ + quyet dinh ⓐ da tra loi (COC primitive)
++ risk "blocked" da hethan; ROADMAP dong PARITY.
+
+**Trang thai file (CHUA COMMIT — gom ca P5.8 truoc):** gpt2_ref ×5, simd_matmul
+×3, docs ×3, probe bc/bf/bg/bg2 (untracked), `_seq_cfg.txt` = 1024.
+
+**Con lai cho P6 GĐ2 (theo gia tri do duoc):**
+(1) attention FWD per-head (cung mau, FWD_BODY 20.8s chua cham);
+(2) LHEAD_BWD 11.9s (softmax row loop — song song theo token);
+(3) MLP_BWD 15.8s (gelu scalar + tile build — xem lai thanh phan);
+(4) AdamW + plumbing ~7s (elementwise — can own-list + merge qua nhieu buffer);
+(5) hieu suat merge/worker hien ~2.3x cho attention (40.7->17.8) — con
+duoc toi uu (W=12 vs4, doc qkv share...).
+
+---
+
 ---
 
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES

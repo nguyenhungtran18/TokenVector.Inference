@@ -1,0 +1,89 @@
+# PROBE BG2 — tiep BG: ghi vao list CHUNG (disjoint) co phai nguoi lam cham?
+# BG2[1]: 1 worker ghi toan bo W (1M ptu x reps)                 — baseline
+# BG2[2]: 4 worker ghi DISJOINT quarter vao CUNG 1 list W        — neu cham -> lock tren list chung
+# BG2[3]: 4 worker ghi vao 4 list RIENG (cung tong so ptu)       — neu nhanh -> chung minh
+# Tat ca list duoc tao TRUOC khi do (khong tinh fill vao timing).
+# Chay: tkvc tv/tests/simd_probe_bg2.tkv out/bg2.exe main && ./out/bg2.exe
+import tv.training.tensor
+import tv.training.simd_matmul
+
+class Bg2Job:
+    w: "list[f32]"
+    lo: 'i64'
+    hi: 'i64'
+    reps: 'i64'
+    def __init__(self, w: "list[f32]", lo: 'i64', hi: 'i64', reps: 'i64'):
+        self.w = w
+        self.lo = lo
+        self.hi = hi
+        self.reps = reps
+
+def _mklist(n: 'i64') -> "list[f32]":
+    out = []
+    for i in range(n):
+        out.append((float(i % 97) - 48.0) / 48.0)
+    return out
+
+def _bg2_write(j: "Bg2Job") -> 'i64':
+    w = j.w
+    i = j.lo
+    while i < j.hi:
+        v = w[i]
+        r = 0
+        while r < j.reps:
+            v = v * 0.999 + 0.001
+            r = r + 1
+        w[i] = v
+        i = i + 1
+    return j.hi - j.lo
+
+def main() -> 'i32':
+    N = 1048576
+    Q = 262144
+    reps = 50
+
+    # ---- tao TRUOC tat ca list -------------------------------------------
+    w1 = _mklist(N)
+    ws = _mklist(N)
+    o1 = _mklist(Q)
+    o2 = _mklist(Q)
+    o3 = _mklist(Q)
+    o4 = _mklist(Q)
+
+    # ---- BG2[1]: 1 worker toan bo ----------------------------------------
+    t0 = now_ms()
+    r0 = _bg2_write(Bg2Job(w1, 0, N, reps))
+    t1 = now_ms()
+    d1 = t1 - t0
+
+    # ---- BG2[2]: 4 worker DISJOINT vao CUNG list -------------------------
+    t0 = now_ms()
+    h1 = thread_spawn(_bg2_write, Bg2Job(ws, 0, Q, reps))
+    h2 = thread_spawn(_bg2_write, Bg2Job(ws, Q, 2 * Q, reps))
+    h3 = thread_spawn(_bg2_write, Bg2Job(ws, 2 * Q, 3 * Q, reps))
+    h4 = thread_spawn(_bg2_write, Bg2Job(ws, 3 * Q, N, reps))
+    s1 = thread_join(h1)
+    s2 = thread_join(h2)
+    s3 = thread_join(h3)
+    s4 = thread_join(h4)
+    t1 = now_ms()
+    d4 = t1 - t0
+
+    # ---- BG2[3]: 4 worker list RIENG (cung tong ptu) ---------------------
+    t0 = now_ms()
+    g1 = thread_spawn(_bg2_write, Bg2Job(o1, 0, Q, reps))
+    g2 = thread_spawn(_bg2_write, Bg2Job(o2, 0, Q, reps))
+    g3 = thread_spawn(_bg2_write, Bg2Job(o3, 0, Q, reps))
+    g4 = thread_spawn(_bg2_write, Bg2Job(o4, 0, Q, reps))
+    q1 = thread_join(g1)
+    q2 = thread_join(g2)
+    q3 = thread_join(g3)
+    q4 = thread_join(g4)
+    t1 = now_ms()
+    d4o = t1 - t0
+
+    print("BG2[1] 1w shared-all   = " + str(d1) + " ms (rows=" + str(r0) + ")")
+    print("BG2[2] 4w shared-split = " + str(d4) + " ms  vs1w ratio=" + str(d1 / d4) + " (rows=" + str(s1 + s2 + s3 + s4) + ")")
+    print("BG2[3] 4w own-lists    = " + str(d4o) + " ms  ratio=" + str(d1 / d4o) + " (rows=" + str(q1 + q2 + q3 + q4) + ")")
+    print("BG2 done")
+    return 0

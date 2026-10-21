@@ -499,6 +499,138 @@ def gpt2_linear_bwd(x: "Tensor", w: "Tensor", gy: "Tensor", n: 'i64', in_d: 'i64
 
 # [dx, dw_qkv, db_qkv, dw_proj, db_proj] — MHA causal (recompute softmax)
 # P1.1: gflat + o_qkv/o_proj — ghi thang dw_qkv (qua linear_bwd) + dw_proj.
+# ==== P6 (2026-10-21): SONG SONG THEO HEAD — attention_bwd simd==1 ====
+# Boi toan (probe BF/BG/BG2): thread_spawn/join qua record (field list[f32])
+# bit-exact; NHUNG ghi vao list CHUNG tu nhieu worker chi 1.24x (chanh ghi),
+# moi worker list RIENG = 5.2x -> worker tu tinh vao output rieng, MAIN gop.
+# An toan: moi head ghi vi tri (t, head, d) DUY NHAT, khong tich luy chéo
+# -> ket qua khong phu thuoc thu tu head -> BIT-EXACT. Worker gemm deu
+# T=64 < 96 -> simd_gemm di truc tiep gemm_rows_f32 (bp __declspec(thread))
+#, KHONG dung g_job global (khong co lock) -> an toan khi goi dong thieu.
+class _AtnJob:
+    qkvl: "list[f32]"
+    dctxl: "list[f32]"
+    ctx_out: "list[f32]"
+    dq_out: "list[f32]"
+    n: 'i64'
+    hlo: 'i64'
+    hhi: 'i64'
+    inv: 'f64'
+    def __init__(self, qkvl: "list[f32]", dctxl: "list[f32]", ctx_out: "list[f32]", dq_out: "list[f32]", n: 'i64', hlo: 'i64', hhi: 'i64', inv: 'f64'):
+        self.qkvl = qkvl
+        self.dctxl = dctxl
+        self.ctx_out = ctx_out
+        self.dq_out = dq_out
+        self.n = n
+        self.hlo = hlo
+        self.hhi = hhi
+        self.inv = inv
+
+def _attn_hb_zlist(sz: 'i64') -> "list[f32]":
+    tt = t_zeros([sz])
+    return tt.data
+
+def _attn_hb_one(j: "_AtnJob") -> 'i64':
+    # worker: head-range [hlo, hhi) doc qkv/dctx read-only, ghi rieng
+    h = HiddenSize
+    hd = HeadDim
+    n = j.n
+    inv = j.inv
+    for head in range(j.hlo, j.hhi):
+        ho = head * hd
+        gQ = t_zeros([n, hd])
+        gK = t_zeros([n, hd])
+        gV = t_zeros([n, hd])
+        gDc = t_zeros([n, hd])
+        for t2 in range(n):
+            s0 = t2 * 3 * h + ho
+            c0 = t2 * h + ho
+            for d in range(hd):
+                gQ.data[t2 * hd + d] = j.qkvl[s0 + d]
+                gK.data[t2 * hd + d] = j.qkvl[s0 + h + d]
+                gV.data[t2 * hd + d] = j.qkvl[s0 + 2 * h + d]
+                gDc.data[t2 * hd + d] = j.dctxl[c0 + d]
+        # P = softmax causal (cach tinh giong draft forward)
+        Smat = smm_dot(gQ, gK, n, n, hd)
+        for t2 in range(n):
+            b0 = t2 * n
+            m0 = Smat.data[b0] * inv
+            Smat.data[b0] = m0
+            mxv = m0
+            for u in range(1, t2 + 1):
+                m0 = Smat.data[b0 + u] * inv
+                Smat.data[b0 + u] = m0
+                if m0 > mxv:
+                    mxv = m0
+            totv = 0.0
+            for u in range(t2 + 1):
+                e = exp(Smat.data[b0 + u] - mxv)
+                Smat.data[b0 + u] = e
+                totv = totv + e
+            ivv = 1.0 / totv
+            for u in range(t2 + 1):
+                Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
+            for u in range(t2 + 1, n):
+                Smat.data[b0 + u] = 0.0
+        # ctx_head[t,:] = sum_u P[t,u]*V[u,:] — can cho dot + dw_proj
+        gCtx = smm_fwd(Smat, gV, n, hd, n)
+        for t2 in range(n):
+            d0 = t2 * hd
+            c0 = t2 * h + ho
+            for d in range(hd):
+                j.ctx_out[c0 + d] = gCtx.data[d0 + d]
+        # dp[t,u] = sum_d dctx[t,d] * V[u,d]  -> smm_dot
+        gDp = smm_dot(gDc, gV, n, n, hd)
+        # ds[t,u] = P[t,u] * (dp[t,u] - dot[t]); u > t = 0
+        gDs = t_zeros([n, n])
+        for t2 in range(n):
+            b0 = t2 * n
+            d0 = t2 * hd
+            dotv = 0.0
+            for d in range(hd):
+                dotv = dotv + gDc.data[d0 + d] * gCtx.data[d0 + d]
+            for u in range(t2 + 1):
+                gDs.data[b0 + u] = Smat.data[b0 + u] * (gDp.data[b0 + u] - dotv)
+            for u in range(t2 + 1, n):
+                gDs.data[b0 + u] = 0.0
+        # dq[t,d] = inv * sum_u ds[t,u] * K[u,d]
+        gDq = smm_fwd(gDs, gK, n, hd, n)
+        # P5.4 (2026-10-20, do PROBE AR): BO 2 transpose n x n (1M phan
+        # tu/head — 672 ms/layer @seq1024 = 16% attention_bwd). Tinh dk/dv
+        # bang chuyen vi NHO cua Q/dctx (n x hd = 65K) roi doc STRIDED khi
+        # writeback:
+        #   dkT[d,u] = sum_t Q[t,d] * ds[t,u]    = (Q^T . ds)[d,u]
+        #   dvT[d,u] = sum_t dctx[t,d] * P[t,u]  = (dctx^T . P)[d,u]
+        # Cung tich lep theo t TANG DAN (p-tile ascending) -> BIT-EXACT.
+        gQt = smm_transpose(gQ, n, hd)
+        gDkT = smm_fwd(gQt, gDs, hd, n, n)
+        gDcT = smm_transpose(gDc, n, hd)
+        gDvT = smm_fwd(gDcT, Smat, hd, n, n)
+        # dong bo vao dqkv — vi tri (t, head, d) la duy nhat -> '=' duoc
+        for t2 in range(n):
+            d0 = t2 * hd
+            r0 = t2 * 3 * h + ho
+            for d in range(hd):
+                j.dq_out[r0 + d] = gDq.data[d0 + d] * inv
+                # gDkT/gDvT luu [d hang][t cot] -> doc strided [d*n + t2]
+                j.dq_out[r0 + h + d] = gDkT.data[d * n + t2] * inv
+                j.dq_out[r0 + 2 * h + d] = gDvT.data[d * n + t2]
+    return j.hhi - j.hlo
+
+def _attn_hb_merge(co: "list[f32]", qo: "list[f32]", ct: "list[f32]", dq: "list[f32]", n: 'i64', h: 'i64', hd: 'i64', hlo: 'i64', hhi: 'i64') -> 'i64':
+    # gop output rieng vao ctxT/dqkv (1 thread) — vi tri duy nhat/head
+    for head in range(hlo, hhi):
+        ho = head * hd
+        for t2 in range(n):
+            c0 = t2 * h + ho
+            d0 = t2 * hd
+            r0 = t2 * 3 * h + ho
+            for d in range(hd):
+                ct[c0 + d] = co[c0 + d]
+                dq[r0 + d] = qo[r0 + d]
+                dq[r0 + h + d] = qo[r0 + h + d]
+                dq[r0 + 2 * h + d] = qo[r0 + 2 * h + d]
+    return hhi - hlo
 def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                        w_proj: "Tensor", b_proj: "Tensor", n: 'i64', gout: "Tensor", simd: 'i32' = 0,
                        gflat: 'list[f32]' = None, o_qkv: 'i64' = -1, o_bqkv: 'i64' = -1,
@@ -528,85 +660,149 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
         # cuc bo (list khong co .data), truyen dctxT [n,h] vao smm_dot voi
         # k = hd (sai bo tri), dao chu/dk, va khong tinh dw_proj/db_proj nua.
         # Vong head LA NGOAI vong token -> moi head mot lan n x n, O(n^2*hd).
-        for head in range(NHeads):
-            ho = head * hd
-            gQ = t_zeros([n, hd])
-            gK = t_zeros([n, hd])
-            gV = t_zeros([n, hd])
-            gDc = t_zeros([n, hd])
-            for t2 in range(n):
-                s0 = t2 * 3 * h + ho
-                c0 = t2 * h + ho
-                for d in range(hd):
-                    gQ.data[t2 * hd + d] = qkv.data[s0 + d]
-                    gK.data[t2 * hd + d] = qkv.data[s0 + h + d]
-                    gV.data[t2 * hd + d] = qkv.data[s0 + 2 * h + d]
-                    gDc.data[t2 * hd + d] = dctxT.data[c0 + d]
-            # P = softmax causal (cach tinh giong draft forward)
-            Smat = smm_dot(gQ, gK, n, n, hd)
-            for t2 in range(n):
-                b0 = t2 * n
-                m0 = Smat.data[b0] * inv
-                Smat.data[b0] = m0
-                mxv = m0
-                for u in range(1, t2 + 1):
-                    m0 = Smat.data[b0 + u] * inv
-                    Smat.data[b0 + u] = m0
-                    if m0 > mxv:
-                        mxv = m0
-                totv = 0.0
-                for u in range(t2 + 1):
-                    e = exp(Smat.data[b0 + u] - mxv)
-                    Smat.data[b0 + u] = e
-                    totv = totv + e
-                ivv = 1.0 / totv
-                for u in range(t2 + 1):
-                    Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
-                for u in range(t2 + 1, n):
-                    Smat.data[b0 + u] = 0.0
-            # ctx_head[t,:] = sum_u P[t,u]*V[u,:] — can cho dot + dw_proj
-            gCtx = smm_fwd(Smat, gV, n, hd, n)
-            for t2 in range(n):
-                d0 = t2 * hd
-                c0 = t2 * h + ho
-                for d in range(hd):
-                    ctxT.data[c0 + d] = gCtx.data[d0 + d]
-            # dp[t,u] = sum_d dctx[t,d] * V[u,d]  -> smm_dot
-            gDp = smm_dot(gDc, gV, n, n, hd)
-            # ds[t,u] = P[t,u] * (dp[t,u] - dot[t]); u > t = 0
-            gDs = t_zeros([n, n])
-            for t2 in range(n):
-                b0 = t2 * n
-                d0 = t2 * hd
-                dotv = 0.0
-                for d in range(hd):
-                    dotv = dotv + gDc.data[d0 + d] * gCtx.data[d0 + d]
-                for u in range(t2 + 1):
-                    gDs.data[b0 + u] = Smat.data[b0 + u] * (gDp.data[b0 + u] - dotv)
-                for u in range(t2 + 1, n):
-                    gDs.data[b0 + u] = 0.0
-            # dq[t,d] = inv * sum_u ds[t,u] * K[u,d]
-            gDq = smm_fwd(gDs, gK, n, hd, n)
-            # P5.4 (2026-10-20, do PROBE AR): BO 2 transpose n x n (1M phan
-            # tu/head — 672 ms/layer @seq1024 = 16% attention_bwd). Tinh dk/dv
-            # bang chuyen vi NHO cua Q/dctx (n x hd = 65K) roi doc STRIDED khi
-            # writeback:
-            #   dkT[d,u] = sum_t Q[t,d] * ds[t,u]    = (Q^T . ds)[d,u]
-            #   dvT[d,u] = sum_t dctx[t,d] * P[t,u]  = (dctx^T . P)[d,u]
-            # Cung tich lep theo t TANG DAN (p-tile ascending) -> BIT-EXACT.
-            gQt = smm_transpose(gQ, n, hd)
-            gDkT = smm_fwd(gQt, gDs, hd, n, n)
-            gDcT = smm_transpose(gDc, n, hd)
-            gDvT = smm_fwd(gDcT, Smat, hd, n, n)
-            # dong bo vao dqkv — vi tri (t, head, d) la duy nhat -> '=' duoc
-            for t2 in range(n):
-                d0 = t2 * hd
-                r0 = t2 * 3 * h + ho
-                for d in range(hd):
-                    dqkv.data[r0 + d] = gDq.data[d0 + d] * inv
-                    # gDkT/gDvT luu [d hang][t cot] -> doc strided [d*n + t2]
-                    dqkv.data[r0 + h + d] = gDkT.data[d * n + t2] * inv
-                    dqkv.data[r0 + 2 * h + d] = gDvT.data[d * n + t2]
+        # P6 (2026-10-21): SONG SONG 12 HEAD — worker rieng, main gop (xem
+        # ghi chu P6 truoc gpt2_attention_bwd). n nho (<128) giu duong cu.
+        if n < 128:
+            for head in range(NHeads):
+                ho = head * hd
+                gQ = t_zeros([n, hd])
+                gK = t_zeros([n, hd])
+                gV = t_zeros([n, hd])
+                gDc = t_zeros([n, hd])
+                for t2 in range(n):
+                    s0 = t2 * 3 * h + ho
+                    c0 = t2 * h + ho
+                    for d in range(hd):
+                        gQ.data[t2 * hd + d] = qkv.data[s0 + d]
+                        gK.data[t2 * hd + d] = qkv.data[s0 + h + d]
+                        gV.data[t2 * hd + d] = qkv.data[s0 + 2 * h + d]
+                        gDc.data[t2 * hd + d] = dctxT.data[c0 + d]
+                # P = softmax causal (cach tinh giong draft forward)
+                Smat = smm_dot(gQ, gK, n, n, hd)
+                for t2 in range(n):
+                    b0 = t2 * n
+                    m0 = Smat.data[b0] * inv
+                    Smat.data[b0] = m0
+                    mxv = m0
+                    for u in range(1, t2 + 1):
+                        m0 = Smat.data[b0 + u] * inv
+                        Smat.data[b0 + u] = m0
+                        if m0 > mxv:
+                            mxv = m0
+                    totv = 0.0
+                    for u in range(t2 + 1):
+                        e = exp(Smat.data[b0 + u] - mxv)
+                        Smat.data[b0 + u] = e
+                        totv = totv + e
+                    ivv = 1.0 / totv
+                    for u in range(t2 + 1):
+                        Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
+                    for u in range(t2 + 1, n):
+                        Smat.data[b0 + u] = 0.0
+                # ctx_head[t,:] = sum_u P[t,u]*V[u,:] — can cho dot + dw_proj
+                gCtx = smm_fwd(Smat, gV, n, hd, n)
+                for t2 in range(n):
+                    d0 = t2 * hd
+                    c0 = t2 * h + ho
+                    for d in range(hd):
+                        ctxT.data[c0 + d] = gCtx.data[d0 + d]
+                # dp[t,u] = sum_d dctx[t,d] * V[u,d]  -> smm_dot
+                gDp = smm_dot(gDc, gV, n, n, hd)
+                # ds[t,u] = P[t,u] * (dp[t,u] - dot[t]); u > t = 0
+                gDs = t_zeros([n, n])
+                for t2 in range(n):
+                    b0 = t2 * n
+                    d0 = t2 * hd
+                    dotv = 0.0
+                    for d in range(hd):
+                        dotv = dotv + gDc.data[d0 + d] * gCtx.data[d0 + d]
+                    for u in range(t2 + 1):
+                        gDs.data[b0 + u] = Smat.data[b0 + u] * (gDp.data[b0 + u] - dotv)
+                    for u in range(t2 + 1, n):
+                        gDs.data[b0 + u] = 0.0
+                # dq[t,d] = inv * sum_u ds[t,u] * K[u,d]
+                gDq = smm_fwd(gDs, gK, n, hd, n)
+                # P5.4 (2026-10-20, do PROBE AR): BO 2 transpose n x n (1M phan
+                # tu/head — 672 ms/layer @seq1024 = 16% attention_bwd). Tinh dk/dv
+                # bang chuyen vi NHO cua Q/dctx (n x hd = 65K) roi doc STRIDED khi
+                # writeback:
+                #   dkT[d,u] = sum_t Q[t,d] * ds[t,u]    = (Q^T . ds)[d,u]
+                #   dvT[d,u] = sum_t dctx[t,d] * P[t,u]  = (dctx^T . P)[d,u]
+                # Cung tich lep theo t TANG DAN (p-tile ascending) -> BIT-EXACT.
+                gQt = smm_transpose(gQ, n, hd)
+                gDkT = smm_fwd(gQt, gDs, hd, n, n)
+                gDcT = smm_transpose(gDc, n, hd)
+                gDvT = smm_fwd(gDcT, Smat, hd, n, n)
+                # dong bo vao dqkv — vi tri (t, head, d) la duy nhat -> '=' duoc
+                for t2 in range(n):
+                    d0 = t2 * hd
+                    r0 = t2 * 3 * h + ho
+                    for d in range(hd):
+                        dqkv.data[r0 + d] = gDq.data[d0 + d] * inv
+                        # gDkT/gDvT luu [d hang][t cot] -> doc strided [d*n + t2]
+                        dqkv.data[r0 + h + d] = gDkT.data[d * n + t2] * inv
+                        dqkv.data[r0 + 2 * h + d] = gDvT.data[d * n + t2]
+        else:
+            ctxo0 = _attn_hb_zlist(n * h)
+            ctxo1 = _attn_hb_zlist(n * h)
+            ctxo2 = _attn_hb_zlist(n * h)
+            ctxo3 = _attn_hb_zlist(n * h)
+            ctxo4 = _attn_hb_zlist(n * h)
+            ctxo5 = _attn_hb_zlist(n * h)
+            ctxo6 = _attn_hb_zlist(n * h)
+            ctxo7 = _attn_hb_zlist(n * h)
+            ctxo8 = _attn_hb_zlist(n * h)
+            ctxo9 = _attn_hb_zlist(n * h)
+            ctxo10 = _attn_hb_zlist(n * h)
+            ctxo11 = _attn_hb_zlist(n * h)
+            dqo0 = _attn_hb_zlist(n * 3 * h)
+            dqo1 = _attn_hb_zlist(n * 3 * h)
+            dqo2 = _attn_hb_zlist(n * 3 * h)
+            dqo3 = _attn_hb_zlist(n * 3 * h)
+            dqo4 = _attn_hb_zlist(n * 3 * h)
+            dqo5 = _attn_hb_zlist(n * 3 * h)
+            dqo6 = _attn_hb_zlist(n * 3 * h)
+            dqo7 = _attn_hb_zlist(n * 3 * h)
+            dqo8 = _attn_hb_zlist(n * 3 * h)
+            dqo9 = _attn_hb_zlist(n * 3 * h)
+            dqo10 = _attn_hb_zlist(n * 3 * h)
+            dqo11 = _attn_hb_zlist(n * 3 * h)
+            hb0 = thread_spawn(_attn_hb_one, _AtnJob(qkv.data, dctxT.data, ctxo0, dqo0, n, 0, 1, inv))
+            hb1 = thread_spawn(_attn_hb_one, _AtnJob(qkv.data, dctxT.data, ctxo1, dqo1, n, 1, 2, inv))
+            hb2 = thread_spawn(_attn_hb_one, _AtnJob(qkv.data, dctxT.data, ctxo2, dqo2, n, 2, 3, inv))
+            hb3 = thread_spawn(_attn_hb_one, _AtnJob(qkv.data, dctxT.data, ctxo3, dqo3, n, 3, 4, inv))
+            hb4 = thread_spawn(_attn_hb_one, _AtnJob(qkv.data, dctxT.data, ctxo4, dqo4, n, 4, 5, inv))
+            hb5 = thread_spawn(_attn_hb_one, _AtnJob(qkv.data, dctxT.data, ctxo5, dqo5, n, 5, 6, inv))
+            hb6 = thread_spawn(_attn_hb_one, _AtnJob(qkv.data, dctxT.data, ctxo6, dqo6, n, 6, 7, inv))
+            hb7 = thread_spawn(_attn_hb_one, _AtnJob(qkv.data, dctxT.data, ctxo7, dqo7, n, 7, 8, inv))
+            hb8 = thread_spawn(_attn_hb_one, _AtnJob(qkv.data, dctxT.data, ctxo8, dqo8, n, 8, 9, inv))
+            hb9 = thread_spawn(_attn_hb_one, _AtnJob(qkv.data, dctxT.data, ctxo9, dqo9, n, 9, 10, inv))
+            hb10 = thread_spawn(_attn_hb_one, _AtnJob(qkv.data, dctxT.data, ctxo10, dqo10, n, 10, 11, inv))
+            hb11 = thread_spawn(_attn_hb_one, _AtnJob(qkv.data, dctxT.data, ctxo11, dqo11, n, 11, 12, inv))
+            rb0 = thread_join(hb0)
+            rb1 = thread_join(hb1)
+            rb2 = thread_join(hb2)
+            rb3 = thread_join(hb3)
+            rb4 = thread_join(hb4)
+            rb5 = thread_join(hb5)
+            rb6 = thread_join(hb6)
+            rb7 = thread_join(hb7)
+            rb8 = thread_join(hb8)
+            rb9 = thread_join(hb9)
+            rb10 = thread_join(hb10)
+            rb11 = thread_join(hb11)
+            _attn_hb_merge(ctxo0, dqo0, ctxT.data, dqkv.data, n, h, hd, 0, 1)
+            _attn_hb_merge(ctxo1, dqo1, ctxT.data, dqkv.data, n, h, hd, 1, 2)
+            _attn_hb_merge(ctxo2, dqo2, ctxT.data, dqkv.data, n, h, hd, 2, 3)
+            _attn_hb_merge(ctxo3, dqo3, ctxT.data, dqkv.data, n, h, hd, 3, 4)
+            _attn_hb_merge(ctxo4, dqo4, ctxT.data, dqkv.data, n, h, hd, 4, 5)
+            _attn_hb_merge(ctxo5, dqo5, ctxT.data, dqkv.data, n, h, hd, 5, 6)
+            _attn_hb_merge(ctxo6, dqo6, ctxT.data, dqkv.data, n, h, hd, 6, 7)
+            _attn_hb_merge(ctxo7, dqo7, ctxT.data, dqkv.data, n, h, hd, 7, 8)
+            _attn_hb_merge(ctxo8, dqo8, ctxT.data, dqkv.data, n, h, hd, 8, 9)
+            _attn_hb_merge(ctxo9, dqo9, ctxT.data, dqkv.data, n, h, hd, 9, 10)
+            _attn_hb_merge(ctxo10, dqo10, ctxT.data, dqkv.data, n, h, hd, 10, 11)
+            _attn_hb_merge(ctxo11, dqo11, ctxT.data, dqkv.data, n, h, hd, 11, 12)
         # P5.1: dw_proj[r,o] = sum_t ctxT[t,r]*gout[t,o] -> GEMM (ctxT^T @ gout)
         # + db_proj[o] = sum_t gout[t,o] (thay vong scalar n*h^2)
         ctxTt = smm_transpose(ctxT, n, h)
@@ -938,27 +1134,19 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
                     ggv = ggv - inv_n
                 gg.data[base + o] = ggv
         dxf = smm_fwd(gg, wte, n, h, VocabSize)
-        # dwte[o,k] = sum_t ggT[o,t]*xf[t,k] — gg luu [token][vocab], can ggT [vocab][token];
-        # smm_fwd(ggT, xf) tra luon dwte [Vocab][h], khong can transpose sau.
+        # dwte[o,k] = sum_t gg[o,t]*xf[t,k] — trans-A: smm_fwd_at nhan truc
+        # tiep gg [n][V] nhu A^T, khong materialize ggT.
         # P5.7 (2026-10-20): DA THU duong xfT/dwteT + transpose nguoc (dung
         # probe AV: GEMM 2360 < 3062ms) — nhung transpose nguoc h x V = 38.6M
         # ptu CO DINH, trong khi ggT chi n x V (nho khi seq nho) -> REGRESSION
-        # seq8 +22%, seq256 +17.6% (loss van bit-exact). REVERT, giu ggT.
-        ggT = smm_transpose(gg, n, VocabSize)
-        dwte = smm_fwd(ggT, xf, VocabSize, h, n)
+        # seq8 +22%, seq256 +17.6% (loss van bit-exact). REVERT.
+        # P5.8 (2026-10-21): dwte = smm_fwd_at(gg, xf) — BO transpose ggT,
+        # bit-exact 0.0 (probe AX @256/@1024), dwte loi ~400ms @256 / ~900ms
+        # @1024 so voi duong ggT + smm_fwd cu.
+        # KHAC P5.7: dxf van giu smm_fwd nguyen (P5.7 bo qua dxf -> bug gradient,
+        # hunk do da revert ve pre-6bf4a1c truoc khi wire).
+        dwte = smm_fwd_at(gg, xf, VocabSize, h, n)
     if simd == 0:
-        # P5.7 (2026-10-20): LHEAD kernel API moi: trans-A GEMM + direct-to-gflat
-        # muc dich: bo hieu spending 1.56s transpose ggT @1024 + 154MB dwte + 52M copy loop
-        # Du che: (a) smm_fwd(xfT, gg, h, V, n) dung trans-A: xfT [h x n] x gg [n x V]
-        #       (b) ghi thang gsc * xf directly vao gflat[o_wte + o*h + k], bo dwte toan cuc + copy
-        #       (c) plain transpose khong blocked 64x64 (2.7x cham hon bo cache)
-        xfT = smm_transpose(xf, n, h)  # h x n = 0.79M @1024, rat nho!
-        # dwte da duoc cap phat o gflat[o_wte : o_wte + VocabSize*h] bo caller
-        # Nhieu phep: khong cap phat dwte VocabSize*h hon, bo copy 52M giua dwte->gflat
-        # GEMM xfT x gg: C[h,V] = xfT[h,n] x gg[n,V] — trans-A duoc smm_fwd thong thuc
-        # (B lay cot j, dong i: C[j,i] = sum_k A[k,j]*B[k,i] khi A duoc trans)
-        # Trong tu xfT [h,n] gg [n,V] -> C[h,V] khong can transpose gg
-        # Chi compute softmax de dxf, va GEMM de dwte tich luy vao gflat
         for i in range(n):
             row = []
             mxf = 0.0
@@ -978,30 +1166,15 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
                 tot = tot + e
             inv_tot = 1.0 / tot
             inv_n = 1.0 / float(n)
-            # GEMM trans-A: dwte tich luy vao gflat
-            # C[o,k] = sum_i xfT[o,i] * gg[i,k] = sum_i xf[i,k] * gg[i,o] (vi xfT la tran A)
-            # Mỗi token i contrib: gsc * xf[i,k] vao gflat o_wte + o*h + k
-            if use_flat == 1 and len(gflat) > o_wte + VocabSize * h:
-                # ghi thang straight ke gflat bo di dwte toan cuc + copy 52M
-                for o in range(VocabSize):
-                    ggv = row[o] * inv_tot * inv_n
-                    if o == ids[i]:
-                        ggv = ggv - inv_n
-                    # dwte cu = gflat[o_wte + o*h : o*h + h] (da zero chua)
-                    # tien hanh: gflat[o_wte + o*h + k] += ggv * xf.data[i * h + k]
-                    base_gflat = o_wte + o * h
-                    base_xf = i * h
-                    for k in range(h):
-                        gflat[base_gflat + k] = gflat[base_gflat + k] + ggv * xf.data[base_xf + k]
-            else:
-                # duong cu (ke dwte toan cuc + copy qua gflat sau này)
-                for o in range(VocabSize):
-                    gsc = row[o] * inv_tot * inv_n
-                    if o == ids[i]:
-                        gsc = gsc - inv_n
-                    for k in range(h):
-                        dxf.data[i * h + k] = dxf.data[i * h + k] + gsc * wte.data[o * h + k]
-                        dwte.data[o * h + k] = dwte.data[o * h + k] + gsc * xf.data[i * h + k]
+            for o in range(VocabSize):
+                # DAT TEN KHAC nhánh simd==1 (`gg` la Tensor o do) — compiler
+                # gop bien cung ten/cung ham thanh mot slot, doc sai bo nho
+                gsc = row[o] * inv_tot * inv_n
+                if o == ids[i]:
+                    gsc = gsc - inv_n
+                for k in range(h):
+                    dxf.data[i * h + k] = dxf.data[i * h + k] + gsc * wte.data[o * h + k]
+                    dwte.data[o * h + k] = dwte.data[o * h + k] + gsc * xf.data[i * h + k]
     # ln_f
     rl = gpt2_layernorm_bwd(xf_in, lnf_g, lnf_b, dxf, gflat, o_lnf_g, o_lnf_b)
     # backward qua cac block (tu cuoi ve dau), luu phang theo thu tu backward

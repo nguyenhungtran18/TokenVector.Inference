@@ -169,24 +169,24 @@ def smm_transpose(t: "Tensor", rows: 'i64', cols: 'i64') -> "Tensor":
 # Yeu cau do duoc tu P5.7 (roadmap TRIZ §12):
 #   (a) trans-A: nhan C = A^T x B TRUC TIEP tu A dang luu [k hang][m cot] —
 #       bo 1.56s transpose ggT @1024 (probe AW: PLAIN [1024,50257] = 1500ms).
-#   (b) tich luy in-place: tich luy ket qua moi p-tile vao buffer T x T bang
-#       simd_add NATIVE (System.Numerics.Vector) thay vong lap thong dich
-#       ib*jb phan tu/oi — dung khi p0t >= 2 VA j0t == 1 (dxf 52M, dwte 77M,
-#       attn ctx 16 o @1024). j0t > 1 giu duong v1 (khong list-of-lists —
-#       compiler khong nhan list[list[f32]] cho simd_add).
-#   (c) dispatch: p0t == 1 -> khong tich luy (gemm + ghi thang);
-#       nho (m*n < T^2) -> duong cu (tranh them T^2 add vs vung that qua nho).
-# DETERMINISM: thu tu tich luy GIU NGUYEN (p0 tang dan, cung gia tri p-tile
-# nhu v1) -> ket qua BIT-EXACT voi v1 (kiem chung bang probe AX).
-# v1 NGUYEN KHONG DOI; v2 la duong RIENG, chua goi cho den khi do A/B chot.
-
-def _p58_ceildiv(a: 'i64', b: 'i64') -> 'i64':
-    r = 0
-    s = 0
-    while s < a:
-        s = s + b
-        r = r + 1
-    return r
+#   (b) tich luy in-place (simd_add native): DA DO VA BO — cham hon simple
+#       (dxf @1024: 3000 vs 2703ms; simd_add allocate 16B/element) — xem ghi
+#       chu duong ACC ben duoi.
+#   (c) dispatch: TOAN BO -> _p58_core_simple (v1 + trans_a).
+#
+# BAI HOC PROBE BC (2026-10-21) — NGUYEN NHAN v2 cham 2.5x da CHOT:
+#   Call site simd_add/simd_sub (System.Numerics) trong CUNG function voi vong
+#   lap scalar lam compiler codegen vong do cham 2.5-4x — DU khi khong chay
+#   (use_acc=0). Da chot bang 2/2 gia thuyet: BC-v5 (chi nhanh + goi
+#   simd_add/sub, use_acc=0) = 156-172ms vs v1 = 63ms; BC-v6 (copy nguyen van
+#   vao probe) cung cham -> noi dung function, khong phai vi tri module.
+#   -> TACH 2 HAM: _p58_core_simple KHONG co call site simd_add/sub.
+#   Ket qua do tiep (AX @1024): _p58_core_acc (simd_add native) CHAM HON
+#   simple (dxf 3000 vs 2703ms, simd_add allocate 16B/element) -> XOA acc,
+#   dispatch toan bo vao simple. Con lai loi do duoc: trans-A (dwte 4875 vs
+#   5140 cu). Determinism: thu tu tich luy p0 tang dan GIU NGUYEN (cung gia
+#   tri p-tile) -> BIT-EXACT voi v1 (kiem chung bang probe AX 256 + 1024).
+# v1 NGUYEN KHONG DOI; v2 = v1 + trans-A, BIT-EXACT, DA DO A/B (AX ALL PASS).
 
 # At[r][t] = A_stored[(p0+t)*mdim + (i0+r)] — A_stored luu [k hang][m cot] (= A^T).
 # Nguon row-major doc lienh tuc; ghi scatter vao o nho T x T (L2/L1) — khong
@@ -205,28 +205,13 @@ def _p58_tile_a_at(a: "Tensor", mdim: 'i64', i0: 'i64', ib: 'i64', p0: 'i64', pw
         t = t + 1
     return out
 
-def _p58_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32', trans_a: 'i32') -> "Tensor":
-    # TRONG SO 1 LOOP NEST (probe AZ 2026-10-21: ban co early-return p0t==1
-    # lap lai toan bo nest cham hon 2.3x — compiler codegen tieu voi function
-    # lon; clone cung logic 1 nest bang nhau voi v1). Dispatch bien dau ra:
-    # use_acc = 0 va p0t == 1 -> tich luy vung that C nhu v1 (1 p-tile cung
-    # chinh la vung that sau moi gemm).
+# DUONG AN TOAN (v1 + trans_a): KHONG simd_add/simd_sub call site (probe BC:
+# chi su hien tai call do trong function cung vong scalar da lam cham 2.5x).
+def _p58_core_simple(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32', trans_a: 'i32') -> "Tensor":
     T = _imin(_tilek(k), _roundup64(_imin(m, n)))
     C = t_zeros([m, n])
     cd = C.data
-    Rt = _zeros_list(T * T)
-    p0t = _p58_ceildiv(k, T)
-    j0t = _p58_ceildiv(n, T)
-    # (b) use_acc = 1 chi khi p0t >= 2 VA j0t == 1 (1 buffer T x T duy nhat;
-    # compiler khong nhan list[list[f32]] cho simd_add)
-    use_acc = 0
-    if p0t >= 2:
-        if j0t == 1:
-            if m * n >= T * T:
-                use_acc = 1
-    acc = _zeros_list(1)
-    if use_acc == 1:
-        acc = _zeros_list(T * T)
+    Ct = _zeros_list(T * T)
     i0 = 0
     while i0 < m:
         ib = _imin(T, m - i0)
@@ -241,39 +226,33 @@ def _p58_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64
             while j0 < n:
                 jb = _imin(T, n - j0)
                 Bt = _tile_b(b, ndim, p0, pw, j0, jb, T, trans_b)
-                simd_gemm(At, Bt, Rt, T)
-                if use_acc == 1:
-                    # (b) tich luy NATIVE: acc = acc + Rt (toan bo o T x T)
-                    simd_add(acc, Rt, acc)
-                else:
-                    # duong cu v1: tich luy vung that C sau moi p-tile
-                    r = 0
-                    while r < ib:
-                        bc = (i0 + r) * n + j0
-                        bt = r * T
-                        c = 0
-                        while c < jb:
-                            cd[bc + c] = cd[bc + c] + Rt[bt + c]
-                            c = c + 1
-                        r = r + 1
+                simd_gemm(At, Bt, Ct, T)
+                r = 0
+                while r < ib:
+                    bc = (i0 + r) * n + j0
+                    bt = r * T
+                    c = 0
+                    while c < jb:
+                        cd[bc + c] = cd[bc + c] + Ct[bt + c]
+                        c = c + 1
+                    r = r + 1
                 j0 = j0 + jb
             p0 = p0 + pw
-        if use_acc == 1:
-            # ghi vung that C 1 lan + reset acc ve 0 (native: acc - acc)
-            r = 0
-            while r < ib:
-                bc = (i0 + r) * n
-                bt = r * T
-                c = 0
-                while c < n:
-                    cd[bc + c] = cd[bc + c] + acc[bt + c]
-                    c = c + 1
-                r = r + 1
-            simd_sub(acc, acc, acc)
         i0 = i0 + ib
     return C
 
-# C[m,n] = A x B — v2 (bit-exact voi smm_fwd, tich luy native)
+# P5.8 ACC PATH DA DO VA BO (2026-10-21, AX @1024): _p58_core_acc tich luy bang
+# simd_add native — DO DUOC CHAM HON duong simple: dxf [1024,50257] 3000ms vs
+# 2703ms (v1/simple), va simd_add 3-arg allocate ~16B/element (SIMD_NOTES P2-2)
+# -> 66 p-tile x 768^2 alloc/lan. ctx/score nho: 31 = 31 (khong do duoc lech).
+# Khong co shape nao acc nhanh hon -> dispatch TOAN BO ve simple; chi giu lai
+# trans-A (dwte @1024: 4875 vs 5140 cu — LOI RO RET). Acc path xoa (git luu).
+
+# dispatch: TOAN BO duong simple (v1 + trans_a) — xem ghi chu P5.8 ACC o tren.
+def _p58_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32', trans_a: 'i32') -> "Tensor":
+    return _p58_core_simple(a, b, m, n, k, ndim, trans_b, trans_a)
+
+# C[m,n] = A x B — v2 (bit-exact voi smm_fwd)
 def smm_fwd_v2(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
     return _p58_core(a, b, m, n, k, n, 0, 0)
 

@@ -1,0 +1,98 @@
+# PROBE BG — P6 tiep: tai sao 4 worker tkv cham (BF[3] 0.35x, cpu ratio 3.1)?
+# BG[1]: worker THUAN CPU (local acc, khong doc/ghi list chung) — neu cung cham
+#        -> loi o scheduler/task; neu nhanh -> loi o truy cap list chung.
+# BG[2]: worker doc list CHUNG (read-only) + ghi local — toi doc list co khong cham?
+# BG[3]: worker ghi vao list RIENG (moi worker1 list cua rieng no) — ghi co cham?
+# Chay: tkvc tv/tests/simd_probe_bg.tkv out/bg.exe main && ./out/bg.exe
+import tv.training.tensor
+import tv.training.simd_matmul
+
+class BgJob:
+    src: "list[f32]"
+    iters: 'i64'
+    seed: 'i64'
+    def __init__(self, src: "list[f32]", iters: 'i64', seed: 'i64'):
+        self.src = src
+        self.iters = iters
+        self.seed = seed
+
+# BG[1/2] — ghi ket qua vao bien ket qua qua return (i64)
+def _bg_local(j: "BgJob") -> 'i64':
+    # KHONG doc list chung — pure compute
+    acc = 0
+    i = 0
+    while i < j.iters:
+        acc = acc + (i * 7 + j.seed) % 1000
+        i = i + 1
+    return acc
+
+def _bg_read(j: "BgJob") -> 'i64':
+    # doc list CHUNG (read-only), tinh vao local, tra ve i64
+    src = j.src
+    n = len(src)
+    acc = 0.0
+    rep = 0
+    while rep < j.iters:
+        s = 0.0
+        i = 0
+        while i < n:
+            s = s + src[i]
+            i = i + 1
+        if s > 0.0:
+            acc = acc + s
+        rep = rep + 1
+    if acc > 1.0e30:
+        return -1
+    return rep
+
+def main() -> 'i32':
+    # ---- BG[1]: pure local compute 1 vs 4 workers ------------------------
+    it = 20000000
+    t0 = now_ms()
+    r0 = _bg_local(BgJob([], it, 1))
+    t1 = now_ms()
+    dv1 = t1 - t0
+    t0 = now_ms()
+    h1 = thread_spawn(_bg_local, BgJob([], it, 1))
+    h2 = thread_spawn(_bg_local, BgJob([], it, 2))
+    h3 = thread_spawn(_bg_local, BgJob([], it, 3))
+    h4 = thread_spawn(_bg_local, BgJob([], it, 4))
+    s1 = thread_join(h1)
+    s2 = thread_join(h2)
+    s3 = thread_join(h3)
+    s4 = thread_join(h4)
+    t1 = now_ms()
+    dv4 = t1 - t0
+    print("BG[1] pure-local: 1w=" + str(dv1) + " ms  4w=" + str(dv4) + " ms  speedup=" + str(dv1 / dv4) + " sum=" + str(r0 + s1 + s2 + s3 + s4))
+
+    # ---- BG[2]: read-only shared list ------------------------------------
+    src = []
+    for i in range(1048576):
+        src.append((float(i % 101) - 50.0) / 10.0)
+    reps = 8
+    t0 = now_ms()
+    m0 = _bg_read(BgJob(src, reps, 0))
+    t1 = now_ms()
+    rv1 = t1 - t0
+    t0 = now_ms()
+    h1 = thread_spawn(_bg_read, BgJob(src, reps, 1))
+    h2 = thread_spawn(_bg_read, BgJob(src, reps, 2))
+    h3 = thread_spawn(_bg_read, BgJob(src, reps, 3))
+    h4 = thread_spawn(_bg_read, BgJob(src, reps, 4))
+    u1 = thread_join(h1)
+    u2 = thread_join(h2)
+    u3 = thread_join(h3)
+    u4 = thread_join(h4)
+    t1 = now_ms()
+    rv4 = t1 - t0
+    print("BG[2] read-shared: 1w=" + str(rv1) + " ms  4w=" + str(rv4) + " ms  speedup=" + str(rv1 / rv4) + " m0=" + str(m0) + " u=" + str(u1 + u2 + u3 + u4))
+
+    if dv1 / dv4 > 0.8:
+        if rv1 / rv4 > 0.8:
+            print("BG RESULT: threads OK — BF[3] slowdown o phan KHAC (ghi list chung?)")
+        else:
+            print("BG RESULT: DOC list chung cham song song")
+    else:
+        print("BG RESULT: pure-local cung cham -> scheduler/task la nguoi loi")
+    print("BG done")
+    return 0
