@@ -2,7 +2,7 @@
 
 Ngày lập: **2026-10-17** · cập nhật gần nhất: **2026-10-22**
 Trạng thái: **ĐÃ CODE — G0→G5 XANH, G6 chưa bắt đầu** (bảng TRẠNG THÁI dưới đây).
-Kế hoạch các bước còn lại tới parity (2026-10-22, sau GĐ10): `docs/perf-plan-triz-roadmap.md` **§13** — ~~GĐ11 song song softmax-grad~~ **❌ ĐO BÁC BỎ 2026-10-22** (probe `simd_probe_ce`: SHARED ghi+exp 0.25-0.36× — cùng bệnh AdamW BL; OWN+MERGE 0.56× — merge 1172 ms ≈ serial; HANDOFF §0.32) → GĐ12 LN saves mu/rstd → GĐ13 AdamW parallel (probe chẩn đoán trước) → P7b đo GEMM gap vs torch; trần `.tkv`-only ≈ **9-10×** (sau bust GĐ11: ~10.1× nếu GĐ13 bust, ~9.6-9.7× nếu thắng), parity 1.0× bắt buộc đi qua native/C (P7b điều hướng).
+Kế hoạch các bước còn lại tới parity (2026-10-22, sau GĐ10): `docs/perf-plan-triz-roadmap.md` **§13** — ~~GĐ11 song song softmax-grad~~ **❌ ĐO BÁC BỎ 2026-10-22** (probe `simd_probe_ce`: SHARED ghi+exp 0.25-0.36× — cùng bệnh AdamW BL; OWN+MERGE 0.56× — merge 1172 ms ≈ serial; HANDOFF §0.32) → ~~GĐ12 LN saves mu/rstd~~ **❌ ĐO BÁC BỎ 2026-10-22** (probe `simd_probe_cf`: LN_BWD chỉ 1.10-1.22×; mu/rstd lưu f32 trong saves → maxdiff grad 3.17e-08, loss đổi chữ số cuối 13.442912→13.442913 — HANDOFF §0.33) → GĐ13 AdamW parallel (probe chẩn đoán trước) → P7b đo GEMM gap vs torch; trần `.tkv`-only ≈ **10.4×** nếu GĐ13 bust, **~9.6×** nếu thắng; parity 1.0× bắt buộc đi qua native/C (P7b điều hướng).
 Phạm vi: chứng minh đúng thuật toán huấn luyện LLM; việc kiểm thử hiệu năng thực
 sẽ diễn ra sau trên GPU Google. Ưu tiên số tuyệt đối với PyTorch.
 

@@ -1725,6 +1725,57 @@ GĐ13 thắng → ~33.8-34.2 s ≈ 9.6-9.7×. P7b giữ nguyên vai trò điều
 
 ---
 
+### 0.33 P6 GĐ12 — LN_BWD DÙNG SAVES MU/RSTD: ĐO BÁC BỎ, KHÔNG WIRE (2026-10-22)
+
+Đi tiếp §0.32 item 2 (GĐ12 "chắc chắn nhất", kỳ vọng −0.23..0.31 s, "mu/rstd
+cùng hàm cùng input → bitwise bằng"). Wire thử đầy đủ theo thiết kế §13.3:
+helper `gpt2_layernorm_saved` (LN fwd + thu mu/rstd vào Tensor [n]),
+`gpt2_block_saved` trả thêm mu1/rs1/mu2/rs2, `gpt2_forward_saved` append CUỐI
+(format mới 3+8N+2, len guard → saves cũ 3+4N vẫn đọc được),
+`gpt2_layernorm_bwd(save_mu, save_rs)` optional, `gpt2_block_bwd` +
+`gpt2_backward` truyền tiếp theo len guard — wire 5 mirror `gpt2_ref`. Rồi **đo:
+tiền đề bit-exact của plan SAI, lợi ích nhỏ hơn nhiều mức thắng → REVERT**.
+
+**1. SO HOC — TIỀN ĐỀ PLAN SAI (probe `tv/tests/simd_probe_cf.tkv` @124M):**
+- Trong `.tkv`, `mu`/`rstd` của LN được tính bằng **f64** (accumulator f64),
+  nhưng saves là `list[Tensor]` mà `Tensor.data` **chỉ chứa `list[f32]`** →
+  lưu mu/rstd vào saves **bị làm tròn f32**: đo trực tiếp mu lệch **6.79e-10**,
+  rstd lệch **2.52e-08** so với bản recompute f64.
+- Hệ quả: **MAXDIFF toàn bộ grad (148 tensor, 124M ptu) saves vs recompute =
+  3.17e-08** — KHÔNG phải 0.0 (wte 7.5e-09, LN-g ~3e-08, bias LN ~0.0).
+- Hệ quả nữa: loss in ra **đổi chữ số cuối** — bench A/B 2 binary cùng phiên:
+  GĐ10 `10.760399 → 13.442912`, GĐ12 `10.760399 → 13.442913` (deterministic,
+  2/2 lần chạy mỗi binary). → **vi phạm cả 2 điều kiện §13.2** (maxdiff 0.0
+  HOẶC loss khớp exact).
+
+**2. LỢI ÍCH THỰC SÓ (probe CF, 2 lần chạy, best):**
+
+| Pha | Không saves | Có saves | Tốc độ |
+|---|---|---|---|
+| LN_BWD ×25 | 656-703 ms | 578-594 ms | **1.10-1.22× (−62..−125 ms)** |
+
+Thấp hơn nhiều mức thắng plan (−215 ms, 765→≤500): 2 pass bị bỏ (mu, v/rstd)
+là 2 pass **RẺ nhất** — chỉ đọc `x` đã cache-hot; 2 pass còn lại (s1/s2 + dx,
+đọc thêm `gy`/`g` + ghi dx/dg/db) nặng hơn nhiều. Bench A/B seq1024 2 cặp
+xen kẽ: GĐ12 nhanh hơn ~1% mỗi cặp nhưng chênh 400-600 ms vượt xa LN_BWD
+(62-125 ms) → không tách được khỏi nhiễu nhiệt (phiên này nóng: 38.5-40.6 s
+cả 2 binary, GĐ10 best cũ 36.7 s); seq8/256 không đo tiếp vì kết cục đã chốt
+bằng điều kiện số học.
+
+**3. KẾT LUẬN — KHÔNG WIRE:** `git checkout` 5 mirror `gpt2_ref` — mã nguồn
+về nguyên trạng HEAD. Probe `simd_probe_cf.tkv` GIỮ LẠI làm bằng chứng.
+**Điều kiện sống lại:** compiler hỗ trợ **f64 container** (lưu mu/rstd đúng
+f64 → bitwise bằng bản recompute) **hoặc typed f32 locals** (LN tính f32
+toàn bộ như torch → saved = computed bitwise) — đều ngoài tầm `.tkv` hiện tại,
+cùng hướng với P7b/native.
+
+**4. HỆ QUẢ KẾ HOẠCH §13:** GĐ11 + GĐ12 đều bust → chỉ còn GĐ13 (AdamW
+parallel, probe chẩn đoán) + P7b (đo GEMM gap). Trần `.tkv`-only nếu GĐ13
+bust ≈ **36.7 s = 10.4×** (giữ nguyên GĐ10); GĐ13 thắng → ~34.0-34.3 s ≈ 9.6×.
+Docs: perf-plan §12 (dòng GĐ12) + §13.3/§13.4/§13.5/§13.6 + §0.33 này.
+
+---
+
 ---
 
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES

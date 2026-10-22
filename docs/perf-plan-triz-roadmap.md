@@ -321,6 +321,7 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 | **P6** ❌ **GĐ9 ĐO BÁC BỎ 2026-10-22** | **Nhân rộng quy tắc native int64 ra vòng ngoài GEMM** — scan IL của `out/bseq_new.il` (đường train đầy đủ) tìm mọi biến người dùng bị box `TkvInt`: `_step124.off` (unflatten), `_tn_one.off`/`_norm_groups.off` (norm), `_ls_one.k`, vòng ngoài `_smm_core`; **`step` (AdamW 4.2 s), `zero_grad`, `gpt2_loss`, LN, gelu ĐÃ dùng `int32 'i'` → không thuộc phạm vi sửa**. Probe `simd_probe_ca.tkv` (N=124M, `time_perf`, **4 lần chạy**): unflatten 2.27-2.34→2.29-2.30 ns/ptu (**1.02/0.998/0.991/0.990 — median ≈ 0.99**), norm 2.23-2.33→2.24-2.25 (**1.04/0.996/1.002/0.996 ≈ 1.00**), bit-exact 0.0. **Bác bỏ:** cả hai vòng memory-bound (≈3.4 GB/s đọc+ghi) nên arithmetic bị ẩn hết — bản "sửa" không nhanh hơn; quy tắc chỉ ăn tiền ở vòng compute-bound (GĐ8: tile-build GEMM 1.5-2.3×); tiết kiệm tối đa ~18 ms @1024 = **0.05%**, nhỏ hơn nhiễu đo, mà chi phí wire = 7 file mirror. Hướng thật: `AdamW.step` (4.2 s) phải giảm số phép/phần tử, không phải sửa khai báo biến | **0 (không làm)** | giữ **10.7×** |
 | **P6** ✅ **GĐ10 XONG 2026-10-22** | **Học PyTorch cho AdamW: gộp 2 div → 1 div** (so công thức trước với `torch/optim/adamw.py` rồi mới đo — probe `simd_probe_cb`, `time_perf`, N=124M, 3 lần chạy): PyTorch `denom = sqrt(v)/sqrt(bc2) + eps` rồi `addcdiv_` = **1 div/ptu**; ta `denom = sqrt(v)/bc2s + eps` **rồi** `m/denom` = **2 div/ptu**. Định lý gộp (đại số chính xác): `m/(sqrt(v)/bc2s+eps) == (m*bc2s)/(sqrt(v)+eps*bc2s)`. Đo 4 biến thể: V1 hoist `(1-b1)/(1-b2)` **0.93×** ❌, V2 gộp `p` **0.92×** ❌ (JIT/CSE đã tự làm — **phải đo từng cái riêng**), V3 gộp div **1.068×** ✅ maxdiff **1.19e-07**. Wire 4 file `trainer`. **Kết quả: `ADAMW_STEP` 4370→3930 ms (−10.1%); seq8/256/1024 = 12.516/17.313/36.703 s (−2.6/−3.3/−3.1%); loss in ra khớp exact 7 chữ số cả 3 seq; gate 135/135 + `trainer_tests` 15/15 PASS với fixture PyTorch thật (TOL=1e-5, chênh lớn nhất 2.5e-06)**; tỉ lệ vs torch 13.9/12.9/10.7× → **13.4×/12.3×/10.4×** | AdamW −440 ms/bước @124M | **10.4×** |
 | **P6** ❌ **GĐ11 ĐO BÁC BỎ 2026-10-22** | **Song song softmax-grad lm-head bwd** (kế hoạch §13.3 — mẫu `_ls_one` GĐ4) — wire thử 12 worker row-parallel ghi thẳng `gg.data` phân đoạn (bit-exact, chk AQ `0.000105296414` giữ nguyên) rồi **đo bác bỏ**: AQ LHEAD_BWD **7407 → 10719 ms (+3.3 s)**. Probe `simd_probe_ce.tkv` tách nguyên nhân @51.5M ptu (2 lần chạy, maxdiff 0.0 cả SH/OW): serial **1110-1140**; **SHARED ghi+exp = 3110-4453 (0.25-0.36×)** — CÙNG bệnh AdamW BL/SHARED; **CP copy shared KHÔNG exp = 484-547 (2.0-2.3×)** → shared write thuần KHÔNG bệnh, bệnh là **phep toan + ghi list tuong minh**; **OW own-seg: worker 484 (2.36×) + merge 1172 + alloc 359-375 = TOTAL 2031 (0.56×)** — merge phiên bản đơn luồng (~22.7 ns/ptu) ăn hết lợi thế, ceiling kể cả merge miễn phí cũng chỉ ≈ −0.28 s < bar −0.9 s. **KHÔNG WIRE** — `gpt2_backward` giữ vòng serial; 5 mirror gpt2_ref + AQ revert nguyên vẹn | **0 (không làm)** | giữ **10.4×** |
+| **P6** ❌ **GĐ12 ĐO BÁC BỎ 2026-10-22** | **LN_BWD dùng saves mu/rstd từ forward** (kế hoạch §13.3 — helper `gpt2_layernorm_saved`, saves append CUỐI format 3+8N+2, len guard, wire thử 5 mirror) — **đo bác bỏ, revert toàn bộ**. (1) **Tiền đề "bitwise bằng" của plan SAI**: saves `Tensor` chỉ chứa `list[f32]` nhưng mu/rstd tính bằng **f64** → lưu vào saves bị làm tròn f32 (probe CF: mu lệch 6.79e-10, rstd 2.52e-08) → **MAXDIFF toàn bộ grad = 3.17e-08 (không phải 0.0)** → loss in ra **đổi chữ số cuối 13.442912 → 13.442913** (bench A/B 2 binary cùng phiên, deterministic) → vi phạm cả 2 điều kiện §13.2 (maxdiff 0.0 HOẶC loss khớp exact). (2) **Lợi ích nhỏ hơn nhiều**: LN_BWD ×25 chỉ **656-703 → 578-594 ms (1.10-1.22×, −62..−125 ms)** thay vì −215 ms như ước — 2 pass bị bỏ là 2 pass **RẺ nhất** (chỉ đọc x, cache-hot); 2 pass còn lại (s1/s2 + dx) nặng hơn nhiều. Muốn bit-exact phải lưu f64 (Tensor không chứa được) → điều kiện sống lại: compiler hỗ trợ f64 container / typed f32 locals (LN tính f32 toàn bộ như torch) — gắn hướng P7b/native | **0 (không làm)** | giữ **10.4×** |
 | **P7** ❌ **ĐO BÁC BỎ 2026-10-22** | **Mixed precision (bf16/tf32/f16): ĐO TRƯỚC rồi BỎ — probe `tv/tests/simd_probe_bx.tkv`.** Lý do cứng: (1) máy = **Xeon E5-2695 v3 (Haswell-EP)** → **chỉ AVX2+FMA3**, không AVX512/VNNI/**BF16**/AMX; (2) native lib `tkv_simd_native.c` **chỉ kernel F32/F64** (`SgemmF32`/`SgemmF64`) — grep `f16\|bf16\|half` = **0 hit**; (3) compiler (`compiler_src`) **không có kiểu/intrinsic f16/bf16** — grep = **0 hit** ⇒ muốn f16 chỉ còn 1 đường: **làm tròn f16 bằng PHẦN MỀM** (scalar .tkv `native_f16_encode/decode`). **Số học:** f16-round vào GEMM 256×768×768 → **maxdiff 0.0497** (max\|C32\|=46.206 vs max\|C16\|=46.202 → relerr **1.08e-3**; check chéo scalar C[0][0] 4.0e-8) ⇒ **vượt cửa sổ parity 2.4e-7 gấp 2.1e5×** ⇒ không thể giữ 135/135 gate fp32. **Tốc độ:** chi phí làm tròn f16 phần mềm = **378-458 ns/ptu** (3 lần chạy; baseline đọc list 19-20 ns/ptu) ⇒ **ngay cả khi GEMM f16 MIỄN PHÍ** thì AMP best-case = **0.056-0.065× (768³) / 0.047-0.056× (1024×768×768) / 0.096-0.108× (lm-head 1024×768×50257)** = **chậm 9-21×**. ⇒ **P7 chỉ sống lại khi có kernel f16/bf16 NATIVE** (viết C/Rust thêm vào `tkv_simd_native`) **+ CPU hỗ trợ** (AVX512-BF16/AMX) hoặc GPU — không phải việc làm được bằng .tkv. | **0 (không làm)** | giữ **12.4×** |
 
 **Song song — seq8 riêng:** hiện 18.7×; threads ít giúp (GEMM quá nhỏ, overhead interpreter chiếm chủ yếu) → cần specialise batch nhỏ: unroll, fuse loop, giảm vật liệu hoá trung gian. Theo dõi KPI seq8 riêng, không hòa lẫn seq1024.
@@ -399,6 +400,15 @@ Probe AQ chạy lại **2026-10-22** (sau GĐ8/GĐ10, `out/audit_aq.log`) + ADAM
   3. `gpt2_layernorm_bwd` nhận `save_mu/save_rstd` optional (default `None`): có → bỏ 2 pass đầu; `gpt2_block_bwd`/`gpt2_backward` truyền tiếp; `saves == None` → đường recompute cũ nguyên vẹn.
 - **Bit-exact:** mu/rstd do **cùng hàm + cùng input + cùng thứ tự tích lũy** với bản recompute → bitwise bằng → downstream không đổi (xác minh maxdiff 0.0 + loss exact).
 - **Wire:** 5 mirror `gpt2_ref`. **Thắng nếu:** `LN_BWD` 765 → ≤550 ms (−≥30%), gate xanh.
+- **KẾT QUẢ ĐO — ĐO BÁC BỎ, KHÔNG WIRE (2026-10-22):** wire thử đầy đủ (5
+  mirror, saves format 3+8N+2 append cuối, len guard) rồi đo bằng probe
+  `simd_probe_cf.tkv` @124M: LN_BWD ×25 **656-703 → 578-594 ms (chỉ 1.10-1.22×,
+  −62..−125 ms)** — thấp hơn nhiều mức thắng −215 ms; **so học fail điều kiện
+  §13.2**: saves `Tensor` = `list[f32]` trong khi mu/rstd tính f64 → làm tròn
+  f32 (mu 6.79e-10, rstd 2.52e-08) → maxdiff grad toàn bộ **3.17e-08 ≠ 0.0**,
+  loss in ra **13.442912 → 13.442913** (A/B 2 binary cùng phiên). → revert 5
+  mirror; probe CF giữ làm bằng chứng. Điều kiện sống lại: compiler f64
+  container / typed f32 locals.
 - **Không làm mặc định:** row-parallel LN_BWD — mỗi gói 786K < ngưỡng break-even 2M (GĐ4 đo) → nhiều khả năng bust; chỉ làm thêm nếu probe cho net win.
 
 #### GĐ13 — AdamW parallel LẦN 3: probe chẩn đoán TRƯỚC, wire CHỈ nếu thắng (−2.4..2.7 s nếu thành)
@@ -439,10 +449,10 @@ Probe AQ chạy lại **2026-10-22** (sau GĐ8/GĐ10, `out/audit_aq.log`) + ADAM
 | Item | Tiết kiệm | Loại | Độ tin cậy |
 |---|---|---|---|
 | ~~GĐ11 softmax-grad PAR12~~ **ĐÃ ĐO BÁC BỎ 2026-10-22** (probe CE: SHARED 0.25-0.36×, OWN+MERGE 0.56× — xem §12 dòng GĐ11) | 0 | — | đã đóng |
-| GĐ12 LN saves mu/rstd | −0.23..0.31 s | `.tkv` | **cao** (chắc chắn về số học) |
+| ~~GĐ12 LN saves mu/rstd~~ **ĐÃ ĐO BÁC BỎ 2026-10-22** (probe CF: LN_BWD chỉ −62..−125 ms; mu/rstd lưu f32 → maxdiff grad 3.17e-08, loss đổi chữ số cuối — xem §12 dòng GĐ12) | 0 | — | đã đóng |
 | GĐ13 AdamW parallel | −2.4..2.7 s (hoặc 0) | `.tkv` | **thấp** — 2 lần bust, cần probe chẩn đoán |
-| **Tổng — GĐ13 thắng** | −3.6..4.0 s → **~32.7-33.1 s = 9.3×** | | |
-| **Tổng — GĐ13 bust** | −0.23..0.31 s (GĐ12) → **~36.4-36.5 s = 10.1×** | | |
+| **Tổng — GĐ13 thắng** | −2.4..2.7 s → **~34.0-34.3 s = 9.6×** | | |
+| **Tổng — GĐ13 bust** | 0 → **~36.7 s = 10.4×** (giữ nguyên) | | |
 | P7b | 0 (probe) | điều hướng parity | — |
 
 **Kết luận trung thực:** trần của mọi việc làm được bằng `.tkv` sau GĐ10 ≈ **9-10×**; còn ~9× nằm ở 3 bucket GEMM 24.1 s (+ sàn băng thông các vòng elementwise) → **parity 1.0× bắt buộc đi qua native/C hoặc compiler** (f32 locals, fused kernel) — P7b điều hướng.
@@ -452,7 +462,9 @@ Probe AQ chạy lại **2026-10-22** (sau GĐ8/GĐ10, `out/audit_aq.log`) + ADAM
 1. **GĐ11** ✅ **ĐÃ ĐO — BÁC BỎ, KHÔNG WIRE** (2026-10-22): wire thử → AQ
    LHEAD +3.3 s → probe `simd_probe_ce` tách nguyên nhân → revert 5 mirror +
    AQ, ghi §12 + HANDOFF §0.32. Tiến tiếp GĐ12.
-2. **GĐ12** → tương tự.
+2. **GĐ12** ✅ **ĐÃ ĐO — BÁC BỎ, KHÔNG WIRE** (2026-10-22): wire thử → probe
+   `simd_probe_cf`: LN_BWD chỉ 1.10-1.22× + vi phạm bit-exact/loss-exact →
+   revert 5 mirror, ghi §12 + HANDOFF §0.33. Tiến tiếp GĐ13.
 3. **GĐ13 probe `simd_probe_cc`** → ra quyết định (wire `trainer` ×4 **hoặc** đóng + ghi dòng bác bỏ §12) → gates/docs/commit.
 4. **P7b probe `simd_probe_cd`** → báo cáo số + đề xuất (quyết định cần chủ khoa/compiler team).
 
@@ -473,3 +485,4 @@ Mỗi bước giữ nguyên toàn bộ gate hiện có; **không GĐ nào đư�
 | Lưu softmax (exp) từ forward làm saves | hơn GĐ11 ~0.2 s nhưng +206 MB + sửa forward → không đáng |
 | transpose ggT / blocked / `simd_add` tích lũy | P5.7 / AW / P5.8b đã đo bust |
 | Song song softmax-grad lm-head (GĐ11) | CE: SHARED ghi+exp 0.25-0.36× (cùng bệnh AdamW BL), OWN+MERGE 0.56× (merge 1172 ms ≈ serial) |
+| LN_BWD saves mu/rstd (GĐ12) — kiểu container hiện tại | CF: chỉ 1.10-1.22×; Tensor=list[f32] không chứa nổi mu/rstd f64 → maxdiff grad 3.17e-08 + loss đổi chữ số cuối. Sống lại nếu compiler có f64 container / typed f32 locals |
