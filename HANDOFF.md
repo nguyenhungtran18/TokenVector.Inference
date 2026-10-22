@@ -1778,6 +1778,37 @@ Docs: perf-plan §12 (dòng GĐ12) + §13.3/§13.4/§13.5/§13.6 + §0.33 này.
 
 ---
 
+### 0.34 P6 GĐ13 — ADAMW PARALLEL LẦN 3: ĐO BÁC BỎ, ĐÓNG (2026-10-22)
+
+**Mục tiêu:** `ADAMW_STEP` 3930 ms (11% bước @124M) — song song 12 worker. Đã bust 2 lần
+(BL: SHARED-12 0.36×, OWN+MERGE 0.29×; GĐ9 loại boxing) → GĐ13 chạy probe chẩn đoán TRƯỚC
+(§13.3: "đo trước, quyết theo số"), không wire khi chưa net win.
+
+**Probe `tv/tests/simd_probe_cc.tkv`** — @N=124M, `time_perf`, best-of, bit-check subset 12M:
+
+| V | Variant | ms | so serial | Bit vs V0 |
+|---|---|---|---|---|
+| V0 | serial (công thức GĐ10) | 3297 | 1.00× | — |
+| V1 | OWN-seg compute-only (ceiling) | 1266 | **2.60×** | n/a (không merge) |
+| V2 | SHARED + read-back | 10984 | **0.30×** ❌ | dp=dm=dv **0.0** |
+| V4 | copy shared (control) | 1297 | **2.54×** | — |
+| V5 | **REGISTERS** (toàn bộ phep toan trong thanh ghi, ghi p/m/v 1 lần, KHÔNG read-back) | 9937 | **0.33×** ❌ | dm=dv 0.0, dp 9.5e-07 |
+| V3 | OWN + serial merge | 2766 | **1.19×** | exact theo segment |
+
+**Chốt nguyên nhân — lật giả thuyết CE/CF:** V5 (không read-back, mọi phép trong thanh ghi) ≈ V2
+(0.33× ≈ 0.30×) → **read-back KHÔNG phải thủ phạm**; bệnh thật là **phep toan per-ptu + ghi list
+CHUNG** (cùng pattern CE SHARED 0.25-0.36×, BL SHARED 0.36×). Worker chỉ scale khi ghi **seg
+RIENG** (V1 2.60×); đưa kết quả về list chung bằng **merge đơn luồng** (V3 1.19× — merge 875 ms
+ăn phần lớn) hay **ghi thẳng shared** (V5 0.33×) đều **ăn hết lợi thế**. **V4 copy shared 2.54×**
+loại lỗi hệ thống/NUMA/drift (V4 ≥2× đúng quy tắc §13.3) → kết luận vững.
+
+**Bit:** V2-vs-V0 dp=dm=dv **0.0** (bit-exact); V5-vs-V0 dm=dv 0.0, dp **9.5e-07** (V5 không round
+f32 trước khi tính p → lệch 1 ULP, vô hại vì đã bust).
+
+**Quyết định: KHÔNG WIRE** — `trainer.step` giữ serial; 4 file trainer không đổi; ước −2.4..2.7 s
+(nếu thắng) → **0**; giữ **10.4×**. Hướng còn lại cho AdamW: **kernel fused native** (sàn băng
+thông ~1.0-1.1 s, không cần thread) — mục con của P7b. Docs: §12 dòng GĐ13 + §13.3/§13.4/§13.5/§13.6.
+
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
 
 | Gate | Command / Path | Result |

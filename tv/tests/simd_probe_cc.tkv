@@ -1,0 +1,707 @@
+# PROBE CC — CHUAN DOAN GĐ13 (2026-10-22): ADAMW PARALLEL LAN THU 3
+# Boi canh: ADAMW_STEP 3930 ms (11% buoc @124M), da bust 2 lan (BL: SHARED-12
+# = 0.36x, OWN+MERGE = 0.29x — merge 372M = 11.7s), boxing DA loai (GĐ9).
+# Them du lieu moi tu probe CE (GĐ11): benh "phep toan + ghi list CHUNG" xuat
+# hien khi worker ghi ROI doc lai (read-your-write) tren list chung; copy thuan
+# (khong doc lai) van 2.0-3.0x; worker ghi own-seg + doc lai own van 2.4-7.3x.
+# KET QUA (N=124M, now_ms, best-of-2/1):
+#   V0 serial 3297ms | V1 own-seg 1266ms (2.60x) | V2 shared+readback 10984ms (0.30x)
+#   V4 copy shared 1297ms (2.54x) | V5 REGISTERS 9937ms (0.33x) | V3 own+merge 2766ms (1.19x)
+# BIT: V2-vs-V0 dp=dm=dv=0.0 (bit-exact). V5-vs-V0 dp=9.5e-07 dm=dv=0.0
+#   (V5 khong luu tron f32 truoc khi tinh p -> p lech 1 ULP; m/v van chinh xac).
+# -> KET LUAN GĐ13: V5 (phep toan toan bo trong thanh ghi, ghi p/m/v 1 lan,
+#   KHONG doc-lai) van BUST 0.33x — GIONG V2 (0.30x). Doc-lai khong phai thu pham;
+#   benh la phep toan + ghi list CHUNG (van the BL/CE da do). Worker chi scale khi
+#   ghi seg RIENG (V1 2.60x), nhung dua ve list chung bang merge serial (V3 1.19x)
+#   hay ghi chung (V5) deu an het loi. KHONG co hinh thai AdamW song song nao net
+#   win -> DONG GĐ13, khong wire.
+#
+# -> HYPOTHESIS can chot: doc-lai tren list CHUNG la thu pham (khong phai
+# "phep toan + ghi chung" don thuan). V5 do chinh dieu do: phep toan toan bo
+# trong thanh ghi (register), ghi p/m/v 1 lan, KHONG doc lai sau khi ghi.
+#
+# Bien the (N = 124.000.000, now_ms, >=2 lan/variant, best):
+#   V0 serial        — copy NGUYEN vong AdamW.step hien tai (GĐ10, co doc-lai)
+#   V1 own-seg       — worker ghi seg RIENG, KHONG merge (BL[2] — ceiling compute)
+#   V2 shared+readback — copy NGUYEN _bl_aw_shared (BL[2] — benh da do 0.36x)
+#   V3 own+merge     — worker own-seg + MAIN merge serial (BL[3] — 0.29x)
+#   V4 copy shared   — dieu kien: 12 worker copy g -> tmp, KHONG phep toan
+#   V5 REGISTERS     — phep toan trong thanh ghi, ghi p/m/v 1 lan, KHONG doc lai
+#                      (UNG VIEN WIRE neu V5 scale)
+# Bit-check (subset 12M, inline trong main): V5 vs V2 vs V0 cung dau vao.
+# Chay (tu goc repo):
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_cc.tkv out/cc.exe main
+#   ./out/cc.exe
+
+def _cc_div(a: 'i64', b: 'i64') -> 'i64':
+    if a < b:
+        return 0
+    q = 0
+    r = a
+    while r >= b:
+        step = b
+        add = 1
+        while (step + step) <= r:
+            step = step + step
+            add = add + add
+        r = r - step
+        q = q + add
+    return q
+
+def _cc_seg_sz(n: 'i64', k: 'i64') -> 'i64':
+    return _cc_div((k + 1) * n, 12) - _cc_div(k * n, 12)
+
+def _cc_smt(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+def _cc_zeros(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(0.0)
+    return out
+
+def _cc_fill(n: 'i64', salt: 'i64') -> 'list[f32]':
+    out = []
+    i = 0
+    while i < n:
+        out.append(float((((i * 131) + salt) % 997) - 498) * 0.017)
+        i = i + 1
+    return out
+
+def _cc_copy_seg(dst: 'list[f32]', src: 'list[f32]', dlo: 'i64', cnt: 'i64') -> 'i64':
+    i = 0
+    while i < cnt:
+        dst[dlo + i] = src[i]
+        i = i + 1
+    return 0
+
+# ---- V0 serial — copy NGUYEN vong AdamW.step hien tai (GĐ10, co doc-lai) --
+def _cc_aw_ser(p: 'list[f32]', m: 'list[f32]', v: 'list[f32]', g: 'list[f32]',
+               n: 'i64', coef: 'f64', wdf: 'f64', b1: 'f64', b2: 'f64',
+               ks: 'f64', epss: 'f64') -> 'i64':
+    i = 0
+    while i < n:
+        gi = g[i] * coef
+        p[i] = p[i] * wdf
+        m[i] = b1 * m[i] + (1.0 - b1) * gi
+        v[i] = b2 * v[i] + (1.0 - b2) * gi * gi
+        p[i] = p[i] - ks * m[i] / (sqrt(v[i]) + epss)
+        i = i + 1
+    return 0
+
+class _CcJob:
+    pl: "list[f32]"
+    ml: "list[f32]"
+    vl: "list[f32]"
+    gl: "list[f32]"
+    pseg: "list[f32]"
+    mseg: "list[f32]"
+    vseg: "list[f32]"
+    lo: 'i64'
+    hi: 'i64'
+    coef: 'f64'
+    wdf: 'f64'
+    b1: 'f64'
+    b2: 'f64'
+    ks: 'f64'
+    epss: 'f64'
+    def __init__(self, pl: "list[f32]", ml: "list[f32]", vl: "list[f32]",
+                 gl: "list[f32]", pseg: "list[f32]", mseg: "list[f32]",
+                 vseg: "list[f32]", lo: 'i64', hi: 'i64',
+                 coef: 'f64', wdf: 'f64', b1: 'f64', b2: 'f64',
+                 ks: 'f64', epss: 'f64'):
+        self.pl = pl
+        self.ml = ml
+        self.vl = vl
+        self.gl = gl
+        self.pseg = pseg
+        self.mseg = mseg
+        self.vseg = vseg
+        self.lo = lo
+        self.hi = hi
+        self.coef = coef
+        self.wdf = wdf
+        self.b1 = b1
+        self.b2 = b2
+        self.ks = ks
+        self.epss = epss
+
+# ---- V1 own-seg (copy NGUYEN _bl_aw_own) — ghi seg rieng, KHONG merge ------
+def _cc_aw_own(j: "_CcJob") -> 'i64':
+    ps = j.pseg
+    ms = j.mseg
+    vs = j.vseg
+    k = 0
+    i = j.lo
+    while i < j.hi:
+        gi = j.gl[i] * j.coef
+        pv = j.pl[i] * j.wdf
+        mv = j.b1 * j.ml[i] + (1.0 - j.b1) * gi
+        vv = j.b2 * j.vl[i] + (1.0 - j.b2) * gi * gi
+        pv = pv - j.ks * mv / (sqrt(vv) + j.epss)
+        ps[k] = pv
+        ms[k] = mv
+        vs[k] = vv
+        k = k + 1
+        i = i + 1
+    return 0
+
+# ---- V2 shared + doc-lai (copy NGUYEN _bl_aw_shared — BL[2]) ---------------
+def _cc_aw_shared(j: "_CcJob") -> 'i64':
+    i = j.lo
+    while i < j.hi:
+        gi = j.gl[i] * j.coef
+        j.pl[i] = j.pl[i] * j.wdf
+        j.ml[i] = j.b1 * j.ml[i] + (1.0 - j.b1) * gi
+        j.vl[i] = j.b2 * j.vl[i] + (1.0 - j.b2) * gi * gi
+        j.pl[i] = j.pl[i] - j.ks * j.ml[i] / (sqrt(j.vl[i]) + j.epss)
+        i = i + 1
+    return 0
+
+# ---- V5 REGISTERS — phep toan thanh ghi, ghi 1 lan, KHONG doc lai ---------
+# BIT-EXACT voi V0: V0 luu m/v vao list[f32] (lam tron f32) ROI doc lai de
+# tinh p -> p dung GIA TRI F32. V5 lap lai phep lam tron bang scratch RIENG
+# cua worker (rt[0] = mv; mv32 = rt[0]) — khong doc list chung.
+def _cc_aw_reg(j: "_CcJob") -> 'i64':
+    rt = []
+    rt.append(0.0)
+    i = j.lo
+    while i < j.hi:
+        gi = j.gl[i] * j.coef
+        pv = j.pl[i] * j.wdf
+        mv = j.b1 * j.ml[i] + (1.0 - j.b1) * gi
+        vv = j.b2 * j.vl[i] + (1.0 - j.b2) * gi * gi
+        rt[0] = mv
+        mv32 = rt[0]
+        rt[0] = vv
+        vv32 = rt[0]
+        pv = pv - j.ks * mv32 / (sqrt(vv32) + j.epss)
+        j.pl[i] = pv
+        j.ml[i] = mv
+        j.vl[i] = vv
+        i = i + 1
+    return 0
+
+# ---- V4 copy shared — dieu kien khong phep toan ---------------------------
+class _CcCpJob:
+    al: "list[f32]"
+    bl: "list[f32]"
+    lo: 'i64'
+    hi: 'i64'
+    def __init__(self, al: "list[f32]", bl: "list[f32]", lo: 'i64', hi: 'i64'):
+        self.al = al
+        self.bl = bl
+        self.lo = lo
+        self.hi = hi
+
+def _cc_cp_one(j: "_CcCpJob") -> 'i64':
+    i = j.lo
+    while i < j.hi:
+        j.bl[i] = j.al[i]
+        i = i + 1
+    return 0
+
+# ---- 12 spawn/join — moi bien the 1 ham rieng (bai hoc GĐ4) ---------------
+def _cc_v1_all(p: 'list[f32]', m: 'list[f32]', v: 'list[f32]', g: 'list[f32]',
+               p0: "list[f32]", m0: "list[f32]", v0: "list[f32]",
+               p1: "list[f32]", m1: "list[f32]", v1: "list[f32]",
+               p2: "list[f32]", m2: "list[f32]", v2: "list[f32]",
+               p3: "list[f32]", m3: "list[f32]", v3: "list[f32]",
+               p4: "list[f32]", m4: "list[f32]", v4: "list[f32]",
+               p5: "list[f32]", m5: "list[f32]", v5: "list[f32]",
+               p6: "list[f32]", m6: "list[f32]", v6: "list[f32]",
+               p7: "list[f32]", m7: "list[f32]", v7: "list[f32]",
+               p8: "list[f32]", m8: "list[f32]", v8: "list[f32]",
+               p9: "list[f32]", m9: "list[f32]", v9: "list[f32]",
+               p10: "list[f32]", m10: "list[f32]", v10: "list[f32]",
+               p11: "list[f32]", m11: "list[f32]", v11: "list[f32]",
+               n: 'i64', coef: 'f64', wdf: 'f64', b1: 'f64', b2: 'f64',
+               ks: 'f64', epss: 'f64') -> 'i32':
+    r0 = _cc_div(0 * n, 12)
+    r1 = _cc_div(1 * n, 12)
+    r2 = _cc_div(2 * n, 12)
+    r3 = _cc_div(3 * n, 12)
+    r4 = _cc_div(4 * n, 12)
+    r5 = _cc_div(5 * n, 12)
+    r6 = _cc_div(6 * n, 12)
+    r7 = _cc_div(7 * n, 12)
+    r8 = _cc_div(8 * n, 12)
+    r9 = _cc_div(9 * n, 12)
+    r10 = _cc_div(10 * n, 12)
+    r11 = _cc_div(11 * n, 12)
+    h0 = thread_spawn(_cc_aw_own, _CcJob(p, m, v, g, p0, m0, v0, r0, r1, coef, wdf, b1, b2, ks, epss))
+    h1 = thread_spawn(_cc_aw_own, _CcJob(p, m, v, g, p1, m1, v1, r1, r2, coef, wdf, b1, b2, ks, epss))
+    h2 = thread_spawn(_cc_aw_own, _CcJob(p, m, v, g, p2, m2, v2, r2, r3, coef, wdf, b1, b2, ks, epss))
+    h3 = thread_spawn(_cc_aw_own, _CcJob(p, m, v, g, p3, m3, v3, r3, r4, coef, wdf, b1, b2, ks, epss))
+    h4 = thread_spawn(_cc_aw_own, _CcJob(p, m, v, g, p4, m4, v4, r4, r5, coef, wdf, b1, b2, ks, epss))
+    h5 = thread_spawn(_cc_aw_own, _CcJob(p, m, v, g, p5, m5, v5, r5, r6, coef, wdf, b1, b2, ks, epss))
+    h6 = thread_spawn(_cc_aw_own, _CcJob(p, m, v, g, p6, m6, v6, r6, r7, coef, wdf, b1, b2, ks, epss))
+    h7 = thread_spawn(_cc_aw_own, _CcJob(p, m, v, g, p7, m7, v7, r7, r8, coef, wdf, b1, b2, ks, epss))
+    h8 = thread_spawn(_cc_aw_own, _CcJob(p, m, v, g, p8, m8, v8, r8, r9, coef, wdf, b1, b2, ks, epss))
+    h9 = thread_spawn(_cc_aw_own, _CcJob(p, m, v, g, p9, m9, v9, r9, r10, coef, wdf, b1, b2, ks, epss))
+    h10 = thread_spawn(_cc_aw_own, _CcJob(p, m, v, g, p10, m10, v10, r10, r11, coef, wdf, b1, b2, ks, epss))
+    h11 = thread_spawn(_cc_aw_own, _CcJob(p, m, v, g, p11, m11, v11, r11, n, coef, wdf, b1, b2, ks, epss))
+    j0 = thread_join(h0)
+    j1 = thread_join(h1)
+    j2 = thread_join(h2)
+    j3 = thread_join(h3)
+    j4 = thread_join(h4)
+    j5 = thread_join(h5)
+    j6 = thread_join(h6)
+    j7 = thread_join(h7)
+    j8 = thread_join(h8)
+    j9 = thread_join(h9)
+    j10 = thread_join(h10)
+    j11 = thread_join(h11)
+    return 0
+
+def _cc_v2_all(p: 'list[f32]', m: 'list[f32]', v: 'list[f32]', g: 'list[f32]',
+               n: 'i64', coef: 'f64', wdf: 'f64', b1: 'f64', b2: 'f64',
+               ks: 'f64', epss: 'f64') -> 'i32':
+    r0 = _cc_div(0 * n, 12)
+    r1 = _cc_div(1 * n, 12)
+    r2 = _cc_div(2 * n, 12)
+    r3 = _cc_div(3 * n, 12)
+    r4 = _cc_div(4 * n, 12)
+    r5 = _cc_div(5 * n, 12)
+    r6 = _cc_div(6 * n, 12)
+    r7 = _cc_div(7 * n, 12)
+    r8 = _cc_div(8 * n, 12)
+    r9 = _cc_div(9 * n, 12)
+    r10 = _cc_div(10 * n, 12)
+    r11 = _cc_div(11 * n, 12)
+    zd = []
+    zd.append(0.0)
+    h0 = thread_spawn(_cc_aw_shared, _CcJob(p, m, v, g, zd, zd, zd, r0, r1, coef, wdf, b1, b2, ks, epss))
+    h1 = thread_spawn(_cc_aw_shared, _CcJob(p, m, v, g, zd, zd, zd, r1, r2, coef, wdf, b1, b2, ks, epss))
+    h2 = thread_spawn(_cc_aw_shared, _CcJob(p, m, v, g, zd, zd, zd, r2, r3, coef, wdf, b1, b2, ks, epss))
+    h3 = thread_spawn(_cc_aw_shared, _CcJob(p, m, v, g, zd, zd, zd, r3, r4, coef, wdf, b1, b2, ks, epss))
+    h4 = thread_spawn(_cc_aw_shared, _CcJob(p, m, v, g, zd, zd, zd, r4, r5, coef, wdf, b1, b2, ks, epss))
+    h5 = thread_spawn(_cc_aw_shared, _CcJob(p, m, v, g, zd, zd, zd, r5, r6, coef, wdf, b1, b2, ks, epss))
+    h6 = thread_spawn(_cc_aw_shared, _CcJob(p, m, v, g, zd, zd, zd, r6, r7, coef, wdf, b1, b2, ks, epss))
+    h7 = thread_spawn(_cc_aw_shared, _CcJob(p, m, v, g, zd, zd, zd, r7, r8, coef, wdf, b1, b2, ks, epss))
+    h8 = thread_spawn(_cc_aw_shared, _CcJob(p, m, v, g, zd, zd, zd, r8, r9, coef, wdf, b1, b2, ks, epss))
+    h9 = thread_spawn(_cc_aw_shared, _CcJob(p, m, v, g, zd, zd, zd, r9, r10, coef, wdf, b1, b2, ks, epss))
+    h10 = thread_spawn(_cc_aw_shared, _CcJob(p, m, v, g, zd, zd, zd, r10, r11, coef, wdf, b1, b2, ks, epss))
+    h11 = thread_spawn(_cc_aw_shared, _CcJob(p, m, v, g, zd, zd, zd, r11, n, coef, wdf, b1, b2, ks, epss))
+    j0 = thread_join(h0)
+    j1 = thread_join(h1)
+    j2 = thread_join(h2)
+    j3 = thread_join(h3)
+    j4 = thread_join(h4)
+    j5 = thread_join(h5)
+    j6 = thread_join(h6)
+    j7 = thread_join(h7)
+    j8 = thread_join(h8)
+    j9 = thread_join(h9)
+    j10 = thread_join(h10)
+    j11 = thread_join(h11)
+    return 0
+
+def _cc_v5_all(p: 'list[f32]', m: 'list[f32]', v: 'list[f32]', g: 'list[f32]',
+               n: 'i64', coef: 'f64', wdf: 'f64', b1: 'f64', b2: 'f64',
+               ks: 'f64', epss: 'f64') -> 'i32':
+    r0 = _cc_div(0 * n, 12)
+    r1 = _cc_div(1 * n, 12)
+    r2 = _cc_div(2 * n, 12)
+    r3 = _cc_div(3 * n, 12)
+    r4 = _cc_div(4 * n, 12)
+    r5 = _cc_div(5 * n, 12)
+    r6 = _cc_div(6 * n, 12)
+    r7 = _cc_div(7 * n, 12)
+    r8 = _cc_div(8 * n, 12)
+    r9 = _cc_div(9 * n, 12)
+    r10 = _cc_div(10 * n, 12)
+    r11 = _cc_div(11 * n, 12)
+    zd = []
+    zd.append(0.0)
+    h0 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, r0, r1, coef, wdf, b1, b2, ks, epss))
+    h1 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, r1, r2, coef, wdf, b1, b2, ks, epss))
+    h2 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, r2, r3, coef, wdf, b1, b2, ks, epss))
+    h3 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, r3, r4, coef, wdf, b1, b2, ks, epss))
+    h4 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, r4, r5, coef, wdf, b1, b2, ks, epss))
+    h5 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, r5, r6, coef, wdf, b1, b2, ks, epss))
+    h6 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, r6, r7, coef, wdf, b1, b2, ks, epss))
+    h7 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, r7, r8, coef, wdf, b1, b2, ks, epss))
+    h8 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, r8, r9, coef, wdf, b1, b2, ks, epss))
+    h9 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, r9, r10, coef, wdf, b1, b2, ks, epss))
+    h10 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, r10, r11, coef, wdf, b1, b2, ks, epss))
+    h11 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, r11, n, coef, wdf, b1, b2, ks, epss))
+    j0 = thread_join(h0)
+    j1 = thread_join(h1)
+    j2 = thread_join(h2)
+    j3 = thread_join(h3)
+    j4 = thread_join(h4)
+    j5 = thread_join(h5)
+    j6 = thread_join(h6)
+    j7 = thread_join(h7)
+    j8 = thread_join(h8)
+    j9 = thread_join(h9)
+    j10 = thread_join(h10)
+    j11 = thread_join(h11)
+    return 0
+
+def _cc_v4_all(a: 'list[f32]', b: 'list[f32]', cnt: 'i64') -> 'i32':
+    c0 = _cc_div(0 * cnt, 12)
+    c1 = _cc_div(1 * cnt, 12)
+    c2 = _cc_div(2 * cnt, 12)
+    c3 = _cc_div(3 * cnt, 12)
+    c4 = _cc_div(4 * cnt, 12)
+    c5 = _cc_div(5 * cnt, 12)
+    c6 = _cc_div(6 * cnt, 12)
+    c7 = _cc_div(7 * cnt, 12)
+    c8 = _cc_div(8 * cnt, 12)
+    c9 = _cc_div(9 * cnt, 12)
+    c10 = _cc_div(10 * cnt, 12)
+    c11 = _cc_div(11 * cnt, 12)
+    h0 = thread_spawn(_cc_cp_one, _CcCpJob(a, b, c0, c1))
+    h1 = thread_spawn(_cc_cp_one, _CcCpJob(a, b, c1, c2))
+    h2 = thread_spawn(_cc_cp_one, _CcCpJob(a, b, c2, c3))
+    h3 = thread_spawn(_cc_cp_one, _CcCpJob(a, b, c3, c4))
+    h4 = thread_spawn(_cc_cp_one, _CcCpJob(a, b, c4, c5))
+    h5 = thread_spawn(_cc_cp_one, _CcCpJob(a, b, c5, c6))
+    h6 = thread_spawn(_cc_cp_one, _CcCpJob(a, b, c6, c7))
+    h7 = thread_spawn(_cc_cp_one, _CcCpJob(a, b, c7, c8))
+    h8 = thread_spawn(_cc_cp_one, _CcCpJob(a, b, c8, c9))
+    h9 = thread_spawn(_cc_cp_one, _CcCpJob(a, b, c9, c10))
+    h10 = thread_spawn(_cc_cp_one, _CcCpJob(a, b, c10, c11))
+    h11 = thread_spawn(_cc_cp_one, _CcCpJob(a, b, c11, cnt))
+    j0 = thread_join(h0)
+    j1 = thread_join(h1)
+    j2 = thread_join(h2)
+    j3 = thread_join(h3)
+    j4 = thread_join(h4)
+    j5 = thread_join(h5)
+    j6 = thread_join(h6)
+    j7 = thread_join(h7)
+    j8 = thread_join(h8)
+    j9 = thread_join(h9)
+    j10 = thread_join(h10)
+    j11 = thread_join(h11)
+    return 0
+
+# spawn/join V5 rieng cho bit-check subset (12 worker, goc 0..ns)
+def _cc_v5_sub(p: 'list[f32]', m: 'list[f32]', v: 'list[f32]', g: 'list[f32]',
+               ns: 'i64', coef: 'f64', wdf: 'f64', b1: 'f64', b2: 'f64',
+               ks: 'f64', epss: 'f64') -> 'i32':
+    s0 = _cc_div(0 * ns, 12)
+    s1 = _cc_div(1 * ns, 12)
+    s2 = _cc_div(2 * ns, 12)
+    s3 = _cc_div(3 * ns, 12)
+    s4 = _cc_div(4 * ns, 12)
+    s5 = _cc_div(5 * ns, 12)
+    s6 = _cc_div(6 * ns, 12)
+    s7 = _cc_div(7 * ns, 12)
+    s8 = _cc_div(8 * ns, 12)
+    s9 = _cc_div(9 * ns, 12)
+    s10 = _cc_div(10 * ns, 12)
+    s11 = _cc_div(11 * ns, 12)
+    zd = []
+    zd.append(0.0)
+    h0 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, s0, s1, coef, wdf, b1, b2, ks, epss))
+    h1 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, s1, s2, coef, wdf, b1, b2, ks, epss))
+    h2 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, s2, s3, coef, wdf, b1, b2, ks, epss))
+    h3 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, s3, s4, coef, wdf, b1, b2, ks, epss))
+    h4 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, s4, s5, coef, wdf, b1, b2, ks, epss))
+    h5 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, s5, s6, coef, wdf, b1, b2, ks, epss))
+    h6 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, s6, s7, coef, wdf, b1, b2, ks, epss))
+    h7 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, s7, s8, coef, wdf, b1, b2, ks, epss))
+    h8 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, s8, s9, coef, wdf, b1, b2, ks, epss))
+    h9 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, s9, s10, coef, wdf, b1, b2, ks, epss))
+    h10 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, s10, s11, coef, wdf, b1, b2, ks, epss))
+    h11 = thread_spawn(_cc_aw_reg, _CcJob(p, m, v, g, zd, zd, zd, s11, ns, coef, wdf, b1, b2, ks, epss))
+    j0 = thread_join(h0)
+    j1 = thread_join(h1)
+    j2 = thread_join(h2)
+    j3 = thread_join(h3)
+    j4 = thread_join(h4)
+    j5 = thread_join(h5)
+    j6 = thread_join(h6)
+    j7 = thread_join(h7)
+    j8 = thread_join(h8)
+    j9 = thread_join(h9)
+    j10 = thread_join(h10)
+    j11 = thread_join(h11)
+    return 0
+
+def main() -> 'i32':
+    n = 124000000
+    print("CC N=" + str(n))
+    coef = 0.1
+    wdf = 0.995
+    b1 = 0.9
+    b2 = 0.999
+    ks = 0.03
+    epss = 0.00000001 * 0.999
+    p0 = _cc_fill(n, 1)
+    m0 = _cc_fill(n, 2)
+    v0 = _cc_fill(n, 3)
+    g0 = _cc_fill(n, 4)
+    print("CC fills ok")
+
+    # ---- V0 serial — 2 lan, best ------------------------------------------
+    v0t = 1.0e18
+    k = 0
+    while k < 2:
+        t0 = now_ms()
+        _cc_aw_ser(p0, m0, v0, g0, n, coef, wdf, b1, b2, ks, epss)
+        dt = now_ms() - t0
+        v0t = _cc_smt(v0t, dt)
+        k = k + 1
+    print("CC V0 serial          = " + str(v0t) + " ms  (" + str(v0t * 1000.0 / float(n)) + " ns/ptu)")
+    p0 = None
+    m0 = None
+    v0 = None
+
+    # ---- V5 REGISTERS — UNG VIEN WIRE — 2 lan ------------------------------
+    pr = _cc_fill(n, 1)
+    mr = _cc_fill(n, 2)
+    vr = _cc_fill(n, 3)
+    v5t = 1.0e18
+    k = 0
+    while k < 2:
+        t0 = now_ms()
+        _cc_v5_all(pr, mr, vr, g0, n, coef, wdf, b1, b2, ks, epss)
+        dt = now_ms() - t0
+        v5t = _cc_smt(v5t, dt)
+        k = k + 1
+    print("CC V5 REGISTERS       = " + str(v5t) + " ms  (speed " + str(v0t / v5t) + "x)")
+    pr = None
+    mr = None
+    vr = None
+
+    # ---- V1 own-seg (ceiling compute) — 2 lan ------------------------------
+    sz = _cc_div(n, 12)
+    sz11 = _cc_seg_sz(n, 11)
+    ps0 = _cc_zeros(_cc_seg_sz(n, 0))
+    ps1 = _cc_zeros(_cc_seg_sz(n, 1))
+    ps2 = _cc_zeros(_cc_seg_sz(n, 2))
+    ps3 = _cc_zeros(_cc_seg_sz(n, 3))
+    ps4 = _cc_zeros(_cc_seg_sz(n, 4))
+    ps5 = _cc_zeros(_cc_seg_sz(n, 5))
+    ps6 = _cc_zeros(_cc_seg_sz(n, 6))
+    ps7 = _cc_zeros(_cc_seg_sz(n, 7))
+    ps8 = _cc_zeros(_cc_seg_sz(n, 8))
+    ps9 = _cc_zeros(_cc_seg_sz(n, 9))
+    ps10 = _cc_zeros(_cc_seg_sz(n, 10))
+    ps11 = _cc_zeros(sz11)
+    ms0 = _cc_zeros(_cc_seg_sz(n, 0))
+    ms1 = _cc_zeros(_cc_seg_sz(n, 1))
+    ms2 = _cc_zeros(_cc_seg_sz(n, 2))
+    ms3 = _cc_zeros(_cc_seg_sz(n, 3))
+    ms4 = _cc_zeros(_cc_seg_sz(n, 4))
+    ms5 = _cc_zeros(_cc_seg_sz(n, 5))
+    ms6 = _cc_zeros(_cc_seg_sz(n, 6))
+    ms7 = _cc_zeros(_cc_seg_sz(n, 7))
+    ms8 = _cc_zeros(_cc_seg_sz(n, 8))
+    ms9 = _cc_zeros(_cc_seg_sz(n, 9))
+    ms10 = _cc_zeros(_cc_seg_sz(n, 10))
+    ms11 = _cc_zeros(sz11)
+    vs0 = _cc_zeros(_cc_seg_sz(n, 0))
+    vs1 = _cc_zeros(_cc_seg_sz(n, 1))
+    vs2 = _cc_zeros(_cc_seg_sz(n, 2))
+    vs3 = _cc_zeros(_cc_seg_sz(n, 3))
+    vs4 = _cc_zeros(_cc_seg_sz(n, 4))
+    vs5 = _cc_zeros(_cc_seg_sz(n, 5))
+    vs6 = _cc_zeros(_cc_seg_sz(n, 6))
+    vs7 = _cc_zeros(_cc_seg_sz(n, 7))
+    vs8 = _cc_zeros(_cc_seg_sz(n, 8))
+    vs9 = _cc_zeros(_cc_seg_sz(n, 9))
+    vs10 = _cc_zeros(_cc_seg_sz(n, 10))
+    vs11 = _cc_zeros(sz11)
+    pi = _cc_fill(n, 1)
+    mi = _cc_fill(n, 2)
+    vi = _cc_fill(n, 3)
+    print("CC segs ready")
+    v1t = 1.0e18
+    k = 0
+    while k < 2:
+        t0 = now_ms()
+        _cc_v1_all(pi, mi, vi, g0,
+                    ps0, ms0, vs0, ps1, ms1, vs1, ps2, ms2, vs2, ps3, ms3, vs3,
+                    ps4, ms4, vs4, ps5, ms5, vs5, ps6, ms6, vs6, ps7, ms7, vs7,
+                    ps8, ms8, vs8, ps9, ms9, vs9, ps10, ms10, vs10, ps11, ms11, vs11,
+                    n, coef, wdf, b1, b2, ks, epss)
+        dt = now_ms() - t0
+        v1t = _cc_smt(v1t, dt)
+        k = k + 1
+    print("CC V1 own-seg (no mrg)= " + str(v1t) + " ms  (speed " + str(v0t / v1t) + "x)")
+    pi = None
+    mi = None
+    vi = None
+
+    # ---- V2 shared + doc-lai — 1 lan (da biet ~0.36x) ----------------------
+    ps = _cc_fill(n, 1)
+    ms = _cc_fill(n, 2)
+    vs = _cc_fill(n, 3)
+    t0 = now_ms()
+    _cc_v2_all(ps, ms, vs, g0, n, coef, wdf, b1, b2, ks, epss)
+    v2t = now_ms() - t0
+    print("CC V2 shared+readback = " + str(v2t) + " ms  (speed " + str(v0t / v2t) + "x)")
+    ps = None
+    ms = None
+    vs = None
+
+    # ---- V4 copy shared dieu kien — 1 lan ----------------------------------
+    ca = _cc_fill(n, 5)
+    cb = _cc_zeros(n)
+    t0 = now_ms()
+    _cc_v4_all(ca, cb, n)
+    v4t = now_ms() - t0
+    print("CC V4 copy shared     = " + str(v4t) + " ms  (speed " + str(v0t / v4t) + "x)")
+    ca = None
+    cb = None
+
+    # ---- V3 own + MAIN merge serial — 1 lan (merge 3 x 124M) ---------------
+    pm = _cc_fill(n, 1)
+    mm = _cc_fill(n, 2)
+    vm = _cc_fill(n, 3)
+    t0 = now_ms()
+    _cc_v1_all(pm, mm, vm, g0,
+               ps0, ms0, vs0, ps1, ms1, vs1, ps2, ms2, vs2, ps3, ms3, vs3,
+               ps4, ms4, vs4, ps5, ms5, vs5, ps6, ms6, vs6, ps7, ms7, vs7,
+               ps8, ms8, vs8, ps9, ms9, vs9, ps10, ms10, vs10, ps11, ms11, vs11,
+               n, coef, wdf, b1, b2, ks, epss)
+    t_w = now_ms() - t0
+    t0 = now_ms()
+    _cc_copy_seg(pm, ps0, _cc_div(0 * n, 12), _cc_seg_sz(n, 0))
+    _cc_copy_seg(pm, ps1, _cc_div(1 * n, 12), _cc_seg_sz(n, 1))
+    _cc_copy_seg(pm, ps2, _cc_div(2 * n, 12), _cc_seg_sz(n, 2))
+    _cc_copy_seg(pm, ps3, _cc_div(3 * n, 12), _cc_seg_sz(n, 3))
+    _cc_copy_seg(pm, ps4, _cc_div(4 * n, 12), _cc_seg_sz(n, 4))
+    _cc_copy_seg(pm, ps5, _cc_div(5 * n, 12), _cc_seg_sz(n, 5))
+    _cc_copy_seg(pm, ps6, _cc_div(6 * n, 12), _cc_seg_sz(n, 6))
+    _cc_copy_seg(pm, ps7, _cc_div(7 * n, 12), _cc_seg_sz(n, 7))
+    _cc_copy_seg(pm, ps8, _cc_div(8 * n, 12), _cc_seg_sz(n, 8))
+    _cc_copy_seg(pm, ps9, _cc_div(9 * n, 12), _cc_seg_sz(n, 9))
+    _cc_copy_seg(pm, ps10, _cc_div(10 * n, 12), _cc_seg_sz(n, 10))
+    _cc_copy_seg(pm, ps11, _cc_div(11 * n, 12), sz11)
+    _cc_copy_seg(mm, ms0, _cc_div(0 * n, 12), _cc_seg_sz(n, 0))
+    _cc_copy_seg(mm, ms1, _cc_div(1 * n, 12), _cc_seg_sz(n, 1))
+    _cc_copy_seg(mm, ms2, _cc_div(2 * n, 12), _cc_seg_sz(n, 2))
+    _cc_copy_seg(mm, ms3, _cc_div(3 * n, 12), _cc_seg_sz(n, 3))
+    _cc_copy_seg(mm, ms4, _cc_div(4 * n, 12), _cc_seg_sz(n, 4))
+    _cc_copy_seg(mm, ms5, _cc_div(5 * n, 12), _cc_seg_sz(n, 5))
+    _cc_copy_seg(mm, ms6, _cc_div(6 * n, 12), _cc_seg_sz(n, 6))
+    _cc_copy_seg(mm, ms7, _cc_div(7 * n, 12), _cc_seg_sz(n, 7))
+    _cc_copy_seg(mm, ms8, _cc_div(8 * n, 12), _cc_seg_sz(n, 8))
+    _cc_copy_seg(mm, ms9, _cc_div(9 * n, 12), _cc_seg_sz(n, 9))
+    _cc_copy_seg(mm, ms10, _cc_div(10 * n, 12), _cc_seg_sz(n, 10))
+    _cc_copy_seg(mm, ms11, _cc_div(11 * n, 12), sz11)
+    _cc_copy_seg(vm, vs0, _cc_div(0 * n, 12), _cc_seg_sz(n, 0))
+    _cc_copy_seg(vm, vs1, _cc_div(1 * n, 12), _cc_seg_sz(n, 1))
+    _cc_copy_seg(vm, vs2, _cc_div(2 * n, 12), _cc_seg_sz(n, 2))
+    _cc_copy_seg(vm, vs3, _cc_div(3 * n, 12), _cc_seg_sz(n, 3))
+    _cc_copy_seg(vm, vs4, _cc_div(4 * n, 12), _cc_seg_sz(n, 4))
+    _cc_copy_seg(vm, vs5, _cc_div(5 * n, 12), _cc_seg_sz(n, 5))
+    _cc_copy_seg(vm, vs6, _cc_div(6 * n, 12), _cc_seg_sz(n, 6))
+    _cc_copy_seg(vm, vs7, _cc_div(7 * n, 12), _cc_seg_sz(n, 7))
+    _cc_copy_seg(vm, vs8, _cc_div(8 * n, 12), _cc_seg_sz(n, 8))
+    _cc_copy_seg(vm, vs9, _cc_div(9 * n, 12), _cc_seg_sz(n, 9))
+    _cc_copy_seg(vm, vs10, _cc_div(10 * n, 12), _cc_seg_sz(n, 10))
+    _cc_copy_seg(vm, vs11, _cc_div(11 * n, 12), sz11)
+    t_m = now_ms() - t0
+    v3t = t_w + t_m
+    print("CC V3 own+serial merge= " + str(v3t) + " ms  (worker " + str(t_w)
+          + " + merge " + str(t_m) + ")  (speed " + str(v0t / v3t) + "x)")
+    pm = None
+    mm = None
+    vm = None
+    ps0 = None
+    ps1 = None
+    ps2 = None
+    ps3 = None
+    ps4 = None
+    ps5 = None
+    ps6 = None
+    ps7 = None
+    ps8 = None
+    ps9 = None
+    ps10 = None
+    ps11 = None
+    ms0 = None
+    ms1 = None
+    ms2 = None
+    ms3 = None
+    ms4 = None
+    ms5 = None
+    ms6 = None
+    ms7 = None
+    ms8 = None
+    ms9 = None
+    ms10 = None
+    ms11 = None
+    vs0 = None
+    vs1 = None
+    vs2 = None
+    vs3 = None
+    vs4 = None
+    vs5 = None
+    vs6 = None
+    vs7 = None
+    vs8 = None
+    vs9 = None
+    vs10 = None
+    vs11 = None
+
+    # ---- BIT CHECK subset 12M: V0 vs V5 vs V2 (inline trong main) ----------
+    ns = 12000000
+    p_a = _cc_fill(ns, 1)
+    m_a = _cc_fill(ns, 2)
+    v_a = _cc_fill(ns, 3)
+    g_a = _cc_fill(ns, 4)
+    p_b = _cc_fill(ns, 1)
+    m_b = _cc_fill(ns, 2)
+    v_b = _cc_fill(ns, 3)
+    p_c = _cc_fill(ns, 1)
+    m_c = _cc_fill(ns, 2)
+    v_c = _cc_fill(ns, 3)
+    _cc_aw_ser(p_a, m_a, v_a, g_a, ns, coef, wdf, b1, b2, ks, epss)
+    _cc_v5_sub(p_b, m_b, v_b, g_a, ns, coef, wdf, b1, b2, ks, epss)
+    _cc_v2_all(p_c, m_c, v_c, g_a, ns, coef, wdf, b1, b2, ks, epss)
+    # maxdiff INLINE (khong chuyen kieu list — bai hoc P7)
+    d_pa = 0.0
+    d_ma = 0.0
+    d_va = 0.0
+    d_pc = 0.0
+    d_mc = 0.0
+    d_vc = 0.0
+    i = 0
+    while i < ns:
+        e = p_a[i] - p_b[i]
+        if e < 0.0:
+            e = -e
+        if e > d_pa:
+            d_pa = e
+        e = m_a[i] - m_b[i]
+        if e < 0.0:
+            e = -e
+        if e > d_ma:
+            d_ma = e
+        e = v_a[i] - v_b[i]
+        if e < 0.0:
+            e = -e
+        if e > d_va:
+            d_va = e
+        e = p_a[i] - p_c[i]
+        if e < 0.0:
+            e = -e
+        if e > d_pc:
+            d_pc = e
+        e = m_a[i] - m_c[i]
+        if e < 0.0:
+            e = -e
+        if e > d_mc:
+            d_mc = e
+        e = v_a[i] - v_c[i]
+        if e < 0.0:
+            e = -e
+        if e > d_vc:
+            d_vc = e
+        i = i + 1
+    print("CC bit V5-vs-V0: dp=" + str(d_pa) + " dm=" + str(d_ma) + " dv=" + str(d_va))
+    print("CC bit V2-vs-V0: dp=" + str(d_pc) + " dm=" + str(d_mc) + " dv=" + str(d_vc))
+    print("CC done")
+    return 0
