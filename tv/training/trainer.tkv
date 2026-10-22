@@ -169,13 +169,25 @@ class AdamW:
         step_size = lr / bc1
         bc2s = sqrt(bc2)
         wdf = 1.0 - lr * self.wd
+        # ==== P6 GĐ10 (2026-10-22, probe CB): GỘP 2 DIV THÀNH 1 ====
+        # Cong thuc dai so (chinh xac): m / (sqrt(v)/bc2s + eps)
+        #   == (m*bc2s) / (sqrt(v) + eps*bc2s)
+        # PyTorch (torch/optim/adamw.py) cung chi co 1 div/ptu:
+        #   denom = (exp_avg_sq.sqrt() / sqrt(bc2)).add_(eps) roi addcdiv_
+        # Duong cu cua ta: 1 sqrt + 2 div/ptu (mot phan tu di qua 2 lan chia).
+        # Do (probe CB, N=124M, 3 lan chay on dinh): 30.7 -> 28.8 ns/ptu =
+        # 1.07x; maxdiff voi duong cu = 1.19e-07 sau 1 buoc (dai so thay doi
+        # nhung cung con so hoi voi chinh PyTorch — xem gate trainer_tests
+        # TOL=1e-5). Hoist (1-b1)/(1-b2) + gop p: DO LAI KHONG ANH HUONG
+        # (V1 0.93x, V2 0.92x — bi javac/JIT CSE nuot, giu NGUYEN).
+        epss = self.eps * bc2s
+        ks = step_size * bc2s
         for i in range(self.n):
             gi = self.g[i] * coef
             self.p[i] = self.p[i] * wdf
             self.m[i] = self.b1 * self.m[i] + (1.0 - self.b1) * gi
             self.v[i] = self.b2 * self.v[i] + (1.0 - self.b2) * gi * gi
-            denom = sqrt(self.v[i]) / bc2s + self.eps
-            self.p[i] = self.p[i] - step_size * self.m[i] / denom
+            self.p[i] = self.p[i] - ks * self.m[i] / (sqrt(self.v[i]) + epss)
         self.t = self.t + 1
         return lr
 

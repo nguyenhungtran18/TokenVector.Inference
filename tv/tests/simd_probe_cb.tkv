@@ -1,0 +1,212 @@
+# PROBE CB — ADAMW: so sanh cong thuc PyTorch vs hien tai, do A/B cac bien the
+#
+# PYTORCH (torch.optim.AdamW, CPU f32 — torch/optim/adamw.py):
+#   exp_avg.lerp_(grad, 1-beta1)                    # m = m + (1-b1)*(g-m)
+#   exp_avg_sq.mul_(beta2).addcmul_(g, g, 1-beta2)  # v = b2*v + (1-b2)*g^2
+#   param.mul_(1 - lr*wd)
+#   denom = (exp_avg_sq.sqrt() / sqrt(bc2)).add_(eps)
+#   param.addcdiv_(exp_avg, denom, -lr/bc1)
+#   => 1 sqrt + 1 div/ptu, toan f32, (1-b1)/(1-b2) tinh 1 lan, p doc/ghi 1 lan/qua
+#
+# HIEN TAI (AdamW.step, tv/training/trainer.tkv):
+#   gi = g[i] * coef                              # f64
+#   p[i] = p[i] * wdf                             # p doc/ghi 2 lan
+#   m[i] = b1*m[i] + (1.0 - b1)*gi                # (1-b1) TINH MOI PTU
+#   v[i] = b2*v[i] + (1.0 - b2)*gi*gi             # (1-b2) TINH MOI PTU
+#   denom = sqrt(v[i]) / bc2s + eps               # 1 sqrt + 1 div (f64)
+#   p[i] = p[i] - step_size*m[i]/denom            # 1 div nua (f64)
+#   => 1 sqrt + 2 div/ptu, p doc/ghi 2 lan
+#
+# CAC BIEN THE (cung cong thuc, khac cach toan — do tung cai):
+#   W : copy nguyen van hien tai
+#   V1: hoist (1-b1), (1-b2) ra ngoai vong        (kieu bit: khac 0 phep nao)
+#   V2: V1 + gop p (doc 1 lan, ghi 1 lan)         (kieu bit: khac 0 phep nao)
+#   V3: V2 + gop 2 div thanh 1 (dai so: m/(sqrt(v)/bc2s+eps) ==
+#         (m*bc2s)/(sqrt(v)+eps*bc2s))            (CHET LECH — se do)
+#
+# Chay:
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_cb.tkv out/cb.exe main
+#   ./out/cb.exe
+def _cb_zeros(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append((float(0) - 0.0) / 1.0)
+    return out
+
+def _cb_seed(p: "list[f32]", m: "list[f32]", v: "list[f32]", n: 'i64') -> 'i64':
+    i = 0
+    while i < n:
+        p[i] = float((i % 211) - 105) * 0.01
+        m[i] = float((i % 97) - 48) * 0.0002
+        v[i] = float((i % 17) + 1) * 0.000004
+        i = i + 1
+    return 0
+
+def _cb_maxdiff(a: "list[f32]", b: "list[f32]", n: 'i64') -> 'f64':
+    mx = 0.0
+    i = 0
+    while i < n:
+        d = a[i] - b[i]
+        if d < 0.0:
+            d = 0.0 - d
+        if d > mx:
+            mx = d
+        i = i + 1
+    return mx
+
+def _cb_time() -> 'f64':
+    return time_perf()
+
+# ---- W: hien tai (copy nguyen van tu AdamW.step) -------------------------
+def _cb_w(p: "list[f32]", g: "list[f32]", m: "list[f32]", v: "list[f32]",
+          n: 'i64', coef: 'f64', b1: 'f32', b2: 'f32', step_size: 'f32',
+          bc2s: 'f64', eps: 'f32', wdf: 'f32') -> 'i64':
+    i = 0
+    while i < n:
+        gi = g[i] * coef
+        p[i] = p[i] * wdf
+        m[i] = b1 * m[i] + (1.0 - b1) * gi
+        v[i] = b2 * v[i] + (1.0 - b2) * gi * gi
+        denom = sqrt(v[i]) / bc2s + eps
+        p[i] = p[i] - step_size * m[i] / denom
+        i = i + 1
+    return 0
+
+# ---- V1: hoist (1-b1), (1-b2) -------------------------------------------
+def _cb_v1(p: "list[f32]", g: "list[f32]", m: "list[f32]", v: "list[f32]",
+           n: 'i64', coef: 'f64', b1: 'f32', b2: 'f32', step_size: 'f32',
+           bc2s: 'f64', eps: 'f32', wdf: 'f32') -> 'i64':
+    ob1 = 1.0 - b1
+    ob2 = 1.0 - b2
+    i = 0
+    while i < n:
+        gi = g[i] * coef
+        p[i] = p[i] * wdf
+        m[i] = b1 * m[i] + ob1 * gi
+        v[i] = b2 * v[i] + ob2 * gi * gi
+        denom = sqrt(v[i]) / bc2s + eps
+        p[i] = p[i] - step_size * m[i] / denom
+        i = i + 1
+    return 0
+
+# ---- V2: V1 + gop p (doc/ghi 1 lan) ------------------------------------
+def _cb_v2(p: "list[f32]", g: "list[f32]", m: "list[f32]", v: "list[f32]",
+           n: 'i64', coef: 'f64', b1: 'f32', b2: 'f32', step_size: 'f32',
+           bc2s: 'f64', eps: 'f32', wdf: 'f32') -> 'i64':
+    ob1 = 1.0 - b1
+    ob2 = 1.0 - b2
+    i = 0
+    while i < n:
+        gi = g[i] * coef
+        m[i] = b1 * m[i] + ob1 * gi
+        v[i] = b2 * v[i] + ob2 * gi * gi
+        denom = sqrt(v[i]) / bc2s + eps
+        p[i] = p[i] * wdf - step_size * m[i] / denom
+        i = i + 1
+    return 0
+
+# ---- V3: V2 + gop 2 div thanh 1 ----------------------------------------
+def _cb_v3(p: "list[f32]", g: "list[f32]", m: "list[f32]", v: "list[f32]",
+           n: 'i64', coef: 'f64', b1: 'f32', b2: 'f32', step_size: 'f32',
+           bc2s: 'f64', eps: 'f32', wdf: 'f32') -> 'i64':
+    ob1 = 1.0 - b1
+    ob2 = 1.0 - b2
+    epss = eps * bc2s
+    ks = step_size * bc2s
+    i = 0
+    while i < n:
+        gi = g[i] * coef
+        m[i] = b1 * m[i] + ob1 * gi
+        v[i] = b2 * v[i] + ob2 * gi * gi
+        # m / (sqrt(v)/bc2s + eps) == (m*bc2s) / (sqrt(v) + eps*bc2s)
+        p[i] = p[i] * wdf - ks * m[i] / (sqrt(v[i]) + epss)
+        i = i + 1
+    return 0
+
+def main() -> 'i32':
+    N = 124000000
+    print("CB AdamW n=" + str(N))
+    p = _cb_zeros(N)
+    g = _cb_zeros(N)
+    m = _cb_zeros(N)
+    v = _cb_zeros(N)
+    pref = _cb_zeros(N)
+    i = 0
+    while i < N:
+        g[i] = float((i % 131) - 65) * 0.0001
+        i = i + 1
+    coef = 1.0
+    b1 = 0.9
+    b2 = 0.999
+    step_size = 0.05
+    bc2s = 0.0316
+    eps = 0.00000001
+    wdf = 1.0
+
+    # ---- W (tham chieu) ----
+    _cb_seed(p, m, v, N)
+    tW = 1.0e18
+    for rep in range(2):
+        if rep > 0:
+            _cb_seed(p, m, v, N)
+        t0 = _cb_time()
+        _cb_w(p, g, m, v, N, coef, b1, b2, step_size, bc2s, eps, wdf)
+        t1 = _cb_time()
+        if (t1 - t0) < tW:
+            tW = t1 - t0
+    # luu p cua W lam tham chieu (chay lai 1 lan nua tren du lieu seed)
+    _cb_seed(p, m, v, N)
+    _cb_w(p, g, m, v, N, coef, b1, b2, step_size, bc2s, eps, wdf)
+    j = 0
+    while j < N:
+        pref[j] = p[j]
+        j = j + 1
+    print("CB[W ] t=" + str(tW) + "s  ns/ptu=" + str(tW * 1000000000.0 / float(N)))
+
+    # ---- V1 ----
+    _cb_seed(p, m, v, N)
+    tV = 1.0e18
+    for rep in range(2):
+        if rep > 0:
+            _cb_seed(p, m, v, N)
+        t0 = _cb_time()
+        _cb_v1(p, g, m, v, N, coef, b1, b2, step_size, bc2s, eps, wdf)
+        t1 = _cb_time()
+        if (t1 - t0) < tV:
+            tV = t1 - t0
+    dV = _cb_maxdiff(p, pref, N)
+    print("CB[V1] t=" + str(tV) + "s  ns/ptu=" + str(tV * 1000000000.0 / float(N))
+          + "  speedup=" + str(tW / tV) + "  maxdiff(W)=" + str(dV))
+
+    # ---- V2 ----
+    _cb_seed(p, m, v, N)
+    tV = 1.0e18
+    for rep in range(2):
+        if rep > 0:
+            _cb_seed(p, m, v, N)
+        t0 = _cb_time()
+        _cb_v2(p, g, m, v, N, coef, b1, b2, step_size, bc2s, eps, wdf)
+        t1 = _cb_time()
+        if (t1 - t0) < tV:
+            tV = t1 - t0
+    dV = _cb_maxdiff(p, pref, N)
+    print("CB[V2] t=" + str(tV) + "s  ns/ptu=" + str(tV * 1000000000.0 / float(N))
+          + "  speedup=" + str(tW / tV) + "  maxdiff(W)=" + str(dV))
+
+    # ---- V3 ----
+    _cb_seed(p, m, v, N)
+    tV = 1.0e18
+    for rep in range(2):
+        if rep > 0:
+            _cb_seed(p, m, v, N)
+        t0 = _cb_time()
+        _cb_v3(p, g, m, v, N, coef, b1, b2, step_size, bc2s, eps, wdf)
+        t1 = _cb_time()
+        if (t1 - t0) < tV:
+            tV = t1 - t0
+    dV = _cb_maxdiff(p, pref, N)
+    print("CB[V3] t=" + str(tV) + "s  ns/ptu=" + str(tV * 1000000000.0 / float(N))
+          + "  speedup=" + str(tW / tV) + "  maxdiff(W)=" + str(dV))
+
+    print("CB done")
+    return 0

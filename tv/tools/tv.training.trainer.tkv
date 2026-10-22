@@ -163,13 +163,18 @@ class AdamW:
         step_size = lr / bc1
         bc2s = sqrt(bc2)
         wdf = 1.0 - lr * self.wd
+        # ==== P6 GĐ10 (2026-10-22, probe CB): GỘP 2 DIV THÀNH 1 ====
+        # m / (sqrt(v)/bc2s + eps) == (m*bc2s) / (sqrt(v) + eps*bc2s)
+        # PyTorch cung chi co 1 div/ptu. Do (probe CB, N=124M): 1.07x;
+        # maxdiff voi duong cu 1.19e-07 sau 1 buoc.
+        epss = self.eps * bc2s
+        ks = step_size * bc2s
         for i in range(self.n):
             gi = self.g[i] * coef
             self.p[i] = self.p[i] * wdf
             self.m[i] = self.b1 * self.m[i] + (1.0 - self.b1) * gi
             self.v[i] = self.b2 * self.v[i] + (1.0 - self.b2) * gi * gi
-            denom = sqrt(self.v[i]) / bc2s + self.eps
-            self.p[i] = self.p[i] - step_size * self.m[i] / denom
+            self.p[i] = self.p[i] - ks * self.m[i] / (sqrt(self.v[i]) + epss)
         self.t = self.t + 1
         return lr
 

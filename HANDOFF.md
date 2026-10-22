@@ -1525,6 +1525,121 @@ tầm `.tkv`.
 
 ---
 
+### 0.29 P6 GĐ9 — QUY TẮC int64 CHO VÒNG NGOÀI GEMM: ĐO BÁC BỎ (2026-10-22)
+
+Yêu cầu: nhân rộng quy tắc native int64 (GĐ8) sang các vòng interpreter nóng
+ngoài GEMM. Nguyên tắc **ĐO TRƯỚC**: scan IL của `out/bseq_new.il` (đường train
+đầy đủ — trainer + gpt2_ref124 + simd_matmul) tìm mọi hàm có biến người dùng
+bị box `TkvInt`, rồi đo A/B bằng probe `tv/tests/simd_probe_ca.tkv` (đồng hồ
+`time_perf`, N = 124.000.000 ptu — đúng mẫu 124M).
+
+**1. BIẾN BỊ BOX (chỉ tính biến người dùng, loại `__tkvint_*` compiler temp —
+temp đó được **khai bỏ** chứ không dùng mỗi phần tử, đã kiểm ở IL `_acc_f`):**
+
+| Hàm | Biến box | Vòng | Mức độ |
+|---|---|---|---|
+| `_step124` (unflatten) | `off` | `d[j] = p[off + j]` | per-element, SERIAL (124M/bước) |
+| `_tn_one` (norm worker) | `off` | `gl[off + i]` | per-element, 12 worker |
+| `_norm_groups` (đường serial <4M) | `off`, `tot_elem` | `g[off + i]` | per-element (chỉ gate/model nhỏ) |
+| `_ls_one` (loss worker) | `k` | `j.seg[k]` | 1 lần/row (1024/bước) |
+| `_smm_core` / `_p58_core_simple` | `i0`, `j0`, `p0` | vòng ngoài GEMM | ~256-4096 lần/GEMM |
+| `gpt2_loss_m`, `_prepare`, `_n_param` | `cnt`, `off`, `n` | — | ít lần |
+| **`step` (AdamW, 4.2 s), `zero_grad`, `gpt2_loss`, LN bwd, gelu** | **không có** | `int32 'i'` | **đã tối ưu, không thuộc phạm vi sửa** |
+
+**2. SỐ ĐO (probe CA, A/B xen kẽ, 4 lần chạy, BIT-EXACT 0.0):**
+
+| Vòng | W (hiện tại) | F (int64, `off += 1`) | Tốc độ (4 lần chạy) |
+|---|---|---|---|
+| unflatten | 2.27-2.34 ns/ptu | 2.29-2.30 ns/ptu | 1.02 / 0.998 / 0.991 / **0.990** → median ≈ **0.99** |
+| norm (12 nhóm) | 2.23-2.33 ns/ptu | 2.24-2.25 ns/ptu | 1.04 / 0.996 / 1.002 / **0.996** → ≈ **1.00** |
+
+`off` trả về giống hệt (124000000), tổng `s` giống hệt → bit-exact.
+
+**3. KẾT LUẬN — KHÔNG WIRE.** Cả hai vòng đều bị **throttled băng thông bộ nhớ**
+(≈2.3 ns/ptu ≈ 3.4 GB/s đọc+ghi) nên phần index arithmetic bị ẩn hết: bản
+"sửa" **không nhanh hơn** (unflatten còn chậm hơn ~1% — trong nhiễu). Quy tắc
+int64 chỉ ăn tiền ở vòng **compute-bound** (tile-build GEMM — nơi arithmetic
+chiếm phần lớn, GĐ8 đo được 1.5-2.3×). Tiết kiệm tối đa ~**18 ms** @seq1024
+= **0.05%** của 37.83 s, nhỏ hơn nhiều nhiễu đo (±5-10% do nhiệt/CPU khác
+luồng). Chi phí wire thật = **7 file** (`gpt2_train` ×4 mirror + 3 file bench)
+→ KHÔNG tương xứng. Giữ nguyên mã nguồn; probe `simd_probe_ca.tkv` + ghi chép
+này là bằng chứng.
+
+**4. HƯỚNG SAU (thay cho "sửa quy tắc khai báo"):** vòng còn lại lớn nhất là
+`AdamW.step` (4.2 s @124M) — đã dùng `int32 'i'` (**không** phải vấn đề boxing);
+muốn cắt phải giảm số phép/phần tử (fused update, đổi f64→f32 trong m/v) chứ
+không phải đổi khai báo biến. Phần interpreter còn lại (copy/norm/loss) đã ở
+gần băng thông → cắt được chỉ bằng kernel native (ngoài tầm `.tkv`).
+→ **ĐÃ LÀM, xem 0.30 (GĐ10) — so công thức với PyTorch rồi gộp 2 div.**
+
+---
+
+### 0.30 P6 GĐ10 — HỌC PyTORCH CHO ADAMW: GỘP 2 DIV THÀNH 1 (2026-10-22) — 135/135 + 15/15, seq1024 −6.5%
+
+Đi tiếp 0.29 ("phải giảm số phép/phần tử trong `AdamW.step`"). Nguyên tắc:
+**so công thức với PyTorch trước, rồi đo** (probe `tv/tests/simd_probe_cb.tkv`,
+`time_perf`, N=124.000.000, 3 lần chạy).
+
+**1. SO CÔNG THỨC — PyTorch `torch.optim.AdamW` (CPU) vs ta:**
+
+| Hạng mục | PyTorch (`torch/optim/adamw.py`) | Ta (trước GĐ10) | Sau GĐ10 |
+|---|---|---|---|
+| Weight decay | `param.mul_(1 - lr*wd)` (decoupled) | `p[i] * wdf` | giữ |
+| Momentum | `exp_avg.lerp_(grad, 1-b1)` = m+(1-b1)(g−m) | `b1*m + (1-b1)*gi` | giữ (đại số tương đương) |
+| Variance | `mul_(b2).addcmul_(g,g,1-b2)` | `b2*v + (1-b2)*gi*gi` | giữ |
+| Bias correction | tính 1 lần/bước | 1 lần/bước | giữ |
+| **Denom** | `sqrt(v)/sqrt(bc2) + eps` → **1 div** | `denom = sqrt(v)/bc2s + eps` **rồi** `m/denom` → **2 div** | **gộp thành 1 div** ✅ |
+| Precision | **f32 toàn bộ** | f64 trung gian (`gi`, `denom`) | giữ f64 — `.tkv` không có khai báo biến kiểu (`x: 'f32'` **bị compiler từ chối**), `sqrt()` trả f64 |
+| Thực thi | C++ vectorize AVX2 + multi-tensor-apply | interpreter .tkv | ngoài tầm `.tkv` |
+| **Số phép/ptu** | ~10 mul + 1 sqrt + 1 div + 4 add | ~9 mul + 1 sqrt + **2 div** + 3 add | ~9 mul + 1 sqrt + **1 div** + 3 add ⇒ **ít hơn PyTorch** |
+
+**Định lý gộp (đại số chính xác):** `m / (sqrt(v)/bc2s + eps)`
+`== (m*bc2s) / (sqrt(v) + eps*bc2s)` — `bc2s` và `eps*bc2s` tính 1 lần/bước.
+
+**2. SỐ ĐO (probe CB, 3 lần chạy ổn định — best-of-2 mỗi biến thể):**
+
+| Biến thể | ns/ptu | Tốc độ | maxdiff vs W (1 bước) | Kết luận |
+|---|---|---|---|---|
+| W (hiện tại) | 30.74 / 30.72 / 30.71 | 1.00× | — | tham chiếu |
+| V1: hoist `(1-b1)`, `(1-b2)` | 33.16 / 33.13 / 33.12 | **0.93×** | 0.0 | **bác bỏ** |
+| V2: V1 + gộp `p` (đọc/ghi 1 lần) | 33.31 / 33.35 / 33.34 | **0.92×** | 0.0 | **bác bỏ** |
+| V3: gộp 2 div → 1 | 28.75 / 28.76 / 28.77 | **1.068×** | **1.19e-07** | **WIRE** |
+
+Bài học đo được: hoist `(1-b1)`/`(1-b2)` **không có lợi** — JIT/CSE đã tự làm
+(chính V3 có hoist mà vẫn nhanh hơn) → mỗi biến thể phải đo riêng.
+
+**3. WIRE:** `AdamW.step` trong **4 file** `trainer` (canonical
+`tv/training/trainer.tkv` + 3 bản demo `tv/{training,tests,tools}/tv.training.trainer.tkv`):
+cộng `epss = self.eps * bc2s`, `ks = step_size * bc2s` trước vòng, và
+`p[i] = p[i] - ks*m[i]/(sqrt(v[i]) + epss)`.
+
+**4. KẾT QUẢ:**
+- Phase `ADAMW_STEP` (profile @124M): **4375/4375/4359 → 3922/3937 ms = −10.1%** (−440 ms/bước).
+- Gate **135/135** (9 suite nhỏ 102 + `gpt2_full` 33) + **`trainer_tests` 15/15 PASS** —
+  parity với **fixture PyTorch thật** (`torch.optim.AdamW`), TOL=1e-5; chênh lớn nhất
+  còn **2.5e-06** (overfit loss) — vẫn xanh.
+- Loss in ra 3 seq **khớp exact 7 chữ số** so với GĐ8 (10.572291→7.0119243,
+  10.756927→11.807251, 10.760399→13.442912 — **không đổi chữ số nào**).
+- Bench A/B best-of-3 xen kẽ (giảm drift nhiệt):
+
+| seq | GĐ8 | GĐ10 | Δ |
+|---|---|---|---|
+| 8 | 12.844 s | **12.516 s** | **−2.6%** |
+| 256 | 17.906 s | **17.313 s** | **−3.3%** |
+| 1024 | 37.875 s | **36.703 s** | **−3.1%** |
+
+- Tỉ lệ vs torch: 13.9/12.9/10.7× → **13.4× / 12.3× / 10.4×**
+  (từ đầu P6: 16.2/16.3/12.4×).
+
+**5. CÒN LẠI SAU GĐ10:** khoảng cách với PyTorch giờ nằm ở (a) **f32** — PyTorch
+toàn bộ f32, ta f64 trung gian, mà `.tkv` **không có biến cục bộ kiểu**
+(`simd_probe_aa.tkv`: `x: 'f32' = 0.0` → `il_codegen: không dịch được`) ⇒ chỉ
+dùng được nếu compiler hỗ trợ; (b) **vectorize** — vòng của PyTorch là C++
+AVX2, ta là interpreter ⇒ muộn hơn phải thêm kernel native (vùng `C`, cùng
+gió như P7 đã chỉ).
+
+---
+
 ---
 
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
