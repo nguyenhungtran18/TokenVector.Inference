@@ -1809,6 +1809,25 @@ f32 trước khi tính p → lệch 1 ULP, vô hại vì đã bust).
 (nếu thắng) → **0**; giữ **10.4×**. Hướng còn lại cho AdamW: **kernel fused native** (sàn băng
 thông ~1.0-1.1 s, không cần thread) — mục con của P7b. Docs: §12 dòng GĐ13 + §13.3/§13.4/§13.5/§13.6.
 
+### 0.35 P7b — ĐO KHOẢNG CÁCH GEMM: tkv NATIVE vs TORCH — CHỐT PARITY PHẢI QUA NATIVE/C (2026-10-22)
+
+**Mục tiêu (kế hoạch §13.3 P7b):** kiểm lại claim "3 bucket GEMM (ATTN+MLP+LHEAD) = 24.1 s = 66% bước, near-peak AVX2" — nếu thật near torch thì full step phải ≪ 36.7 s. Probe thuần, **0 thay đổi code train**.
+
+**Phương pháp:** rebuild `simd_probe_bh` (tkv, `simd_gemm` native qua wrapper thật) + `tools/p7b_gemm_torch.py` (torch.matmul f32, 14 thread) — **cùng phiên, cùng máy**, shape đại diện, best-of. Bit-check LIB-vs-PAR = **0.0** (all bit-exact). Tái xác nhận standalone `simd_probe_cd` (probe riêng 4 shape, best-of-3, cùng script torch): S1 93 vs 6.5 ms (**14.3×**), S3 968 vs 134.4 (**7.2×**), S4 1734 vs 234.3 (**7.4×**), S5 1562 vs 247.5 (**6.3×**) — **6-14×**, GFLOPS thật tkv **45.6-81.7** vs torch **319-741**.
+
+| Shape (m×n×k) | tkv native (best) | torch.matmul (14T) | tỉ lệ |
+|---|---|---|---|
+| S1 dx1 [1024,768,3072] | 94 ms | 7.1 ms | **13.2×** |
+| S3 dxf [1024,768,50257] | 969 ms | 129 ms | **7.5×** |
+| S4 dwte [50257,768,1024] | 1781 ms | 254 ms | **7.0×** |
+| S5 logits [1024,50257,768] | 1547 ms | 240 ms | **6.5×** |
+
+**CHỐT — rơi vào kịch bản "Ta 10-30% torch" (thực tế 8-15%):** khoảng cách nằm ở **KERNEL/threading**, không phải driver/alloc/wrapper. Bằng chứng: builder đã tối ưu GĐ3 (append→buffer, 1.4-3.2×) + wave-12 lm-head PAR chỉ **1.22-1.29×** serial (probe BH S3/S4/S5 LIB vs PAR) → overhead ngoài kernel chỉ ~20-25%, còn **~6-14×** là chính `simd_gemm`. Claim "near-peak AVX2" **SAI** — `simd_gemm` ~45-82 GFLOP/s vs torch MKL 320-740 GFLOP/s cùng Haswell (AVX2). Nghi vấn: native pool 1 luồng cho tile nhỏ (`TKV_GEMM_MIN_N=96`), thiếu packing/register-block, hoặc thread pool không parallel thật.
+
+**Đề xuất (cần compiler/native team — KHÔNG làm được bằng `.tkv`):** C source `tools/simd_native/tkv_simd_native.c` + `build.ps1` (repo compiler, cần phối hợp): (1) verify số thread THẬT của pool, (2) micro-kernel f32 AVX2 register-block + prefetch, (3) parallel tile nhỏ; **kernel fused AdamW/elementwise native** ≈ sàn băng thông ~1.0-1.1 s (thay GĐ13 bust). **Đây là đường DUY NHẤT tới parity 1.0×.**
+
+**Kết luận chung sau GĐ11-13 + P7 + P7b:** trần `.tkv`-only ≈ **10.4×** (giữ nguyên, không cải thiện thêm được); parity 1.0× **bắt buộc** đi qua native/C hoặc compiler (f32 locals, fused kernel). P7b là probe quyết định, không phải tối ưu. Docs: §12 dòng P7b + §13.3 P7b + §13.4.
+
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
 
 | Gate | Command / Path | Result |
