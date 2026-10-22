@@ -473,7 +473,7 @@ Probe AQ chạy lại **2026-10-22** (sau GĐ8/GĐ10, `out/audit_aq.log`) + ADAM
   | S4 dwte [50257,768,1024] | 1781 ms | 254 ms | **7.0×** |
   | S5 logits [1024,50257,768] | 1547 ms | 240 ms | **6.5×** |
 
-  **CHỐT — rơi vào kịch bản "Ta 10-30% torch" (thực tế 8-15%):** khoảng cách nằm ở **KERNEL/threading**, không phải driver/alloc/wrapper. Bằng chứng: builder đã được GĐ3 tối ưu (append→buffer, 1.4-3.2×), wave-12 lm-head PAR chỉ **1.22-1.29×** so serial (probe BH S3/S4/S5 LIB vs PAR) — tức overhead ngoài kernel chỉ ~20-25%, còn **~7-13×** là chính `simd_gemm`. Claim "near-peak AVX2" **SAI** — `simd_gemm` đạt ~45-82 GFLOP/s trong khi torch MKL đạt 320-740 GFLOP/s cùng shape (probe CD standalone: 52.0/81.7/45.6/50.6 vs 741/588/337/319 GFLOPS). Lý do có thể: native pool 1 luồng cho tile nhỏ (`TKV_GEMM_MIN_N=96`), không packing/AVX-register-block như MKL, hoặc thread pool không thực sự parallel trên Haswell.
+  **CHỐT — rơi vào kịch bản "Ta 10-30% torch" (thực tế 8-15%):** khoảng cách nằm ở **KERNEL/threading**, không phải driver/alloc/wrapper. Bằng chứng: builder đã được GĐ3 tối ưu (append→buffer, 1.4-3.2×), wave-12 lm-head PAR chỉ **1.22-1.29×** so serial (probe BH S3/S4/S5 LIB vs PAR) — tức overhead ngoài kernel chỉ ~20-25%, còn **~7-13×** là chính `simd_gemm`. Claim "near-peak AVX2" **SAI** — `simd_gemm` đạt ~45-82 GFLOP/s trong khi torch MKL đạt 320-740 GFLOP/s cùng shape (probe CD standalone: 52.0/81.7/45.6/50.6 vs 741/588/337/319 GFLOPS). Lý do có thể: native pool 1 luồng cho tile nhỏ (`TKV_GEMM_MIN_N=96`), không packing/AVX-register-block như MKL. ~~Hoặc thread pool không thực sự parallel trên Haswell~~ **ĐÃ BÁC BỎ 2026-10-22 (xác nhận theo yêu cầu): P3 đo cpu/wall = 21.20× @768³ (539 GFLOP/s, ~21 luồng) — pool PARALLEL THẬT và đạt đỉnh ngang MKL ở shape vuông lớn; vấn đề là shape/tiling/khai thác ở shape thật, xem §14 mục M3.**
 - **Tái xác nhận standalone (2026-10-22, `simd_probe_cd` + `tools/p7b_gemm_torch.py` cùng phiên, best-of-3):** S1 93 vs 6.5 ms = **14.3×** · S3 968 vs 134.4 = **7.2×** · S4 1734 vs 234.3 = **7.4×** · S5 1562 vs 247.5 = **6.3×** → chốt khoảng cách **6-14×**, cùng kết luận (bảng trên là probe BH best-of LIB/SER/PAR).
 - **Đề xuất (cần compiler/native team — không làm được bằng `.tkv`):** C source tại `tools/simd_native/tkv_simd_native.c` — (1) verify số thread THẬT của pool, (2) micro-kernel f32 AVX2 register-block + prefetch, (3) parallel tile nhỏ; **kernel fused AdamW/elementwise native** ≈ sàn băng thông ~1.0-1.1 s (thay GĐ13 bust). Đây là đường DUY NHẤT tới parity 1.0×.
 - **Ý nghĩa:** GĐ11-13 chỉ đưa ~36.7 → **~32.7-35.5 s ≈ 9-10×** — mục tiêu 1.0× SỐNG hay CHẾT ở item này. P7b là probe quyết định, không phải tối ưu.
@@ -522,3 +522,67 @@ Mỗi bước giữ nguyên toàn bộ gate hiện có; **không GĐ nào đư�
 | LN_BWD saves mu/rstd (GĐ12) — kiểu container hiện tại | CF: chỉ 1.10-1.22×; Tensor=list[f32] không chứa nổi mu/rstd f64 → maxdiff grad 3.17e-08 + loss đổi chữ số cuối. Sống lại nếu compiler có f64 container / typed f32 locals |
 | "GEMM near-peak AVX2" → attack driver/alloc ngoài kernel | P7b: kernel `simd_gemm` chậm 6-14× torch (wrapper PAR12 chỉ ~1.25×) → nút thắt nằm TRONG kernel/threading, không phải dispatch/alloc — `.tkv` không sửa được |
 | AdamW parallel (GĐ13) — mọi hình thái bằng `.tkv` | CC: V5 REGISTERS (toàn bộ phep toan trong thanh ghi, ghi p/m/v 1 lần, KHÔNG read-back) **0.33×** ≈ V2 SHARED+readback 0.30× → read-back không phải thủ phạm; bệnh = phep toan + ghi list CHUNG. V1 OWN-seg 2.60× nhưng V3 merge serial 1.19× / V5 shared 0.33× đều ăn hết lợi thế. Sống lại chỉ bằng **kernel fused native** (~1.0-1.1 s sàn băng thông, không cần thread) |
+
+---
+
+---
+
+## 14. TRIZ — MENU GIẢI PHÁM PARITY (2026-10-22, phân tích — CHƯA COMMIT WIRE)
+
+Sau P7b (§13.3) mâu thuẫn đã **đổi cấp**: không còn "tkv thua vì plumbing/driver" mà là **kernel tkv không đạt được mức tối ưu mà chính nó + resource sẵn có trong máy đã đạt ở nơi khác**. Phân tích lại bằng TRIZ (§2 là khung cũ cho P5.x; khung này cho level native).
+
+> **XÁC NHẬN ĐA LUỒNG (2026-10-22, theo yêu cầu — tra lại số đo đã có):** TokenVector **CÓ đa luồng**, bằng chứng 3 lớp: (1) primitive `.tkv` `thread_spawn/join` (Task<T>, không GIL; overhead spawn+join ×100 = **0.0 ms**, probe BH[0]) — đang chạy thật trong trainer `_tn_one` (12 worker), `simd_matmul` wave-12 `_pd_one`, attention fwd/bwd per-head; (2) native `simd_gemm` có **thread pool riêng ~21 luồng** — P3 (`simd_probe_ao` + `tools/probe_threads.py`, đo cpu/wall ratio): 768³ × 800 = wall 1.397 s / cpu 29.63 s → **21.20×, 539 GFLOP/s**; nhưng 64³ → ratio **0.99 = 1 luồng** (`TKV_GEMM_MIN_N=96`, tile < 96 đi `gemm_rows` serial); (3) các bài song song đo được speedup thật: attention_bwd own-list **5.2×** (GĐ1), worker eff **8.66×** (GĐ5/BN), gelu_fwd **7.33×** / gelu_bwd **5.03×** (GĐ4/BM), wave-12 lm-head **3.2×** (BH S3/S4). **Hệ quả:** giả thuyết "pool không parallel thật" (§13.3) **BỊ BÁC BỎ**; nút thắt là (a) các *hình thái* song song `.tkv` ghi list CHUNG/merge (BL/CE/CC bust — nguyên nhân đã biết), và (b) **shape thật chỉ ăn 6-33% khả năng đã đo của chính pool** — đó là mục M3 bên dưới.
+
+### 14.1 Phát biểu mâu thuẫn
+
+**Mâu thuẫn kỹ thuật:**
+
+| # | Muốn tăng | Bị hy sinh (ràng buộc) |
+|---|---|---|
+| TC1 | FLOPS `simd_gemm` ở các shape thật (45-82 GFLOP/s) | tính bit-exact/deterministic audit được bằng `.tkv`; không thêm dependency ngoài |
+| TC2 | Khai thác nốt 12C/28T (pool đã chứng minh 21 luồng @768³) | các hình thái song song `.tkv` đã đo bust (BL/CE/CC) — ghi CHUNG + merge nuốt lợi thế |
+| TC3 | f32 everywhere như torch (băng thông ×2) | hợp đồng numerics hiện tại: tích lũy f64 + 84/84 parity |
+
+**Mâu thuẫn vật lý (giải bằng separation principles):**
+
+- **PC1:** kernel phải **đơn giản/deterministic** VÀ phải **tối ưu triệt để** → tách theo *hệ thống*: phần tối ưu nằm ở native/C (compiler repo), phần điều phối giữ nguyên `.tkv` (giữ ABI `simd_gemm`).
+- **PC2:** thread pool phải **phẳng/ổn định trên mọi shape** (như MKL) VÀ **chỉ chạy hết công suất ở tile vuông lớn** (21.2× @768³ vs 1.0× @64³, 1.23-3.2× ở shape thật) → tách theo *điều kiện*: shape nào được phép đi multi-thread/tile lớn (M3 sửa scheduling), shape nào đi serial — thay vì viết lại toàn bộ.
+- **PC3:** số liệu phải **f32 như torch** VÀ **f64 như hợp đồng cũ** → tách theo *thời gian*: hợp đồng numerics là ràng buộc **của phiên này**; mục tiêu chủ khoa ("BẰNG torch") cho phép đổi sang numerics-torch nếu 84/84 theo tolerance vẫn pass.
+
+### 14.2 IFR + tài nguyên (resources) đang bỏ không
+
+**IFR (Ideal Final Result):** `simd_gemm` đạt ngang MKL **mà không phải viết một kernel mới nào** — vì năng lực đó đã được chứng minh ngay trong chính hệ thống.
+
+9-windows: mỗi lần một level "hết" (P0 → P5.3 simd → GĐ3 builder) đều phải nhảy level để ăn tiếp. Level `.tkv` đã cạn ở **10.4×**; level kế tiếp là native — nhưng **bằng chứng P3 cho thấy không nhất thiết phải viết lại từ đầu**.
+
+Resource chưa dùng (xếp theo đòn bẩy):
+1. **Đỉnh đã đo của chính `simd_gemm`: 539 GFLOP/s @768³ (21.2 luồng, P3)** — lớn hơn torch trên shape tương đương (320-740). Khoảng cách 6-14× ở shape thật là **khai thác sai/đánh rơi**, không phải thiếu năng lực.
+2. **oneMKL đã nằm trong máy** — torch 2.14.0+cpu gọi MKL. Gọi đúng thứ torch dùng = "bằng torch" cả numerics lẫn tốc độ (M1, phương án B).
+3. **Weights bất biến trong 1 step** (wte/w1/w2/qkv) → prepack 1 lần được (prior action #10).
+4. **gg/xf dùng lại cho 3 GEMM lm-head** → tài nguyên đọc-trong-kernel (merge #5).
+
+### 14.3 MENU (xếp theo ideality — lợi ích / chi phí / rủi ro)
+
+| # | TRIZ | Giải pháp | Lợi ích kỳ vọng | Chi phí / rủi ro |
+|---|---|---|---|---|
+| **M3** | #2 Extraction + resources | **Điều tra shape-gap: vì sao shape thật chỉ 45-82 GFLOP/s trong khi chính pool đạt 539 @768³ (P3)?** Lặp lại phép đo P3 (cpu/wall `tools/probe_threads.py`) trên 4 shape P7b; giả thuyết cần kiểm: T/k-tiling với k=50257/3072, luồng acc per k-tile, wave 12 chỉ dựng tile mà worker không gọi `simd_gemm` (BH: worker KHÔNG simd_gemm), `TKV_GEMM_MIN_N=96` chặn S1 | Nếu đúng (đánh rơi scheduling/tiling): GEMM 24.1 → **~4-6 s** ở **đỉnh đã đo sẵn**, **không cần kernel mới, không cần BLAS** — step ~36.7 → **~16-18 s ≈ 2.0-2.3×** | **1-2 ngày probe — LÀM ĐẦU TIÊN, đòn bẩy cao nhất/chi phí thấp nhất** |
+| **M1** | **#28 Mechanics substitution** | **Gọi BLAS sẵn có** (OpenBLAS `cblas_sgemm` BSD, hoặc oneMKL) từ runtime native qua `dlopen` — **thay implementation trong `simd_gemm`, giữ nguyên ABI**, `.tkv` không đổi 1 dòng | GEMM 24.1 s → **~3.5-4 s** (ngang torch); numerics = numerics torch | C shim trong repo compiler; license OK (OpenBLAS); phải set số thread để không oversubscribe pool tkv; gate 84/84 theo tolerance. **Phương án B khi M3 không đóng được gap** |
+| **M2** | #24 Asymmetry + #1 Segmentation | **Micro-kernel AVX2 BLIS-style** (8×8 register-block, macro MC/KC/NC, prefetch) thay phần cốt lõi `simd_gemm` | chuẩn hóa 45-82 → 150-300 GFLOP/s mọi shape | compiler team, ~2-4 tuần; **phương án C cuối cùng** (P3 chứng minh kernel không yếu về gốc) |
+| **M4** | #10 Prior action + #1 Segmentation | **Prepack weights 1 lần** trước train loop (`simd_gemm_packed`): wte/w1/w2/qkv bất biến trong step | bỏ packing khỏi timed path; ~20-25% wrapper còn lại biến mất | ABI mới, kèm M1/M3 |
+| **M5** | #35 Parameter change | **Buffer f32 native + fused AdamW/elementwise kernel** (thay list[f64]) | Plumbing 3.93 s → sàn băng thông **~1.0-1.1 s** (GĐ13 V1 2.60× chứng minh compute đủ nhanh, bệnh chỉ là container) | Gate: AdamW f32 = numerics torch → loss-exact; kèm M1/M3 |
+| **M6** | #5 Merging + #26 Nesting doll | **Fuse softmax-grad + dxf + dwte** lm-head trong 1 kernel (gg đọc 1 lần); fuse attention: softmax+gDs+transpose n² (16% attn bwd, §1) thành kernel épilogue | lm-head bwd 10.84 s → ~4-5 s; attn non-GEMM ~8 s → cắt sâu | native, sau M1/M3 |
+| **M7** | #15 Asymmetry + #3 Local quality | **Dispatch kernel theo shape class**: nhỏ/square (S1 13.2×) vs lớn k=50257 (lm-head 6.5-7.5×) | khoảng cách ~13× ở shape nhỏ biến mất | trong M3/M2 |
+| **M8** | #40 Nature (treo lại) | INT8 GEMM + fp32 acc | ~2× nữa (nếu M1-M7 chưa đủ) | **numerics đã đo bust** với f16/bf16 (P7) — chỉ mở lại nếu hợp đồng đổi |
+
+**Đã bác bỏ từ TRIZ (không làm lại):** #21 Skipping/sparsity (fp32 dense — §13.6); mọi song song `.tkv` kiểu ghi CHUNG/merge (§13.6 — nguyên nhân đã biết, **KHÔNG phải thiếu đa luồng**: P3 21.2×, GĐ1 5.2×, GĐ4 7.33×); "attack driver/alloc ngoài kernel" (P7b); giả thuyết "pool không parallel thật" (**P3 bác bỏ**).
+
+### 14.4 Thứ tự đề xuất + KPI gate
+
+0. **M3 — điều tra shape-gap** (1-2 ngày): lặp phép đo P3 (cpu/wall) trên 4 shape P7b → chốt nguyên nhân (tiling/k-tiling/wave/không ra thread). Nếu là scheduling → patch nhỏ (`.tkv` hoặc 1 hàm native) → GEMM 24.1 → ~4-6 s **ở đỉnh đã đo sẵn**.
+1. **M1 dlopen OpenBLAS** giữ ABI `simd_gemm` — nếu M3 không đóng được gap → đo lại 4 shape P7b + full step 3 seq + 84/84. Nếu M1 cũng bị chặn (build/deploy/license) → **M2**.
+2. **M4 + M5** (prepack + fused step native) → step tiếp về **~11-13 s ≈ 1.8×**.
+3. **M6 + M7** (fused lm-head + attention épilogue + dispatch theo shape) → mục tiêu dải **1.1-1.3×**; stretch goal 1.0× đòi thêm fused attention-stage kernel.
+
+**KPI gate chung cho mọi mục:** 4 shape P7b ≥ **250 GFLOP/s mỗi shape** (đỉnh đã đo 539 @768³ là tham chiếu); full step 3 seq không regress; 84/84 parity theo tolerance; numerics target = **numerics torch** (vì mục tiêu là "BẰNG torch" — cùng thư viện = cùng số).
+
+> Lưu ý trung thực: M1-M8 là **phân tích + ước lượng từ số đo đã có** (P3, P7b, BH, GĐ13), CHƯA có số đo mới — mọi bước đều phải qua probe/Gate trước khi wire, đúng kỷ luật §13.2.

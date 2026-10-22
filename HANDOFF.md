@@ -1822,11 +1822,11 @@ thông ~1.0-1.1 s, không cần thread) — mục con của P7b. Docs: §12 dòn
 | S4 dwte [50257,768,1024] | 1781 ms | 254 ms | **7.0×** |
 | S5 logits [1024,50257,768] | 1547 ms | 240 ms | **6.5×** |
 
-**CHỐT — rơi vào kịch bản "Ta 10-30% torch" (thực tế 8-15%):** khoảng cách nằm ở **KERNEL/threading**, không phải driver/alloc/wrapper. Bằng chứng: builder đã tối ưu GĐ3 (append→buffer, 1.4-3.2×) + wave-12 lm-head PAR chỉ **1.22-1.29×** serial (probe BH S3/S4/S5 LIB vs PAR) → overhead ngoài kernel chỉ ~20-25%, còn **~6-14×** là chính `simd_gemm`. Claim "near-peak AVX2" **SAI** — `simd_gemm` ~45-82 GFLOP/s vs torch MKL 320-740 GFLOP/s cùng Haswell (AVX2). Nghi vấn: native pool 1 luồng cho tile nhỏ (`TKV_GEMM_MIN_N=96`), thiếu packing/register-block, hoặc thread pool không parallel thật.
+**CHỐT — rơi vào kịch bản "Ta 10-30% torch" (thực tế 8-15%):** khoảng cách nằm ở **KERNEL/threading**, không phải driver/alloc/wrapper. Bằng chứng: builder đã tối ưu GĐ3 (append→buffer, 1.4-3.2×) + wave-12 lm-head PAR chỉ **1.22-1.29×** serial (probe BH S3/S4/S5 LIB vs PAR) → overhead ngoài kernel chỉ ~20-25%, còn **~6-14×** là chính `simd_gemm`. Claim "near-peak AVX2" **SAI** — `simd_gemm` ~45-82 GFLOP/s vs torch MKL 320-740 GFLOP/s cùng Haswell (AVX2). Nghi vấn: native pool 1 luồng cho tile nhỏ (`TKV_GEMM_MIN_N=96`), thiếu packing/register-block. ~~Hoặc thread pool không parallel thật~~ **BỊ BÁC BỎ (xác nhận lại 2026-10-22): P3 đo cpu/wall 21.20× @768³ = 539 GFLOP/s ~21 luồng — pool parallel thật, đỉnh ngang MKL ở shape vuông lớn; nút thắt là shape thật chỉ ăn 6-33% đỉnh đó (roadmap §14 mục M3).**
 
 **Đề xuất (cần compiler/native team — KHÔNG làm được bằng `.tkv`):** C source `tools/simd_native/tkv_simd_native.c` + `build.ps1` (repo compiler, cần phối hợp): (1) verify số thread THẬT của pool, (2) micro-kernel f32 AVX2 register-block + prefetch, (3) parallel tile nhỏ; **kernel fused AdamW/elementwise native** ≈ sàn băng thông ~1.0-1.1 s (thay GĐ13 bust). **Đây là đường DUY NHẤT tới parity 1.0×.**
 
-**Kết luận chung sau GĐ11-13 + P7 + P7b:** trần `.tkv`-only ≈ **10.4×** (giữ nguyên, không cải thiện thêm được); parity 1.0× **bắt buộc** đi qua native/C hoặc compiler (f32 locals, fused kernel). P7b là probe quyết định, không phải tối ưu. Docs: §12 dòng P7b + §13.3 P7b + §13.4.
+**Kết luận chung sau GĐ11-13 + P7 + P7b:** trần `.tkv`-only ≈ **10.4×** (giữ nguyên, không cải thiện thêm được); parity 1.0× **bắt buộc** đi qua native/C hoặc compiler (f32 locals, fused kernel). P7b là probe quyết định, không phải tối ưu. **Phân tích TRIZ + menu giải pháp chi tiết cho native-team (M1-M7): roadmap §14.** Docs: §12 dòng P7b + §13.3 P7b + §13.4.
 
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
 
