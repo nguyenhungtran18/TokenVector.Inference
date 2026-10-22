@@ -1,7 +1,8 @@
 # ROADMAP — Huấn luyện LLM trong TokenVector (chứng minh thuật toán)
 
-Ngày lập: **2026-10-17** · cập nhật gần nhất: **2026-10-19**
+Ngày lập: **2026-10-17** · cập nhật gần nhất: **2026-10-22**
 Trạng thái: **ĐÃ CODE — G0→G5 XANH, G6 chưa bắt đầu** (bảng TRẠNG THÁI dưới đây).
+Kế hoạch các bước còn lại tới parity (2026-10-22, sau GĐ10): `docs/perf-plan-triz-roadmap.md` **§13** — GĐ11 song song softmax-grad → GĐ12 LN saves mu/rstd → GĐ13 AdamW parallel (probe chẩn đoán trước) → P7b đo GEMM gap vs torch; trần `.tkv`-only ≈ **9-10×**, parity 1.0× bắt buộc đi qua native/C (P7b điều hướng).
 Phạm vi: chứng minh đúng thuật toán huấn luyện LLM; việc kiểm thử hiệu năng thực
 sẽ diễn ra sau trên GPU Google. Ưu tiên số tuyệt đối với PyTorch.
 

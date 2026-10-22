@@ -1640,6 +1640,41 @@ gió như P7 đã chỉ).
 
 ---
 
+### 0.31 PLAN TOÀN BỘ CƠ HỘI CÒN LẠI SAU GĐ10 (2026-10-22) — CHỈ TÀI LIỆU, KHÔNG ĐỔI CODE
+
+- **Bối cảnh:** rà soát toàn bộ đường train, phân rã mới bằng probe AQ chạy lại
+  2026-10-22 (`out/audit_aq.log`) @seq1024: ATTN_BWD 8844 / MLP_BWD 7953 /
+  LHEAD_BWD 7281 / FWD_BODY 6656 / ADAMW 3930 / LN_BWD 765 / EMBED 829 /
+  UNFLATTEN 734 ms — 3 bucket GEMM = **24.1 s = 66%** bước. (Artifact cần
+  nhớ: GRAD_ACC 1232 ms là của bench — đường thật ghi thẳng vào `opt.g`;
+  RESIDUAL −10438 ms do probe gọi library không gflat, đo tuần tự.)
+- **Plan đầy đủ ghi tại `docs/perf-plan-triz-roadmap.md` §13** (mới) — 4 hạng
+  mục xếp theo lợi nhuận × tin cậy, bảng kỳ vọng, trình tự + gates, danh sách
+  đã-bác-bỏ:
+  1. **GĐ11** — song song softmax-grad lm-head bwd (còn serial 1.33 s @1024,
+     probe AV; mẫu `_ls_one` GĐ4 cùng math forward đã thắng 5.10×) →
+     **−0.95..1.05 s, tin cậy cao — làm trước**.
+  2. **GĐ12** — LN_BWD dùng saves mu/rstd từ forward (bỏ 2/4 pass; 765 ms →
+     ≤550) → **−0.23..0.31 s, chắc chắn** (mu/rstd cùng hàm cùng input với
+     recompute → bitwise bằng, xác minh maxdiff 0.0).
+  3. **GĐ13** — AdamW parallel lần 3, **probe chẩn đoán `simd_probe_cc`
+     TRƯỚC** (V1 compute-only PAR12 / V2 ghi SHARED / V4 copy control) vì 2
+     lần bust chưa rõ nguyên nhân (BL 0.36×/0.29×; boxing ĐÃ loại — `step`
+     int32, `i/k` native) → nếu thắng **−2.4..2.7 s** (sàn băng thông ~1.0-1.1 s),
+     nếu V1 ≈1× thì ĐÓNG vĩnh viễn.
+  4. **P7b** — probe `simd_probe_cd` đo GEMM native vs `torch.matmul` cùng
+     shape cùng phiên (GFLOPS + số thread thật, `TKV_GEMM_MIN_N=96`?) →
+     điều hướng parity.
+- **Trần trung thực:** `.tkv`-only sau GĐ11-13 ≈ **32.7-35.5 s ≈ 9-10×**;
+  mục tiêu 1.0× bắt buộc đi qua native/C (C source sẵn ở
+  `D:/TokenVector/Release/tools/simd_native/tkv_simd_native.c` + `build.ps1`,
+  thuộc repo compiler) hoặc compiler hỗ trợ f32 locals (đang chặn —
+  `simd_probe_aa`).
+- **Lần này KHÔNG đổi code** — chỉ 3 file tài liệu: perf-plan (§9 + §13),
+  HANDOFF (§0.31 này), ROADMAP_TRAIN.
+
+---
+
 ---
 
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES

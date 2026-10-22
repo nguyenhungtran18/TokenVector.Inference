@@ -252,6 +252,8 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 | `tv/tests/simd_probe_by2.tkv` | P6 GĐ8: **probe quyết định** (đồng hồ `time_perf`) — A-tile 1.49×, B-tile 1.43×, acc 1.08×, core 1.54× (Smat) / 2.28× (gCtx), maxdiff 0.0 |
 | `tv/tests/simd_probe_ca.tkv` | P6 GĐ9: nhân rộng quy tắc int64 ra vòng ngoài GEMM — A/B unflatten + norm @124M, **4 lần chạy**: unflatten 1.02/0.998/0.991/0.990, norm 1.04/0.996/1.002/0.996 (**≈ 1.00, bit-exact 0.0**) ⇒ **đo bác bỏ** (vòng memory-bound ≈3.4 GB/s, arithmetic bị ẩn) |
 | `tv/tests/simd_probe_cb.tkv` | P6 GĐ10: so công thức **AdamW vs PyTorch** + A/B 4 biến thể @124M (3 lần chạy): V1 hoist `(1-b1)/(1-b2)` **0.93×** ❌, V2 gộp `p` **0.92×** ❌ (CSE/JIT đã tự làm), V3 **gộp 2 div → 1 div** = `m*bc2s/(sqrt(v)+eps*bc2s)` **1.068×** ✅ maxdiff **1.19e-07** → wire 4 file trainer |
+| `tv/tests/simd_probe_cc.tkv` | **DỰ KIẾN P6 GĐ13**: probe chẩn đoán AdamW parallel lần 3 @124M — V0 serial / V1 compute-only PAR12 (OWN segs) / V2 ghi SHARED phân đoạn / V3 OWN+MERGE / V4 copy control (BM 3.0×) → chốt nguyên nhân 2 lần bust, hoặc ĐÓNG item (§13.3) |
+| `tv/tests/simd_probe_cd.tkv` | **DỰ KIẾN P7b**: đo GEMM native vs `torch.matmul` cùng shape cùng phiên (3 shape đại diện, GFLOPS + số thread THẬT của native pool) → điều hướng parity (§13.3) |
 
 ---
 
@@ -329,3 +331,129 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 - ⓒ **"Nhanh hơn" cụ thể bao nhiêu, giữ bao nhiêu gate?** Đề xuất: ≤0.8× full step cả 3 seq, 84/84 fp32 giữ nguyên + gate AMP mới (nếu ⓑ = mixed).
 
 **Rủi ro riêng P6/P7:** xem §8 (blocked threads, thermal drift, contract precision).
+
+---
+
+## 13. KẾ HOẠCH CÁC CƠ HỘI CÒN LẠI SAU GĐ10 — RÀ SOÁT TOÀN BỘ ĐƯỜNG TRAIN (2026-10-22)
+
+**Mục tiêu tài liệu này:** liệt kê MỌI cơ hội còn lại theo số đo, xếp hạng theo lợi nhuận × độ tin cậy, chốt trình tự + tiêu chí cho các GĐ kế tiếp. Số nền (sau GĐ10): **full step seq8/256/1024 = 12.516/17.313/36.703 s** vs torch 0.934/1.404/3.542 = **13.4×/12.3×/10.4×**, gate **135/135 + `trainer_tests` 15/15**, loss khớp exact 7 chữ số cả 3 seq.
+
+### 13.1 Phân rã bước train @seq1024 — nền của mọi ưu tiên
+
+Probe AQ chạy lại **2026-10-22** (sau GĐ8/GĐ10, `out/audit_aq.log`) + ADAMW/UNFLATTEN theo bench:
+
+| Pha | ms | % | So PyTorch | Cơ hội còn lại trong `.tkv` |
+|---|---|---|---|---|
+| `ATTN_BWD` ×12 | 8844 | 24% | GEMM AVX2 native | **thấp** — chỉ còn P7b (kernel C) |
+| `MLP_BWD` ×12 | 7953 | 22% | đã bỏ transpose, overlap gelu | **thấp** |
+| `LHEAD_BWD` | 7281 | 20% | vocab GEMM wave-parallel | **softmax-grad 1.33 s còn serial → GĐ11** |
+| `FWD_BODY` (embed+12blk+lnf) | 6656 | 18% | đã parallel gelu/norm/loss + attn/heads | thấp (GEMM chiếm chủ đạo) |
+| `ADAMW_STEP` | 3930 | 11% | torch: f32 + AVX2 + multi-tensor-apply; ta: f64-ish interpreter | **trung bình — GĐ13 (lớn nhất còn lại)** |
+| `LN_BWD` ×25 | 765 | 2% | torch lưu rstd từ fwd; ta tính lại mu/v | **có — GĐ12 (nhỏ, chắc chắn)** |
+| `EMBED_BWD` | 829 | 2% | scatter chỉ số trùng | thấp (BQ đã bust PAR) |
+| `UNFLATTEN` | 734 | 2% | memory-bound ≈3.4 GB/s (GĐ9 đo) | xong |
+| `GRAD_NORM` (đã PAR 2.79×) | ~375 | 1% | — | xong |
+
+**Đọc số:**
+1. `GRAD_ACC` ~1232 ms trong profile bench là **artifact** — đường thật `gpt2_train_step` truyền `gflat=opt.g` vào backward → grad ghi tại chỗ, không có vòng acc riêng.
+2. `RESIDUAL` = SUM(32719) − TOTAL_bwd(22281) = **−10438 ms là artifact đo** (probe AQ gọi library tuần tự không gflat; bench ghi thẳng + overlap worker) — không phải pha âm. `LN_FWD 391` + `GELU 1125/797` nằm bên trong các mục trên.
+3. **3 bucket GEMM (ATTN+MLP+LHEAD) = 24.1 s = 66% bước** — native AVX2, `.tkv` không thêm được gì → chỉ còn P7b.
+
+### 13.2 Nguyên tắc chung (bắt buộc cho mọi GĐ dưới đây)
+
+- **Đo trước, quyết theo số** — mọi thứ mới phải có probe; đồng hồ `time_perf` (`now_ms` lượng tử 15.6 ms đã làm vô hiệu probe BY).
+- **Bit-exact**: maxdiff 0.0 với đường cũ, hoặc loss khớp exact 7 chữ số; saves **append CUỐI + len guard** (saves cũ vẫn đọc được — tiền lệ GĐ7).
+- **Gate mỗi GĐ**: 135/135 + `trainer_tests` 15/15 + bench A/B 3 seq best-of-3 cùng phiên (ghi drift nhiệt).
+- **Wire đồng bộ mirror** (gpt2_ref ×5, trainer ×4) — bench import `tv.training.gpt2_ref124` + `tv.training.trainer`.
+- Ghi kết quả: dòng §12 ladder + `HANDOFF.md` §0.x + **commit từng GĐ**.
+
+### 13.3 Các hạng mục — xếp theo lợi nhuận × độ tin cậy
+
+#### GĐ11 — Song song softmax-grad trong lm-head bwd (~ −1.0 s @1024) — LÀM TRƯỚC
+
+- **Hiện trạng:** vòng serial trong `gpt2_backward` simd==1 (`gg = t_zeros([n,V])` rồi `for i in range(n)`: max + exp + chuẩn hoá + onehot): probe AV **1.33 s** @seq1024 (51.5M ptu; code không đổi từ P5.7) + zero-fill `gg` 206 MB ≈ 60 ms. Softmax-grad ≈ 18% `LHEAD_BWD` hiện tại.
+- **Thiết kế:** row-parallel 12 worker theo **mẫu `_ls_one` GĐ4 — đã thắng 5.10× cho CÙNG math ở forward**: worker nhận (logits, gg, ids, n, rlo, rhi), tự tính rows `[rlo,rhi)` **ghi thẳng vào `gg.data` phân đoạn (row-disjoint → không merge → bit-exact từng bit)**; guard `n*V ≥ 4M` (seq8 = 402K → serial nguyên vẹn). Tuỳ đo: worker tự zero seg, bỏ t_zeros serial.
+- **Wire:** 5 mirror `gpt2_ref` (bench: `gpt2_ref124`).
+- **Thắng nếu:** `LHEAD_BWD` trong AQ giảm ≥0.9 s + net win 3 seq + gate xanh.
+- **Rủi ro:** thấp (mẫu đã thắng); đề phòng bài học GĐ4: main quá lớn → BadImageFormat → tách hàm; nested `list[f32]` append → ArrayTypeMismatch → ghi index.
+
+#### GĐ12 — LN_BWD dùng saves mu/rstd từ forward (~ −0.25 s @1024) — CHẮC CHẮN NHẤT
+
+- **Hiện trạng:** `gpt2_layernorm_bwd` tính lại `mu` (pass 1) + `v`/`rstd` (pass 2) từ `x` — **2/4 pass quét**; 25 gói = **765 ms** @1024. GĐ7 đã lưu `a_ln`/`m_ln` (bỏ 24 gói LN-fwd recompute) nhưng **chưa mu/rstd**; torch lưu `rstd` từ forward.
+- **Thiết kế:**
+  1. Helper `gpt2_layernorm_saved(x,g,b) → [out, mu, rstd]` (mu/rstd = list f32 `n` ptu ≈ 8 KB/gói @1024) — `gpt2_layernorm` cũ giữ nguyên cho parity.
+  2. `gpt2_block_saved` trả thêm mu/rstd của ln1+ln2, `gpt2_forward_saved` thêm của lnf — **append CUỐI saves (format 3+6N), len guard** → saves cũ (3+4N…) vẫn chạy.
+  3. `gpt2_layernorm_bwd` nhận `save_mu/save_rstd` optional (default `None`): có → bỏ 2 pass đầu; `gpt2_block_bwd`/`gpt2_backward` truyền tiếp; `saves == None` → đường recompute cũ nguyên vẹn.
+- **Bit-exact:** mu/rstd do **cùng hàm + cùng input + cùng thứ tự tích lũy** với bản recompute → bitwise bằng → downstream không đổi (xác minh maxdiff 0.0 + loss exact).
+- **Wire:** 5 mirror `gpt2_ref`. **Thắng nếu:** `LN_BWD` 765 → ≤550 ms (−≥30%), gate xanh.
+- **Không làm mặc định:** row-parallel LN_BWD — mỗi gói 786K < ngưỡng break-even 2M (GĐ4 đo) → nhiều khả năng bust; chỉ làm thêm nếu probe cho net win.
+
+#### GĐ13 — AdamW parallel LẦN 3: probe chẩn đoán TRƯỚC, wire CHỈ nếu thắng (−2.4..2.7 s nếu thành)
+
+- **Hiện trạng:** `ADAMW_STEP` **3930 ms (11%)** — 124M ptu, ~25 phép/ptu interpreter + ~3.5 GB traffic (đọc g,m,v + đọc/ghi p,m,v; 4 mảng × 496 MB) → **sàn băng thông ≈ 1.0-1.1 s** (mức 3.4 GB/s đo ở GĐ9). Công thức ĐÃ bắt kịp torch (GĐ10: 1 div/ptu). Đã bust 2 lần: **BL SHARED-12 = 0.36× (11.9 vs 4.2 s), OWN+MERGE = 0.29×** (merge 372M = 11.7 s); GĐ9 + scan IL mới nhất **loại giả thuyết boxing** (`step` đã `int32 'i'`, `i/k` worker native int64) → **nguyên nhân chưa rõ**. Đây là mục `.tkv` lớn nhất còn lại.
+- **Probe chẩn đoán (`simd_probe_cc`, N=124M, `time_perf`, ≥3 lần/variant):**
+
+  | V | Variant | Câu trả lời |
+  |---|---|---|
+  | V0 | serial baseline (công thức GĐ10) | mốc |
+  | V1 | compute-only PAR12, ghi OWN segs | compute có scale? (BL: 3.9→0.5 s — xác nhận lại) |
+  | V2 | SHARED: đọc g,m,v shared, ghi p,m,v shared phân đoạn | đường GHI shared có phải thủ phạm? |
+  | V3 | OWN+MERGE (như BL) | merge còn 11.7 s không |
+  | V4 | control copy PAR12 @124M (BM: 3.0×) | shared-write@124M có bình thường không — chạy CÙNG phiên |
+
+- **Quy tắc ra quyết định:**
+  - V1 ≥2× mà V2 ≈1× hoặc chậm hơn → bệnh ở ghi SHARED → probe V5 tách dần (p-only shared, m/v own…) → tìm pattern thắng → wire `trainer` ×4.
+  - V1 ≈1× → compute không scale trong worker → **ĐÓNG vĩnh viễn**, ghi §12 dòng bác bỏ.
+  - V4 <2× (lệch BM) → vấn đề hệ thống (NUMA/hyperthread/drift) → điều chỉnh rồi đo lại trước khi kết luận.
+- **Bit-exact:** từng phần tử độc lập (`p[i],m[i],v[i]` chỉ phụ thuộc `i`) → thứ tự tùy ý đều exact; OWN+MERGE gộp theo thứ tự segment.
+- **Kỳ vọng nếu thắng:** 3930 → 1.2-1.5 s (sàn băng thông) = **−2.4..2.7 s/bước (−6.5-7.5%)**.
+- **KHÔNG làm lại:** fused step+unflatten (P1.2/AH bust), giảm phép mới (GĐ10 V1/V2 đã đo âm).
+
+#### P7b — Đo khoảng cách GEMM vs torch rồi chốt đường parity (probe thuần, 0 thay đổi code)
+
+- **Bối cảnh:** ATTN+MLP+LHEAD = **24.1 s = 66%** bước, được ghi là “near-peak AVX2” — nhưng torch chạy **cả bước** trong 3.542 s → mâu thuẫn: nếu GEMM thật near torch thì full step phải ≪ 36.7 s. Khẳng định “near-peak” phải kiểm lại ở mức **hệ thống**.
+- **Probe (`simd_probe_cd`, cùng phiên):**
+  1. `simd_gemm` native trên 3 shape đại diện (attn T=64, proj/mlp 768→3072, lm-head 1024×768×50257) → GFLOPS thật + **in số thread THẬT của native pool** (câu hỏi AO còn treo: `TKV_GEMM_MIN_N=96` → tile 64 có đang chạy 1 thread?).
+  2. `torch.matmul` f32 cùng shape, 14 thread, cùng máy cùng phiên.
+  3. Roofline `2·m·n·k / time`, đối chiếu sàn ~190 GFLOP/s của torch.
+- **Kịch bản ra quyết định:**
+  - Ta ≥70% torch/shape → khoảng cách nằm NGOÀI kernel (dispatch interpreter giữa các GEMM, alloc buffer, merge copy) → attack driver/alloc trong `.tkv`.
+  - Ta 10-30% torch → **kernel/threading là nút thắt** → đề xuất compiler/native team: C source có sẵn tại `D:/TokenVector/Release/tools/simd_native/tkv_simd_native.c` + `build.ps1` (thuộc repo compiler, cần phối hợp). Phương án: thread cho tile nhỏ, f32 everywhere, prefetch/register-block; **kernel fused AdamW/elementwise native** — step native ≈ sàn băng thông ~1.0-1.1 s mà KHÔNG cần thread (giải pháp thay thế GĐ13 nếu GĐ13 bust).
+- **Ý nghĩa:** GĐ11-13 chỉ đưa ~36.7 → **~32.7-35.5 s ≈ 9-10×** — mục tiêu 1.0× SỐNG hay CHẾT ở item này. P7b là probe quyết định, không phải tối ưu.
+
+### 13.4 Bảng tổng hợp kỳ vọng @seq1024
+
+| Item | Tiết kiệm | Loại | Độ tin cậy |
+|---|---|---|---|
+| GĐ11 softmax-grad PAR12 | −0.95..1.05 s | `.tkv` | **cao** (mẫu GĐ4 thắng 5.10× cùng math) |
+| GĐ12 LN saves mu/rstd | −0.23..0.31 s | `.tkv` | **cao** (chắc chắn về số học) |
+| GĐ13 AdamW parallel | −2.4..2.7 s (hoặc 0) | `.tkv` | **thấp** — 2 lần bust, cần probe chẩn đoán |
+| **Tổng — GĐ13 thắng** | −3.6..4.0 s → **~32.7-33.1 s = 9.3×** | | |
+| **Tổng — GĐ13 bust** | −1.2..1.4 s → **~35.3-35.5 s = 10.0×** | | |
+| P7b | 0 (probe) | điều hướng parity | — |
+
+**Kết luận trung thực:** trần của mọi việc làm được bằng `.tkv` sau GĐ10 ≈ **9-10×**; còn ~9× nằm ở 3 bucket GEMM 24.1 s (+ sàn băng thông các vòng elementwise) → **parity 1.0× bắt buộc đi qua native/C hoặc compiler** (f32 locals, fused kernel) — P7b điều hướng.
+
+### 13.5 Trình tự thực hiện + gates
+
+1. **GĐ11** (probe qua gate) → bench A/B 3 seq → ghi §12 + HANDOFF §0.31… → commit.
+2. **GĐ12** → tương tự.
+3. **GĐ13 probe `simd_probe_cc`** → ra quyết định (wire `trainer` ×4 **hoặc** đóng + ghi dòng bác bỏ §12) → gates/docs/commit.
+4. **P7b probe `simd_probe_cd`** → báo cáo số + đề xuất (quyết định cần chủ khoa/compiler team).
+
+Mỗi bước giữ nguyên toàn bộ gate hiện có; **không GĐ nào được wire khi chưa net win trên cả 3 seq**.
+
+### 13.6 ĐÃ BÁC BỎ — không làm lại (tra nhanh)
+
+| Hướng | Lý do (probe) |
+|---|---|
+| f32 typed locals (`x: 'f32' = 0.0`) | compiler từ chối — `simd_probe_aa` |
+| AdamW f32 toàn bộ (giống torch) | chặn ở compiler, cùng nguyên nhân trên |
+| Fused step+unflatten | P1.2/AH: mọi hình thức chậm hơn 2 vòng riêng |
+| Mixed precision f16/bf16 | P7/BX: relerr 1.08e-3 + 378-460 ns/ptu → 0.047-0.108× |
+| int64-narrow ngoài GEMM | GĐ9/CA: memory-bound ≈3.4 GB/s, arithmetic bị ẩn (0.05%) |
+| dwte-add / embed PAR12 | BQ: PAR12+merge 719 > serial 328 ms |
+| main-thread + 11 worker | BW: eff 5.59× < spawn12 6.48× |
+| UNFLATTEN parallel/fused | memory-bound + AH/BL bust |
+| Lưu softmax (exp) từ forward làm saves | hơn GĐ11 ~0.2 s nhưng +206 MB + sửa forward → không đáng |
+| transpose ggT / blocked / `simd_add` tích lũy | P5.7 / AW / P5.8b đã đo bust |
