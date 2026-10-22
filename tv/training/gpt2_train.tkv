@@ -144,14 +144,31 @@ def gpt2_loss_of(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: '
 # bo ghi d 4704, function-level 7547. Con ca bug do ra: `for jj in range(sz)`
 # ket hop `jj = jj + 1` con lai tu while-loop → skip nua phan tu (loss sai,
 # gate [5 bat duoc). KET LUAN: GIU 2 VONG RIENG — dung lam lai fused nay.
+#
+# P6 GĐ7 (2026-10-21, do BR[5]: zero_grad 124M = 250ms): zero_grad chay
+# worker DONG THOI forward (forward khong dot opt.g) — join TRUOC backward
+# (bwd ghi += vao opt.g) -> ket qua GIONG HET (bit-exact), an 250ms/buoc.
+class _ZrJob:
+    gl: "list[f32]"
+    def __init__(self, gl: "list[f32]"):
+        self.gl = gl
+
+def _zr_one(j: "_ZrJob") -> 'i64':
+    for i in range(len(j.gl)):
+        j.gl[i] = 0.0
+    return 0
+
 def gpt2_train_step(opt: "AdamW", ps: 'list[Tensor]',
                     ids: 'list[i64]', pos: 'list[i64]', simd: 'i32' = 0) -> 'f32':
+    # P6 GĐ7: spawn zero_grad TRUOC forward, join TRUOC backward — an 250ms
+    # (BR[5]) vi forward khong dot opt.g; ket qua khong doi (bit-exact).
+    zh = thread_spawn(_zr_one, _ZrJob(opt.g))
     loss = gpt2_loss_of(ps, ids, pos, simd)
+    jz = thread_join(zh)
     # P1.1 (perf-plan): bwd ghi THANG param grads vao opt.g (da zero) —
     # bo duoc materialization grads 148 tensor (~1.6 GB song) + vong GRAD_ACC
     # (~1.4s/buoc 124M). out list cua backward = placeholder len 0.
     # Khac thu tu accumulate vs duong cu -> ULP-scale (parity torch ok).
-    opt.zero_grad()
     grads = gpt2_bwd_ps(ps, ids, pos, simd, opt.g)
     opt.step()
     # ghi trong so da cap nhat tro lai tensor

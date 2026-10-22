@@ -1326,6 +1326,75 @@ AdamW/plumbing ~4.9s. P7 mixed precision van cho quyet dinh ⓑ (Haswell).
 
 ---
 
+### 0.26 P6 GIAI DOAN 7 — PLUMBING: ZERO_GRAD OVERLAP + LN-FWD SAVES (2026-10-22) — 135/135, BIT-EXACT, seq1024 −2.5%
+
+Tiep 0.25 ("Con lai": ATTN_BWD serial chain, LHEAD 9.6s, AdamW/plumbing
+~4.9s). DO TRUOC bang 3 probe:
+
+**Probe BR** (`tv/tests/simd_probe_br.tkv`) — phan rac plumbing forward-side
+@124M (cung duong bench):
+
+| Thanh phan | ms | Ghi chu |
+|---|---|---|
+| logits smm_fwd_pd (BR[1a]) | 1313 | FWD_BODY phan lon (vocab GEMM) |
+| forward_saved whole (BR[2]) | 9828 | embed+12blk+lnf+logits |
+| LN fwd recompute x24 (BR[3]) | **359** | 24 goi LN fwd RECOMPUTE trong block_bwd |
+| LN bwd x25 (BR[4]) | 719 | gpt2_layernorm_bwd (chua đụng) |
+| zero_grad (BR[5]) | **250** | 124M phan tu, serial TRUOC forward |
+| AdamW step (BR[6]) | 4234 | 3 vong m/v/p — da co norm parallel (GĐ4) |
+| unflatten (BR[7]) | 766 | copy p -> tensor.data |
+
+BR sum (logits+lnf+lnb+zero+step+unflat) = 6922 vs forward_saved whole =
+9828 -> chu dich truoc AdamW la **LN recompute + zero_grad** (609ms) — 2
+muc nay an duoc ngay; AdamW gan break-even voi BL/BL2 da do (giu 2 vong
+rieng, xem P1.2).
+
+**Probe BQ** (`tv/tests/simd_probe_bq.tkv`) — LHEAD con lai: dwte-add PAR12
+(seg worker + main merge, dung mau GĐ4) = **719ms vs serial 328ms — DO BAC
+BO** (merge 50257x768 = 38.6M phan tu qua 12 worker qua dich; maxdiff 0.0
+nhung khong co loi). EMBED_BWD cung nguon.
+
+**Probe BW** (`tv/tests/simd_probe_bw.tkv`) — main-thread + 11 worker
+(attention head): BW[1] spawn12+join+merge = 391ms (eff 6.48x), BW[2]
+spawn11 + main tinh head0 = 453ms (eff(main+11) = 5.59x, maxdiff 0.0) ->
+**main thread cham hon 1 worker -> DO BAC BO**, giu nguyen spawn 12 (GĐ1/2).
+
+**Wire:**
+- `gpt2_train_step` (gpt2_train x3 mirror + bench `_step124`): spawn
+  zero_grad worker TRUOC forward, join TRUOC backward — forward KHONG dot
+  opt.g -> ket qua GIONG HET (bit-exact), an 250ms/buoc @124M.
+- `gpt2_block_saved`: luu them dau vao LN (`a_ln`, `m_ln`); saves append
+  CUOI (vi tri cu xins/rs NGUYEN -> format cu van doc duoc);
+  `gpt2_block_bwd` nhan `save_a`/`save_m` -> bo 24 goi gpt2_layernorm
+  recompute (359ms @1024). Cung input cung phep -> BIT-EXACT.
+
+**Ket qua:**
+- Gate **135/135** (9 suite nho + gpt2_full 33, fails=0).
+- Bench A/B (best-of-2, loss khop EXACT ca 3 seq):
+
+| seq | GĐ6 | GĐ7 | Δ |
+|---|---|---|---|
+| 8 | 15.313 | **15.172** | −0.9% |
+| 256 | 23.516 | **22.844** | −2.9% |
+| 1024 | 45.000 | **43.890** | **−2.5%** |
+
+- Tỉ lệ vs torch: **16.2× / 16.3× / 12.4×**.
+
+**Ghi chu do:** phien nay nhiet do lon (chay lan 46750 vs lan 43890 cung
+binary) — lay best-of-2. Loi thuyet 609ms, do thuc ~1.1s (zero_grad worker
+overlap con cham forward nhieu hon 250ms nua).
+
+**"Con lai" sau GĐ7 (BR):** AdamW step 4.2s + unflatten 0.7s = ~5s — BL/BL2
+da do truoc (OWN+MERGE 0.29x) — CHI con 2 huong chua do: (1) fused
+step+unflatten DA BAC BO (probe AH, xem P1.2 — KHONG lam lai); (2) giu vong
+rieng nhung overlap step voi unflatten cua tham so cu (unflatten doc opt.p
+TRUOC khi step ghi moi — can chot thu tu). ATTN_BWD 11.3s: worker wall
+516ms/layer da do (GĐ5) — con lai la serial chain GEMM near-peak. Tiep theo:
+**P7 mixed precision** (quyet dinh ⓑ — may nay Haswell AVX2, khong VNNI/
+BF16/AMX).
+
+---
+
 ---
 
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES

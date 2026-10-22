@@ -410,19 +410,24 @@ def gpt2_block_saved(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
                      simd: 'i32' = 0) -> 'list[Tensor]':
     n = _sh0(x)
     h = _sh1(x)
-    a = gpt2_layernorm(x, ln1_g, ln1_b)
-    a = gpt2_attention(a, w_qkv, b_qkv, w_proj, b_proj, n, simd)
+    a_ln = gpt2_layernorm(x, ln1_g, ln1_b)
+    a = gpt2_attention(a_ln, w_qkv, b_qkv, w_proj, b_proj, n, simd)
     r = t_zeros([n, h])
     for i in range(n * h):
         r.data[i] = x.data[i] + a.data[i]
-    m = gpt2_layernorm(r, ln2_g, ln2_b)
-    m = gpt2_mlp(m, w1, b1, w2, b2, n, simd)
+    m_ln = gpt2_layernorm(r, ln2_g, ln2_b)
+    m = gpt2_mlp(m_ln, w1, b1, w2, b2, n, simd)
     out = t_zeros([n, h])
     for i in range(n * h):
         out.data[i] = r.data[i] + m.data[i]
+    # P6 GĐ7 (do BR[3]: LN fwd recompute 24 goi = 359ms @1024 trong
+    # block_bwd): LUU luon dau vao LN (a_ln, m_ln) — cung input cung phep
+    # voi viec recompute -> BIT-EXACT, bo duoc 24 goi gpt2_layernorm.
     res = []
     res.append(out)
     res.append(r)
+    res.append(a_ln)
+    res.append(m_ln)
     return res
 
 # ---- Full forward: embed -> N block -> ln_f -> LM head (tie wte) ----------
@@ -476,12 +481,16 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
     x = gpt2_embed(ids, pos, wte, wpe)
     xins = []
     rsin = []
+    ains = []
+    msin = []
     for i in range(NLayers):
         xins.append(x)
         rb = gpt2_block_saved(x, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
                               ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i], simd)
         x = rb[0]
         rsin.append(rb[1])
+        ains.append(rb[2])
+        msin.append(rb[3])
     xf_in = x
     xf = gpt2_layernorm(x, lnf_g, lnf_b)
     if simd == 1:
@@ -502,6 +511,13 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
         out.append(xins[i])
     for i in range(NLayers):
         out.append(rsin[i])
+    # P6 GĐ7: dau vao LN (a_ln, m_ln) — bo block_bwd phai recompute 24 goi
+    # gpt2_layernorm (359ms @1024, do BR[3]). Vi tri CU (xins, rs) NGUYEN ->
+    # saves format cu van doc duoc.
+    for i in range(NLayers):
+        out.append(ains[i])
+    for i in range(NLayers):
+        out.append(msin[i])
     return out
 
 # ---- Cross entropy (F.cross_entropy mean = mean_i(lse_i - logit[i, y_i]))
@@ -1093,7 +1109,8 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
                    w1: "Tensor", b1: "Tensor", w2: "Tensor", b2: "Tensor",
                    gout: "Tensor", simd: 'i32' = 0,
                    gflat: 'list[f32]' = None, offs: 'list[i64]' = None,
-                   save_r: "Tensor" = None) -> 'list[Tensor]':
+                   save_r: "Tensor" = None, save_a: "Tensor" = None,
+                   save_m: "Tensor" = None) -> 'list[Tensor]':
     # offs = 12 offset flat theo layout layer (0 ln1_g 1 ln1_b 2 w_qkv
     # 3 b_qkv 4 w_proj 5 b_proj 6 ln2_g 7 ln2_b 8 w1 9 b1 10 w2 11 b2);
     # rong = off (duong cu, parity nguyen ven).
@@ -1126,7 +1143,11 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
         o_b2 = offs[11]
     n = _sh0(x)
     h = _sh1(x)
-    a = gpt2_layernorm(x, ln1_g, ln1_b)
+    # P6 GĐ7 (do BR[3]: 24 goi LN fwd recompute = 359ms @1024): save_a/save_m
+    # tu forward_saved -> bo recompute. Cung input + cung phep -> BIT-EXACT.
+    a = save_a
+    if save_a == None:
+        a = gpt2_layernorm(x, ln1_g, ln1_b)
     # P5.6 (2026-10-20): save_r != None -> lay r tu forward_saved, BO HAN
     # gpt2_attention fwd recompute (~15.4s @seq1024, probe AQ). save_r la
     # x + attn_out tinh trong forward — cung gia tri TUNG BIT -> grad bit-exact.
@@ -1137,7 +1158,9 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
             r.data[i] = x.data[i] + attn_out.data[i]
     else:
         r = save_r
-    m = gpt2_layernorm(r, ln2_g, ln2_b)
+    m = save_m
+    if save_m == None:
+        m = gpt2_layernorm(r, ln2_g, ln2_b)
     # out = r + mlp(m)
     rmlp = gpt2_mlp_bwd(m, w1, b1, w2, b2, n, gout, simd, gflat, o_w1, o_b1, o_w2, o_b2)
     dr = t_zeros([n, h])
@@ -1356,11 +1379,23 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
                                 ln2_g[li], ln2_b[li],
                                 w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo)
         else:
-            rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
-                                w_qkv[li], b_qkv[li], w_proj[li], b_proj[li],
-                                ln2_g[li], ln2_b[li],
-                                w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo,
-                                saves[3 + NLayers + li])
+            # P6 GĐ7: saves format 3+4N (P5.5/P5.6: logits, xf, xf_in, xins, rs
+            # + ains, msin) -> truyen them dau vao LN, bo recompute 24 goi.
+            # Saves cu (3+2N hoac 3+3N) van doc duoc (guard len).
+            if len(saves) >= 3 + 4 * NLayers:
+                rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
+                                    w_qkv[li], b_qkv[li], w_proj[li], b_proj[li],
+                                    ln2_g[li], ln2_b[li],
+                                    w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo,
+                                    saves[3 + NLayers + li],
+                                    saves[3 + 2 * NLayers + li],
+                                    saves[3 + 3 * NLayers + li])
+            else:
+                rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
+                                    w_qkv[li], b_qkv[li], w_proj[li], b_proj[li],
+                                    ln2_g[li], ln2_b[li],
+                                    w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo,
+                                    saves[3 + NLayers + li])
         gx = rb[0]
         for j in range(1, 13):
             rblocks.append(rb[j])

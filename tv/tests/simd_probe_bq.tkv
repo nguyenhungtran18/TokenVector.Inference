@@ -1,0 +1,532 @@
+# PROBE BQ — P6 GĐ7: NHANH CON LAI CUA LHEAD + EMBED_BWD (2026-10-21)
+#
+# So do AQ sau GĐ6: ATTN_BWD 11.3s, MLP_BWD 10.9s (GEMM near-peak),
+# LHEAD 9.6s, EMBED_BWD 1.0s. LHEAD gom: logits GEMM (smm_dot_pd, wave),
+# SOFTMAX GRAD serial loop n*V = 51.5M ptu (max + exp + normalize),
+# dxf smm_fwd_pd + dwte smm_fwd_at_pd (da wave tu GĐ3/P5.8).
+# Uc vien GĐ7 theo so do:
+#   (A) parallel softmax-grad theo row (12 worker) — moi ptu chi phu thuoc
+#       row minh, cong thuc + thu tu tich luy trong row NGUYEN -> bit-exact;
+#   (B) parallel dwte += gwte_e (38.6M ptu serial) trong EMBED_BWD.
+#
+# BQ[1]  gg serial (copy NGUYEN vong gpt2_backward simd==1) — reference
+# BQ[2a] gg PAR12 worker ghi TRUC TIEP vao gg (row disjoint, khong merge)
+# BQ[2b] gg PAR12 worker own-seg + main merge DUNG thu tu row
+#        -> maxdiff ca 2 bien the vs serial (ky vong 0.0)
+# BQ[3]  dxf + dwte GEMM (reference, da wave tu GĐ3/P5.8)
+# BQ[4a] dwte += gwte serial
+# BQ[4b] dwte += gwte PAR12 own-seg + merge -> maxdiff
+# chk = (sum cac phan - whole) / whole (loi do nhu cac probe truoc)
+#
+# Chay (tu goc repo):
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_bq.tkv out/bq.exe main
+#   ./out/bq.exe
+
+import tv.training.gpt2_ref124
+import tv.training.simd_matmul
+
+def _bq_div(a: 'i64', b: 'i64') -> 'i64':
+    # chia nhi phan (khong dung '/' cua i64)
+    if a < b:
+        return 0
+    q = 0
+    r = a
+    while r >= b:
+        step = b
+        add = 1
+        while (step + step) <= r:
+            step = step + step
+            add = add + add
+        r = r - step
+        q = q + add
+    return q
+
+def _bq_smt(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+def _bq_fx(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(float(((i * 131) % 97) - 48) * 0.031)
+    return out
+
+def _bq_fz(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(0.0)
+    return out
+
+def _bq_ids(n: 'i64') -> 'list[i64]':
+    out = []
+    i = 0
+    while i < n:
+        out.append((i * 37 + 11) % VocabSize)
+        i = i + 1
+    return out
+
+def _bq_md(a: "list[f32]", b: "list[f32]") -> 'f32':
+    m = 0.0
+    for k in range(len(a)):
+        dv = a[k] - b[k]
+        if dv < 0.0:
+            dv = -dv
+        if dv > m:
+            m = dv
+    return m
+
+# ==== worker: softmax-grad ghi TRUC TIEP vao gg (row disjoint) ==============
+class _BqGGJob:
+    xl: "list[f32]"
+    idl: "list[i64]"
+    gl: "list[f32]"
+    rlo: 'i64'
+    rhi: 'i64'
+    invn: 'f32'
+    def __init__(self, xl: "list[f32]", idl: "list[i64]", gl: "list[f32]",
+                  rlo: 'i64', rhi: 'i64', invn: 'f32'):
+        self.xl = xl
+        self.idl = idl
+        self.gl = gl
+        self.rlo = rlo
+        self.rhi = rhi
+        self.invn = invn
+
+def _bq_gg_direct(j: "_BqGGJob") -> 'i64':
+    V = VocabSize
+    invn = j.invn
+    i = j.rlo
+    while i < j.rhi:
+        base = i * V
+        mxf = j.xl[base]
+        o = 1
+        while o < V:
+            if j.xl[base + o] > mxf:
+                mxf = j.xl[base + o]
+            o = o + 1
+        tot = 0.0
+        o = 0
+        while o < V:
+            e = exp(j.xl[base + o] - mxf)
+            j.gl[base + o] = e
+            tot = tot + e
+            o = o + 1
+        inv_tot = 1.0 / tot
+        o = 0
+        while o < V:
+            ggv = j.gl[base + o] * inv_tot * invn
+            if o == j.idl[i]:
+                ggv = ggv - invn
+            j.gl[base + o] = ggv
+            o = o + 1
+        i = i + 1
+    return 0
+
+# ==== worker: softmax-grad own-seg + main merge =============================
+class _BqGSJob:
+    xl: "list[f32]"
+    idl: "list[i64]"
+    seg: "list[f32]"
+    rlo: 'i64'
+    rhi: 'i64'
+    invn: 'f32'
+    def __init__(self, xl: "list[f32]", idl: "list[i64]", seg: "list[f32]",
+                  rlo: 'i64', rhi: 'i64', invn: 'f32'):
+        self.xl = xl
+        self.idl = idl
+        self.seg = seg
+        self.rlo = rlo
+        self.rhi = rhi
+        self.invn = invn
+
+def _bq_gg_seg(j: "_BqGSJob") -> 'i64':
+    V = VocabSize
+    invn = j.invn
+    i = j.rlo
+    k = 0
+    while i < j.rhi:
+        base = i * V
+        mxf = j.xl[base]
+        o = 1
+        while o < V:
+            if j.xl[base + o] > mxf:
+                mxf = j.xl[base + o]
+            o = o + 1
+        tot = 0.0
+        o = 0
+        while o < V:
+            e = exp(j.xl[base + o] - mxf)
+            j.seg[k + o] = e
+            tot = tot + e
+            o = o + 1
+        inv_tot = 1.0 / tot
+        o = 0
+        while o < V:
+            ggv = j.seg[k + o] * inv_tot * invn
+            if o == j.idl[i]:
+                ggv = ggv - invn
+            j.seg[k + o] = ggv
+            o = o + 1
+        k = k + V
+        i = i + 1
+    return 0
+
+# ==== worker: dwte add own-seg =============================================
+class _BqASJob:
+    al: "list[f32]"
+    bl: "list[f32]"
+    seg: "list[f32]"
+    lo: 'i64'
+    hi: 'i64'
+    def __init__(self, al: "list[f32]", bl: "list[f32]", seg: "list[f32]",
+                  lo: 'i64', hi: 'i64'):
+        self.al = al
+        self.bl = bl
+        self.seg = seg
+        self.lo = lo
+        self.hi = hi
+
+def _bq_add_seg(j: "_BqASJob") -> 'i64':
+    k = 0
+    i = j.lo
+    while i < j.hi:
+        j.seg[k] = j.al[i] + j.bl[i]
+        k = k + 1
+        i = i + 1
+    return 0
+
+# ==== serial reference: softmax-grad (copy NGUYEN gpt2_backward simd==1) ====
+def _bq_gg_serial(xl: "list[f32]", idl: 'list[i64]', gl: "list[f32]") -> 'i64':
+    V = VocabSize
+    n = _bq_div(len(gl), V)
+    inv_n = 1.0 / float(n)
+    for i in range(n):
+        base = i * V
+        mxf = xl[base]
+        for o in range(1, V):
+            if xl[base + o] > mxf:
+                mxf = xl[base + o]
+        tot = 0.0
+        for o in range(V):
+            e = exp(xl[base + o] - mxf)
+            gl[base + o] = e
+            tot = tot + e
+        inv_tot = 1.0 / tot
+        for o in range(V):
+            ggv = gl[base + o] * inv_tot * inv_n
+            if o == idl[i]:
+                ggv = ggv - inv_n
+            gl[base + o] = ggv
+    return n
+
+def main() -> 'i32':
+    V = VocabSize
+    h = HiddenSize
+    n = 1024
+    print("BQ seq=" + str(n) + " V=" + str(V) + " h=" + str(h))
+
+    # du lieu synthetic nong (khong denormal), giong mau truoc
+    logits = t_new(_bq_fx(n * V), [n, V])
+    ids = _bq_ids(n)
+    invn = 1.0 / float(n)
+
+    # chia row 12 seg (dung chung cho 2a/2b)
+    r0 = _bq_div(0 * n, 12)
+    r1 = _bq_div(1 * n, 12)
+    r2 = _bq_div(2 * n, 12)
+    r3 = _bq_div(3 * n, 12)
+    r4 = _bq_div(4 * n, 12)
+    r5 = _bq_div(5 * n, 12)
+    r6 = _bq_div(6 * n, 12)
+    r7 = _bq_div(7 * n, 12)
+    r8 = _bq_div(8 * n, 12)
+    r9 = _bq_div(9 * n, 12)
+    r10 = _bq_div(10 * n, 12)
+    r11 = _bq_div(11 * n, 12)
+
+    # ---- BQ[1] gg serial ---------------------------------------------------
+    gg_ref = t_new(_bq_fz(n * V), [n, V])
+    v1 = 1.0e18
+    k1 = 0
+    while k1 < 2:
+        t0 = now_ms()
+        _bq_gg_serial(logits.data, ids, gg_ref.data)
+        d1 = now_ms() - t0
+        v1 = _bq_smt(v1, d1)
+        k1 = k1 + 1
+    print("BQ[1] gg serial = " + str(v1) + " ms")
+
+    # ---- BQ[2a] gg PAR12 direct-write (row disjoint) -----------------------
+    v2a = 1.0e18
+    md2a = 0.0
+    k2 = 0
+    while k2 < 2:
+        gg_a = t_new(_bq_fz(n * V), [n, V])
+        gl = gg_a.data
+        xl = logits.data
+        t0 = now_ms()
+        h0 = thread_spawn(_bq_gg_direct, _BqGGJob(xl, ids, gl, r0, r1, invn))
+        h1 = thread_spawn(_bq_gg_direct, _BqGGJob(xl, ids, gl, r1, r2, invn))
+        h2 = thread_spawn(_bq_gg_direct, _BqGGJob(xl, ids, gl, r2, r3, invn))
+        h3 = thread_spawn(_bq_gg_direct, _BqGGJob(xl, ids, gl, r3, r4, invn))
+        h4 = thread_spawn(_bq_gg_direct, _BqGGJob(xl, ids, gl, r4, r5, invn))
+        h5 = thread_spawn(_bq_gg_direct, _BqGGJob(xl, ids, gl, r5, r6, invn))
+        h6 = thread_spawn(_bq_gg_direct, _BqGGJob(xl, ids, gl, r6, r7, invn))
+        h7 = thread_spawn(_bq_gg_direct, _BqGGJob(xl, ids, gl, r7, r8, invn))
+        h8 = thread_spawn(_bq_gg_direct, _BqGGJob(xl, ids, gl, r8, r9, invn))
+        h9 = thread_spawn(_bq_gg_direct, _BqGGJob(xl, ids, gl, r9, r10, invn))
+        h10 = thread_spawn(_bq_gg_direct, _BqGGJob(xl, ids, gl, r10, r11, invn))
+        h11 = thread_spawn(_bq_gg_direct, _BqGGJob(xl, ids, gl, r11, n, invn))
+        j0 = thread_join(h0)
+        j1 = thread_join(h1)
+        j2 = thread_join(h2)
+        j3 = thread_join(h3)
+        j4 = thread_join(h4)
+        j5 = thread_join(h5)
+        j6 = thread_join(h6)
+        j7 = thread_join(h7)
+        j8 = thread_join(h8)
+        j9 = thread_join(h9)
+        j10 = thread_join(h10)
+        j11 = thread_join(h11)
+        d2a = now_ms() - t0
+        v2a = _bq_smt(v2a, d2a)
+        if k2 == 1:
+            md2a = _bq_md(gg_ref.data, gg_a.data)
+        k2 = k2 + 1
+    print("BQ[2a] gg PAR12 direct = " + str(v2a) + " ms  maxdiff=" + str(md2a))
+
+    # ---- BQ[2b] gg PAR12 own-seg + merge -----------------------------------
+    v2b = 1.0e18
+    md2b = 0.0
+    k3 = 0
+    while k3 < 2:
+        gg_b = t_new(_bq_fz(n * V), [n, V])
+        gl = gg_b.data
+        xl = logits.data
+        s0 = _bq_fz((r1 - r0) * V)
+        s1 = _bq_fz((r2 - r1) * V)
+        s2 = _bq_fz((r3 - r2) * V)
+        s3 = _bq_fz((r4 - r3) * V)
+        s4 = _bq_fz((r5 - r4) * V)
+        s5 = _bq_fz((r6 - r5) * V)
+        s6 = _bq_fz((r7 - r6) * V)
+        s7 = _bq_fz((r8 - r7) * V)
+        s8 = _bq_fz((r9 - r8) * V)
+        s9 = _bq_fz((r10 - r9) * V)
+        s10 = _bq_fz((r11 - r10) * V)
+        s11 = _bq_fz((n - r11) * V)
+        t0 = now_ms()
+        h0 = thread_spawn(_bq_gg_seg, _BqGSJob(xl, ids, s0, r0, r1, invn))
+        h1 = thread_spawn(_bq_gg_seg, _BqGSJob(xl, ids, s1, r1, r2, invn))
+        h2 = thread_spawn(_bq_gg_seg, _BqGSJob(xl, ids, s2, r2, r3, invn))
+        h3 = thread_spawn(_bq_gg_seg, _BqGSJob(xl, ids, s3, r3, r4, invn))
+        h4 = thread_spawn(_bq_gg_seg, _BqGSJob(xl, ids, s4, r4, r5, invn))
+        h5 = thread_spawn(_bq_gg_seg, _BqGSJob(xl, ids, s5, r5, r6, invn))
+        h6 = thread_spawn(_bq_gg_seg, _BqGSJob(xl, ids, s6, r6, r7, invn))
+        h7 = thread_spawn(_bq_gg_seg, _BqGSJob(xl, ids, s7, r7, r8, invn))
+        h8 = thread_spawn(_bq_gg_seg, _BqGSJob(xl, ids, s8, r8, r9, invn))
+        h9 = thread_spawn(_bq_gg_seg, _BqGSJob(xl, ids, s9, r9, r10, invn))
+        h10 = thread_spawn(_bq_gg_seg, _BqGSJob(xl, ids, s10, r10, r11, invn))
+        h11 = thread_spawn(_bq_gg_seg, _BqGSJob(xl, ids, s11, r11, n, invn))
+        j0 = thread_join(h0)
+        j1 = thread_join(h1)
+        j2 = thread_join(h2)
+        j3 = thread_join(h3)
+        j4 = thread_join(h4)
+        j5 = thread_join(h5)
+        j6 = thread_join(h6)
+        j7 = thread_join(h7)
+        j8 = thread_join(h8)
+        j9 = thread_join(h9)
+        j10 = thread_join(h10)
+        j11 = thread_join(h11)
+        # main gop DUNG thu tu row (cung phep + thu tu voi serial)
+        o = 0
+        for k in range((r1 - r0) * V):
+            gl[o + k] = s0[k]
+        o = o + (r1 - r0) * V
+        for k in range((r2 - r1) * V):
+            gl[o + k] = s1[k]
+        o = o + (r2 - r1) * V
+        for k in range((r3 - r2) * V):
+            gl[o + k] = s2[k]
+        o = o + (r3 - r2) * V
+        for k in range((r4 - r3) * V):
+            gl[o + k] = s3[k]
+        o = o + (r4 - r3) * V
+        for k in range((r5 - r4) * V):
+            gl[o + k] = s4[k]
+        o = o + (r5 - r4) * V
+        for k in range((r6 - r5) * V):
+            gl[o + k] = s5[k]
+        o = o + (r6 - r5) * V
+        for k in range((r7 - r6) * V):
+            gl[o + k] = s6[k]
+        o = o + (r7 - r6) * V
+        for k in range((r8 - r7) * V):
+            gl[o + k] = s7[k]
+        o = o + (r8 - r7) * V
+        for k in range((r9 - r8) * V):
+            gl[o + k] = s8[k]
+        o = o + (r9 - r8) * V
+        for k in range((r10 - r9) * V):
+            gl[o + k] = s9[k]
+        o = o + (r10 - r9) * V
+        for k in range((r11 - r10) * V):
+            gl[o + k] = s10[k]
+        o = o + (r11 - r10) * V
+        for k in range((n - r11) * V):
+            gl[o + k] = s11[k]
+        d2b = now_ms() - t0
+        v2b = _bq_smt(v2b, d2b)
+        if k3 == 1:
+            md2b = _bq_md(gg_ref.data, gg_b.data)
+        k3 = k3 + 1
+    print("BQ[2b] gg PAR12 seg+merge = " + str(v2b) + " ms  maxdiff=" + str(md2b))
+
+    # ---- BQ[3] dxf + dwte GEMM (reference — da wave tu GĐ3/P5.8) ----------
+    xf = t_new(_bq_fx(n * h), [n, h])
+    wte = t_new(_bq_fx(V * h), [V, h])
+    v3a = 1.0e18
+    k4 = 0
+    while k4 < 2:
+        t0 = now_ms()
+        dxf = smm_fwd_pd(gg_ref, wte, n, h, V)
+        d3a = now_ms() - t0
+        v3a = _bq_smt(v3a, d3a)
+        k4 = k4 + 1
+    print("BQ[3a] dxf smm_fwd_pd = " + str(v3a) + " ms")
+    v3b = 1.0e18
+    k5 = 0
+    while k5 < 2:
+        t0 = now_ms()
+        dwte = smm_fwd_at_pd(gg_ref, xf, V, h, n)
+        d3b = now_ms() - t0
+        v3b = _bq_smt(v3b, d3b)
+        k5 = k5 + 1
+    print("BQ[3b] dwte smm_fwd_at_pd = " + str(v3b) + " ms")
+
+    # ---- BQ[4a] dwte += gwte serial ---------------------------------------
+    gwte = t_new(_bq_fx(V * h), [V, h])
+    N4 = V * h
+    v4a = 1.0e18
+    k6 = 0
+    while k6 < 2:
+        dref = t_new(_bq_fz(N4), [V, h])
+        t0 = now_ms()
+        for k in range(N4):
+            dref.data[k] = dwte.data[k] + gwte.data[k]
+        d4a = now_ms() - t0
+        v4a = _bq_smt(v4a, d4a)
+        k6 = k6 + 1
+    print("BQ[4a] dwte add serial = " + str(v4a) + " ms")
+
+    # ---- BQ[4b] dwte += gwte PAR12 own-seg + merge ------------------------
+    v4b = 1.0e18
+    md4 = 0.0
+    k7 = 0
+    while k7 < 2:
+        t4 = t_new(_bq_fz(N4), [V, h])
+        c0 = _bq_div(0 * N4, 12)
+        c1 = _bq_div(1 * N4, 12)
+        c2 = _bq_div(2 * N4, 12)
+        c3 = _bq_div(3 * N4, 12)
+        c4 = _bq_div(4 * N4, 12)
+        c5 = _bq_div(5 * N4, 12)
+        c6 = _bq_div(6 * N4, 12)
+        c7 = _bq_div(7 * N4, 12)
+        c8 = _bq_div(8 * N4, 12)
+        c9 = _bq_div(9 * N4, 12)
+        c10 = _bq_div(10 * N4, 12)
+        c11 = _bq_div(11 * N4, 12)
+        a0 = _bq_fz(c1 - c0)
+        a1 = _bq_fz(c2 - c1)
+        a2 = _bq_fz(c3 - c2)
+        a3 = _bq_fz(c4 - c3)
+        a4 = _bq_fz(c5 - c4)
+        a5 = _bq_fz(c6 - c5)
+        a6 = _bq_fz(c7 - c6)
+        a7 = _bq_fz(c8 - c7)
+        a8 = _bq_fz(c9 - c8)
+        a9 = _bq_fz(c10 - c9)
+        a10 = _bq_fz(c11 - c10)
+        a11 = _bq_fz(N4 - c11)
+        dl = dwte.data
+        gl2 = gwte.data
+        t0 = now_ms()
+        h0 = thread_spawn(_bq_add_seg, _BqASJob(dl, gl2, a0, c0, c1))
+        h1 = thread_spawn(_bq_add_seg, _BqASJob(dl, gl2, a1, c1, c2))
+        h2 = thread_spawn(_bq_add_seg, _BqASJob(dl, gl2, a2, c2, c3))
+        h3 = thread_spawn(_bq_add_seg, _BqASJob(dl, gl2, a3, c3, c4))
+        h4 = thread_spawn(_bq_add_seg, _BqASJob(dl, gl2, a4, c4, c5))
+        h5 = thread_spawn(_bq_add_seg, _BqASJob(dl, gl2, a5, c5, c6))
+        h6 = thread_spawn(_bq_add_seg, _BqASJob(dl, gl2, a6, c6, c7))
+        h7 = thread_spawn(_bq_add_seg, _BqASJob(dl, gl2, a7, c7, c8))
+        h8 = thread_spawn(_bq_add_seg, _BqASJob(dl, gl2, a8, c8, c9))
+        h9 = thread_spawn(_bq_add_seg, _BqASJob(dl, gl2, a9, c9, c10))
+        h10 = thread_spawn(_bq_add_seg, _BqASJob(dl, gl2, a10, c10, c11))
+        h11 = thread_spawn(_bq_add_seg, _BqASJob(dl, gl2, a11, c11, N4))
+        j0 = thread_join(h0)
+        j1 = thread_join(h1)
+        j2 = thread_join(h2)
+        j3 = thread_join(h3)
+        j4 = thread_join(h4)
+        j5 = thread_join(h5)
+        j6 = thread_join(h6)
+        j7 = thread_join(h7)
+        j8 = thread_join(h8)
+        j9 = thread_join(h9)
+        j10 = thread_join(h10)
+        j11 = thread_join(h11)
+        o = 0
+        for k in range(c1 - c0):
+            t4.data[o + k] = a0[k]
+        o = o + (c1 - c0)
+        for k in range(c2 - c1):
+            t4.data[o + k] = a1[k]
+        o = o + (c2 - c1)
+        for k in range(c3 - c2):
+            t4.data[o + k] = a2[k]
+        o = o + (c3 - c2)
+        for k in range(c4 - c3):
+            t4.data[o + k] = a3[k]
+        o = o + (c4 - c3)
+        for k in range(c5 - c4):
+            t4.data[o + k] = a4[k]
+        o = o + (c5 - c4)
+        for k in range(c6 - c5):
+            t4.data[o + k] = a5[k]
+        o = o + (c6 - c5)
+        for k in range(c7 - c6):
+            t4.data[o + k] = a6[k]
+        o = o + (c7 - c6)
+        for k in range(c8 - c7):
+            t4.data[o + k] = a7[k]
+        o = o + (c8 - c7)
+        for k in range(c9 - c8):
+            t4.data[o + k] = a8[k]
+        o = o + (c9 - c8)
+        for k in range(c10 - c9):
+            t4.data[o + k] = a9[k]
+        o = o + (c10 - c9)
+        for k in range(c11 - c10):
+            t4.data[o + k] = a10[k]
+        o = o + (c11 - c10)
+        for k in range(N4 - c11):
+            t4.data[o + k] = a11[k]
+        d4b = now_ms() - t0
+        v4b = _bq_smt(v4b, d4b)
+        if k7 == 1:
+            md4 = _bq_md(dref.data, t4.data)
+        k7 = k7 + 1
+    print("BQ[4b] dwte add PAR12 seg+merge = " + str(v4b) + " ms  maxdiff=" + str(md4))
+
+    # ---- chk ---------------------------------------------------------------
+    whole = v1 + v3a + v3b + v4a
+    par = v2a + v3a + v3b + v4b
+    print("BQ serial-sum(gg+dxf+dwte+add) = " + str(whole)
+          + " ms  par-sum(2a+3+4b) = " + str(par) + " ms")
+    print("BQ done")
+    return 0

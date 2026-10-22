@@ -124,11 +124,24 @@ def _f124_bwd(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32
                          ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd, gflat, saves)
 
 # ---- 1 buoc train day du (ban sao gpt2_train_step) --------------------------
+# P6 GĐ7: zero_grad worker dong thoi forward (join truoc bwd) — giong
+# gpt2_train_step, bit-exact, an ~250ms/buoc @124M (do BR[5]).
+class _BqZrJob:
+    gl: "list[f32]"
+    def __init__(self, gl: "list[f32]"):
+        self.gl = gl
+
+def _bq_zr_one(j: "_BqZrJob") -> 'i64':
+    for i in range(len(j.gl)):
+        j.gl[i] = 0.0
+    return 0
+
 def _step124(opt: "AdamW", ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32') -> 'f32':
     # P5.5: forward_saved -> bwd dung lai saves (khong forward recompute)
+    zh = thread_spawn(_bq_zr_one, _BqZrJob(opt.g))
     sv = _f124_fwd2(ps, ids, pos, simd)
     loss = gpt2_loss(sv[0], ids)
-    opt.zero_grad()
+    jz = thread_join(zh)
     grads = _f124_bwd(ps, ids, pos, simd, opt.g, sv)
     opt.step()
     off = 0
