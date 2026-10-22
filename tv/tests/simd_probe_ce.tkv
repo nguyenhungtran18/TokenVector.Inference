@@ -1,0 +1,478 @@
+# PROBE CE — CHUAN DOAN GĐ11 (2026-10-22): softmax-grad PAR12 BUST (+3.3s)
+# KET LUAN (2 lan chay, bit-exact 0.0 ca SH va OW):
+#   S serial 1110-1140 | SH shared+exp 3110-4453 (0.25-0.36x) |
+#   CP copy shared 484-547 (2.0-2.3x — shared write THUAN khong benh) |
+#   OW alloc 359-375 + worker 484 (2.36x) + merge 1172 = TOTAL 2031 (0.56x)
+#   -> merge doc (1172ms ~ serial toan bo) an het loi; worker co 2.36x nhung
+#   khong cuu duoc. CUNG benh voi AdamW BL/SHARED (HANDOFF 0.22):
+#   phep toan + ghi list TUONG MINH = cham; copy thuan (CP) thi on.
+#   GĐ11 KHONG WIRE — gpt2_backward giu duong serial (maxdiff 0.0 voi ban wire).
+# Tinh huong: _sg_all (shared write vao gg.data) trong AQ lam LHEAD 7407 ->
+# 10719 ms (bit-exact van giu, chk = 0.000105296414). Muc dich: tach nguyen
+# nhan bang 5 bien the @n=1024 V=50257 (51.5M ptu), moi bien the chay 2 lan
+# xen ke, so sanh TUNG BIT voi serial (maxdiff inline trong main — bai hoc
+# P7: khong chuyen kieu list khi so sanh).
+#   S  : serial (duong hien tai trong gpt2_backward)
+#   SH : shared write + exp (ban vua wire — tai hien)
+#   OW : own seg + main merge (mau _ls_one GĐ4 — ung vien sua)
+#   CP : shared write KHONG exp (copy xl -> gl) — dieu kien shared-write thuan
+#   ON : own seg, khong merge — tranh tinh compute/doc shared (gioi han tren)
+# Chay (tu goc repo):
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_ce.tkv out/ce.exe main
+#   ./out/ce.exe
+import tv.training.gpt2_ref124
+import tv.training.simd_matmul
+
+def _ce_div(a: 'i64', b: 'i64') -> 'i64':
+    if a < b:
+        return 0
+    q = 0
+    r = a
+    while r >= b:
+        step = b
+        add = 1
+        while (step + step) <= r:
+            step = step + step
+            add = add + add
+        r = r - step
+        q = q + add
+    return q
+
+def _ce_fill(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(float(((i * 131) % 97) - 48) * 0.07)
+    return out
+
+def _ce_zeros(n: 'i64') -> 'list[f32]':
+    out = []
+    for i in range(n):
+        out.append(0.0)
+    return out
+
+def _ce_maxdiff(a: 'list[f32]', b: 'list[f32]', cnt: 'i64') -> 'f64':
+    dmax = 0.0
+    i = 0
+    while i < cnt:
+        e = a[i] - b[i]
+        if e < 0.0:
+            e = -e
+        if e > dmax:
+            dmax = e
+        i = i + 1
+    return dmax
+
+# ==== worker: SHARED write + exp (ban wire GĐ11 — NGUYEN VAN) ==============
+class _CeShJob:
+    xl: "list[f32]"
+    gl: "list[f32]"
+    idl: "list[i64]"
+    n: 'i64'
+    V: 'i64'
+    rlo: 'i64'
+    rhi: 'i64'
+    def __init__(self, xl: "list[f32]", gl: "list[f32]", idl: "list[i64]",
+                 n: 'i64', V: 'i64', rlo: 'i64', rhi: 'i64'):
+        self.xl = xl
+        self.gl = gl
+        self.idl = idl
+        self.n = n
+        self.V = V
+        self.rlo = rlo
+        self.rhi = rhi
+
+def _ce_sh_one(j: "_CeShJob") -> 'i64':
+    V = j.V
+    inv_n = 1.0 / float(j.n)
+    i = j.rlo
+    while i < j.rhi:
+        base = i * V
+        mxf = j.xl[base]
+        o = 1
+        while o < V:
+            if j.xl[base + o] > mxf:
+                mxf = j.xl[base + o]
+            o = o + 1
+        tot = 0.0
+        o = 0
+        while o < V:
+            e = exp(j.xl[base + o] - mxf)
+            j.gl[base + o] = e
+            tot = tot + e
+            o = o + 1
+        inv_tot = 1.0 / tot
+        o = 0
+        while o < V:
+            ggv = j.gl[base + o] * inv_tot * inv_n
+            if o == j.idl[i]:
+                ggv = ggv - inv_n
+            j.gl[base + o] = ggv
+            o = o + 1
+        i = i + 1
+    return 0
+
+# ==== worker: OWN seg + exp (ung vien sua — ghi seg rieng) =================
+class _CeOwJob:
+    xl: "list[f32]"
+    seg: "list[f32]"
+    idl: "list[i64]"
+    n: 'i64'
+    V: 'i64'
+    rlo: 'i64'
+    rhi: 'i64'
+    def __init__(self, xl: "list[f32]", seg: "list[f32]", idl: "list[i64]",
+                 n: 'i64', V: 'i64', rlo: 'i64', rhi: 'i64'):
+        self.xl = xl
+        self.seg = seg
+        self.idl = idl
+        self.n = n
+        self.V = V
+        self.rlo = rlo
+        self.rhi = rhi
+
+def _ce_ow_one(j: "_CeOwJob") -> 'i64':
+    V = j.V
+    inv_n = 1.0 / float(j.n)
+    i = j.rlo
+    k = 0
+    while i < j.rhi:
+        base = i * V
+        mxf = j.xl[base]
+        o = 1
+        while o < V:
+            if j.xl[base + o] > mxf:
+                mxf = j.xl[base + o]
+            o = o + 1
+        tot = 0.0
+        o = 0
+        while o < V:
+            e = exp(j.xl[base + o] - mxf)
+            j.seg[k + o] = e
+            tot = tot + e
+            o = o + 1
+        inv_tot = 1.0 / tot
+        o = 0
+        while o < V:
+            ggv = j.seg[k + o] * inv_tot * inv_n
+            if o == j.idl[i]:
+                ggv = ggv - inv_n
+            j.seg[k + o] = ggv
+            o = o + 1
+        k = k + V
+        i = i + 1
+    return 0
+
+# ==== worker: COPY shared (khong exp) — dieu kien shared-write thuan ========
+class _CeCpJob:
+    xl: "list[f32]"
+    gl: "list[f32]"
+    lo: 'i64'
+    hi: 'i64'
+    def __init__(self, xl: "list[f32]", gl: "list[f32]", lo: 'i64', hi: 'i64'):
+        self.xl = xl
+        self.gl = gl
+        self.lo = lo
+        self.hi = hi
+
+def _ce_cp_one(j: "_CeCpJob") -> 'i64':
+    i = j.lo
+    while i < j.hi:
+        j.gl[i] = j.xl[i]
+        i = i + 1
+    return 0
+
+# ==== 12 spawn + join theo mau (tach ham — bai hoc GĐ4) ====================
+def _ce_sh_all(xl: "list[f32]", gl: "list[f32]", idl: "list[i64]",
+               n: 'i64', V: 'i64') -> 'i32':
+    r0 = _ce_div(0 * n, 12)
+    r1 = _ce_div(1 * n, 12)
+    r2 = _ce_div(2 * n, 12)
+    r3 = _ce_div(3 * n, 12)
+    r4 = _ce_div(4 * n, 12)
+    r5 = _ce_div(5 * n, 12)
+    r6 = _ce_div(6 * n, 12)
+    r7 = _ce_div(7 * n, 12)
+    r8 = _ce_div(8 * n, 12)
+    r9 = _ce_div(9 * n, 12)
+    r10 = _ce_div(10 * n, 12)
+    r11 = _ce_div(11 * n, 12)
+    h0 = thread_spawn(_ce_sh_one, _CeShJob(xl, gl, idl, n, V, r0, r1))
+    h1 = thread_spawn(_ce_sh_one, _CeShJob(xl, gl, idl, n, V, r1, r2))
+    h2 = thread_spawn(_ce_sh_one, _CeShJob(xl, gl, idl, n, V, r2, r3))
+    h3 = thread_spawn(_ce_sh_one, _CeShJob(xl, gl, idl, n, V, r3, r4))
+    h4 = thread_spawn(_ce_sh_one, _CeShJob(xl, gl, idl, n, V, r4, r5))
+    h5 = thread_spawn(_ce_sh_one, _CeShJob(xl, gl, idl, n, V, r5, r6))
+    h6 = thread_spawn(_ce_sh_one, _CeShJob(xl, gl, idl, n, V, r6, r7))
+    h7 = thread_spawn(_ce_sh_one, _CeShJob(xl, gl, idl, n, V, r7, r8))
+    h8 = thread_spawn(_ce_sh_one, _CeShJob(xl, gl, idl, n, V, r8, r9))
+    h9 = thread_spawn(_ce_sh_one, _CeShJob(xl, gl, idl, n, V, r9, r10))
+    h10 = thread_spawn(_ce_sh_one, _CeShJob(xl, gl, idl, n, V, r10, r11))
+    h11 = thread_spawn(_ce_sh_one, _CeShJob(xl, gl, idl, n, V, r11, n))
+    j0 = thread_join(h0)
+    j1 = thread_join(h1)
+    j2 = thread_join(h2)
+    j3 = thread_join(h3)
+    j4 = thread_join(h4)
+    j5 = thread_join(h5)
+    j6 = thread_join(h6)
+    j7 = thread_join(h7)
+    j8 = thread_join(h8)
+    j9 = thread_join(h9)
+    j10 = thread_join(h10)
+    j11 = thread_join(h11)
+    return 0
+
+def _ce_ow_all(xl: "list[f32]", idl: "list[i64]", n: 'i64', V: 'i64',
+               sg0: "list[f32]", sg1: "list[f32]", sg2: "list[f32]",
+               sg3: "list[f32]", sg4: "list[f32]", sg5: "list[f32]",
+               sg6: "list[f32]", sg7: "list[f32]", sg8: "list[f32]",
+               sg9: "list[f32]", sg10: "list[f32]", sg11: "list[f32]") -> 'i32':
+    r0 = _ce_div(0 * n, 12)
+    r1 = _ce_div(1 * n, 12)
+    r2 = _ce_div(2 * n, 12)
+    r3 = _ce_div(3 * n, 12)
+    r4 = _ce_div(4 * n, 12)
+    r5 = _ce_div(5 * n, 12)
+    r6 = _ce_div(6 * n, 12)
+    r7 = _ce_div(7 * n, 12)
+    r8 = _ce_div(8 * n, 12)
+    r9 = _ce_div(9 * n, 12)
+    r10 = _ce_div(10 * n, 12)
+    r11 = _ce_div(11 * n, 12)
+    h0 = thread_spawn(_ce_ow_one, _CeOwJob(xl, sg0, idl, n, V, r0, r1))
+    h1 = thread_spawn(_ce_ow_one, _CeOwJob(xl, sg1, idl, n, V, r1, r2))
+    h2 = thread_spawn(_ce_ow_one, _CeOwJob(xl, sg2, idl, n, V, r2, r3))
+    h3 = thread_spawn(_ce_ow_one, _CeOwJob(xl, sg3, idl, n, V, r3, r4))
+    h4 = thread_spawn(_ce_ow_one, _CeOwJob(xl, sg4, idl, n, V, r4, r5))
+    h5 = thread_spawn(_ce_ow_one, _CeOwJob(xl, sg5, idl, n, V, r5, r6))
+    h6 = thread_spawn(_ce_ow_one, _CeOwJob(xl, sg6, idl, n, V, r6, r7))
+    h7 = thread_spawn(_ce_ow_one, _CeOwJob(xl, sg7, idl, n, V, r7, r8))
+    h8 = thread_spawn(_ce_ow_one, _CeOwJob(xl, sg8, idl, n, V, r8, r9))
+    h9 = thread_spawn(_ce_ow_one, _CeOwJob(xl, sg9, idl, n, V, r9, r10))
+    h10 = thread_spawn(_ce_ow_one, _CeOwJob(xl, sg10, idl, n, V, r10, r11))
+    h11 = thread_spawn(_ce_ow_one, _CeOwJob(xl, sg11, idl, n, V, r11, n))
+    j0 = thread_join(h0)
+    j1 = thread_join(h1)
+    j2 = thread_join(h2)
+    j3 = thread_join(h3)
+    j4 = thread_join(h4)
+    j5 = thread_join(h5)
+    j6 = thread_join(h6)
+    j7 = thread_join(h7)
+    j8 = thread_join(h8)
+    j9 = thread_join(h9)
+    j10 = thread_join(h10)
+    j11 = thread_join(h11)
+    return 0
+
+def _ce_cp_all(xl: "list[f32]", gl: "list[f32]", cnt: 'i64') -> 'i32':
+    c0 = _ce_div(0 * cnt, 12)
+    c1 = _ce_div(1 * cnt, 12)
+    c2 = _ce_div(2 * cnt, 12)
+    c3 = _ce_div(3 * cnt, 12)
+    c4 = _ce_div(4 * cnt, 12)
+    c5 = _ce_div(5 * cnt, 12)
+    c6 = _ce_div(6 * cnt, 12)
+    c7 = _ce_div(7 * cnt, 12)
+    c8 = _ce_div(8 * cnt, 12)
+    c9 = _ce_div(9 * cnt, 12)
+    c10 = _ce_div(10 * cnt, 12)
+    c11 = _ce_div(11 * cnt, 12)
+    h0 = thread_spawn(_ce_cp_one, _CeCpJob(xl, gl, c0, c1))
+    h1 = thread_spawn(_ce_cp_one, _CeCpJob(xl, gl, c1, c2))
+    h2 = thread_spawn(_ce_cp_one, _CeCpJob(xl, gl, c2, c3))
+    h3 = thread_spawn(_ce_cp_one, _CeCpJob(xl, gl, c3, c4))
+    h4 = thread_spawn(_ce_cp_one, _CeCpJob(xl, gl, c4, c5))
+    h5 = thread_spawn(_ce_cp_one, _CeCpJob(xl, gl, c5, c6))
+    h6 = thread_spawn(_ce_cp_one, _CeCpJob(xl, gl, c6, c7))
+    h7 = thread_spawn(_ce_cp_one, _CeCpJob(xl, gl, c7, c8))
+    h8 = thread_spawn(_ce_cp_one, _CeCpJob(xl, gl, c8, c9))
+    h9 = thread_spawn(_ce_cp_one, _CeCpJob(xl, gl, c9, c10))
+    h10 = thread_spawn(_ce_cp_one, _CeCpJob(xl, gl, c10, c11))
+    h11 = thread_spawn(_ce_cp_one, _CeCpJob(xl, gl, c11, cnt))
+    j0 = thread_join(h0)
+    j1 = thread_join(h1)
+    j2 = thread_join(h2)
+    j3 = thread_join(h3)
+    j4 = thread_join(h4)
+    j5 = thread_join(h5)
+    j6 = thread_join(h6)
+    j7 = thread_join(h7)
+    j8 = thread_join(h8)
+    j9 = thread_join(h9)
+    j10 = thread_join(h10)
+    j11 = thread_join(h11)
+    return 0
+
+# ==== SERIAL — duong hien tai trong gpt2_backward (NGUYEN VAN) =============
+def _ce_serial(xl: "list[f32]", gl: "list[f32]", idl: "list[i64]",
+               n: 'i64', V: 'i64') -> 'i32':
+    for i in range(n):
+        base = i * V
+        mxf = xl[base]
+        for o in range(1, V):
+            if xl[base + o] > mxf:
+                mxf = xl[base + o]
+        tot = 0.0
+        for o in range(V):
+            e = exp(xl[base + o] - mxf)
+            gl[base + o] = e
+            tot = tot + e
+        inv_tot = 1.0 / tot
+        inv_n = 1.0 / float(n)
+        for o in range(V):
+            ggv = gl[base + o] * inv_tot * inv_n
+            if o == idl[i]:
+                ggv = ggv - inv_n
+            gl[base + o] = ggv
+    return 0
+
+def _ce_mn(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+def main() -> 'i32':
+    n = 1024
+    V = VocabSize
+    cnt = n * V
+    print("CE n=" + str(n) + " V=" + str(V) + " cnt=" + str(cnt))
+    xl = _ce_fill(cnt)
+    idl = []
+    i = 0
+    while i < n:
+        idl.append((i * 37 + 11) % 50257)
+        i = i + 1
+
+    # ---- S: serial 2 lan (best-of-2) --------------------------------------
+    gser = _ce_zeros(cnt)
+    t0 = now_ms()
+    _ce_serial(xl, gser, idl, n, V)
+    v_s = now_ms() - t0
+    t0 = now_ms()
+    _ce_serial(xl, gser, idl, n, V)
+    v_s = _ce_mn(v_s, now_ms() - t0)
+    print("CE S  serial          = " + str(v_s) + " ms")
+
+    # ---- SH: shared write + exp (ban wire GĐ11) — 2 lan --------------------
+    gsh = _ce_zeros(cnt)
+    t0 = now_ms()
+    _ce_sh_all(xl, gsh, idl, n, V)
+    v_sh = now_ms() - t0
+    t0 = now_ms()
+    _ce_sh_all(xl, gsh, idl, n, V)
+    v_sh = _ce_mn(v_sh, now_ms() - t0)
+    print("CE SH shared+exp      = " + str(v_sh) + " ms  (speed " + str(v_s / v_sh) + "x)")
+
+    # ---- CP: copy shared KHONG exp — 2 lan ---------------------------------
+    gcp = _ce_zeros(cnt)
+    t0 = now_ms()
+    _ce_cp_all(xl, gcp, cnt)
+    v_cp = now_ms() - t0
+    t0 = now_ms()
+    _ce_cp_all(xl, gcp, cnt)
+    v_cp = _ce_mn(v_cp, now_ms() - t0)
+    print("CE CP copy shared     = " + str(v_cp) + " ms  (speed " + str(v_s / v_cp) + "x)")
+
+    # ---- OW: own seg + merge — alloc segs TRONG vong do (gia su wire) ------
+    # LUU Y: seg phai theo ROW boundary (_ce_div(i*n,12)) — khong phai chia
+    # theo ptu (1024/12 = 85.33 -> worker 11 co 89 hang > segsz ptu-div).
+    rr0 = _ce_div(0 * n, 12)
+    rr1 = _ce_div(1 * n, 12)
+    rr2 = _ce_div(2 * n, 12)
+    rr3 = _ce_div(3 * n, 12)
+    rr4 = _ce_div(4 * n, 12)
+    rr5 = _ce_div(5 * n, 12)
+    rr6 = _ce_div(6 * n, 12)
+    rr7 = _ce_div(7 * n, 12)
+    rr8 = _ce_div(8 * n, 12)
+    rr9 = _ce_div(9 * n, 12)
+    rr10 = _ce_div(10 * n, 12)
+    rr11 = _ce_div(11 * n, 12)
+    # moi worker 85 hoac 86 hang (1024/12 = 85.33) -> seg phai theo TUNG
+    # boundary, khong chia deu duoc.
+    segsz = (rr1 - rr0) * V
+    segsz2 = (rr2 - rr1) * V
+    segsz3 = (rr3 - rr2) * V
+    segsz4 = (rr4 - rr3) * V
+    segsz5 = (rr5 - rr4) * V
+    segsz6 = (rr6 - rr5) * V
+    segsz7 = (rr7 - rr6) * V
+    segsz8 = (rr8 - rr7) * V
+    segsz9 = (rr9 - rr8) * V
+    segsz10 = (rr10 - rr9) * V
+    segsz11 = (rr11 - rr10) * V
+    segsz12 = (n - rr11) * V
+    t0 = now_ms()
+    s0 = _ce_zeros(segsz)
+    s1 = _ce_zeros(segsz2)
+    s2 = _ce_zeros(segsz3)
+    s3 = _ce_zeros(segsz4)
+    s4 = _ce_zeros(segsz5)
+    s5 = _ce_zeros(segsz6)
+    s6 = _ce_zeros(segsz7)
+    s7 = _ce_zeros(segsz8)
+    s8 = _ce_zeros(segsz9)
+    s9 = _ce_zeros(segsz10)
+    s10 = _ce_zeros(segsz11)
+    s11 = _ce_zeros(segsz12)
+    v_alloc = now_ms() - t0
+    print("CE OW alloc segs      = " + str(v_alloc) + " ms  (segsz=" + str(segsz)
+          + " segsz12=" + str(segsz12) + ")")
+    gow = _ce_zeros(cnt)
+    t0 = now_ms()
+    _ce_ow_all(xl, idl, n, V, s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11)
+    v_ow_w = now_ms() - t0
+    t0 = now_ms()
+    _ce_ow_all(xl, idl, n, V, s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11)
+    v_ow_w = _ce_mn(v_ow_w, now_ms() - t0)
+    print("CE OW worker only     = " + str(v_ow_w) + " ms  (speed " + str(v_s / v_ow_w) + "x)")
+    # merge DUNG thu tu row (main, 12 vung lien tuc theo TUNG segsz)
+    t0 = now_ms()
+    off = 0
+    for x in range(segsz):
+        gow[off + x] = s0[x]
+    off = off + segsz
+    for x in range(segsz2):
+        gow[off + x] = s1[x]
+    off = off + segsz2
+    for x in range(segsz3):
+        gow[off + x] = s2[x]
+    off = off + segsz3
+    for x in range(segsz4):
+        gow[off + x] = s3[x]
+    off = off + segsz4
+    for x in range(segsz5):
+        gow[off + x] = s4[x]
+    off = off + segsz5
+    for x in range(segsz6):
+        gow[off + x] = s5[x]
+    off = off + segsz6
+    for x in range(segsz7):
+        gow[off + x] = s6[x]
+    off = off + segsz7
+    for x in range(segsz8):
+        gow[off + x] = s7[x]
+    off = off + segsz8
+    for x in range(segsz9):
+        gow[off + x] = s8[x]
+    off = off + segsz9
+    for x in range(segsz10):
+        gow[off + x] = s9[x]
+    off = off + segsz10
+    for x in range(segsz11):
+        gow[off + x] = s10[x]
+    off = off + segsz11
+    for x in range(segsz12):
+        gow[off + x] = s11[x]
+    v_merge = now_ms() - t0
+    print("CE OW merge (main)    = " + str(v_merge) + " ms")
+    print("CE OW TOTAL           = " + str(v_alloc + v_ow_w + v_merge) + " ms  (speed "
+          + str(v_s / (v_alloc + v_ow_w + v_merge)) + "x)")
+
+    # ---- BIT CHECK (inline trong main — bai hoc P7) ------------------------
+    d_sh = _ce_maxdiff(gser, gsh, cnt)
+    d_ow = _ce_maxdiff(gser, gow, cnt)
+    print("CE maxdiff SH=" + str(d_sh) + "  OW=" + str(d_ow))
+    print("CE done")
+    return 0

@@ -1675,6 +1675,56 @@ gió như P7 đã chỉ).
 
 ---
 
+### 0.32 P6 GĐ11 — SONG SONG SOFTMAX-GRAD LM-HEAD: ĐO BÁC BỎ, KHÔNG WIRE (2026-10-22)
+
+Đi tiếp §0.31 item 1 (GĐ11 "làm trước", kỳ vọng −0.95..1.05 s, tin cậy cao
+theo mẫu `_ls_one` GĐ4). Nguyên tắc **ĐO TRƯỚC** được giữ: wire thử vào 5
+mirror `gpt2_ref` (worker `_SgJob`/`_sg_one`/`_sg_all`, row-parallel 12 worker,
+guard `n*V >= 4M`, ghi THANG vào `gg.data` phân đoạn row-disjoint) rồi đo —
+**số đo phản bác kỳ vọng, revert toàn bộ, KHÔNG commit code**.
+
+**1. SỐ ĐO (2 lần chạy, bit-exact giữ nguyên — chk AQ `0.000105296414`):**
+
+- Bench seq1024 với bản wire: **38391 ms** (GĐ10 best 36703) — chậm hơn.
+- AQ (A/B 2 binary cùng phiên): LHEAD_BWD **7407 → 10719 ms (+3.3 s)**,
+  TOTAL_bwd 22375 → 23297.
+
+**2. CHUAN DOAN — probe `tv/tests/simd_probe_ce.tkv` (@51.5M ptu, 2 lần chạy,
+maxdiff 0.0 cả SH lẫn OW):**
+
+| Biến thể | ms | Tốc độ vs serial |
+|---|---|---|
+| S — serial (đường hiện tại) | 1110-1140 | 1.00× |
+| SH — shared write + exp (bản wire) | 3110-4453 | **0.25-0.36×** |
+| CP — copy shared KHÔNG exp (điều khiển) | 484-547 | **2.0-2.3×** |
+| OW — own-seg: alloc | 359-375 | — |
+| OW — worker only | 484 | 2.36× |
+| OW — merge (main, đơn luồng) | **1172** | ≈ toàn bộ serial! |
+| OW — TOTAL (alloc+worker+merge) | 2031 | **0.56×** |
+
+**3. KẾT LUẬN — 2 quy tắc đo mới:**
+1. **Shared-write thuần KHÔNG bệnh** (CP 2.0-2.3×) — bệnh xuất hiện khi có
+   **phep toan per-ptu + ghi list tuong Minh** (SH 0.25-0.36×) — CÙNG bệnh
+   AdamW BL (SHARED 0.36×, OWN+MERGE 0.29×) → quy tắc chung cho mọi ứng viên
+   song song còn lại: **vòng compute-heavy ghi thẳng vào list CHUNG phải đo
+   riêng, không được suy ra từ mẫu đã thắng** (mẫu `_ls_one` thắng vì seg
+   output TINY — 85 ptu/worker, không phải vì "cùng math").
+2. **Own-seg + merge cũng có thể chết** khi merge đơn luồng ≈ serial: ở đây
+   merge 51.5M ptu = **1172 ms (~22.7 ns/ptu)** ≈ toàn bộ softmax serial →
+   ceiling kể cả merge miễn phí (worker 484 + alloc ~360) ≈ −0.28 s, dưới bar
+   −0.9 s của §13.3.
+
+**4. WIRE/REVERT:** `git checkout` 5 mirror `gpt2_ref` + `tv/tests/simd_probe_aq.tkv`
+— mã nguồn về nguyên trạng HEAD (vòng serial trong `gpt2_backward` simd==1).
+Probe `simd_probe_ce.tkv` GIỮ LẠI làm bằng chứng + regression reference.
+Docs: perf-plan §12 (dòng GĐ11) + §13.3/§13.4/§13.5/§13.6 + §0.32 này.
+
+**5. HỆ QUẢ KẾ HOẠCH §13:** bỏ GĐ11 khỏi danh sách kỳ vọng → trần `.tkv`-only
+hạ tương ứng (GĐ11 −0.95..1.05 s không còn): GĐ13 bust → ~36.4-36.5 s ≈ 10.1×;
+GĐ13 thắng → ~33.8-34.2 s ≈ 9.6-9.7×. P7b giữ nguyên vai trò điều hướng.
+
+---
+
 ---
 
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES

@@ -320,6 +320,7 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 | **P6** ✅ **GĐ8 XONG 2026-10-22** | **Giảm overhead interpreter trong GEMM** (probe BY2 đồng hồ `time_perf` — `now_ms()` lượng tử 15.6 ms làm probe BY v1 vô hiệu): đọc IL phát hiện biến cục bộ gán **trong vòng lặp** bị compiler **box thành `TkvInt`** (struct 16 B) ⇒ mỗi phép cộng chỉ số là phép cộng trên struct; quy tắc (probe `narrow2`): **phép gán đầu tiên ở top-level hàm** + các phép gán sau đều "chứng minh được" ⇒ **native int64** (một phép gán không chứng minh được ở top-level ⇒ box lại `TkvInt`). Đo: A-tile **1.49×**, B-tile **1.43×**, acc **1.08×**, core **1.54×** (Smat) / **2.28×** (gCtx), maxdiff **0.0** (bản "copy p-tile đầu" **chậm hơn** cộng đơn → bỏ, giữ nguyên phép cộng ⇒ không đổi dấu ±0.0). Wire `_tile_a_w`/`_tile_b_w`/`_tile_a_at_w` (index chạy + đọc trực tiếp) + helper mới `_acc_f` cho `_smm_core` + `_p58_core_simple` + `_pd_do` (đường wave-12 lm-head); IL xác nhận cả 4 hàm khai `int64`. **KHÔNG** đổi thứ tự vòng (bản p0→j0→i0 đã đo REGRESSION ở §10). **Kết quả: seq8/256/1024 = 12.969/18.125/37.828 s (−15.0/−21.1/−15.1%), loss 3 seq khớp EXACT từng chữ số, 135/135**; tỉ lệ vs torch 16.2/16.3/12.4× → **13.9×/12.9×/10.7×** | GEMM interpreter −6.7 s @1024 | **10.7×** |
 | **P6** ❌ **GĐ9 ĐO BÁC BỎ 2026-10-22** | **Nhân rộng quy tắc native int64 ra vòng ngoài GEMM** — scan IL của `out/bseq_new.il` (đường train đầy đủ) tìm mọi biến người dùng bị box `TkvInt`: `_step124.off` (unflatten), `_tn_one.off`/`_norm_groups.off` (norm), `_ls_one.k`, vòng ngoài `_smm_core`; **`step` (AdamW 4.2 s), `zero_grad`, `gpt2_loss`, LN, gelu ĐÃ dùng `int32 'i'` → không thuộc phạm vi sửa**. Probe `simd_probe_ca.tkv` (N=124M, `time_perf`, **4 lần chạy**): unflatten 2.27-2.34→2.29-2.30 ns/ptu (**1.02/0.998/0.991/0.990 — median ≈ 0.99**), norm 2.23-2.33→2.24-2.25 (**1.04/0.996/1.002/0.996 ≈ 1.00**), bit-exact 0.0. **Bác bỏ:** cả hai vòng memory-bound (≈3.4 GB/s đọc+ghi) nên arithmetic bị ẩn hết — bản "sửa" không nhanh hơn; quy tắc chỉ ăn tiền ở vòng compute-bound (GĐ8: tile-build GEMM 1.5-2.3×); tiết kiệm tối đa ~18 ms @1024 = **0.05%**, nhỏ hơn nhiễu đo, mà chi phí wire = 7 file mirror. Hướng thật: `AdamW.step` (4.2 s) phải giảm số phép/phần tử, không phải sửa khai báo biến | **0 (không làm)** | giữ **10.7×** |
 | **P6** ✅ **GĐ10 XONG 2026-10-22** | **Học PyTorch cho AdamW: gộp 2 div → 1 div** (so công thức trước với `torch/optim/adamw.py` rồi mới đo — probe `simd_probe_cb`, `time_perf`, N=124M, 3 lần chạy): PyTorch `denom = sqrt(v)/sqrt(bc2) + eps` rồi `addcdiv_` = **1 div/ptu**; ta `denom = sqrt(v)/bc2s + eps` **rồi** `m/denom` = **2 div/ptu**. Định lý gộp (đại số chính xác): `m/(sqrt(v)/bc2s+eps) == (m*bc2s)/(sqrt(v)+eps*bc2s)`. Đo 4 biến thể: V1 hoist `(1-b1)/(1-b2)` **0.93×** ❌, V2 gộp `p` **0.92×** ❌ (JIT/CSE đã tự làm — **phải đo từng cái riêng**), V3 gộp div **1.068×** ✅ maxdiff **1.19e-07**. Wire 4 file `trainer`. **Kết quả: `ADAMW_STEP` 4370→3930 ms (−10.1%); seq8/256/1024 = 12.516/17.313/36.703 s (−2.6/−3.3/−3.1%); loss in ra khớp exact 7 chữ số cả 3 seq; gate 135/135 + `trainer_tests` 15/15 PASS với fixture PyTorch thật (TOL=1e-5, chênh lớn nhất 2.5e-06)**; tỉ lệ vs torch 13.9/12.9/10.7× → **13.4×/12.3×/10.4×** | AdamW −440 ms/bước @124M | **10.4×** |
+| **P6** ❌ **GĐ11 ĐO BÁC BỎ 2026-10-22** | **Song song softmax-grad lm-head bwd** (kế hoạch §13.3 — mẫu `_ls_one` GĐ4) — wire thử 12 worker row-parallel ghi thẳng `gg.data` phân đoạn (bit-exact, chk AQ `0.000105296414` giữ nguyên) rồi **đo bác bỏ**: AQ LHEAD_BWD **7407 → 10719 ms (+3.3 s)**. Probe `simd_probe_ce.tkv` tách nguyên nhân @51.5M ptu (2 lần chạy, maxdiff 0.0 cả SH/OW): serial **1110-1140**; **SHARED ghi+exp = 3110-4453 (0.25-0.36×)** — CÙNG bệnh AdamW BL/SHARED; **CP copy shared KHÔNG exp = 484-547 (2.0-2.3×)** → shared write thuần KHÔNG bệnh, bệnh là **phep toan + ghi list tuong minh**; **OW own-seg: worker 484 (2.36×) + merge 1172 + alloc 359-375 = TOTAL 2031 (0.56×)** — merge phiên bản đơn luồng (~22.7 ns/ptu) ăn hết lợi thế, ceiling kể cả merge miễn phí cũng chỉ ≈ −0.28 s < bar −0.9 s. **KHÔNG WIRE** — `gpt2_backward` giữ vòng serial; 5 mirror gpt2_ref + AQ revert nguyên vẹn | **0 (không làm)** | giữ **10.4×** |
 | **P7** ❌ **ĐO BÁC BỎ 2026-10-22** | **Mixed precision (bf16/tf32/f16): ĐO TRƯỚC rồi BỎ — probe `tv/tests/simd_probe_bx.tkv`.** Lý do cứng: (1) máy = **Xeon E5-2695 v3 (Haswell-EP)** → **chỉ AVX2+FMA3**, không AVX512/VNNI/**BF16**/AMX; (2) native lib `tkv_simd_native.c` **chỉ kernel F32/F64** (`SgemmF32`/`SgemmF64`) — grep `f16\|bf16\|half` = **0 hit**; (3) compiler (`compiler_src`) **không có kiểu/intrinsic f16/bf16** — grep = **0 hit** ⇒ muốn f16 chỉ còn 1 đường: **làm tròn f16 bằng PHẦN MỀM** (scalar .tkv `native_f16_encode/decode`). **Số học:** f16-round vào GEMM 256×768×768 → **maxdiff 0.0497** (max\|C32\|=46.206 vs max\|C16\|=46.202 → relerr **1.08e-3**; check chéo scalar C[0][0] 4.0e-8) ⇒ **vượt cửa sổ parity 2.4e-7 gấp 2.1e5×** ⇒ không thể giữ 135/135 gate fp32. **Tốc độ:** chi phí làm tròn f16 phần mềm = **378-458 ns/ptu** (3 lần chạy; baseline đọc list 19-20 ns/ptu) ⇒ **ngay cả khi GEMM f16 MIỄN PHÍ** thì AMP best-case = **0.056-0.065× (768³) / 0.047-0.056× (1024×768×768) / 0.096-0.108× (lm-head 1024×768×50257)** = **chậm 9-21×**. ⇒ **P7 chỉ sống lại khi có kernel f16/bf16 NATIVE** (viết C/Rust thêm vào `tkv_simd_native`) **+ CPU hỗ trợ** (AVX512-BF16/AMX) hoặc GPU — không phải việc làm được bằng .tkv. | **0 (không làm)** | giữ **12.4×** |
 
 **Song song — seq8 riêng:** hiện 18.7×; threads ít giúp (GEMM quá nhỏ, overhead interpreter chiếm chủ yếu) → cần specialise batch nhỏ: unroll, fuse loop, giảm vật liệu hoá trung gian. Theo dõi KPI seq8 riêng, không hòa lẫn seq1024.
@@ -374,6 +375,18 @@ Probe AQ chạy lại **2026-10-22** (sau GĐ8/GĐ10, `out/audit_aq.log`) + ADAM
 - **Hiện trạng:** vòng serial trong `gpt2_backward` simd==1 (`gg = t_zeros([n,V])` rồi `for i in range(n)`: max + exp + chuẩn hoá + onehot): probe AV **1.33 s** @seq1024 (51.5M ptu; code không đổi từ P5.7) + zero-fill `gg` 206 MB ≈ 60 ms. Softmax-grad ≈ 18% `LHEAD_BWD` hiện tại.
 - **Thiết kế:** row-parallel 12 worker theo **mẫu `_ls_one` GĐ4 — đã thắng 5.10× cho CÙNG math ở forward**: worker nhận (logits, gg, ids, n, rlo, rhi), tự tính rows `[rlo,rhi)` **ghi thẳng vào `gg.data` phân đoạn (row-disjoint → không merge → bit-exact từng bit)**; guard `n*V ≥ 4M` (seq8 = 402K → serial nguyên vẹn). Tuỳ đo: worker tự zero seg, bỏ t_zeros serial.
 - **Wire:** 5 mirror `gpt2_ref` (bench: `gpt2_ref124`).
+- **KẾT QUẢ ĐO — ĐO BÁC BỎ, KHÔNG WIRE (2026-10-22):** wire thử 12 worker
+  row-parallel ghi thẳng `gg.data` (bit-exact 0.0 — chk AQ giữ nguyên
+  `0.000105296414`) → AQ LHEAD_BWD **7407 → 10719 ms (+3.3 s)**, bench seq1024
+  38391 ms (drift) — ngược chiều kỳ vọng. Probe `simd_probe_ce.tkv` (2 lần
+  chạy, @51.5M ptu, maxdiff 0.0): serial 1110-1140 · SHARED ghi+exp 3110-4453
+  (**0.25-0.36×**) · CP copy shared **không** exp 484-547 (**2.0-2.3×**) · OW
+  own-seg worker 484 (**2.36×**) + merge 1172 + alloc 359-375 = **2031
+  (0.56×)**. Kết luận: (1) shared-write thuần không bệnh (CP 2.0-2.3×) — bệnh
+  xuất hiện khi có **phep toan per-ptu + ghi** (CÙNG pattern AdamW BL
+  0.36×/0.29×); (2) own-seg + merge (mẫu GĐ4) cũng chết ở đây vì **merge
+  đơn luồng 51.5M ≈ 1172 ms ≈ toàn bộ serial** — ceiling kể cả merge miễn phí
+  ≈ −0.28 s < bar −0.9 s. → ĐÓNG GĐ11; `gpt2_backward` giữ vòng serial.
 - **Thắng nếu:** `LHEAD_BWD` trong AQ giảm ≥0.9 s + net win 3 seq + gate xanh.
 - **Rủi ro:** thấp (mẫu đã thắng); đề phòng bài học GĐ4: main quá lớn → BadImageFormat → tách hàm; nested `list[f32]` append → ArrayTypeMismatch → ghi index.
 
@@ -425,18 +438,20 @@ Probe AQ chạy lại **2026-10-22** (sau GĐ8/GĐ10, `out/audit_aq.log`) + ADAM
 
 | Item | Tiết kiệm | Loại | Độ tin cậy |
 |---|---|---|---|
-| GĐ11 softmax-grad PAR12 | −0.95..1.05 s | `.tkv` | **cao** (mẫu GĐ4 thắng 5.10× cùng math) |
+| ~~GĐ11 softmax-grad PAR12~~ **ĐÃ ĐO BÁC BỎ 2026-10-22** (probe CE: SHARED 0.25-0.36×, OWN+MERGE 0.56× — xem §12 dòng GĐ11) | 0 | — | đã đóng |
 | GĐ12 LN saves mu/rstd | −0.23..0.31 s | `.tkv` | **cao** (chắc chắn về số học) |
 | GĐ13 AdamW parallel | −2.4..2.7 s (hoặc 0) | `.tkv` | **thấp** — 2 lần bust, cần probe chẩn đoán |
 | **Tổng — GĐ13 thắng** | −3.6..4.0 s → **~32.7-33.1 s = 9.3×** | | |
-| **Tổng — GĐ13 bust** | −1.2..1.4 s → **~35.3-35.5 s = 10.0×** | | |
+| **Tổng — GĐ13 bust** | −0.23..0.31 s (GĐ12) → **~36.4-36.5 s = 10.1×** | | |
 | P7b | 0 (probe) | điều hướng parity | — |
 
 **Kết luận trung thực:** trần của mọi việc làm được bằng `.tkv` sau GĐ10 ≈ **9-10×**; còn ~9× nằm ở 3 bucket GEMM 24.1 s (+ sàn băng thông các vòng elementwise) → **parity 1.0× bắt buộc đi qua native/C hoặc compiler** (f32 locals, fused kernel) — P7b điều hướng.
 
 ### 13.5 Trình tự thực hiện + gates
 
-1. **GĐ11** (probe qua gate) → bench A/B 3 seq → ghi §12 + HANDOFF §0.31… → commit.
+1. **GĐ11** ✅ **ĐÃ ĐO — BÁC BỎ, KHÔNG WIRE** (2026-10-22): wire thử → AQ
+   LHEAD +3.3 s → probe `simd_probe_ce` tách nguyên nhân → revert 5 mirror +
+   AQ, ghi §12 + HANDOFF §0.32. Tiến tiếp GĐ12.
 2. **GĐ12** → tương tự.
 3. **GĐ13 probe `simd_probe_cc`** → ra quyết định (wire `trainer` ×4 **hoặc** đóng + ghi dòng bác bỏ §12) → gates/docs/commit.
 4. **P7b probe `simd_probe_cd`** → báo cáo số + đề xuất (quyết định cần chủ khoa/compiler team).
@@ -457,3 +472,4 @@ Mỗi bước giữ nguyên toàn bộ gate hiện có; **không GĐ nào đư�
 | UNFLATTEN parallel/fused | memory-bound + AH/BL bust |
 | Lưu softmax (exp) từ forward làm saves | hơn GĐ11 ~0.2 s nhưng +206 MB + sửa forward → không đáng |
 | transpose ggT / blocked / `simd_add` tích lũy | P5.7 / AW / P5.8b đã đo bust |
+| Song song softmax-grad lm-head (GĐ11) | CE: SHARED ghi+exp 0.25-0.36× (cùng bệnh AdamW BL), OWN+MERGE 0.56× (merge 1172 ms ≈ serial) |
