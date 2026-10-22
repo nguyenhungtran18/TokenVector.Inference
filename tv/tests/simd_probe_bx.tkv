@@ -1,0 +1,212 @@
+# PROBE BX — P7 "MIXED PRECISION": phan dinh THUC TE tren may nay
+# (2026-10-22)
+#
+# BOI CANH:
+#   - CPU: Intel Xeon E5-2695 v3 (Haswell-EP): AVX2+FMA3. KHONG co AVX512 /
+#     BF16 / AMX / VNNI.
+#   - Native SIMD lib (tkv_simd_native) CHI co kernel F32/F64 — khong co
+#     kernel f16/bf16 GEMM.
+#   - Compiler .tkv: chi co kieu i32/bool/i64/f64/f32 — khong co kieu f16.
+#   => Muon dung f16/bf16 trong train, ton tai: (a) bo qua f16, hoac
+#      (b) lam tron f16 bang PHAAN MEM (software, scalar) tren CPU nay.
+#      (b) la thu cach duy nhat co the — va day la cai probe nay do.
+#
+# DO 4 PHEP DO:
+#   [0] REPRO compiler bug: truyen `Tensor.data` (List<float>) vao param kieu
+#       list[f64] -> GIA TRI SAI (im lang); cung data do qua param list[f32]
+#       -> dung. Repro 4 phan tu + 786432 phan tu.
+#   [1] SOI SANH GIA: f16-round voi f32 tren GEMM 256x768x768.
+#       maxdiff (tinh INLINE — tranh bug [0]) + max|C| + relerr.
+#   [2] CHI PHI LAM TRON f16 (software, scalar): ns/element tren list
+#       786432 phan tu — so voi chi phi doc + cong (baseline).
+#   [3] GHEP: voi 3 shape that (768^3, 1024x768x768, lm-head 1024x768x50257)
+#       -> thoi gian GEMM f32, chi phi f16-round duoc chieu, va
+#          "AMP best case" = gemm / (gemm + round(A) + round(B)).
+#
+# Chay (tu goc repo):
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_bx.tkv out/bx.exe main
+#   ./out/bx.exe
+#
+# LUU Y KIEN THUC: moi vong lap so sanh deu INLINE trong main (khong dua
+# list qua ham) — vi bug [0] lam sai gia tri khi list di qua bien tham.
+
+import tv.training.gpt2_ref124
+import tv.training.simd_matmul
+import tv.quantization.types
+
+
+def _bx0_show64(d: "list[f64]") -> 'i64':
+    print("BX[0] list[f64] -> " + str(d[0]) + " " + str(d[1]) + " " + str(d[2]))
+    return 0
+
+
+def _bx0_show32(d: "list[f32]") -> 'i64':
+    print("BX[0] list[f32] -> " + str(d[0]) + " " + str(d[1]) + " " + str(d[2]))
+    return 0
+
+
+def _bx0_big64(d: "list[f64]") -> 'i64':
+    print("BX[0] lon list[f64] -> [0]=" + str(d[0]) + " [1]=" + str(d[1]) + " [1000]=" + str(d[1000]) + " [786431]=" + str(d[786431]))
+    return 0
+
+
+def _bx0_big32(d: "list[f32]") -> 'i64':
+    print("BX[0] lon list[f32] -> [0]=" + str(d[0]) + " [1]=" + str(d[1]) + " [1000]=" + str(d[1000]) + " [786431]=" + str(d[786431]))
+    return 0
+
+
+def main() -> 'i32':
+    # ================= BX[0] repro bug compiler =================
+    T0 = t_zeros([4])
+    t0 = T0.data
+    i = 0
+    while i < 4:
+        t0[i] = float(i) + 0.5
+        i = i + 1
+    print("BX[0] goc (inline) -> " + str(t0[0]) + " " + str(t0[1]) + " " + str(t0[2]))
+    _bx0_show64(T0.data)
+    _bx0_show32(T0.data)
+    # repro LON (786432 ptu) — cung loai loi, dung Tensor.data (List<float>)
+    TL = t_zeros([786432])
+    tl = TL.data
+    i = 0
+    while i < 786432:
+        tl[i] = float(i)
+        i = i + 1
+    print("BX[0] goc lon (inline) -> [0]=" + str(tl[0]) + " [1]=" + str(tl[1]) + " [1000]=" + str(tl[1000]) + " [786431]=" + str(tl[786431]))
+    _bx0_big64(TL.data)
+    _bx0_big32(TL.data)
+
+    # ================= BX[1] numerics: f16-round vs f32 =================
+    m = 256
+    k = 768
+    n = 768
+    A32 = t_zeros([m, k])
+    B32 = t_zeros([k, n])
+    A16 = t_zeros([m, k])
+    B16 = t_zeros([k, n])
+    a32 = A32.data
+    b32 = B32.data
+    a16 = A16.data
+    b16 = B16.data
+    i = 0
+    while i < m * k:
+        v = float(((i * 131) % 97) - 48) * 0.031
+        a32[i] = v
+        a16[i] = native_f16_decode(native_f16_encode(v))
+        i = i + 1
+    i = 0
+    while i < k * n:
+        v = float(((i * 173) % 97) - 48) * 0.031
+        b32[i] = v
+        b16[i] = native_f16_decode(native_f16_encode(v))
+        i = i + 1
+    C32 = smm_fwd(A32, B32, m, n, k)
+    C16 = smm_fwd(A16, B16, m, n, k)
+    c32 = C32.data
+    c16 = C16.data
+    maxd = 0.0
+    maxc = 0.0
+    maxc16 = 0.0
+    i = 0
+    while i < m * n:
+        d = c32[i] - c16[i]
+        if d < 0.0:
+            d = 0.0 - d
+        if d > maxd:
+            maxd = d
+        a = c32[i]
+        if a < 0.0:
+            a = 0.0 - a
+        if a > maxc:
+            maxc = a
+        b = c16[i]
+        if b < 0.0:
+            b = 0.0 - b
+        if b > maxc16:
+            maxc16 = b
+        i = i + 1
+    # kiem tra chéo: C[0][0] tinh tay (scalar) vs GEMM — chung kich thuoc,
+    # B luu [k hang][n cot] => B[p][0] = b32[p*nd]
+    ref = 0.0
+    p = 0
+    while p < k:
+        ref = ref + a32[p] * b32[p * n]
+        p = p + 1
+    print("BX[1] numerics " + str(m) + "x" + str(k) + "x" + str(n) + ": maxdiff=" + str(maxd) + "  max|C32|=" + str(maxc) + "  max|C16|=" + str(maxc16) + "  relerr=" + str(maxd / (maxc + 1e-30)))
+    print("BX[1] check scalar C[0][0]=" + str(ref) + "  GEMM C[0][0]=" + str(c32[0]) + "  (|sai|=" + str((c32[0] - ref) / (ref + 1e-30)) + ")")
+
+    # ================= BX[2] chi phi lam tron f16 (ns/phan tu) =================
+    ne = 786432
+    src = []
+    i = 0
+    while i < ne:
+        src.append(float(((i * 131) % 97) - 48) * 0.031)
+        i = i + 1
+    best_rnd = 1e12
+    best_base = 1e12
+    r = 0
+    while r < 3:
+        t0 = now_ms()
+        acc = 0.0
+        j = 0
+        while j < ne:
+            acc = acc + native_f16_decode(native_f16_encode(src[j]))
+            j = j + 1
+        t1 = now_ms()
+        d = t1 - t0
+        if d < best_rnd:
+            best_rnd = d
+        t0 = now_ms()
+        acc = 0.0
+        j = 0
+        while j < ne:
+            acc = acc + src[j]
+            j = j + 1
+        t1 = now_ms()
+        d = t1 - t0
+        if d < best_base:
+            best_base = d
+        r = r + 1
+    ns_rnd = (best_rnd - best_base) * 1000000.0 / float(ne)
+    print("BX[2] f16 round: " + str(best_rnd) + " ms vs baseline " + str(best_base) + " ms tren " + str(ne) + " ptu -> chi phi LAM TRON = " + str(ns_rnd) + " ns/ptu")
+
+    # ================= BX[3] ghep voi shape that =================
+    # shape: [m, k, nd]  (3) 768x768x768 (4) 1024x768x768 (5) lm-head 1024x768x50257
+    shapes = [768, 1024, 1024]
+    nds = [768, 768, 50257]
+    si = 0
+    while si < 3:
+        mm = shapes[si]
+        kk = 768
+        nn = nds[si]
+        AA = t_zeros([mm, kk])
+        BB = t_zeros([kk, nn])
+        aa = AA.data
+        bb = BB.data
+        i = 0
+        while i < mm * kk:
+            aa[i] = float(((i * 131) % 97) - 48) * 0.031
+            i = i + 1
+        i = 0
+        while i < kk * nn:
+            bb[i] = float(((i * 173) % 97) - 48) * 0.031
+            i = i + 1
+        bestg = 1e12
+        r = 0
+        while r < 2:
+            t0 = now_ms()
+            CC = smm_fwd(AA, BB, mm, nn, kk)
+            t1 = now_ms()
+            d = t1 - t0
+            if d < bestg:
+                bestg = d
+            r = r + 1
+        # chi phi f16-round duoc chieu (A + B)
+        rnd_ms = ns_rnd * float(mm * kk + kk * nn) / 1000000.0
+        amp = bestg / (bestg + rnd_ms)
+        print("BX[3] shape " + str(mm) + "x" + str(kk) + "x" + str(nn) + ": GEMM f32 = " + str(bestg) + " ms | f16-round(A+B) duoc chieu = " + str(rnd_ms) + " ms | AMP best-case = " + str(amp) + "x")
+        si = si + 1
+
+    print("DONE")
+    return 0

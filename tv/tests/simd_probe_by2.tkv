@@ -1,0 +1,512 @@
+# PROBE BY2 — P6 GĐ8 (2026-10-22): giam overhead interpreter trong _smm_core
+#
+# VI SAO PROBE NAY: probe BY (cung ngay) DO HONG — dong ho `now_us()` = TickCount*1000
+# (luong tu 15.6 ms) nen 2/4 phep ra "0.0 ms"; va bien the "toi uu" (ban P) BI BOXING
+# bien dem -> CHAM HON 2×. Probe nay sua ca hai.
+#
+# PHAT HIEN MOI (tu IL, probe `simd_probe_narrow.tkv`): bien cuc bo chi duoc khai
+# NATIVE int64 (narrow) khi:
+#   (a) moi phep gan cua no CHUNG MINH duoc int64 (so nguyen nho, +/- cua bien
+#       narrow, len/int64/ord) — `*` trong phep GAN lam bien do mat narrow; va
+#   (b) bien DUOC KHAI BAO o TOP-LEVEL cua ham. Bien khai trong than `if` ->
+#       KHONG narrow (bi boxing thanh TkvInt 16 byte) -> moi phep `i+1` ton
+#       ~50 lenh IL. => MOI bien dem phai khai o top-level, KHONG trong `if`.
+#
+# DO 4 PHEP (dong ho time_perf() = Stopwatch, do phan giay):
+#   [0] A-tile build: ban W (ep kieu `(-0.0)/1.0` + 2 nhanh) vs ban F
+#       (index chay, khong ep kieu, bien dem top-level)
+#   [1] B-tile build trans_b=1 (doc STRIDED): W vs F
+#   [2] accumulate: W (`cd = cd + Ct`) vs F (index chay) vs C (p-tile dau: copy)
+#   [3] GEMM full hinh Smat (1024x1024x64, T=64): smm_dot hien tai vs core moi
+#       -> thoi gian + MAXDIFF phai = 0.0
+#
+# Chay (tu goc repo):
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_by2.tkv out/by2.exe main
+#   ./out/by2.exe
+#
+# LUU Y: moi phep so sanh deu INLINE trong main (khong dua list qua bien
+# tham) — bug compiler da bi phat hien: truyen list qua bien tham co the lam
+# SAI GIA TRI (im lang).
+
+import tv.training.tensor
+import tv.training.simd_matmul
+
+
+# ---- helpers ------------------------------------------------------------
+def _b2_imin(a: 'i64', b: 'i64') -> 'i64':
+    if a < b:
+        return a
+    return b
+
+
+def _b2_roundup64(x: 'i64') -> 'i64':
+    r = 64
+    while r < x:
+        r = r + 64
+    return r
+
+
+def _b2_tilek(k: 'i64') -> 'i64':
+    r = _b2_roundup64(k)
+    if r > 1024:
+        r = 1024
+    return r
+
+
+def _b2_ceil(x: 'i64', T: 'i64') -> 'i64':
+    q = 0
+    r = 0
+    while r < x:
+        r = r + T
+        q = q + 1
+    return q
+
+
+def _b2_zeros(n: 'i64') -> 'list[f32]':
+    out = []
+    i = 0
+    while i < n:
+        out.append((float(0) - 0.0) / 1.0)
+        i = i + 1
+    return out
+
+
+# ---- [0] A-tile build: W (hien tai) vs F (index chay) --------------------
+def _b2_ta_w(out: "list[f32]", d: "list[f32]", kdim: 'i64', i0: 'i64',
+             ib: 'i64', p0: 'i64', pw: 'i64', T: 'i64') -> 'i64':
+    z = (float(0) - 0.0) / 1.0
+    i = 0
+    while i < T:
+        j = 0
+        while j < T:
+            if i < ib:
+                if j < pw:
+                    out[i * T + j] = (d[(i0 + i) * kdim + (p0 + j)] - 0.0) / 1.0
+                else:
+                    out[i * T + j] = z
+            else:
+                out[i * T + j] = z
+            j = j + 1
+        i = i + 1
+    return 0
+
+
+def _b2_ta_f(out: "list[f32]", d: "list[f32]", kdim: 'i64', i0: 'i64',
+             ib: 'i64', p0: 'i64', pw: 'i64', T: 'i64') -> 'i64':
+    # F: index chay (dst tang dan) + doc truc tiep (khong ep kieu) +
+    # bien dem khai o TOP-LEVEL (narrow int64).
+    z = 0.0
+    i = 0
+    dst = 0
+    j = 0
+    src = i0 * kdim + p0
+    while i < ib:
+        j = 0
+        while j < pw:
+            out[dst] = d[src + j]
+            dst = dst + 1
+            j = j + 1
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        src = src + kdim
+        i = i + 1
+    while i < T:
+        j = 0
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        i = i + 1
+    return 0
+
+
+# ---- [1] B-tile build: W vs F -------------------------------------------
+def _b2_tb_w(out: "list[f32]", d: "list[f32]", ndim: 'i64', p0: 'i64',
+             pw: 'i64', r0: 'i64', br: 'i64', T: 'i64', trans_b: 'i32') -> 'i64':
+    z = (float(0) - 0.0) / 1.0
+    i = 0
+    while i < T:
+        j = 0
+        while j < T:
+            if i < pw:
+                if j < br:
+                    if trans_b == 1:
+                        out[i * T + j] = (d[(r0 + j) * ndim + (p0 + i)] - 0.0) / 1.0
+                    else:
+                        out[i * T + j] = (d[(p0 + i) * ndim + (r0 + j)] - 0.0) / 1.0
+                else:
+                    out[i * T + j] = z
+            else:
+                out[i * T + j] = z
+            j = j + 1
+        i = i + 1
+    return 0
+
+
+def _b2_tb_f(out: "list[f32]", d: "list[f32]", ndim: 'i64', p0: 'i64',
+             pw: 'i64', r0: 'i64', br: 'i64', T: 'i64', trans_b: 'i32') -> 'i64':
+    z = 0.0
+    i = 0
+    dst = 0
+    j = 0
+    row = p0 * ndim + r0
+    idx = r0 * ndim + p0
+    while i < pw:
+        if trans_b == 1:
+            idx = r0 * ndim + p0 + i
+            j = 0
+            while j < br:
+                out[dst] = d[idx]
+                dst = dst + 1
+                idx = idx + ndim
+                j = j + 1
+        else:
+            row = (p0 + i) * ndim + r0
+            j = 0
+            while j < br:
+                out[dst] = d[row + j]
+                dst = dst + 1
+                j = j + 1
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        i = i + 1
+    while i < T:
+        j = 0
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        i = i + 1
+    return 0
+
+
+# ---- [2] accumulate: W vs F vs C ----------------------------------------
+def _b2_acc_w(cd: "list[f32]", Ct: "list[f32]", n: 'i64', i0: 'i64',
+              ib: 'i64', j0: 'i64', jb: 'i64', T: 'i64') -> 'i64':
+    r = 0
+    while r < ib:
+        bc = (i0 + r) * n + j0
+        bt = r * T
+        c = 0
+        while c < jb:
+            cd[bc + c] = cd[bc + c] + Ct[bt + c]
+            c = c + 1
+        r = r + 1
+    return 0
+
+
+def _b2_acc_f(cd: "list[f32]", Ct: "list[f32]", n: 'i64', i0: 'i64',
+              ib: 'i64', j0: 'i64', jb: 'i64', T: 'i64', first: 'i32') -> 'i64':
+    # F: index chay (bc/bt tang dan) + p-tile dau COPY (khong cong don).
+    r = 0
+    bc = i0 * n + j0
+    bt = T * 0
+    c = 0
+    while r < ib:
+        bc = i0 * n + j0 + r * n
+        bt = r * T
+        c = 0
+        if first == 1:
+            while c < jb:
+                cd[bc] = Ct[bt]
+                bc = bc + 1
+                bt = bt + 1
+                c = c + 1
+        else:
+            while c < jb:
+                cd[bc] = cd[bc] + Ct[bt]
+                bc = bc + 1
+                bt = bt + 1
+                c = c + 1
+        r = r + 1
+    return 0
+
+
+# ---- [3] core moi: fast tile + fast acc + chon thu tu vong --------------
+def _b2_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64',
+             ndim: 'i64', trans_b: 'i32') -> "Tensor":
+    T = _b2_imin(_b2_tilek(k), _b2_roundup64(_b2_imin(m, n)))
+    C = t_zeros([m, n])
+    cd = C.data
+    Ct = _b2_zeros(T * T)
+    AtB = _b2_zeros(T * T)
+    BtB = _b2_zeros(T * T)
+    n_i = _b2_ceil(m, T)
+    n_j = _b2_ceil(n, T)
+    if n_j < n_i:
+        # thu tu p0 -> j0 -> i0: B tile build 1 lan cho moi (p0,j0)
+        p0 = 0
+        while p0 < k:
+            pw = _b2_imin(T, k - p0)
+            j0 = 0
+            while j0 < n:
+                jb = _b2_imin(T, n - j0)
+                rv = _b2_tb_f(BtB, b.data, ndim, p0, pw, j0, jb, T, trans_b)
+                i0 = 0
+                while i0 < m:
+                    ib = _b2_imin(T, m - i0)
+                    rv2 = _b2_ta_f(AtB, a.data, k, i0, ib, p0, pw, T)
+                    simd_gemm(AtB, BtB, Ct, T)
+                    first = 0
+                    if p0 == 0:
+                        first = 1
+                    rv3 = _b2_acc_f(cd, Ct, n, i0, ib, j0, jb, T, first)
+                    i0 = i0 + ib
+                j0 = j0 + jb
+            p0 = p0 + pw
+        return C
+    # thu tu i0 -> p0 -> j0: A tile build 1 lan cho moi (i0,p0)
+    i0 = 0
+    while i0 < m:
+        ib = _b2_imin(T, m - i0)
+        p0 = 0
+        while p0 < k:
+            pw = _b2_imin(T, k - p0)
+            rv = _b2_ta_f(AtB, a.data, k, i0, ib, p0, pw, T)
+            j0 = 0
+            while j0 < n:
+                jb = _b2_imin(T, n - j0)
+                rv2 = _b2_tb_f(BtB, b.data, ndim, p0, pw, j0, jb, T, trans_b)
+                simd_gemm(AtB, BtB, Ct, T)
+                first = 0
+                if p0 == 0:
+                    first = 1
+                rv3 = _b2_acc_f(cd, Ct, n, i0, ib, j0, jb, T, first)
+                j0 = j0 + jb
+            p0 = p0 + pw
+        i0 = i0 + ib
+    return C
+
+
+def _b2_dot(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
+    return _b2_core(a, b, m, n, k, k, 1)
+
+
+def _b2_fwd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
+    return _b2_core(a, b, m, n, k, n, 0)
+
+
+def main() -> 'i32':
+    # ================= data =================
+    T = 64
+    n = 1024
+    hd = 64
+    # A [n, hd] va B [n, hd] (dot) — gia tri khong dyadic de bat loi lam tron
+    A = t_zeros([n, hd])
+    ad = A.data
+    i = 0
+    while i < n:
+        j = 0
+        while j < hd:
+            x = (i * hd + j) * 2654435761
+            x = x % 1000003
+            ad[i * hd + j] = (float(x) - 500000.0) / 1000.0
+            j = j + 1
+        i = i + 1
+    B = t_zeros([n, hd])
+    bd = B.data
+    i = 0
+    while i < n:
+        j = 0
+        while j < hd:
+            x = (i * hd + j) * 40503
+            x = x % 1000033
+            bd[i * hd + j] = (float(x) - 500000.0) / 2000.0
+            j = j + 1
+        i = i + 1
+
+    # ================= [0] A-tile =================
+    buf = _b2_zeros(T * T)
+    R = 3000
+    t0 = time_perf()
+    r = 0
+    while r < R:
+        rv = _b2_ta_w(buf, ad, hd, 0, T, 0, T, T)
+        r = r + 1
+    t1 = time_perf()
+    tA = t1 - t0
+
+    buf2 = _b2_zeros(T * T)
+    t0 = time_perf()
+    r = 0
+    while r < R:
+        rv = _b2_ta_f(buf2, ad, hd, 0, T, 0, T, T)
+        r = r + 1
+    t1 = time_perf()
+    tB = t1 - t0
+
+    # bit-exact?
+    md = 0.0
+    i = 0
+    while i < T * T:
+        df = buf[i] - buf2[i]
+        if df < 0.0:
+            df = 0.0 - df
+        if df > md:
+            md = df
+        i = i + 1
+    npt = float(R * T * T)
+    print("BY2[0] A-tile  W=" + str(tA) + "s  F=" + str(tB) + "s  ns/ptu W="
+          + str(tA * 1000000000.0 / npt) + " F=" + str(tB * 1000000000.0 / npt)
+          + "  speedup=" + str(tA / tB) + "  maxdiff=" + str(md))
+
+    # ================= [1] B-tile (trans_b=1, doc strided) =================
+    # d lon: (r0+j)*ndim + (p0+i) -> can ndim*br phan tu
+    ndim = 1024
+    big = t_zeros([ndim, T])
+    bigd = big.data
+    i = 0
+    while i < ndim * T:
+        bigd[i] = (float(i % 7919) - 4000.0) / 1000.0
+        i = i + 1
+    b1 = _b2_zeros(T * T)
+    b2 = _b2_zeros(T * T)
+    t0 = time_perf()
+    r = 0
+    while r < R:
+        rv = _b2_tb_w(b1, bigd, ndim, 0, T, 0, T, T, 1)
+        r = r + 1
+    t1 = time_perf()
+    tC = t1 - t0
+    t0 = time_perf()
+    r = 0
+    while r < R:
+        rv = _b2_tb_f(b2, bigd, ndim, 0, T, 0, T, T, 1)
+        r = r + 1
+    t1 = time_perf()
+    tD = t1 - t0
+    md = 0.0
+    i = 0
+    while i < T * T:
+        df = b1[i] - b2[i]
+        if df < 0.0:
+            df = 0.0 - df
+        if df > md:
+            md = df
+        i = i + 1
+    print("BY2[1] B-tile  W=" + str(tC) + "s  F=" + str(tD) + "s  speedup="
+          + str(tC / tD) + "  maxdiff=" + str(md))
+
+    # ================= [2] accumulate =================
+    cdw = _b2_zeros(n * n)
+    cdf = _b2_zeros(n * n)
+    cdc = _b2_zeros(n * n)
+    Ct = _b2_zeros(T * T)
+    i = 0
+    while i < T * T:
+        Ct[i] = (float(i % 1013) - 500.0) / 100.0
+        i = i + 1
+    R2 = 2000
+    t0 = time_perf()
+    r = 0
+    while r < R2:
+        rv = _b2_acc_w(cdw, Ct, n, 0, T, 0, T, T)
+        r = r + 1
+    t1 = time_perf()
+    tE = t1 - t0
+    t0 = time_perf()
+    r = 0
+    while r < R2:
+        rv = _b2_acc_f(cdf, Ct, n, 0, T, 0, T, T, 0)
+        r = r + 1
+    t1 = time_perf()
+    tF = t1 - t0
+    t0 = time_perf()
+    r = 0
+    while r < R2:
+        rv = _b2_acc_f(cdc, Ct, n, 0, T, 0, T, T, 1)
+        r = r + 1
+    t1 = time_perf()
+    tG = t1 - t0
+    npt2 = float(R2 * T * T)
+    print("BY2[2] acc     W=" + str(tE) + "s F(copy)=" + str(tF) + "s F(add)="
+          + str(tG) + "s  ns/ptu W=" + str(tE * 1000000000.0 / npt2)
+          + " copy=" + str(tF * 1000000000.0 / npt2)
+          + " add=" + str(tG * 1000000000.0 / npt2))
+    md = 0.0
+    i = 0
+    while i < n * n:
+        df = cdw[i] - cdf[i]
+        if df < 0.0:
+            df = 0.0 - df
+        if df > md:
+            md = df
+        i = i + 1
+    print("BY2[2b] acc maxdiff W vs copy = " + str(md))
+
+    # ================= [3] GEMM full (Smat shape) =================
+    R3 = 3
+    t0 = time_perf()
+    r = 0
+    while r < R3:
+        C0 = smm_dot(A, B, n, n, hd)
+        r = r + 1
+    t1 = time_perf()
+    tH = t1 - t0
+    t0 = time_perf()
+    r = 0
+    while r < R3:
+        C1 = _b2_dot(A, B, n, n, hd)
+        r = r + 1
+    t1 = time_perf()
+    tI = t1 - t0
+    c0d = C0.data
+    c1d = C1.data
+    md = 0.0
+    i = 0
+    while i < n * n:
+        df = c0d[i] - c1d[i]
+        if df < 0.0:
+            df = 0.0 - df
+        if df > md:
+            md = df
+        i = i + 1
+    print("BY2[3] GEMM smm_dot=" + str(tH) + "s  core_moi=" + str(tI)
+          + "s  speedup=" + str(tH / tI) + "  maxdiff=" + str(md))
+    # ================= [4] GEMM shape gCtx (m=1024, n=64, k=1024) ======
+    A2 = t_zeros([n, n])
+    a2d = A2.data
+    i = 0
+    while i < n * n:
+        a2d[i] = (float(i % 7919) - 4000.0) / 1000.0
+        i = i + 1
+    B2 = t_zeros([n, hd])
+    b2d = B2.data
+    i = 0
+    while i < n * hd:
+        b2d[i] = (float(i % 6151) - 3000.0) / 900.0
+        i = i + 1
+    R4 = 3
+    t0 = time_perf()
+    r = 0
+    while r < R4:
+        C2 = smm_fwd(A2, B2, n, hd, n)
+        r = r + 1
+    t1 = time_perf()
+    tJ = t1 - t0
+    t0 = time_perf()
+    r = 0
+    while r < R4:
+        C3 = _b2_fwd(A2, B2, n, hd, n)
+        r = r + 1
+    t1 = time_perf()
+    tK = t1 - t0
+    c2d = C2.data
+    c3d = C3.data
+    md = 0.0
+    i = 0
+    while i < n * hd:
+        df = c2d[i] - c3d[i]
+        if df < 0.0:
+            df = 0.0 - df
+        if df > md:
+            md = df
+        i = i + 1
+    print("BY2[4] GEMM smm_fwd(gCtx shape)=" + str(tJ) + "s  core_moi=" + str(tK)
+          + "s  speedup=" + str(tJ / tK) + "  maxdiff=" + str(md))
+    print("BY2 done")
+    return 0

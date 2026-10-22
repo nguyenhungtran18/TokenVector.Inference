@@ -1,0 +1,55 @@
+# PROBE NARROW2 — cac khai bao bien dem/chi so de GIU native int64
+#   t8:  src = i0 * kdim + p0  (kieu int64, gan DONG DAU o top-level)
+#   t9:  src = 0 (top-level) roi gan lai trong vong
+#   t10: bt  = T * 0 (kieu int64, value 0)
+#   t11: bt  = 0 roi gan lai trong vong
+#   t12: src = i0*kdim+p0 top-level + src = src + kdim trong vong
+#   t13: idx = r0 * ndim + p0 + i (top-level) + idx = idx + ndim trong vong
+#   t14: bc = i0 * n + j0 (top-level) + bc = bc + n trong vong
+def t8(kdim: 'i64', i0: 'i64', p0: 'i64') -> 'i64':
+    src = i0 * kdim + p0
+    return src
+
+def t9(kdim: 'i64', i0: 'i64', p0: 'i64') -> 'i64':
+    src = 0
+    src = i0 * kdim + p0
+    return src
+
+def t10(T: 'i64') -> 'i64':
+    bt = T * 0
+    return bt
+
+def t11(T: 'i64') -> 'i64':
+    bt = 0
+    bt = bt + T
+    return bt
+
+def t12(kdim: 'i64', i0: 'i64', p0: 'i64', n: 'i64') -> 'i64':
+    src = i0 * kdim + p0
+    i = 0
+    while i < n:
+        src = src + kdim
+        i = i + 1
+    return src
+
+def t13(ndim: 'i64', r0: 'i64', p0: 'i64', n: 'i64') -> 'i64':
+    idx = r0 * ndim + p0
+    i = 0
+    while i < n:
+        idx = idx + ndim
+        i = i + 1
+    return idx
+
+def t14(n: 'i64', i0: 'i64', j0: 'i64', m: 'i64') -> 'i64':
+    bc = i0 * n + j0
+    r = 0
+    while r < m:
+        bc = bc + n
+        r = r + 1
+    return bc
+
+def main() -> 'i32':
+    print("N2 " + str(t8(3, 4, 5)) + " " + str(t9(3, 4, 5)) + " " + str(t10(7))
+          + " " + str(t11(7)) + " " + str(t12(3, 4, 5, 2)) + " "
+          + str(t13(3, 4, 5, 2)) + " " + str(t14(9, 4, 5, 2)))
+    return 0

@@ -1395,6 +1395,136 @@ BF16/AMX).
 
 ---
 
+### 0.27 P7 — MIXED PRECISION: DO TRUOC, BAC BO (2026-10-22) — quyet dinh ⓑ = fp32-vs-fp32
+
+P6 xong (GĐ7) → bước kế theo trong plan §12 là **P7 mixed precision**
+(bf16/tf32 GEMM + tích luỹ fp32 + fp32 master), kèm câu hỏi quyết định ⓑ
+("parity so ở precision nào?"). Nguyên tắc của repo: **ĐO TRƯỚC, rồi mới
+code** → probe `tv/tests/simd_probe_bx.tkv` (mới) đo 4 phép.
+
+**1. RANG BUOC CUNG (do, khong suy doan):**
+
+| Hang muc | Ket qua |
+|---|---|
+| CPU | **Intel Xeon E5-2695 v3 @ 2.30GHz** (Family 6 Model 63 = Haswell-EP), 14 core / 28 thread → **AVX2 + FMA3**; **KHONG** AVX512 / VNNI / **BF16** / AMX |
+| Native SIMD lib `tkv_simd_native.c` | export `SgemmF32`/`SgemmF64` + `Add/Sub/Mul/Scale/Axpy/Dot/Sum/Max/Min` × **F32/F64**; grep `f16\|bf16\|half` = **0 hit** ⇒ **KHONG co kernel f16/bf16 GEMM** |
+| Compiler `.tkv` (`compiler_src`) | grep `f16\|bfloat\|float16` = **0 hit** ⇒ **KHONG co kieu/intrinsic f16/bf16** (chi `i32/bool/i64/f64/f32`) |
+| ⇒ duong duy nhất con lai cho f16 | **lam tron f16 bang PHAN MEM** (scalar): `tv/quantization/types.tkv` → `native_f16_encode` / `native_f16_decode` (da xac minh DUNG: 1.0→0x3C00, 65504→0x7BFF, 70000→inf, max relerr 4.3e-4) |
+
+**2. SO DO (probe BX, 3 lan chay — ket qua on dinh):**
+
+| Do | Ket qua | Y nghia |
+|---|---|---|
+| BX[0] bug compiler | truyen `Tensor.data` (List<float>) vao tham so `list[f64]` → **gia tri SAI** (0.125 / 128.0 / 0.0 thay vi 0.5/1.5/2.5); cung data do qua `list[f32]` → **DUNG** | bug compiler moi — xem muc 4 |
+| BX[1] so hoc: f16-round → GEMM 256×768×768 vs f32 | **maxdiff 0.0497**; max\|C32\|=46.206 vs max\|C16\|=46.202 (dong bo) → **relerr 1.08e-3**; check chéo scalar C[0][0] 9.56386814 vs GEMM 9.5638685 (**4.0e-8**) ⇒ duong GEMM dung | cua so parity forward logits = **2.4e-7** ⇒ **VUOT 2.1e5×** ⇒ KHONG giu duoc 135/135 gate fp32 |
+| BX[2] chi phi lam tron f16 (phan mem) | **378-458 ns/ptu** (3 lan chay: 378/397/458; 375 ms vs baseline 15 ms / 786.432 ptu; baseline doc list = 19-20 ns/ptu) | interpreter .tkv ~19 ns/phép ⇒ ban bit-trick toi uu cung ~200-460 ns/ptu — khong cua duoc |
+| BX[3] AMP best-case (gia su GEMM f16 **MIEN PHI**) | 768³: GEMM 31-32 ms vs round(A+B) 468-540 ms → **0.056-0.065×**; 1024×768×768: 31 ms vs 546-630 ms → **0.047-0.056×**; lm-head 1024×768×50257: 1860-1922 ms vs 15625-18028 ms → **0.096-0.108×** | **CHAM 9-21×** du da gia su toi uu nhat |
+
+**3. QUYET DINH ⓑ = fp32-vs-fp32 (GIU nguyen contract 2.4e-7). KHONG lam P7.**
+Ly do khong phai "ly thuyet" ma la so do: (i) may khong co phan cung f16/bf16
+⇒ f16 chi con duong lam tron bang phan mem; (ii) loi so hoc **1.08e-3**
+(vuot cua so parity 2.1e5×) ⇒ pha 135/135 gate; (iii) chi phi lam tron
+**~380-460 ns/ptu** ⇒ AMP best-case **0.047-0.108×**. **P7 chi song lai khi:** (a)
+co **kernel f16/bf16 NATIVE** (viet them C/Rust vao `tkv_simd_native.c`) **va**
+(b) CPU ho tro (AVX512-BF16 / AMX) hoac chuyen sang GPU — ca 2 deu ngoai tam
+`.tkv` hien tai.
+
+**4. BUG COMPILER MOI (BX[0]) — can bao compiler team:** phep **chuyen kieu
+TUNG PHAN TU** cua danh sach (List\<float\> → `list[f64]`) ma compiler sinh
+ra **gia tri sai, im lang khong loi**. Repro toi thieu (4 phan tu):
+`Tensor.data` (List<float>) truyen vao tham so khai bao `list[f64]` → doc ra
+0.125/128.0/0.0 thay vi 0.5/1.5/2.5; cung data do truyen vao tham so
+`list[f32]` → dung. Hop le voi 786.432 phan tu (BX[0] "lon" trong probe): `[0]/[1]/[1000]/[786431]`
+= 0.0078125/32.0/1.97e24/0.0 thay vi 0/1/1000/786431. ⇒ **QUY TAC: khong
+truyen list qua bien tham khi kieu phan tu la f64**; moi phep so sanh/doc
+list phai **INLINE trong main**. (Binh an: co ghi chu ve "compiler KHONG tu
+khoi tao bien global" trong `tv.runtime.f32_bits` — cung ho ban, kieu convert
+cai dat sai.) **Hau qua probe:** ban draft cua BX (so sanh 2 tensor qua
+ham `_bx_cmp`) cho `maxdiff=813056` — **SAI**, do loi nay, khong phai do GEMM;
+do lai inline ra **maxdiff=0.0497** (dung). Da loai ban draft.
+
+**5. FILE:** khong sua file nguon (P7 khong wire). Chi them probe
+`tv/tests/simd_probe_bx.tkv` (moi, untracked) + plan §12 + ROADMAP + HANDOFF
+(chuong nay).
+
+**Con lai (theo do @seq1024, full step 43.89 s = 12.4× torch):** ML/HEAD
+duong pd 9.6 s, ATTN_BWD 11.3 s (worker wall 516 ms/layer, chuoi serial
+GEMM near-peak AVX2), AdamW step 4.2 s + unflatten 0.7 s (da do: fused
+step+unflatten **BAC BO** — probe AH; chi con 2 huong: giu vong rieng nhung
+overlap step voi unflatten cua tham so cu — can chot thu tu). **P7 khong
+con dau o nen khong co "mixed precision" de dua tien do len** ⇒ cac buoc
+sau phai den tu **parallel/overlap + giam overhead interpreter** (giong P6),
+hoac tu **kernel native moi** (noi dung tai day).
+
+---
+
+### 0.28 P6 GĐ8 — GIẢM OVERHEAD INTERPRETER TRONG GEMM (2026-10-22) — 135/135, BIT-EXACT, seq1024 −15.1%
+
+Sau P7 bị bác bỏ (0.27) hướng còn lại đã nêu: **giam overhead interpreter**.
+Phần interpreter thuần trong đường GEMM = **tile-build + tích luỹ** (native
+`simd_gemm` chỉ chiếm một phần). Đó là mục tiêu GĐ8 này.
+
+**GỐC RỄ (đọc IL, không phải phỏng đoán):** biến cục bộ `.tkv` bị compiler
+**boxed thành `TkvInt`** (struct 16 byte) ⇒ mỗi phép cộng chỉ số là phép cộng
+trên struct thay vì `int64`. Quy tắc (đọc `.locals` trong `out/*.il`, probe
+`simd_probe_narrow2.tkv`): biến chỉ được khai **native `int64`** khi **phép gán
+đầu tiên** của nó nằm ở **top-level của hàm** và là biểu thức int64
+(`x = 0`, `src = i0 * kdim + p0`) **và** các phép gán sau đều "chứng minh được"
+(`x = x + 1`, `x = y`). Có một phép gán không chứng minh được ở top-level (ví dụ
+gán lại bằng biểu thức có `*`) ⇒ biến bị box lại thành `TkvInt`. (Phép gán
+*bên trong vòng lặp* vẫn OK nếu phép gán đầu tiên đã hợp lệ — probe t12/t13/t14.)
+
+**ĐO TRƯỚC (probe `tv/tests/simd_probe_by2.tkv`, đồng hồ `time_perf()` =
+`Stopwatch` — `now_ms()` có lượng tử 15.6 ms nên probe `by` v1 vô hiệu):**
+
+| Đo | W (đang dùng) | F (index chạy + native i64) | Tốc độ |
+|---|---|---|---|
+| BY2[0] A-tile build | 4.90 ns/ptu | 3.29 ns/ptu | **1.49×** |
+| BY2[1] B-tile build (trans_b=1) | — | — | **1.43×** |
+| BY2[2] tích luỹ Ct→C | 4.79 ns/ptu | 4.44 ns/ptu | **1.08×** |
+| BY2[3] core (shape Smat) | 0.1085 s | 0.0705 s | **1.54×** |
+| BY2[4] core (shape gCtx) | 0.0871 s | 0.0382 s | **2.28×** |
+
+Tất cả **maxdiff = 0.0**. Biến thể "copy p-tile đầu thay cho cộng đơn" **chậm
+hơn** (4.82 vs 4.44 ns/ptu) → **bỏ** (giữ nguyên phép cộng ⇒ không đổi dấu
+±0.0 ⇒ bit-exact tuyệt đối).
+
+**WIRE (`tv/training/simd_matmul.tkv`, đồng bộ 2 file mirror):**
+- `_tile_a_w` / `_tile_b_w` / `_tile_a_at_w`: đổi sang **index chạy** (`dst`/`src`
+  tăng 1 mỗi phần tử) + **đọc trực tiếp** `d[i]` (bỏ ép kiểu `(d[i]-0.0)/1.0` vốn
+  chỉ cần cho `append`) + biến đếm khai ở top-level.
+- Thêm helper `_acc_f(cd, Ct, n, i0, ib, j0, jb, T)`: tích luỹ với `bc`/`bt`
+  chạy (mỗi phần tử 2 phép cộng thay vì 4). Dùng chung cho `_smm_core`,
+  `_p58_core_simple` **và `_pd_do`** (đường wave 12 worker của lm-head).
+- Thứ tự tích luỹ p-tile **KHÔNG đổi** ⇒ bit-exact. IL xác nhận cả 4 hàm đều
+  khai `int64` (`i/dst/j/src`, `i/dst/j/row/idx`, `r/t/dst/src`, `r/bc/bt/c`).
+
+**KHÔNG đổi thứ tự vòng.** Bản "p0→j0→i0 (ít build tile hơn)" **đã thử trước và
+đo là REGRESSION** (plan §10: FWD_BODY +101%) ⇒ giữ nguyên `i0→p0→j0`.
+
+**KẾT QUẢ:**
+- Gate **135/135** (9 suite nhỏ 102 + `gpt2_full` 33, fails=0).
+- Loss **khớp EXACT từng chữ số** cả 3 seq: seq8 `10.572291 → 7.0119243`,
+  seq256 `10.756927 → 11.807251`, seq1024 `10.760399 → 13.442912`.
+- Bench A/B (best-of-3, xen kẽ base/new để giảm drift nhiệt):
+
+| seq | GĐ7 (base) | GĐ8 (mới) | Δ |
+|---|---|---|---|
+| 8 | 15.250 s | **12.969 s** | **−15.0%** |
+| 256 | 22.969 s | **18.125 s** | **−21.1%** |
+| 1024 | 44.547 s | **37.828 s** | **−15.1%** |
+
+- Tỉ lệ vs torch: 16.2/16.3/12.4× → **13.9× / 12.9× / 10.7×** (vẫn chậm hơn
+  torch, nhưng khoảng cách hẹp lại rõ rệt).
+
+**"Còn lại" sau GĐ8:** GEMM ở đường `smm_*` giờ gần peak AVX2; phần interpreter
+còn lại nằm ở (1) các vòng copy/elementwise ngoài GEMM (AdamW/unflatten —
+đã đo và bác bỏ hướng song song hoá), (2) `simd_gemm` native chỉ có kernel
+F32 — mở rộng sang F64/đa luồng phải sửa **C** (`tkv_simd_native.c`), ngoài
+tầm `.tkv`.
+
+---
+
 ---
 
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
