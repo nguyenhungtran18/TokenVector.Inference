@@ -551,7 +551,8 @@ def gpt2_forward(ids: 'list[i64]', pos: 'list[i64]',
                  ln2_g: 'list[Tensor]', ln2_b: 'list[Tensor]',
                  w1: 'list[Tensor]', b1: 'list[Tensor]',
                  w2: 'list[Tensor]', b2: 'list[Tensor]',
-                 lnf_g: "Tensor", lnf_b: "Tensor", simd: 'i32' = 0) -> "Tensor":
+                 lnf_g: "Tensor", lnf_b: "Tensor", simd: 'i32' = 0,
+                 sc5: "list[f32]" = None) -> "Tensor":
     n = len(ids)
     h = HiddenSize
     x = gpt2_embed(ids, pos, wte, wpe)
@@ -561,7 +562,7 @@ def gpt2_forward(ids: 'list[i64]', pos: 'list[i64]',
     x = gpt2_layernorm(x, lnf_g, lnf_b)
     # LM head: tie weight voi wte -> logits = x @ wte^T  (wte [vocab, h])
     if simd == 1:
-        return smm_dot(x, wte, n, VocabSize, h)
+        return smm_dot(x, wte, n, VocabSize, h, sc5)
     logits = t_zeros([n, VocabSize])
     for i in range(n):
         for o in range(VocabSize):
@@ -587,7 +588,8 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
                        ln2_g: 'list[Tensor]', ln2_b: 'list[Tensor]',
                        w1: 'list[Tensor]', b1: 'list[Tensor]',
                        w2: 'list[Tensor]', b2: 'list[Tensor]',
-                       lnf_g: "Tensor", lnf_b: "Tensor", simd: 'i32' = 0) -> 'list[Tensor]':
+                       lnf_g: "Tensor", lnf_b: "Tensor", simd: 'i32' = 0,
+                       sc5: "list[f32]" = None) -> 'list[Tensor]':
     n = len(ids)
     h = HiddenSize
     x = gpt2_embed(ids, pos, wte, wpe)
@@ -606,7 +608,7 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
     xf_in = x
     xf = gpt2_layernorm(x, lnf_g, lnf_b)
     if simd == 1:
-        logits = smm_dot_pd(xf, wte, n, VocabSize, h)
+        logits = smm_dot_pd(xf, wte, n, VocabSize, h, sc5)
     else:
         logits = t_zeros([n, VocabSize])
         for i in range(n):
@@ -1526,7 +1528,8 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
                   w2: 'list[Tensor]', b2: 'list[Tensor]',
                   lnf_g: "Tensor", lnf_b: "Tensor", simd: 'i32' = 0,
                   gflat: 'list[f32]' = None,
-                  saves: 'list[Tensor]' = None) -> 'list[Tensor]':
+                  saves: 'list[Tensor]' = None,
+                  sc4: "list[f32]" = None) -> 'list[Tensor]':
     n = len(ids)
     h = HiddenSize
     # P1.1: gflat = flat grads phang cua AdamW (da zero) — neu KHONG rong thi
@@ -1653,7 +1656,7 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
         # @1024 so voi duong ggT + smm_fwd cu.
         # KHAC P5.7: dxf van giu smm_fwd nguyen (P5.7 bo qua dxf -> bug gradient,
         # hunk do da revert ve pre-6bf4a1c truoc khi wire).
-        dwte = smm_fwd_at_pd(gg, xf, VocabSize, h, n)
+        dwte = smm_fwd_at_pd(gg, xf, VocabSize, h, n, sc4)
     if simd == 0:
         for i in range(n):
             row = []

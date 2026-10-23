@@ -61,7 +61,8 @@ def _mk_pos(n: 'i64') -> 'list[i64]':
 # ---- forward + LUU activations (P5.5: ban sao gpt2_fwd_ps + forward_saved)
 # Tra ve saves = [logits, xf, xf_in, xins...] — loss tinh rieng bang
 # gpt2_loss(saves[0], ids) tai call site (cung ben trong vong do fwd).
-def _f124_fwd2(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32') -> 'list[Tensor]':
+def _f124_fwd2(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32',
+               sc5: "list[f32]" = None) -> 'list[Tensor]':
     ln1_g = []
     ln1_b = []
     wq = []
@@ -89,11 +90,12 @@ def _f124_fwd2(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i3
         w2.append(ps[base + 10])
         b2.append(ps[base + 11])
     return gpt2_forward_saved(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
-                              ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd)
+                              ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd, sc5)
 
 # ---- backward (ban sao gpt2_bwd_ps + saves P5.5) --------------------------
 def _f124_bwd(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32',
-              gflat: 'list[f32]' = None, saves: 'list[Tensor]' = None) -> 'list[Tensor]':
+              gflat: 'list[f32]' = None, saves: 'list[Tensor]' = None,
+              sc4: "list[f32]" = None) -> 'list[Tensor]':
     ln1_g = []
     ln1_b = []
     wq = []
@@ -121,7 +123,7 @@ def _f124_bwd(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32
         w2.append(ps[base + 10])
         b2.append(ps[base + 11])
     return gpt2_backward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
-                         ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd, gflat, saves)
+                         ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd, gflat, saves, sc4)
 
 # ---- 1 buoc train day du (ban sao gpt2_train_step) --------------------------
 # P6 GĐ7: zero_grad worker dong thoi forward (join truoc bwd) — giong
@@ -136,13 +138,17 @@ def _bq_zr_one(j: "_BqZrJob") -> 'i64':
         j.gl[i] = 0.0
     return 0
 
-def _step124(opt: "AdamW", ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32') -> 'f32':
+def _step124(opt: "AdamW", ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32',
+             sc5: "list[f32]" = None, sc4: "list[f32]" = None) -> 'f32':
     # P5.5: forward_saved -> bwd dung lai saves (khong forward recompute)
+    # M3c: sc5 = scratch [n*V] cho logits (fwd, luu trong saves[0] -> doc trong bwd
+    #      nhu logits_t, KHONG ghi lai); sc4 = scratch [V*h] cho dwte (bwd).
+    #      2 buffer RIENG (logits + dwte CUNG SONG trong bwd P5.5) — CU do 172ms/shape.
     zh = thread_spawn(_bq_zr_one, _BqZrJob(opt.g))
-    sv = _f124_fwd2(ps, ids, pos, simd)
+    sv = _f124_fwd2(ps, ids, pos, simd, sc5)
     loss = gpt2_loss(sv[0], ids)
     jz = thread_join(zh)
-    grads = _f124_bwd(ps, ids, pos, simd, opt.g, sv)
+    grads = _f124_bwd(ps, ids, pos, simd, opt.g, sv, sc4)
     opt.step()
     off = 0
     for i in range(len(ps)):
@@ -199,9 +205,13 @@ def main() -> 'i32':
         # loss bay len, nhung KHONG anh huong thoi gian do (cung so phep).
         opt = _mk_opt(n, groups, 1000)
         _prepare(opt, ps)
-        lw = _step124(opt, ps, ids, pos, 1)
+        # M3c: 2 buffer persistent cho lm-head C — sc5 [n*V] (logits fwd),
+        # sc4 [V*h] (dwte bwd). RIENG nhau (cung song trong bwd P5.5).
+        sc5 = t_zeros([seq * VocabSize])
+        sc4 = t_zeros([VocabSize * HiddenSize])
+        lw = _step124(opt, ps, ids, pos, 1, sc5.data, sc4.data)
         t0 = now_ms()
-        l1 = _step124(opt, ps, ids, pos, 1)
+        l1 = _step124(opt, ps, ids, pos, 1, sc5.data, sc4.data)
         dt = now_ms() - t0
         print("BSEQ full-step simd seq=" + str(seq) + " ms=" + str(dt)
               + " loss=" + str(lw) + " -> " + str(l1))

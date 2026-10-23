@@ -1,0 +1,120 @@
+# PROBE CT — M3c WIN THAT vs PRODUCTION PD WRAPPER + KIEM LIFETIME
+#
+# Boi canh: CQ (sau khi sua list[f32]) cho S5 WIN=125ms nhung do voi _cq_core
+#   DON LUONG (1313ms). Wrapper PRODUCTION la _smm_core_pd WAVE-PARALLEL (12
+#   worker build tile) -> build nhanh hon nhieu -> ti le ALLOC giam. Phai do
+#   WIN that truc tiep tren smm_dot_pd / smm_fwd_at_pd TRUOC khi wire.
+#
+# CT1 — WIN that (best-of-2, production wrapper):
+#   S5 logits [1024x50257x768]  smm_dot_pd    : prod (t_zeros) vs prod_pd_muon (scratch)
+#   S4 dwte   [50257x768x1024]  smm_fwd_at_pd : prod (t_zeros) vs prod_pd_muon (scratch)
+#   BIT moi ca: C_t_zeros vs C_muon -> maxdiff (phai 0.0).
+#
+# CT2 — LIFETIME: trong mot buoc train, logits (fwd, [n,V]) va dwte (bwd, [V,h])
+#   co CUNG kich thuoc element (n*V vs V*h = 1024*50257 vs 50257*768). NEU logits
+#   con song khi dwte tinh (saves[0]=logits doc trong CE-grad cua backward) ->
+#   khong the dung CHUNG 1 scratch -> can 2 buffer. Do: in so ptu 2 C de xac dinh
+#   co chia se duoc khong (day la suy luan tu code, KHONG do truc tiep lifetime).
+#
+# Chu y: muon-phai theo dung kieu — scratch = t_zeros.data = list[f32]
+#   (CR chot). Dat toan bo trong main (P7: khong ep list qua float()). now_ms() o main.
+#
+# Chay (tu goc repo):
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_ct.tkv out/ct.exe main
+#   out/ct.exe
+
+import tv.training.tensor
+import tv.training.simd_matmul
+
+def _ct_fill(d: "list[f32]", seed: 'i64') -> 'i64':
+    n = len(d)
+    i = 0
+    while i < n:
+        d[i] = (float(((i * 131 + seed) % 97) - 48) * 0.0021 - 0.0) / 1.0
+        i = i + 1
+    return n
+
+def _ct_zf(cd: "list[f32]", tot: 'i64') -> 'i64':
+    z = (float(0) - 0.0) / 1.0
+    i = 0
+    while i < tot:
+        cd[i] = z
+        i = i + 1
+    return tot
+
+def _ct_min2(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+def _ct_maxdiff(a: "list[f32]", b: "list[f32]", cnt: 'i64') -> 'f64':
+    dmax = 0.0
+    i = 0
+    while i < cnt:
+        e = a[i] - b[i]
+        if e < 0.0:
+            e = -e
+        if e > dmax:
+            dmax = e
+        i = i + 1
+    return dmax
+
+def main() -> 'i32':
+    nq = 1024
+    h = 768
+    V = 50257
+
+    # ---- CT1a: S5 logits [1024 x 50257 x 768] smm_dot_pd -----------------
+    A5 = t_zeros([nq, h])
+    B5 = t_zeros([V, h])
+    _ct_fill(A5.data, 3)
+    _ct_fill(B5.data, 4)
+    t0 = now_ms()
+    Cp5 = smm_dot_pd(A5, B5, nq, V, h)
+    t1 = now_ms()
+    va = t1 - t0
+    t0 = now_ms()
+    Cp5 = smm_dot_pd(A5, B5, nq, V, h)
+    t1 = now_ms()
+    v_prod5 = _ct_min2(va, t1 - t0)
+    sc5 = t_zeros([nq * V])
+    t0 = now_ms()
+    rz5 = _ct_zf(sc5.data, nq * V)
+    Cm5 = smm_dot_pd(A5, B5, nq, V, h, sc5.data)
+    t1 = now_ms()
+    v_muon5 = t1 - t0
+    d5 = _ct_maxdiff(Cp5.data, Cm5.data, nq * V)
+    print("CT1a S5 dot_pd [1024x50257x768] prod=" + str(v_prod5)
+          + " ms muon(zf " + str(rz5) + "+" + str(v_muon5) + ")=" + str(v_muon5)
+          + " ms WIN~" + str(v_prod5 - v_muon5) + " ms MAXDIFF=" + str(d5))
+
+    # ---- CT1b: S4 dwte [50257 x 768 x 1024] smm_fwd_at_pd ----------------
+    A4 = t_zeros([h, nq])
+    B4 = t_zeros([nq, h])
+    _ct_fill(A4.data, 5)
+    _ct_fill(B4.data, 6)
+    t0 = now_ms()
+    Cp4 = smm_fwd_at_pd(A4, B4, V, h, nq)
+    t1 = now_ms()
+    vb = t1 - t0
+    t0 = now_ms()
+    Cp4 = smm_fwd_at_pd(A4, B4, V, h, nq)
+    t1 = now_ms()
+    v_prod4 = _ct_min2(vb, t1 - t0)
+    sc4 = t_zeros([V * h])
+    t0 = now_ms()
+    rz4 = _ct_zf(sc4.data, V * h)
+    Cm4 = smm_fwd_at_pd(A4, B4, V, h, nq, sc4.data)
+    t1 = now_ms()
+    v_muon4 = t1 - t0
+    d4 = _ct_maxdiff(Cp4.data, Cm4.data, V * h)
+    print("CT1b S4 fwd_at_pd [50257x768x1024] prod=" + str(v_prod4)
+          + " ms muon(zf " + str(rz4) + "+" + str(v_muon4) + ")=" + str(v_muon4)
+          + " ms WIN~" + str(v_prod4 - v_muon4) + " ms MAXDIFF=" + str(d4))
+
+    # ---- CT2: lifetime/size — 2 C co dung chia scratch duoc khong --------
+    print("CT2 size: logits C ptu=" + str(nq * V) + "  dwte C ptu=" + str(V * h)
+          + "  -> " + str(V * h) + " (neu logits C con doc trong bwd -> can 2 buffer)")
+
+    print("CT done")
+    return 0

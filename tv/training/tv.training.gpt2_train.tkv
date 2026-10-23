@@ -63,7 +63,8 @@ def gpt2_copy_into(dst: 'list[f32]', src: 'list[f32]') -> 'i32':
 
 # ---- goi model voi ps (thay vi 20 tham so roi) -----------------------------
 
-def gpt2_fwd_ps(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32' = 0) -> "Tensor":
+def gpt2_fwd_ps(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32' = 0,
+                sc5: "list[f32]" = None) -> "Tensor":
     ln1_g = []
     ln1_b = []
     wq = []
@@ -95,10 +96,11 @@ def gpt2_fwd_ps(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i
     _g = ps[2]
     _b = ps[3]
     return gpt2_forward(ids, pos, _wte, _wpe, ln1_g, ln1_b, wq, bq, wp, bp,
-                        ln2_g, ln2_b, w1, b1, w2, b2, _g, _b, simd)
+                        ln2_g, ln2_b, w1, b1, w2, b2, _g, _b, simd, sc5)
 
 def gpt2_bwd_ps(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]',
-                simd: 'i32' = 0, gflat: 'list[f32]' = None) -> 'list[Tensor]':
+                simd: 'i32' = 0, gflat: 'list[f32]' = None,
+                sc4: "list[f32]" = None) -> 'list[Tensor]':
     ln1_g = []
     ln1_b = []
     wq = []
@@ -130,10 +132,11 @@ def gpt2_bwd_ps(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]',
     _g = ps[2]
     _b = ps[3]
     return gpt2_backward(ids, pos, _wte, _wpe, ln1_g, ln1_b, wq, bq, wp, bp,
-                         ln2_g, ln2_b, w1, b1, w2, b2, _g, _b, simd, gflat)
+                         ln2_g, ln2_b, w1, b1, w2, b2, _g, _b, simd, gflat, None, sc4)
 
-def gpt2_loss_of(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32' = 0) -> 'f32':
-    z = gpt2_fwd_ps(ps, ids, pos, simd)
+def gpt2_loss_of(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32' = 0,
+                 sc5: "list[f32]" = None) -> 'f32':
+    z = gpt2_fwd_ps(ps, ids, pos, simd, sc5)
     return gpt2_loss(z, ids)
 
 # ---- mot buoc train --------------------------------------------------------
@@ -159,25 +162,36 @@ def _zr_one(j: "_ZrJob") -> 'i64':
     return 0
 
 def gpt2_train_step(opt: "AdamW", ps: 'list[Tensor]',
-                    ids: 'list[i64]', pos: 'list[i64]', simd: 'i32' = 0) -> 'f32':
+                    ids: 'list[i64]', pos: 'list[i64]', simd: 'i32' = 0,
+                    sc5: "list[f32]" = None, sc4: "list[f32]" = None) -> 'f32':
     # P6 GĐ7: spawn zero_grad TRUOC forward, join TRUOC backward — an 250ms
     # (BR[5]) vi forward khong dot opt.g; ket qua khong doi (bit-exact).
     zh = thread_spawn(_zr_one, _ZrJob(opt.g))
-    loss = gpt2_loss_of(ps, ids, pos, simd)
+    loss = gpt2_loss_of(ps, ids, pos, simd, sc5)
     jz = thread_join(zh)
     # P1.1 (perf-plan): bwd ghi THANG param grads vao opt.g (da zero) —
     # bo duoc materialization grads 148 tensor (~1.6 GB song) + vong GRAD_ACC
     # (~1.4s/buoc 124M). out list cua backward = placeholder len 0.
     # Khac thu tu accumulate vs duong cu -> ULP-scale (parity torch ok).
-    grads = gpt2_bwd_ps(ps, ids, pos, simd, opt.g)
+    grads = gpt2_bwd_ps(ps, ids, pos, simd, opt.g, sc4)
     opt.step()
     # ghi trong so da cap nhat tro lai tensor
     gpt2_unflatten(ps, opt.p)
     return loss
 
 def gpt2_train_steps(opt: "AdamW", ps: 'list[Tensor]',
-                     ids: 'list[i64]', pos: 'list[i64]', n_steps: 'i64', simd: 'i32' = 0) -> 'list[f32]':
+                     ids: 'list[i64]', pos: 'list[i64]', n_steps: 'i64', simd: 'i32' = 0,
+                     sc5: "list[f32]" = None, sc4: "list[f32]" = None) -> 'list[f32]':
+    # M3c: scratchpersistent cho lm-head C — neu caller khong truyen thi alloc
+    # 1 lan o day (vong lap goi lai toi da n_steps lan) — fallback None van
+    # binh thuong (t_zeros trong wrapper) neu khong alloc.
+    if sc5 == None:
+        n = len(ids)
+        t5 = t_zeros([n * VocabSize])
+        sc5 = t5.data
+        t4 = t_zeros([VocabSize * HiddenSize])
+        sc4 = t4.data
     losses = []
     for s in range(n_steps):
-        losses.append(gpt2_train_step(opt, ps, ids, pos, simd))
+        losses.append(gpt2_train_step(opt, ps, ids, pos, simd, sc5, sc4))
     return losses

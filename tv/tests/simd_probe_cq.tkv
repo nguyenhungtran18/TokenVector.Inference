@@ -1,0 +1,381 @@
+# PROBE CQ — M3c WIRE PREP: CO HET None-param + TENSOR MUON DATA + BIT + SO DO WIN
+#
+# Boi canh (HANDOFF §0.40, quyet dinh wire M3c 2026-10-23):
+#   - CI do: ALLOC t_zeros C S4/S5 = 359-421 ms, ZERO_FILL = 63-94 ms
+#     (ratio 0.18-0.22) -> re-use + zero-fill co loi ~623 ms/buoc.
+#   - Compiler cam gan lai bien module trong ham (khong `global`) ->
+#     scratch phai threading qua tham so (co tien le: gflat/saves = None).
+#
+# CQ kiem TRUOC khi wire (ky luat §13.2 — do truoc khi sua code train):
+#   CQ1 — co che: None-default param + `== None` xuyen 2 lop + truyen list
+#           data tu t_zeros vao; Tensor(data, shape, 0) dung truc tiep duoc.
+#   CQ2 — BIT nho: smm_dot production vs _cq_core (copy vong serial, cd
+#           truyen vao) tren shape nho -> maxdiff = 0.0.
+#   CQ3 — S5 [1024x50257x768] smm_dot: prod (t_zeros) vs borrow (zero-fill
+#           cd muon) — BIT + so do win that.
+#   CQ4 — S4 [50257x768x1024] smm_fwd_at (trans_a): cung kem.
+#
+# Ghi chu ky thuat:
+#   - _cq_core copy DUNG thu tu i0 -> p0 -> j0 cua _smm_core/_p58_core_simple
+#     (tile A 1 lan/(i0,p0), B + gemm + acc moi (i0,p0,j0)) -> BIT-EXACT.
+#   - Tile writers/acc copy y hinh (da chot BIT tai CH/CB); khong goi
+#     simd_add/simd_sub trong cung function (bug P5.8).
+#   - List[Single] cho ta/tb/ct qua append bieu thuc (quy uoc simd_matmul).
+#   - cd muon = data cua t_zeros = List[Single] -> annotation PHAI la
+#     "list[f32]" (CR chot: t_zeros.data->list[f32]=5.5, ->list[f64]=0.0
+#     = P7 silent conv. Giong mau gflat list[f32]=None).
+#   - maxdiff inline/typed param (bug P7: khong ep list[f32]->list[f64]).
+#   - now_ms() o main; input fill dinh de phat hien race (khong dung 0).
+#
+# Chay (tu goc repo):
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_cq.tkv out/cq.exe main
+#   out/cq.exe
+
+import tv.training.tensor
+import tv.training.simd_matmul
+
+# ---- helpers copy tu simd_matmul (ten _cq_ de tranh clash) ----------------
+
+def _cq_imin(a: 'i64', b: 'i64') -> 'i64':
+    if a < b:
+        return a
+    return b
+
+def _cq_ru64(x: 'i64') -> 'i64':
+    r = 64
+    while r < x:
+        r = r + 64
+    return r
+
+def _cq_tilek(k: 'i64') -> 'i64':
+    r = _cq_ru64(k)
+    if r > 1024:
+        r = 1024
+    return r
+
+def _cq_zeros(n: 'i64') -> 'list[f32]':
+    out = []
+    i = 0
+    while i < n:
+        out.append((float(0) - 0.0) / 1.0)
+        i = i + 1
+    return out
+
+def _cq_min2(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+# zero-fill cd muon — giong _ci_zero_f da chot tai CI
+def _cq_zf(cd: "list[f32]", tot: 'i64') -> 'i64':
+    z = (float(0) - 0.0) / 1.0
+    i = 0
+    while i < tot:
+        cd[i] = z
+        i = i + 1
+    return tot
+
+def _cq_fill(d: "list[f32]", seed: 'i64') -> 'i64':
+    n = len(d)
+    i = 0
+    while i < n:
+        d[i] = float(((i * 131 + seed) % 97) - 48) * 0.0021
+        i = i + 1
+    return n
+
+def _cq_maxdiff(a: "list[f32]", b: "list[f32]", cnt: 'i64') -> 'f64':
+    dmax = 0.0
+    i = 0
+    while i < cnt:
+        e = a[i] - b[i]
+        if e < 0.0:
+            e = -e
+        if e > dmax:
+            dmax = e
+        i = i + 1
+    return dmax
+
+# ---- tile writers + acc (copy y hinh tu simd_matmul/CB — da chot BIT) -----
+
+def _cq_tile_a_w(out: "list[f32]", d: "list[f32]", kdim: 'i64', i0: 'i64',
+                 ib: 'i64', p0: 'i64', pw: 'i64', T: 'i64') -> 'i64':
+    z = 0.0
+    i = 0
+    dst = 0
+    src = i0 * kdim + p0
+    while i < ib:
+        j = 0
+        while j < pw:
+            out[dst] = d[src + j]
+            dst = dst + 1
+            j = j + 1
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        src = src + kdim
+        i = i + 1
+    while i < T:
+        j = 0
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        i = i + 1
+    return 0
+
+def _cq_tile_b_w(out: "list[f32]", d: "list[f32]", ndim: 'i64', p0: 'i64',
+                 pw: 'i64', r0: 'i64', br: 'i64', T: 'i64', trans_b: 'i32') -> 'i64':
+    z = 0.0
+    i = 0
+    dst = 0
+    while i < pw:
+        if trans_b == 1:
+            idx = r0 * ndim + p0 + i
+            j = 0
+            while j < br:
+                out[dst] = d[idx]
+                dst = dst + 1
+                idx = idx + ndim
+                j = j + 1
+        else:
+            row = (p0 + i) * ndim + r0
+            j = 0
+            while j < br:
+                out[dst] = d[row + j]
+                dst = dst + 1
+                j = j + 1
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        i = i + 1
+    while i < T:
+        j = 0
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        i = i + 1
+    return 0
+
+def _cq_tile_a_at_w(out: "list[f32]", d: "list[f32]", mdim: 'i64', i0: 'i64',
+                    ib: 'i64', p0: 'i64', pw: 'i64', T: 'i64') -> 'i64':
+    z = 0.0
+    r = 0
+    t = 0
+    dst = 0
+    while r < ib:
+        t = 0
+        src = p0 * mdim + i0 + r
+        while t < pw:
+            out[dst] = d[src]
+            dst = dst + 1
+            src = src + mdim
+            t = t + 1
+        while t < T:
+            out[dst] = z
+            dst = dst + 1
+            t = t + 1
+        r = r + 1
+    while r < T:
+        t = 0
+        while t < T:
+            out[dst] = z
+            dst = dst + 1
+            t = t + 1
+        r = r + 1
+    return 0
+
+def _cq_acc_f(cd: "list[f32]", Ct: "list[f32]", n: 'i64', i0: 'i64',
+              ib: 'i64', j0: 'i64', jb: 'i64', T: 'i64') -> 'i64':
+    r = 0
+    bt = 0
+    c = 0
+    while r < ib:
+        bc = i0 * n + j0 + r * n
+        bt = r * T
+        c = 0
+        while c < jb:
+            cd[bc] = cd[bc] + Ct[bt]
+            bc = bc + 1
+            bt = bt + 1
+            c = c + 1
+        r = r + 1
+    return 0
+
+# ---- core prototype: copy vong _smm_core, cd TRUYEN VAO (khong t_zeros) ----
+
+def _cq_core(ad: "list[f32]", bd: "list[f32]", m: 'i64', n: 'i64', k: 'i64',
+             ndim: 'i64', trans_b: 'i32', trans_a: 'i32',
+             cd: "list[f32]", T: 'i64') -> 'i64':
+    ta = _cq_zeros(T * T)
+    tb = _cq_zeros(T * T)
+    ct = _cq_zeros(T * T)
+    i0 = 0
+    while i0 < m:
+        ib = _cq_imin(T, m - i0)
+        p0 = 0
+        while p0 < k:
+            pw = _cq_imin(T, k - p0)
+            if trans_a == 1:
+                r1 = _cq_tile_a_at_w(ta, ad, m, i0, ib, p0, pw, T)
+            else:
+                r1 = _cq_tile_a_w(ta, ad, k, i0, ib, p0, pw, T)
+            j0 = 0
+            while j0 < n:
+                jb = _cq_imin(T, n - j0)
+                r2 = _cq_tile_b_w(tb, bd, ndim, p0, pw, j0, jb, T, trans_b)
+                simd_gemm(ta, tb, ct, T)
+                r3 = _cq_acc_f(cd, ct, n, i0, ib, j0, jb, T)
+                j0 = j0 + jb
+            p0 = p0 + pw
+        i0 = i0 + ib
+    return 0
+
+# ---- CQ1: co che None-param xuyen 2 lop -----------------------------------
+
+def _cq_l2(sc: "list[f32]" = None) -> 'f64':
+    if sc == None:
+        return -1.0
+    return float(len(sc))
+
+def _cq_l1(sc: "list[f32]" = None) -> 'f64':
+    return _cq_l2(sc)
+
+def main() -> 'i32':
+    # CQ1a: goi khong truyen -> None xuyen 2 lop
+    v0 = _cq_l1()
+    # CQ1b: truyen list data tu t_zeros
+    probe = t_zeros([7])
+    probe.data[3] = 5.0
+    v1 = _cq_l1(probe.data)
+    ok1 = 0
+    if v0 == -1.0:
+        if v1 == 7.0:
+            ok1 = 1
+    print("CQ1 None-xuyen-2-lop: goi-khong-truyen=" + str(v0)
+          + " truyen-t_zeros-data=" + str(v1) + " -> " + str(ok1) + " (1=PASS)")
+    # CQ1c: Tensor(data, shape, 0) truc tiep
+    T1 = Tensor(probe.data, [7], 0)
+    v2 = T1.data[3]
+    ok1c = 0
+    if v2 == 5.0:
+        ok1c = 1
+    print("CQ1c Tensor(data,shape,0) truc tiep: " + str(v2) + " -> " + str(ok1c)
+          + " (1=PASS)")
+
+    # ---- CQ2: BIT nho — smm_dot prod vs _cq_core muon cd -------------------
+    ms = 96
+    ns = 64
+    ks = 128
+    A2 = t_zeros([ms, ks])
+    B2 = t_zeros([ns, ks])
+    _cq_fill(A2.data, 1)
+    _cq_fill(B2.data, 2)
+    t0 = now_ms()
+    C2p = smm_dot(A2, B2, ms, ns, ks)
+    t1 = now_ms()
+    v_prod2 = t1 - t0
+    T2 = _cq_imin(_cq_tilek(ks), _cq_ru64(_cq_imin(ms, ns)))
+    cd2 = t_zeros([ms * ns])
+    rz2 = _cq_zf(cd2.data, ms * ns)
+    t0 = now_ms()
+    r2 = _cq_core(A2.data, B2.data, ms, ns, ks, ks, 1, 0, cd2.data, T2)
+    t1 = now_ms()
+    v_bor2 = t1 - t0
+    d2 = _cq_maxdiff(C2p.data, cd2.data, ms * ns)
+    ok2 = 0
+    if d2 == 0.0:
+        ok2 = 1
+    print("CQ2 BIT nho [96x64x128] smm_dot prod=" + str(v_prod2)
+          + " ms borrow=" + str(v_bor2) + " ms MAXDIFF=" + str(d2)
+          + " -> " + str(ok2) + " (1=PASS)")
+
+    # ---- CQ3: S5 [1024x50257x768] smm_dot — BIT + WIN ---------------------
+    nq = 1024
+    h = 768
+    V = 50257
+    A5 = t_zeros([nq, h])
+    B5 = t_zeros([V, h])
+    _cq_fill(A5.data, 3)
+    _cq_fill(B5.data, 4)
+    t0 = now_ms()
+    C5p = smm_dot(A5, B5, nq, V, h)
+    t1 = now_ms()
+    v_prod5a = t1 - t0
+    t0 = now_ms()
+    C5p = smm_dot(A5, B5, nq, V, h)
+    t1 = now_ms()
+    v_prod5 = _cq_min2(v_prod5a, t1 - t0)
+    cd5 = t_zeros([nq * V])
+    T5 = _cq_imin(_cq_tilek(h), _cq_ru64(_cq_imin(nq, V)))
+    t0 = now_ms()
+    rz5 = _cq_zf(cd5.data, nq * V)
+    t1 = now_ms()
+    v_zf5 = t1 - t0
+    t0 = now_ms()
+    r5 = _cq_core(A5.data, B5.data, nq, V, h, h, 1, 0, cd5.data, T5)
+    t1 = now_ms()
+    v_core5 = t1 - t0
+    t0 = now_ms()
+    rz5b = _cq_zf(cd5.data, nq * V)
+    t1 = now_ms()
+    v_zf5b = t1 - t0
+    t0 = now_ms()
+    r5b = _cq_core(A5.data, B5.data, nq, V, h, h, 1, 0, cd5.data, T5)
+    t1 = now_ms()
+    v_core5b = t1 - t0
+    v_bor5 = _cq_min2(v_zf5 + v_core5, v_zf5b + v_core5b)
+    d5 = _cq_maxdiff(C5p.data, cd5.data, nq * V)
+    ok5 = 0
+    if d5 == 0.0:
+        ok5 = 1
+    print("CQ3 S5 dot [1024x50257x768] prod=" + str(v_prod5)
+          + " ms borrow(zf " + str(v_zf5) + " + core " + str(v_core5) + ")="
+          + str(v_bor5) + " ms  WIN=" + str(v_prod5 - v_bor5)
+          + " ms  MAXDIFF=" + str(d5) + " -> " + str(ok5) + " (1=PASS)")
+
+    # ---- CQ4: S4 [50257x768x1024] smm_fwd_at (trans_a=1) — BIT + WIN ------
+    A4 = t_zeros([h, nq])
+    B4 = t_zeros([nq, h])
+    _cq_fill(A4.data, 5)
+    _cq_fill(B4.data, 6)
+    t0 = now_ms()
+    C4p = smm_fwd_at(A4, B4, V, h, nq)
+    t1 = now_ms()
+    v_prod4a = t1 - t0
+    t0 = now_ms()
+    C4p = smm_fwd_at(A4, B4, V, h, nq)
+    t1 = now_ms()
+    v_prod4 = _cq_min2(v_prod4a, t1 - t0)
+    cd4 = t_zeros([V * h])
+    T4 = _cq_imin(_cq_tilek(nq), _cq_ru64(_cq_imin(V, h)))
+    t0 = now_ms()
+    rz4 = _cq_zf(cd4.data, V * h)
+    t1 = now_ms()
+    v_zf4 = t1 - t0
+    t0 = now_ms()
+    r4 = _cq_core(A4.data, B4.data, V, h, nq, h, 0, 1, cd4.data, T4)
+    t1 = now_ms()
+    v_core4 = t1 - t0
+    t0 = now_ms()
+    rz4b = _cq_zf(cd4.data, V * h)
+    t1 = now_ms()
+    v_zf4b = t1 - t0
+    t0 = now_ms()
+    r4b = _cq_core(A4.data, B4.data, V, h, nq, h, 0, 1, cd4.data, T4)
+    t1 = now_ms()
+    v_core4b = t1 - t0
+    v_bor4 = _cq_min2(v_zf4 + v_core4, v_zf4b + v_core4b)
+    d4 = _cq_maxdiff(C4p.data, cd4.data, V * h)
+    ok4 = 0
+    if d4 == 0.0:
+        ok4 = 1
+    print("CQ4 S4 fwd_at [50257x768x1024] prod=" + str(v_prod4)
+          + " ms borrow(zf " + str(v_zf4) + " + core " + str(v_core4) + ")="
+          + str(v_bor4) + " ms  WIN=" + str(v_prod4 - v_bor4)
+          + " ms  MAXDIFF=" + str(d4) + " -> " + str(ok4) + " (1=PASS)")
+
+    print("CQ done")
+    return 0

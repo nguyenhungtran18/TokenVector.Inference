@@ -1,0 +1,51 @@
+# PROBE CR — NGUYEN NHAN CQ MAXDIFF=2.25e307: P7 SILENT LIST CONV
+#
+# Boi canh: CQ (simd_probe_cq) do BIT mượn-C vs t_zeros -> MAXDIFF
+#   = 2.247118559502319e+307 (garbage) + prod=0.0 ms + CQ4 crash trong
+#   duong PRODUCTION (_p58_core_simple). Gia thuyet: truyen data cua
+#   t_zeros (List[Single]) vao param annotation "list[f64]" lam compiler
+#   sinh CONVERT SILENT (bug P7 da ghi: list[f32]->list[f64] GIA TRI SAI,
+#   im lam — maxdiff=813056). Neu dung nhom kieu DUNG thi BIT=0.0.
+#
+# Cach chung minh (tach biet 3 truong, INLINE trong main theo quy uoc P7):
+#   CR-a: list f32 (append bieu thuc) + param list[f32]     -> doc truc tiep
+#   CR-b: list cua t_zeros (khong ep)      + param list[f32] -> doc truc tiep
+#   CR-c: list cua t_zeros truyen vao param list[f64]       -> neu GIA TRI
+#          LECH/thieu -> chot P7 silent conv la THU PHAM.
+#   Doc gia tri gai tri (index 3 = 5.5) qua 3 nhom; in ket qua.
+#
+# Chay (tu goc repo):
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_cr.tkv out/cr.exe main
+#   out/cr.exe
+
+import tv.training.tensor
+
+def _cr_l32(x: "list[f32]") -> 'f64':
+    return float(x[3])
+
+def _cr_l64(x: "list[f64]") -> 'f64':
+    return x[3]
+
+def main() -> 'i32':
+    # CR-a: list f32 that (append bieu thuc) -> param list[f32]
+    a = []
+    i = 0
+    while i < 7:
+        a.append((float(0) - 0.0) / 1.0)
+        i = i + 1
+    a[3] = (5.5 - 0.0) / 1.0
+    va = _cr_l32(a)
+
+    # CR-b: data cua t_zeros -> param list[f32]
+    tb = t_zeros([7])
+    tb.data[3] = 5.5
+    vb = _cr_l32(tb.data)
+
+    # CR-c: data cua t_zeros -> param list[f64] (P7 silent conv neu lech)
+    vc = _cr_l64(tb.data)
+
+    print("CR-a list[f32]->list[f32] = " + str(va))
+    print("CR-b t_zeros.data->list[f32] = " + str(vb))
+    print("CR-c t_zeros.data->list[f64] = " + str(vc))
+    print("CR done")
+    return 0

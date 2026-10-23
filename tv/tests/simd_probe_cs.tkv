@@ -1,0 +1,51 @@
+# PROBE CS — TACH NGUYEN NHAN CQ4 CRASH: INPUT PROBE HAY SANPH smm_fwd_at?
+#
+# Boi canh: CQ4 (smm_fwd_at A[h,nq] x B[nq,h] -> C[V,h], trans_a=1) crash
+#   ArgumentOutOfRangeException trong _tile_a_at_w cua PRODUCTION
+#   _p58_core_simple. CQ3 (smm_dot) khong crash. Can phan biet:
+#     (a) input CQ4 SAI (B phai la [k=nq hang][n=h cot], A [k=nq][m=V]) -> loi probe;
+#     (b) smm_fwd_at BROKEN cho m=V=50257 (trans_a path OOB) -> loi production.
+#
+# Cach chung minh: chay smm_fwd_at TREN CUNG shape CQ4 nhung giam V dan
+#   (50257 -> 4096 -> 1024) xem V nao bat dau crash. Neu crash chi o V lon
+#   -> (b) production bug (trans_a tile index vuot). Neu khet het -> (a).
+#
+# Dung dung hop dong smm_fwd_at: A luu [k hang][m cot] (=A^T), B luu [k hang][n cot].
+#   C[m,n] = A^T x B. m=V, n=h, k=nq -> A[V hang? khong: A[k=nq][m=V]], B[k=nq][n=h].
+#
+# Chay (tu goc repo):
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_cs.tkv out/cs.exe main
+#   out/cs.exe
+
+import tv.training.tensor
+import tv.training.simd_matmul
+
+def _cs_fill(d: "list[f32]", seed: 'i64') -> 'i64':
+    n = len(d)
+    i = 0
+    while i < n:
+        d[i] = (float(((i * 131 + seed) % 97) - 48) * 0.0021 - 0.0) / 1.0
+        i = i + 1
+    return n
+
+def main() -> 'i32':
+    nq = 1024
+    h = 768
+    # A luu [k=nq hang][m=V cot]; B luu [k=nq hang][n=h cot] — hop dong smm_fwd_at
+    Vs = []
+    Vs.append(50257)
+    Vs.append(4096)
+    Vs.append(1024)
+    for vi in range(len(Vs)):
+        V = Vs[vi]
+        A = t_zeros([nq, V])
+        B = t_zeros([nq, h])
+        _cs_fill(A.data, 5)
+        _cs_fill(B.data, 6)
+        t0 = now_ms()
+        C = smm_fwd_at(A, B, V, h, nq)
+        t1 = now_ms()
+        print("CS smm_fwd_at m=V=" + str(V) + " n=" + str(h) + " k=" + str(nq)
+              + " -> C[" + str(len(C.data)) + "] " + str(t1 - t0) + " ms OK")
+    print("CS done")
+    return 0

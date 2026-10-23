@@ -1945,6 +1945,113 @@ out/ch.exe && python tools/probe_threads.py out/ch.exe 2
 
 **Menu `.tkv` sau 3 probe:** M3a ❌ (replay-floor), M3b ❌ (kernel throughput sụp ở T nhỏ), M3c 🟡 (đo CÓ LỜI, chờ quyết định wire). Còn song song-ACC biến thể gốc (S4/S5 slot rời rạc, S3 p-reduction chặn — chưa đo) → M1 OpenBLAS (native).
 
+### 0.41 M3c — ĐÃ WIRE + GATE 84/84 (2026-10-23)
+
+**Quyết định state:** scratch-**passing** (không module-var) — caller truyền `list[f32]` optional (`sc5` logits fwd, `sc4` dwte bwd), tôn trọng lệnh cấm state module ở `simd_matmul.tkv:430`. Core `_smm_cd` chỉ **mượn** khi `len(sc) >= m*n`, thiếu thì vẫn `t_zeros` → mọi caller cũ bit-identical.
+
+**Đã nối (10 file, 3 tầng):**
+- `gpt2_ref.tkv` (124M) + flattened `tv.training.gpt2_ref` (small V=256 — bản gate thực sự biên dịch) + `gpt2_ref124`: 3 site — `gpt2_forward` `smm_dot(.., sc5)`, `gpt2_forward_saved` `smm_dot_pd(.., sc5)`, `gpt2_backward` `smm_fwd_at_pd(.., sc4)`.
+- `gpt2_train.tkv`: `gpt2_fwd_ps`/`gpt2_loss_of`/`gpt2_train_step`/`gpt2_train_steps` — `steps` cấp phát 2 buffer persistent → **mọi gate đều đi qua đường scratch**.
+- `simd_bench_124m_seq.tkv`: `_f124_fwd2`/`_f124_bwd`/`_step124` + `main` cấp phát `sc5 [seq×V]`, `sc4 [V×h]`.
+
+**Audit lifetime:** bench P5.5 (fwd `logits` sống trong `saves[0]` song song bwd `dwte`) → **2 buffer riêng**; train-step (`logits` chết sau khi tính `loss`, trước bwd) → 1 buffer đủ, nhưng wire 2 cho đồng nhất.
+
+**Số đo (sửa §0.40 ước lượng 623 ms):** CU A/B trực tiếp trên wrapper thật (`smm_dot_pd`/`smm_fwd_at_pd`, prod `t_zeros` vs scratch): **BIT=0.0, ~172 ms/shape × 2 ≈ 344 ms/bước** — wave-parallel nhanh hơn probe serial nên ALLOC là lát mỏng hơn ước tính.
+
+**Gates (cùng session, 2026-10-23) — 84/84 = hợp đồng §13.2:**
+
+| Gate | Kết quả |
+|---|---|
+| `gpt2_train_tests` | **5/5** (overfit 5.083→0.500, resume bit-exact) |
+| `gpt2_tests` | **17/17** |
+| `gpt2_scope_tests` | **9/9** |
+| `gpt2_full_tests` (fixture 124M) | **33/33** |
+| `simd_matmul_tests` | **20/20** |
+
+Full-step bench seq1024 mode1: **36594 ms, loss `13.442912` bit-identical** (§0.33) — 1 bước lẻ quá thô để tách 344 ms (0.9%) khỏi noise; số isolated trung thực là A/B wrapper CU.
+
+**Bug gate bắt được (đúng kỷ luật):** compile `gpt2_train_tests` fail `gpt2_forward 20 args vs 18-19` — flattened twin `tv/tests/tv.training.gpt2_ref.tkv` chưa sync (lệch đúng 6 dòng edit của tôi); `tv/tests/tv.training.gpt2_ref124` + `gpt2_train` đã sync trước đó. Audit 10 twin: 9/10 IN-SYNC, `trainer` lệch 6 dòng **comment pre-existing** (không đụng code).
+
+**Menu `.tkv`:** M3a ❌, M3b ❌, **M3c ✅ wired + 84/84**. Còn lại: song song-ACC biến thể gốc (S4/S5, chưa đo) → M1 OpenBLAS (native).
+
+### 0.42 M3a BIEN THE GOC — SONG SONG ACC TILE ROI RAC ĐÃ ĐO: BUST CA 2 THIET KE (2026-10-23)
+
+**Probe:** `tv/tests/simd_probe_cw.tkv` (compile sạch lần đầu → `out/cw.exe`, log `out/cw_run.log`). 0 thay đổi code train. Đo 2 thiết kế trên đúng wrapper `_smm_core_pd` (best-of-3, cùng phiên, baseline = `smm_*_pd` production):
+- **Thiết kế E (hoist=0):** main vẫn `simd_gemm` TUYÊN TU (tôn re-entrancy CG mode 4) nhưng mỗi slot xong gemm là **spawn worker ACC ngay** → acc(t) chạy song song với gemm(t+1..) và với acc cùng khối khác. Chống p-reduction: slot cùng (i0,j0) → `join(acc(t-1))` TRƯỚC spawn acc(t); 12 Ct buffer riêng/slot; join toàn bộ acc cuối wave. BIT-by-construction: thứ tự tích luy theo khối giữ nguyên i0→p0→j0, khối khác nhau ghi hình chữ nhật rời rạc.
+- **Thiết kế A (hoist=1, §0.36 «ACC theo wave 12»):** xong 12 gemm TRƯỚC rồi mới spawn 12 acc → acc không cùng tải với gemm (gemm đã dùng ~22 thread, CG mode 1 cpu/wall 22.64).
+
+**Số đo (ms, best-of-3, run 2 — cả 2 thiết kế cùng phiên):**
+
+| Shape | base PD | E (acc∥gemm) | sp E | A-hoist | sp A | BIT |
+|---|---|---|---|---|---|---|
+| S3 dxf | 734 | 750 | **0.98×** | 766 | **0.96×** | **0.0** |
+| S4 dwte | 1437 | 1453 | **0.99×** | 1735 | **0.83×** | **0.0** |
+| S5 logits | 1219 | 1703 | **0.72×** | 1829 | **0.67×** | **0.0** |
+
+alloc 12 Ct (T=768) = **46-47 ms/call** (đã nằm trong số variant). Run 1 (E standalone, khác phiên): 0.98/0.92/0.82× — cùng kết luận « 1.3.
+
+**CHỐT:**
+1. **BIT=0.0 cả 2 thiết kế ngay lần chạy đầu** — chain-join theo khối + 12 Ct buffer + join-cuoi-wave đúng; pattern worker-derive/conditional-join của CH tái dùng được (lần thứ 3 sạch BIT lần đầu).
+2. **BUST toàn tập: 0.67-0.99× vs ngưỡng ≥1.3×.** Không wire, `_smm_core_pd` giữ nguyên replay tuần tự main.
+3. **Nguyên nhân E (S5 thua nhiều nhất dù có nhiều acc song song nhất = 0.72×):** `simd_gemm` của main đã dùng ~22 thread (CG mode 1) → 12 acc worker cướp core/bandwidth của chính gemm — acc song song CÀNG nhiều (S5, n_p=1, 12 khối rời rạc) thì càng thua. Đúng bệnh oversubscription đã thấy ở CH (S4 0.94×).
+4. **Nguyên nhân A (thua E):** mất hoàn toàn overlap acc∥gemm (2 pha tuần tự), acc wave-12 KHÔNG scale (interpreted loop memory-bound + 132 spawn/join ~21 ms + 47 ms alloc Ct) → trả đủ gemm + acc song song chậm + overhead. S3 chain 12 p-tile/cùng khối → không song song được (đúng dự đoán p-reduction) chỉ trả overhead → 0.96×.
+5. **Sàn cấu trúc (phân tích, đã có số đo chống lưng):** ACC 234-359 ms là thật (§0.36) nhưng không thể song song hoá **có lãi** trong wrapper này — gemm đã bão hoà máy, acc không scale out.lever `.tkv` cuối cùng của M3a/M3b/M3c khép lại tại đây.
+
+**Menu `.tkv` SAU CW:** M3a-pipeline ❌ (CH), M3a-ACC-variant ❌ (CW — 2 thiết kế), M3b ❌ (CB), M3c ✅ (CI/§0.41). **Còn lại: M1 OpenBLAS (native/C) — thoát khỏi `.tkv`** → M2 micro-kernel → M4-M7.
+
+**Trạng thái git:** probe CW (untracked) + `out/cw_run.log` + HANDOFF §0.42 + roadmap §14.5/§14.8 + ROADMAP_TRAIN — sửa trong working tree, chưa commit. 0 thay đổi code train → không cần gate 84/84.
+
+### 0.43 M1 — GOI OPENBLAS QUA DROP-IN SHIM DLL ĐÃ ĐO: BUST — 0.91-1.13× GEMM, 1.001× FULL STEP, MẤT HỢP ĐỒNG TOLERANCE (2026-10-23)
+
+**Bối cảnh:** bước §14.4 kế tiếp sau khi cửa sổ `.tkv` đóng (§0.42) = **M1** ("Gọi BLAS sẵn có qua dlopen — thay implementation trong `simd_gemm`, giữ nguyên ABI, `.tkv` không đổi 1 dòng", §14.3). Phiên này dựng được hạ tầng đo: **MSVC cl thật** (VS 18 Community qua `vcvars64.bat`) + OpenBLAS LP64 có sẵn trong scipy (`scipy.libs/libscipy_openblas-*.dll`, export `scipy_cblas_sgemm`).
+
+**Cơ chế (đã xác minh bằng đọc IL sinh ra — `out/*.il`):** exe `.tkv` chỉ P/Invoke đúng **2 export** của `tkv_simd_native.dll`: `SgemmF32(a,b,o,n)` / `SgemmF64(a,b,o,n)` (ma vuông n×n row-major, beta=0); 13 `simd_*` elementwise còn lại là managed IL `System.Numerics.Vector`, KHÔNG đụng DLL này. ⇒ M1 = thay đúng DLL đó, ABI giữ nguyên, 0 dòng `.tkv`.
+
+**Shim (repo, nguồn theo dõi được):** `tools/simd_native/tkv_simd_native_m1.c` + `build_m1.ps1` → `out/m1/tkv_simd_native.dll` (drop-in, cùng tên): re-export `SgemmF32/F64`, nạp runtime `m1blas.dll` (copy đổi tên từ OpenBLAS scipy) qua `LoadLibrary`, forward sang `cblas_sgemm/dgemm` row-major; số thread = env `TKV_M1_THREADS` (mặc định 14; máy 28 luồng) gọi `openblas_set_num_threads`; thiếu BLAS → fallback naive + cảnh báo. `out/m1/` còn có `System.Numerics.Vectors.dll` để exe chạy được trọn vẹn.
+
+**Smoke:** `simd_probe_cg` recompile → chạy từ `out/m1/` nạp shim OK ("[m1] OpenBLAS da nap, threads=14").
+
+**Số đo — pha GEMM thuần (CG mode 1, ms/pass, best-of, cùng phiên; GFLOP/s pad):**
+
+| Shape | native DLL (base) | shim 14T | shim 22T | shim 28T |
+|---|---|---|---|---|
+| S1 dx1 | 12.82 (565) | 13.42 (540) = 0.96× | 15.0 (483) | **12.2 (594) = 1.05×** |
+| S3 dxf | 218.75 (547) | 222.75 (537) = 0.98× | 246 (486) | **195.25 (612) = 1.12×** |
+| S4 dwte | 211.0 (567) | 230.5 (519) = 0.91× | 246 (486) | **195.25 (612) = 1.08×** |
+| S5 lgts | 210.75 (567) | 218.75 (547) = 0.96× | 246.25 (486) | **199.25 (600) = 1.05×** |
+
+(22T thấp nhất trong cả 3 cấu hình — quan sát chưa giải thích, ghi nhận trung thực; 28T thắng đều.)
+
+**Số đo — FULL wrapper (CG mode 0, ms):** shim 28T ≈ base trên cả 4 shape: S1 FULL 94 vs 93, S3 968 vs 938, S4 **1797 vs 1797**, S5 1562 vs 1578 (S3 thua ~3%, S5 thắng ~1% — trong nhiễu). Pha GEMM phase-only 195-203 (shim) vs 207-211 (base) — thắng nhỏ, nằm trong RESID noise 24-184 ms đã biết (CG).
+
+**Số đo — full step 3 seq (`simd_bench_124m_seq` seq=1024 mode=1, best-of-3 xen kẽ 2 arm cùng phiên):**
+
+| Arm | ms (3 lần) | best | loss buoc 1 → buoc 2 |
+|---|---|---|---|
+| base (DLL gốc) | 37781 / 34734 / 35984 | **34,734** | 10.760399 → **13.442912** (khớp §0.41 bit-exact) |
+| shim 14T | 35031 / 34687 / 36000 | **34,687** | 10.760399 → **13.442902** (lệch 1.0e-5) |
+| shim 28T | 37593 (1 lần) | 37,593 | → 13.442896 (lệch 1.6e-5) |
+
+**1.001× (34,734 vs 34,687) = không có gì trên full step.**
+
+**Số đo — gate tolerance với shim (14T, các arm khác thread cho casefail như nhau):** train_tests 5/5, gpt2_tests 17/17, scope 9/9, gpt2_full_tests (124M) 33/33 — nhưng `simd_matmul_tests` **19/20**: case "train 3 buoc — loss buoc 3 (tich luy AdamW)" maxdiff **1.407e-4 > tol 1e-4** (bất biến theo 1/14/28 thread). Đúng mức lệch step-loss quan sát được (1.4e-4).
+
+**CHỐT — M1 BUST, theo đúng gate của chính nó (§14.4):**
+1. **"GEMM 24.1 s → ~3.5-4 s (ngang torch)" không xảy ra** — đã biết từ CG "24.1 s" thực chất là wrapper (build+acc+alloc 76-89% + pad 1.5×), kernel đã parity; thay kernel chỉ nhúc nhích pha GEMM 200 ms/shape-call, đổi lấy 1.05-1.13× ở phase thuần (28T) nhưng **full step = 1.001× noise** (GEMM bucket thật của step ~1.5-2 s trên nền ~35 s).
+2. **Hợp đồng tolerance GÃY** (19/20, loss lệch 1.4e-4) — numerical order của OpenBLAS ≠ của `tkv_simd_native`.
+3. **"Numerics = numerics torch" THẤT BẠI cả về nguyên lý:** shim nạp OpenBLAS của scipy — CÙNG NHÓM với np-BLAS đã đo `bit-diff 1609/2048`, KHÔNG phải MKL/torch (`1618`, `docs/accumulation-order-vs-pytorch-2026-10-18.md` + `docs/numerics-contract.md`); torch trên máy này là oneMKL+`libiomp5md`, không phải OpenBLAS ⇒ không có đường nào "gọi đúng thứ torch dùng" mà không kèm oneMKL proprietary.
+4. **KHÔNG wire:** production giữ nguyên `tkv_simd_native.dll` gốc cạnh exe; shim + build script chỉ là probe artifact (`tools/simd_native/`, gitignore chặn `*.dll` nên source C/ps1 là thứ theo dõi được).
+
+**Hệ quả menu (đãi hết ở mức đo):**
+- **M2 micro-kernel: tiền đề ĐÃ BỊ CG BÁC** — kernel đang 552-612 GFLOP/s ≈ torch (588-741), M2 hứa "chuẩn hóa 45-82 → 150-300" là con số đã bị phân rã phase đảo ngược (§0.36) → không còn mục tiêu để viết.
+- **M4 (prepack) / M5 (fused AdamW f32) / M6 (fused lm-head+attn) / M7 (dispatch):** đều cần **builtin/ABI MỚI trong compiler** (`simd_gemm_packed`, fused kernels) — `.tkv` không khai báo được pinvoke mới (chỉ compiler sinh IL pinvoke; đã xác minh qua IL) ⇒ **chặn trên compiler team**, ngoài tầm repo-local.
+- **Còn 1 mục `.tkv` treo có điều kiện:** T=1024 full-wrapper thật (§14.6 footnote — SUM thủ công đã đo 1.18-1.33×, wrapper thật chưa đo).
+- **Kết luận lớn của chương trình đo:** nút thắt full-step = **wrapper interpreted (build/acc/alloc)**, đã thu hẹp qua 7 chu trình đo (CG/CH/CB/CI/CU/CW/M1): mọi lever kernel/threading-side đều neutral, mọi lever song-song `.tkv` bust. Parity 1.0× với torch **không đạt được từ repo-local** — chỉ attack được từ compiler (native fused/packing ABI).
+
+**Logs:** `out/m1_smoke_gemm*.log`, `out/m1_smoke_threads.log`, `out/m1_m0_{base,shim}.log`, `out/m1_step_{base,shim28,shim14,reps}.log`, `out/m1_gates4.log`, `out/m1_smoke_tol.log`.
+
+**Trạng thái git:** `tools/simd_native/{tkv_simd_native_m1.c,build_m1.ps1}` (mới, tracked-worthy) + HANDOFF §0.43 + roadmap §14.3/§14.4/§14.9 + ROADMAP_TRAIN — working tree, chưa commit. Code train không đổi → gate 84/84 trên DLL gốc giữ nguyên (đã chạy trọn vẹn ở CU).
+
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
 
 | Gate | Command / Path | Result |

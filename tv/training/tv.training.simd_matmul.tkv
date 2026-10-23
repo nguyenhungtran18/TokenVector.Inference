@@ -248,16 +248,37 @@ def _acc_f(cd: "list[f32]", Ct: "list[f32]", n: 'i64', i0: 'i64',
         r = r + 1
     return 0
 
+# ---- M3c (2026-10-23, probe CI/CQ/CR/CT): C-data tu scratch -------------
+# t_zeros du`ng append-0.0 interpreted (capacity-doubling) — ALLOC C S4/S5
+# = 359-421 ms/call; zero-fill indexed chi 63-94 ms (ratio 0.18-0.22, CI).
+# _smm_cd: neu sc du` do (len >= m*n) -> zero-fill + muon (thang List[Single]
+# cua t_zeros — CR chot kieu); khong thi t_zeros nhu cu (fallback nguyen ven).
+# sc annotation PHAI la "list[f32]" — P7 silent conv (CR: ->list[f64] doc
+# = 0.0). Caller chu dong trach nghiem: muon xong PHAI copy ra neu giu lau
+# (3 call site hien tai deu copy/dua vao opt.g truoc khi goi lai goi sau).
+
+def _smm_cd(m: 'i64', n: 'i64', sc: "list[f32]" = None) -> "list[f32]":
+    tot = m * n
+    if sc != None:
+        if len(sc) >= tot:
+            z = (float(0) - 0.0) / 1.0
+            i = 0
+            while i < tot:
+                sc[i] = z
+                i = i + 1
+            return sc
+    C0 = t_zeros([m, n])
+    return C0.data
+
 # ---- core: C = A x B (trans_b=0) hoac A x B^T (trans_b=1), tiled -----------
-def _smm_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32') -> "Tensor":
+def _smm_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32', sc: "list[f32]" = None) -> "Tensor":
     # P0.4 (perf-plan): T = min(_tilek(k), roundup64(min(m,n))) — truoc do T
     # chi theo k -> o gian (m=8, k=50257) dan len T=1024, A-tile dung 8/1024
     # hang (0.8% huu dung). Cong thuc chon: V(T) = (ceil(m/T)+ceil(n/T))*ceil(k/T)*T^2
     # — T nho dan luon giam/the tich dung (do duoc, khong can chia: dung min/roundup).
     # Do lan cuoi: gate 20/20, probe X, bench A/B/C.
     T = _imin(_tilek(k), _roundup64(_imin(m, n)))
-    C = t_zeros([m, n])
-    cd = C.data
+    cd = _smm_cd(m, n, sc)
     # P0.1 (perf-plan): Ct DUY NHAT 1 lan/call — simd_gemm ghi de toan bo
     # (r = a x b, GAN khong tich luy) nen khong can sinh/dung lai moi combo.
     Ct = _zeros_list(T * T)
@@ -285,15 +306,15 @@ def _smm_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64
                 j0 = j0 + jb
             p0 = p0 + pw
         i0 = i0 + ib
-    return C
+    return Tensor(cd, [m, n], 0)
 
 # C[m,n] = A[m,k] x B[k,n] — cung y nghia layout voi gpt2_linear (w [in_d][out_d])
 def smm_fwd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
     return _smm_core(a, b, m, n, k, n, 0)
 
 # C[i,j] = dot(A[i,:], B[j,:]) — cung y nghia voi op_matmul_fwd (B [n hang][k cot])
-def smm_dot(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
-    return _smm_core(a, b, m, n, k, k, 1)
+def smm_dot(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', sc: "list[f32]" = None) -> "Tensor":
+    return _smm_core(a, b, m, n, k, k, 1, sc)
 
 def smm_transpose(t: "Tensor", rows: 'i64', cols: 'i64') -> "Tensor":
     out = t_zeros([cols, rows])
@@ -354,10 +375,9 @@ def _p58_tile_a_at(a: "Tensor", mdim: 'i64', i0: 'i64', ib: 'i64', p0: 'i64', pw
 
 # DUONG AN TOAN (v1 + trans_a): KHONG simd_add/simd_sub call site (probe BC:
 # chi su hien tai call do trong function cung vong scalar da lam cham 2.5x).
-def _p58_core_simple(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32', trans_a: 'i32') -> "Tensor":
+def _p58_core_simple(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32', trans_a: 'i32', sc: "list[f32]" = None) -> "Tensor":
     T = _imin(_tilek(k), _roundup64(_imin(m, n)))
-    C = t_zeros([m, n])
-    cd = C.data
+    cd = _smm_cd(m, n, sc)
     Ct = _zeros_list(T * T)
     # P6 GĐ3: buffer tai su dung (xem ghi chu _tile_a_w o tren)
     AtB = _zeros_list(T * T)
@@ -381,7 +401,7 @@ def _p58_core_simple(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndi
                 j0 = j0 + jb
             p0 = p0 + pw
         i0 = i0 + ib
-    return C
+    return Tensor(cd, [m, n], 0)
 
 # P5.8 ACC PATH DA DO VA BO (2026-10-21, AX @1024): _p58_core_acc tich luy bang
 # simd_add native — DO DUOC CHAM HON duong simple: dxf [1024,50257] 3000ms vs
@@ -391,8 +411,8 @@ def _p58_core_simple(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndi
 # trans-A (dwte @1024: 4875 vs 5140 cu — LOI RO RET). Acc path xoa (git luu).
 
 # dispatch: TOAN BO duong simple (v1 + trans_a) — xem ghi chu P5.8 ACC o tren.
-def _p58_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32', trans_a: 'i32') -> "Tensor":
-    return _p58_core_simple(a, b, m, n, k, ndim, trans_b, trans_a)
+def _p58_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32', trans_a: 'i32', sc: "list[f32]" = None) -> "Tensor":
+    return _p58_core_simple(a, b, m, n, k, ndim, trans_b, trans_a, sc)
 
 # C[m,n] = A x B — v2 (bit-exact voi smm_fwd)
 def smm_fwd_v2(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
@@ -406,8 +426,8 @@ def smm_dot_v2(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tenso
 #     -> C[m,n] = A^T x B, khong materialize A^T.
 # Vi du lm-head: dwte[V,h] = ggT[V,n] x xf[n,h] voi gg luu [n][V]
 #   -> smm_fwd_at(gg, xf, V, h, n) — chi transpose theo o T x T khi build.
-def smm_fwd_at(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
-    return _p58_core(a, b, m, n, k, n, 0, 1)
+def smm_fwd_at(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', sc: "list[f32]" = None) -> "Tensor":
+    return _p58_core(a, b, m, n, k, n, 0, 1, sc)
 
 # ==== P6 GĐ3 (2026-10-21, probe BH): smm_*_pd — WAVE PARALLEL TILE-BUILD ====
 # Do duoc probe BH (ALL BIT-EXACT 0.0): build tile interpreted la phan lon chi
@@ -532,7 +552,7 @@ def _pd_do(Ct: "list[f32]", ta: "list[f32]", tb: "list[f32]", T: 'i64',
     return 0
 
 def _smm_core_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64',
-                 ndim: 'i64', trans_b: 'i32', trans_a: 'i32') -> "Tensor":
+                 ndim: 'i64', trans_b: 'i32', trans_a: 'i32', sc: "list[f32]" = None) -> "Tensor":
     T = _imin(_tilek(k), _roundup64(_imin(m, n)))
     n_i = _pd_ceil(m, T)
     n_p = _pd_ceil(k, T)
@@ -541,10 +561,9 @@ def _smm_core_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64',
         # shape nho (MLP/attention/gate): serial da fix builder — overhead
         # 24 buffer (BH[2] 78ms) + spawn lam cham (BH S1/S2)
         if trans_a == 1:
-            return _p58_core_simple(a, b, m, n, k, ndim, trans_b, 1)
-        return _smm_core(a, b, m, n, k, ndim, trans_b)
-    C = t_zeros([m, n])
-    cd = C.data
+            return _p58_core_simple(a, b, m, n, k, ndim, trans_b, 1, sc)
+        return _smm_core(a, b, m, n, k, ndim, trans_b, sc)
+    cd = _smm_cd(m, n, sc)
     Ct = _zeros_list(T * T)
     ta0 = _zeros_list(T * T)
     ta1 = _zeros_list(T * T)
@@ -750,14 +769,14 @@ def _smm_core_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64',
             rrp11 = _pd_do(Ct, ta11, tb11, T, cd, i0_11, ib_11, j0_11, jb_11, n)
 
         wave = wave + 1
-    return C
+    return Tensor(cd, [m, n], 0)
 
 # export: duong PD (route tu dong serial<->wave theo nguong 40M)
-def smm_fwd_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
-    return _smm_core_pd(a, b, m, n, k, n, 0, 0)
+def smm_fwd_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', sc: "list[f32]" = None) -> "Tensor":
+    return _smm_core_pd(a, b, m, n, k, n, 0, 0, sc)
 
-def smm_dot_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
-    return _smm_core_pd(a, b, m, n, k, k, 1, 0)
+def smm_dot_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', sc: "list[f32]" = None) -> "Tensor":
+    return _smm_core_pd(a, b, m, n, k, k, 1, 0, sc)
 
-def smm_fwd_at_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
-    return _smm_core_pd(a, b, m, n, k, n, 0, 1)
+def smm_fwd_at_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', sc: "list[f32]" = None) -> "Tensor":
+    return _smm_core_pd(a, b, m, n, k, n, 0, 1, sc)

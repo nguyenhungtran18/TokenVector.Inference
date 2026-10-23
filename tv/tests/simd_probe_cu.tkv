@@ -1,0 +1,71 @@
+# PROBE CU — TACH CT1b CRASH: TRANS_A WAVE-PARALLEL CO SAN HAY DO sc PARAM?
+#
+# Boi canh: CT1b goi smm_fwd_at_pd(A[h,nq], B[nq,h], V, h, nq, sc) -> crash
+#   worker _pd_one / _tile_a_at_w (IndexOutOfRange). NHUNG CS chay cung
+#   smm_fwd_at_pd(V,h,nq) khong sc -> OK 1875ms. CQ chay smm_fwd_at (serial)
+#   voi _cq_core -> OK. Can phan biet 2 kha nang:
+#     (a) trans_a wave-parallel (_pd_one _tile_a_at_w) co SAN bi OOB o V=50257
+#         — ma CS/chua tung do duong PD trans_a (chi do serial) -> bug production;
+#     (b) chi xay ra khi truyen sc (param) — lo lieng.
+#
+# Cach tach: chay 4 truong, moi truong BEST-OF-1, in ket qua truoc khi crash:
+#   CU1: smm_fwd_at_pd V=1024 (nho, trans_a) KHONG sc   — PD trans_a co chay?
+#   CU2: smm_fwd_at_pd V=1024 (nho, trans_a) CO  sc     — param co khac?
+#   CU3: smm_fwd_at_pd V=50257 KHONG sc                 — wave trans_a V lon
+#   CU4: smm_fwd_at_pd V=50257 CO  sc                   (neu CU3 qua nhung CU4 crash
+#                                                        -> (b); neu CU3 cung crash -> (a))
+#
+# In tung dong truoc khi goi ke — neu crash o dong nao, doan nguyen nhan tu doan.
+#
+# Chay (tu goc repo):
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_cu.tkv out/cu.exe main
+#   out/cu.exe
+
+import tv.training.tensor
+import tv.training.simd_matmul
+
+def _cu_fill(d: "list[f32]", seed: 'i64') -> 'i64':
+    n = len(d)
+    i = 0
+    while i < n:
+        d[i] = (float(((i * 131 + seed) % 97) - 48) * 0.0021 - 0.0) / 1.0
+        i = i + 1
+    return n
+
+def _cu_zf(cd: "list[f32]", tot: 'i64') -> 'i64':
+    z = (float(0) - 0.0) / 1.0
+    i = 0
+    while i < tot:
+        cd[i] = z
+        i = i + 1
+    return tot
+
+def main() -> 'i32':
+    nq = 1024
+    h = 768
+    # A luu [k=nq][m=V] (=A^T), B luu [k=nq][n=h] — hop dong smm_fwd_at
+    Vs = []
+    Vs.append(1024)
+    Vs.append(50257)
+    for vi in range(len(Vs)):
+        V = Vs[vi]
+        A = t_zeros([nq, V])
+        B = t_zeros([nq, h])
+        _cu_fill(A.data, 5)
+        _cu_fill(B.data, 6)
+        # (1) KHONG sc
+        print("CU truoc V=" + str(V) + " khong sc...")
+        t0 = now_ms()
+        C1 = smm_fwd_at_pd(A, B, V, h, nq)
+        t1 = now_ms()
+        print("CU1/3 V=" + str(V) + " khong sc OK " + str(t1 - t0) + " ms")
+        # (2) CO sc
+        sc = t_zeros([V * h])
+        rz = _cu_zf(sc.data, V * h)
+        print("CU truoc V=" + str(V) + " co sc...")
+        t0 = now_ms()
+        C2 = smm_fwd_at_pd(A, B, V, h, nq, sc.data)
+        t1 = now_ms()
+        print("CU2/4 V=" + str(V) + " co sc OK " + str(t1 - t0) + " ms (zf=" + str(rz) + ")")
+    print("CU done")
+    return 0
