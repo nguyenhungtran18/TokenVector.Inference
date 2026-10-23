@@ -256,6 +256,7 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 | `tv/tests/simd_probe_cd.tkv` | **P7b ĐÃ ĐO**: tkv `simd_gemm` vs `torch.matmul` cùng shape cùng phiên — kernel tkv **chậm 6-14×** torch (standalone `simd_probe_cd` tái xác nhận: 93/968/1734/1562 ms vs 6.5/134/234/248; wrapper PAR12 chỉ ~1.25× → khoảng cách nằm trong KERNEL, không phải driver → chốt parity phải đi qua native/C (§13.3 P7b) — **~~chốt này ĐẢO NGƯỢC bởi probe CG (§14.5): wrapper-bound, kernel đã parity~~** |
 | `tv/tests/simd_probe_cg.tkv` | **M3 ĐÃ ĐO 2026-10-23** — phân rã wrapper 4 shape P7b thành ALLOC/BUILD/GEMM/ACC (mode 0) + 3 phép cpu/wall qua `tools/probe_threads.py` (GEMM ratio **22.64**, BUILD ratio **1.00**, FULL ratio **3.97**) + re-entrancy (mode 4): 2 thread gọi `simd_gemm` T=192 đồng thời → **HANG > 90 s** (`tkv_run_mt` dùng `g_job` global không lock — đúng cảnh báo simd_matmul:419/BH:11). **CHỐT: GEMM phase 567-589 GFLOP/s pad ≈ torch; BUILD+ACC+ALLOC = 76-89% wrapper (đơn luồng) + pad 1.5× → wrapper-bound, KHÔNG phải kernel (§14.5)** |
 | `tv/tests/simd_probe_ch.tkv` | **M3a ĐÃ ĐO 2026-10-23 — BÁC BỎ** — pipeline double-buffer build(w+1)∥replay(w) cho `_smm_core_pd` (worker tự derive i0/p0/j0, 2 set 48 buffer, handle reassign theo wave le/chan): **BIT-EXACT 0.0 cả 4 shape** nhưng speedup S3 1.02× / S4 0.94× / S5 1.10× + alloc 48 buffer 187 ms → dưới ngưỡng wire 1.3×. PD đã song song build → pipeline chỉ ẩn build(w+1); bottleneck thật = replay tuần tự (simd_gemm re-entrancy) → **kỳ vọng 1.6-1.7× đảo ngược** (§14.5, HANDOFF §0.38) |
+| `tv/tests/simd_probe_cb.tkv` | **M3b ĐÃ ĐO 2026-10-23 — BÁC BỎ** — T-dispatch grid T=256/384/512/768/1024 trên 4 shape P7b (ALLOC/BUILD/GEMM/ACC/SUM + FULL_prod tham chiếu): **T=256 (pad 1.0×) tệ nhất mọi shape** (kernel simd_gemm mất throughput ở tile nhỏ — 282 GFLOP/s @256 vs 546-616 @768); T=1024 (pad 1.36×) thắng SUM cả 4 nhưng chỉ 1.18-1.33× (S3 750 vs 953) — quá mỏng cho ngưỡng wire 1.3×, phải sửa 3 đường code + wave-12 96 MB buffer, wrapper thật chưa đo → **KHÔNG wire** (§14.6, HANDOFF §0.39) |
 
 ---
 
@@ -580,7 +581,7 @@ Resource chưa dùng (xếp theo đòn bẩy):
 
 ### 14.4 Thứ tự đề xuất + KPI gate
 
-0. **M3 — điều tra shape-gap** ✅ **ĐÃ ĐO 2026-10-23 (probe CG, §14.5): nguyên nhân = BUILD/ACC/ALLOC ĐƠN LUỒNG (BUILD ratio 1.00) + pad 1.5×, KHÔNG phải kernel — GEMM phase đã 567-589 GFLOP/s pad ≈ torch, S4/S5 thắng torch tuyệt đối.** Chuyển thành **M3a song song ACC → M3b T-dispatch giết pad → M3c tái dùng buffer** (đều `.tkv`, gate §13.2). **M3a biến thể pipeline ĐÃ ĐO BÁC BỎ 2026-10-23** (probe CH, §14.5): BIT=0.0 nhưng 0.94-1.10× — replay tuần tự là sàn cứng; sang **M3b (giết pad) + M3c (tái dùng buffer)**.
+0. **M3 — điều tra shape-gap** ✅ **ĐÃ ĐO 2026-10-23 (probe CG, §14.5): nguyên nhân = BUILD/ACC/ALLOC ĐƠN LUỒNG (BUILD ratio 1.00) + pad 1.5×, KHÔNG phải kernel — GEMM phase đã 567-589 GFLOP/s pad ≈ torch, S4/S5 thắng torch tuyệt đối.** Chuyển thành **M3a song song ACC → M3b T-dispatch giết pad → M3c tái dùng buffer** (đều `.tkv`, gate §13.2). **M3a biến thể pipeline ĐÃ ĐO BÁC BỎ 2026-10-23** (probe CH, §14.5): BIT=0.0 nhưng 0.94-1.10× — replay tuần tự là sàn cứng; **M3b T-dispatch ĐÃ ĐO BÁC BỎ 2026-10-23** (probe CB, §14.6): T=256 (pad 1.0×) tệ nhất mọi shape, T=1024 chỉ 1.18-1.33× SUM thủ công — quá mỏng. Cửa sổ còn lại: **M3c (tái dùng buffer)**.
 1. **M1 dlopen OpenBLAS** giữ ABI `simd_gemm` — ~~nếu M3 không đóng được gap~~ **M3 đã đóng phần wrapper; M1 giờ chỉ nhắm residual kernel-side ~1.2-1.6× + "numerics = numerics torch"** → đo lại 4 shape P7b + full step 3 seq + 84/84. Nếu M1 cũng bị chặn (build/deploy/license) → **M2**.
 2. **M4 + M5** (prepack + fused step native) → step tiếp về **~11-13 s ≈ 1.8×**.
 3. **M6 + M7** (fused lm-head + attention épilogue + dispatch theo shape) → mục tiêu dải **1.1-1.3×**; stretch goal 1.0× đòi thêm fused attention-stage kernel.
@@ -623,9 +624,46 @@ Resource chưa dùng (xếp theo đòn bẩy):
 - **M1 (dlopen BLAS) + M2 (micro-kernel) hạ ưu tiên:** chỉ nhắm phần kernel-side còn ~1.2-1.6× (pad + arch) — không phải 7×. M1 giữ vai trò "cùng thư viện = cùng numerics torch" cho bước 1.0× cuối.
 - **Mục mới (đều `.tkv`, KHÔNG cần native, gate §13.2):**
   - **M3a — song song ACC theo wave 12**: ❌ **biến thể pipeline double-buffer (§0.37) ĐÃ ĐO BÁC BỎ 2026-10-23** (probe CH): BIT=0.0 nhưng speedup 0.94-1.10× (S3 1.02/S4 0.94/S5 1.10), alloc 48 buffer 187 ms — dưới ngưỡng wire 1.3×. PD đã song song build bằng 12 worker nên pipeline chỉ ẩn được build(w+1) (nhỏ); bottleneck thật = replay tuần tự 12×(simd_gemm+acc) trên main, simd_gemm T≥96 re-entrancy cấm song song → **kỳ vọng 1.6-1.7× bị số đo đảo ngược** (HANDOFF §0.38). Biến thể gốc "song song ACC tile rời rạc" chỉ khả thi S4/S5 (slot wave ghi C khác block); **S3 bị p-reduction chặn** (12 p-tile cộng cùng 1 block, giữ bit-exact) — chưa đo.
-  - **M3b — T-dispatch giết pad 1.5×** (hiện thực hóa M7): chọn T theo shape class để tile chia hết (S3: T=512 pad 1.33×, T=256 pad 1.0× nhưng calls ×18 — phải gate đo; S4/S5 tính riêng).
+  - **M3b — T-dispatch giết pad 1.5×**: ❌ **ĐÃ ĐO BÁC BỎ 2026-10-23** (probe CB, §14.6) — grid T=256/384/512/768/1024 trên 4 shape: T=256 (pad 1.0×) **tệ nhất mọi shape** (SUM 156/1781/2375/2375 ms — kernel mất throughput ở tile nhỏ: 282 GFLOP/s @256 vs 546-616 @768); T=1024 (pad 1.36×) thắng SUM cả 4 shape nhưng chỉ 1.18-1.33× — quá mỏng cho ngưỡng wire 1.3×, phải sửa 3 đường code + wave-12 96 MB buffer, wrapper thật chưa đo. **Bài học: "giết pad" chỉ đổi GEMM lấy BUILD+ACC; pad 1.5× giá rẻ hơn pad 1.0× ở wrapper này.** Cửa sổ còn lại: M3c tái dùng buffer.
   - **M3c — tái dùng buffer tile/C** (S4/S5 ALLOC ~400 ms/call biến mất).
-- **Trần ước lượng (CHƯA ĐO — chỉ là phân tích):** ~~S3 FULL 938 → ~250-300 ms ≈ 3.1-3.7×~~ **đã bị số đo M3a (probe CH) hạ thấp** — M3a-pipeline bust cho thấy replay tuần tự là sàn cứng; cửa sổ thật còn lại: M3b (giết pad, attack trực tiếp cái làm S3 thua torch 1.57×) + M3c (tái dùng buffer, −400 ms S4/S5). **Không hứa số bước tổng trước khi đo.**
+- **Trần ước lượng (CHƯA ĐO — chỉ là phân tích):** ~~S3 FULL 938 → ~250-300 ms ≈ 3.1-3.7×~~ **đã bị số đo M3a (probe CH) hạ thấp** — M3a-pipeline bust cho thấy replay tuần tự là sàn cứng; ~~M3b (giết pad)~~ **cũng ĐÃ ĐO BÁC BỎ** (probe CB, §14.6). Cửa sổ thật còn lại: **M3c tái dùng buffer** (−375-422 ms ALLOC ở S4/S5 — lever đo được duy nhất còn lại trong `.tkv`) + parallel-ACC biến thể gốc (chỉ S4/S5 slot rời rạc; S3 bị p-reduction chặn — chưa đo). **Không hứa số bước tổng trước khi đo.**
 - **KPI gate diễn giải lại:** "≥250 GFLOP/s mỗi shape" tính cho pha GEMM (pad) → **4/4 ĐÃ VƯỢT** (552-588); gate thật còn lại là FULL-vs-torch theo ms/shape + full step 3 seq + 84/84.
+
+### 14.6 M3b — ĐÃ ĐO (2026-10-23, probe CB): T-DISPATCH BÁC BỎ — GIẢM PAD LUÔN LÀM CHẬM HƠN
+
+*Mục tiêu (§14.5 M3b): chọn T theo shape class để tile chia hết, giết pad 1.5×. Probe thuần `tv/tests/simd_probe_cb.tkv` (0 thay đổi code train): grid T = 256/384/512/768/1024 trên 4 shape P7b, mỗi (shape, T) đo ALLOC/BUILD/GEMM(per-pass)/ACC → SUM; tham chiếu = full-wrapper production T=768 (best-of-2). Cùng phiên, cùng máy; CB1 FULL_prod khớp CG mode 3 trong ±3% → tự nhất quán.*
+
+**Số đo (ms, 1 lần gọi wrapper):**
+
+| Shape | T | ng | pad | ALLOC | BUILD | GEMM | ACC | SUM | GEMM GF (pad) |
+|---|---|---|---|---|---|---|---|---|---|
+| S1 dx1 | 256 | 144 | 1.00× | 15 | 78 | 16.0 | 47 | 156 | 302 |
+| S1 dx1 | 512 | 24 | 1.33× | 15 | 47 | 15.8 | 15 | 92.8 | 409 |
+| S1 dx1 | **768 (prod)** | 8 | 1.50× | 0 | 63 | 11.8 | 15 | **89.8** | 617 |
+| S1 dx1 | 1024 | 3 | 1.33× | 0 | 47 | 7.8 | 16 | **70.8** | 831 |
+| S3 dxf | 256 | 2364 | 1.00× | 15 | 782 | 281 | 703 | 1781 | 282 |
+| S3 dxf | 384 | 786 | 1.13× | 0 | 625 | 234 | 454 | 1313 | 380 |
+| S3 dxf | 512 | 396 | 1.34× | 15 | 547 | 219 | 344 | 1125 | 485 |
+| S3 dxf | **768 (prod)** | 132 | 1.51× | 0 | 531 | 204 | 218 | **953** | 586 |
+| S3 dxf | 1024 | 50 | 1.36× | 16 | 359 | 203 | 172 | **750** | 529 |
+| S4 dwte | 256 | 2364 | 1.00× | 375 | 1031 | 282 | 687 | 2375 | 281 |
+| S4 dwte | **768 (prod)** | 132 | 1.51× | 360 | 750 | 218 | 329 | **1657** | 549 |
+| S4 dwte | 1024 | 50 | 1.36× | 375 | 641 | 203 | 188 | **1407** | 529 |
+| S5 lgts | 256 | 2364 | 1.00× | 562 | 828 | 281 | 704 | 2375 | 282 |
+| S5 lgts | **768 (prod)** | 132 | 1.51× | 422 | 562 | 219 | 235 | **1438** | 546 |
+| S5 lgts | 1024 | 50 | 1.36× | 406 | 344 | 195 | 235 | **1180** | 551 |
+
+(FULL_prod đo thật: S1 94, S3 968, S4 1703, S5 1500 ms — khớp SUM T=768 thủ công trong ±1-5%.)
+
+**CHỐT — M3b BÁC BỎ:**
+
+1. **Pad 1.0× (T=256) là TỆ nhất trên cả 4 shape** — SUM 156/1781/2375/2375 ms, chậm hơn production T=768 (89.8/953/1657/1438) từ 1.3× đến 2.0×. Giả định gốc "T=256 pad 1.0× nhưng calls ×18 — phải gate đo" đã được đo: **calls ×18 không phải vấn đề, mà là kernel失去了 throughput ở tile nhỏ**.
+2. **Kernel throughput suy giảm mạnh khi T nhỏ** (GEMM GFLOP/s pad): 282 @256 → 380 @384 → 485 @512 → 546-616 @768 → 529-831 @1024. T=256 cho GEMM phase 281 ms cho S3 dù flop hữu ích chỉ 66% của T=768 (204 ms) — tức **hiệu suất kernel ở T=256 ≈ 0.47× của T=768**, bù không nổi phần BUILD+ACC tăng thêm.
+3. **T=1024 (pad 1.36×) là T tốt nhất đo được** — SUM 70.8/750/1407/1180 ms vs T=768 thủ công 89.8/953/1657/1438 → **T=1024 thắng SUM trên cả 4 shape** (1.18-1.33×), NHUNG không đủ để wire: (a) biên lợi nhuận quá mỏng — lever chính S3 chỉ 1.26× (750 vs 953), cả 4 shape 1.18-1.33× đều quanh ngưỡng wire 1.3×, và đây mới là SUM thủ công chứ không phải wrapper thật; (b) **chưa tính chi phí wire**: `_smm_core`/`_p58_core_simple`/`_smm_core_pd` 3 đường đều hard-code `T = _imin(_tilek(k), _roundup64(_imin(m,n)))` — dispatch T=1024 phải sửa 3 chỗ, mỗi chỗ có wave-12 (pd) với 24 buffer T² (T=1024 → 4 MB/buffer, 24 buffer = 96 MB, alloc ~2× hiện tại); (c) full-wrapper T=1024 chưa đo thật (probe CB chỉ đo SUM thủ công tách pha — wrapper thật có thể lệch do in-context effect, như CG đã thấy RESID). **Kết luận trung thực: T=1024 là ứng viên tốt nhất nhưng là lever MỎNG — 1.18-1.33× ở SUM thủ công, sát ngưỡng wire 1.3×, đòi sửa 3 đường code + wave-12 96 MB buffer, mà wrapper thật chưa đo.** Theo §13.2 ("mọi lever phải đo wrapper thật trước khi wire"), KHÔNG wire trên số SUM thủ công — nhưng đây là lever DUY NHẤT còn mở của M3b, ghi nhận để đo lại đầy đủ nếu quay lại.
+4. **Bài học (đảo ngược giả định §14.5):** "giết pad" bằng T nhỏ đổi lấy GEMM nhanh hơn nhưng BUILD+ACC tăng theo số tile (ng × T²) — và kernel simd_gemm không duy trì throughput ở T nhỏ. Pad 1.5× ở T=768 **rẻ hơn** pad 1.0× ở T=256 trong wrapper này. Kết luận: **không có lever T-dispatch an toàn trên grid đã đo**; nếu quay lại, chỉ số đo T=1024 full-wrapper thật (không phải SUM thủ công) mới quyết định.
+
+**Quyết định:** KHÔNG wire. `_smm_core`/`_p58_core_simple`/`_smm_core_pd` giữ nguyên `T = _imin(_tilek(k), _roundup64(_imin(m,n)))`. Menu còn lại: **M3c tái dùng buffer tile/C** (S4/S5 ALLOC ~375-422 ms/call — lever thật còn lại cho S4/S5) → parallel-ACC biến thể gốc (chỉ S4/S5 slot rời rạc) → M1 OpenBLAS.
+
+**Bài học chung:** (1) T-dispatch không free — pad chỉ là 1 trong 3 thành phần (GEMM ∝ pad, BUILD ∝ ng×T², ACC ∝ ng×T²), và kernel throughput là hàm của T; (2) SUM thủ công ≠ full-wrapper — mọi wire phải đo wrapper thật; (3) probe CB xác nhận pattern "grid T + so với production" dùng lại được cho mục sau.
 
 > Lưu ý trung thực: M1-M8 là **phân tích + ước lượng từ số đo đã có** (P3, P7b, BH, GĐ13), CHƯA có số đo mới — mọi bước đều phải qua probe/Gate trước khi wire, đúng kỷ luật §13.2.

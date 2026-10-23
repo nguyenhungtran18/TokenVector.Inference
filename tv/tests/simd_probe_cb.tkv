@@ -1,212 +1,467 @@
-# PROBE CB — ADAMW: so sanh cong thuc PyTorch vs hien tai, do A/B cac bien the
+# PROBE CB — M3b: T-DISPATCH GIET PAD — DO CAC PHA THEO T TREN 4 SHAPE P7b
 #
-# PYTORCH (torch.optim.AdamW, CPU f32 — torch/optim/adamw.py):
-#   exp_avg.lerp_(grad, 1-beta1)                    # m = m + (1-b1)*(g-m)
-#   exp_avg_sq.mul_(beta2).addcmul_(g, g, 1-beta2)  # v = b2*v + (1-b2)*g^2
-#   param.mul_(1 - lr*wd)
-#   denom = (exp_avg_sq.sqrt() / sqrt(bc2)).add_(eps)
-#   param.addcdiv_(exp_avg, denom, -lr/bc1)
-#   => 1 sqrt + 1 div/ptu, toan f32, (1-b1)/(1-b2) tinh 1 lan, p doc/ghi 1 lan/qua
+# Boi canh (§14.5 M3b — theo so do CG, §14.5):
+#   - CG chot: kernel da parity (GEMM 552-588 GFLOP/s pad), BUILD don luong,
+#     BUILD+ACC+ALLOC = 76-89% wrapper, pad 1.5-2.4x an 1.5x flop moi goi.
+#   - M3a pipeline (CH) DO BAC BO: BIT=0.0 nhung 0.94-1.10x < nguong 1.3x.
+#   - M3b: T = min(tilek(k), ru64(min(m,n))) hien tai = 768 cho CA 4 shape.
+#     Doi T chon theo shape class de pad giam:
+#       GEMM(T)  ~ pad           (flop thuc = pad*m*n*k)
+#       BUILD(T) ~ pad (xap xi)  (so tile * T^2)
+#       ACC(T)   ~ pad/T         (ng*T^2 = pad*m*n*k/T) -> thich T LON
+#     Uoc luong T=1024 (pad 1.354 cho S3/S4/S5, 1.333 S1): SUM co the
+#     ~650 ms cho S3 vs FULL 969 -> ~1.4x. NHUNG kernel efficiency tai
+#     T=256/384/512/1024 chua do -> probe nay do that, khong do uoc.
 #
-# HIEN TAI (AdamW.step, tv/training/trainer.tkv):
-#   gi = g[i] * coef                              # f64
-#   p[i] = p[i] * wdf                             # p doc/ghi 2 lan
-#   m[i] = b1*m[i] + (1.0 - b1)*gi                # (1-b1) TINH MOI PTU
-#   v[i] = b2*v[i] + (1.0 - b2)*gi*gi             # (1-b2) TINH MOI PTU
-#   denom = sqrt(v[i]) / bc2s + eps               # 1 sqrt + 1 div (f64)
-#   p[i] = p[i] - step_size*m[i]/denom            # 1 div nua (f64)
-#   => 1 sqrt + 2 div/ptu, p doc/ghi 2 lan
+# Grid T (da boi 64, >= TKV_GEMM_MIN_N=96): 256, 384, 512, 768, 1024.
+# Moi (shape, T): ALLOC (C + 3 buffer T^2) + BUILD + GEMM (per-pass) + ACC
+# -> SUM; kem FULL wrapper that (T=768 production, best-of-2) lam tham chieu.
+# Input = 0 (FMA khong skip zero — giong CG). now_ms() o MAIN (bug #8).
+# Buffer At/Bt/Ct theo T dung chung qua cac shape (tieu 25 bo append).
 #
-# CAC BIEN THE (cung cong thuc, khac cach toan — do tung cai):
-#   W : copy nguyen van hien tai
-#   V1: hoist (1-b1), (1-b2) ra ngoai vong        (kieu bit: khac 0 phep nao)
-#   V2: V1 + gop p (doc 1 lan, ghi 1 lan)         (kieu bit: khac 0 phep nao)
-#   V3: V2 + gop 2 div thanh 1 (dai so: m/(sqrt(v)/bc2s+eps) ==
-#         (m*bc2s)/(sqrt(v)+eps*bc2s))            (CHET LECH — se do)
+# Ghi chu ky thuat:
+#   - Tile writers/acc copy y hinh tu CG (da chot BIT-EXACT tai CH); khong
+#     goi simd_add/simd_sub trong cung function (bug P5.8: cham codegen 2.5x).
+#   - GEMM reps: >=100 goi/shape, toi da 4 (T=1024 ng=50 -> rep=2 du on dinh).
+#   - T=1024 > min(m,n) van hop le: tile writer pad bang 0 ( nhu production ).
 #
-# Chay:
+# Chay (tu goc repo):
+#   printf "0\n" > tv/tests/_cb_cfg.txt
 #   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_cb.tkv out/cb.exe main
-#   ./out/cb.exe
+#   out/cb.exe
+
+import tv.training.tensor
+import tv.training.simd_matmul
+import tv.training.gpt2_ref124
+
+CFG = "tv/tests/_cb_cfg.txt"
+
+# ---- nho giong simd_matmul (copy — flatten import khong xuat ham private) ----
+
+def _cb_imin(a: 'i64', b: 'i64') -> 'i64':
+    if a < b:
+        return a
+    return b
+
+def _cb_ru64(x: 'i64') -> 'i64':
+    r = 64
+    while r < x:
+        r = r + 64
+    return r
+
+def _cb_tilek(k: 'i64') -> 'i64':
+    r = _cb_ru64(k)
+    if r > 1024:
+        r = 1024
+    return r
+
 def _cb_zeros(n: 'i64') -> 'list[f32]':
     out = []
-    for i in range(n):
+    i = 0
+    while i < n:
         out.append((float(0) - 0.0) / 1.0)
+        i = i + 1
     return out
 
-def _cb_seed(p: "list[f32]", m: "list[f32]", v: "list[f32]", n: 'i64') -> 'i64':
+def _cb_min2(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+def _cb_is_cmt(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_ints(path: 'str') -> 'list[i64]':
+    txt = read_file(path)
+    lines = txt.split("\n")
+    out = []
+    for i in range(len(lines)):
+        if _cb_is_cmt(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                out.append(int(float(toks[j])))
+    return out
+
+# ---- tile writers + acc (copy y hinh tu CG — da chot BIT-EXACT tai CH) -------
+
+def _cb_tile_a_w(out: "list[f32]", d: "list[f32]", kdim: 'i64', i0: 'i64',
+                 ib: 'i64', p0: 'i64', pw: 'i64', T: 'i64') -> 'i64':
+    z = 0.0
     i = 0
-    while i < n:
-        p[i] = float((i % 211) - 105) * 0.01
-        m[i] = float((i % 97) - 48) * 0.0002
-        v[i] = float((i % 17) + 1) * 0.000004
+    dst = 0
+    j = 0
+    src = i0 * kdim + p0
+    while i < ib:
+        j = 0
+        while j < pw:
+            out[dst] = d[src + j]
+            dst = dst + 1
+            j = j + 1
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        src = src + kdim
+        i = i + 1
+    while i < T:
+        j = 0
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
         i = i + 1
     return 0
 
-def _cb_maxdiff(a: "list[f32]", b: "list[f32]", n: 'i64') -> 'f64':
-    mx = 0.0
+def _cb_tile_b_w(out: "list[f32]", d: "list[f32]", ndim: 'i64', p0: 'i64',
+                 pw: 'i64', r0: 'i64', br: 'i64', T: 'i64', trans_b: 'i32') -> 'i64':
+    z = 0.0
     i = 0
-    while i < n:
-        d = a[i] - b[i]
-        if d < 0.0:
-            d = 0.0 - d
-        if d > mx:
-            mx = d
+    dst = 0
+    j = 0
+    row = p0 * ndim + r0
+    idx = r0 * ndim + p0
+    while i < pw:
+        if trans_b == 1:
+            idx = r0 * ndim + p0 + i
+            j = 0
+            while j < br:
+                out[dst] = d[idx]
+                dst = dst + 1
+                idx = idx + ndim
+                j = j + 1
+        else:
+            row = (p0 + i) * ndim + r0
+            j = 0
+            while j < br:
+                out[dst] = d[row + j]
+                dst = dst + 1
+                j = j + 1
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
         i = i + 1
-    return mx
-
-def _cb_time() -> 'f64':
-    return time_perf()
-
-# ---- W: hien tai (copy nguyen van tu AdamW.step) -------------------------
-def _cb_w(p: "list[f32]", g: "list[f32]", m: "list[f32]", v: "list[f32]",
-          n: 'i64', coef: 'f64', b1: 'f32', b2: 'f32', step_size: 'f32',
-          bc2s: 'f64', eps: 'f32', wdf: 'f32') -> 'i64':
-    i = 0
-    while i < n:
-        gi = g[i] * coef
-        p[i] = p[i] * wdf
-        m[i] = b1 * m[i] + (1.0 - b1) * gi
-        v[i] = b2 * v[i] + (1.0 - b2) * gi * gi
-        denom = sqrt(v[i]) / bc2s + eps
-        p[i] = p[i] - step_size * m[i] / denom
-        i = i + 1
-    return 0
-
-# ---- V1: hoist (1-b1), (1-b2) -------------------------------------------
-def _cb_v1(p: "list[f32]", g: "list[f32]", m: "list[f32]", v: "list[f32]",
-           n: 'i64', coef: 'f64', b1: 'f32', b2: 'f32', step_size: 'f32',
-           bc2s: 'f64', eps: 'f32', wdf: 'f32') -> 'i64':
-    ob1 = 1.0 - b1
-    ob2 = 1.0 - b2
-    i = 0
-    while i < n:
-        gi = g[i] * coef
-        p[i] = p[i] * wdf
-        m[i] = b1 * m[i] + ob1 * gi
-        v[i] = b2 * v[i] + ob2 * gi * gi
-        denom = sqrt(v[i]) / bc2s + eps
-        p[i] = p[i] - step_size * m[i] / denom
+    while i < T:
+        j = 0
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
         i = i + 1
     return 0
 
-# ---- V2: V1 + gop p (doc/ghi 1 lan) ------------------------------------
-def _cb_v2(p: "list[f32]", g: "list[f32]", m: "list[f32]", v: "list[f32]",
-           n: 'i64', coef: 'f64', b1: 'f32', b2: 'f32', step_size: 'f32',
-           bc2s: 'f64', eps: 'f32', wdf: 'f32') -> 'i64':
-    ob1 = 1.0 - b1
-    ob2 = 1.0 - b2
-    i = 0
-    while i < n:
-        gi = g[i] * coef
-        m[i] = b1 * m[i] + ob1 * gi
-        v[i] = b2 * v[i] + ob2 * gi * gi
-        denom = sqrt(v[i]) / bc2s + eps
-        p[i] = p[i] * wdf - step_size * m[i] / denom
-        i = i + 1
+def _cb_tile_a_at_w(out: "list[f32]", d: "list[f32]", mdim: 'i64', i0: 'i64',
+                    ib: 'i64', p0: 'i64', pw: 'i64', T: 'i64') -> 'i64':
+    z = 0.0
+    r = 0
+    t = 0
+    dst = 0
+    src = p0 * mdim + i0
+    while r < ib:
+        t = 0
+        src = p0 * mdim + i0 + r
+        while t < pw:
+            out[dst] = d[src]
+            dst = dst + 1
+            src = src + mdim
+            t = t + 1
+        while t < T:
+            out[dst] = z
+            dst = dst + 1
+            t = t + 1
+        r = r + 1
+    while r < T:
+        t = 0
+        while t < T:
+            out[dst] = z
+            dst = dst + 1
+            t = t + 1
+        r = r + 1
     return 0
 
-# ---- V3: V2 + gop 2 div thanh 1 ----------------------------------------
-def _cb_v3(p: "list[f32]", g: "list[f32]", m: "list[f32]", v: "list[f32]",
-           n: 'i64', coef: 'f64', b1: 'f32', b2: 'f32', step_size: 'f32',
-           bc2s: 'f64', eps: 'f32', wdf: 'f32') -> 'i64':
-    ob1 = 1.0 - b1
-    ob2 = 1.0 - b2
-    epss = eps * bc2s
-    ks = step_size * bc2s
-    i = 0
-    while i < n:
-        gi = g[i] * coef
-        m[i] = b1 * m[i] + ob1 * gi
-        v[i] = b2 * v[i] + ob2 * gi * gi
-        # m / (sqrt(v)/bc2s + eps) == (m*bc2s) / (sqrt(v) + eps*bc2s)
-        p[i] = p[i] * wdf - ks * m[i] / (sqrt(v[i]) + epss)
-        i = i + 1
+# acc vung that vao C — index chay (copy _acc_f tu simd_matmul, giong CG)
+def _cb_acc_f(cd: "list[f32]", Ct: "list[f32]", n: 'i64', i0: 'i64',
+              ib: 'i64', j0: 'i64', jb: 'i64', T: 'i64') -> 'i64':
+    r = 0
+    bc = i0 * n + j0
+    bt = T * 0
+    c = 0
+    while r < ib:
+        bc = i0 * n + j0 + r * n
+        bt = r * T
+        c = 0
+        while c < jb:
+            cd[bc] = cd[bc] + Ct[bt]
+            bc = bc + 1
+            bt = bt + 1
+            c = c + 1
+        r = r + 1
     return 0
+
+# ---- cac pha (typed params -> native i64, khong boxing) ---------------------
+
+# BUILD: lap lai dung cau truc _smm_core — khong gemm, khong acc.
+def _cb_build_pass(ad: "list[f32]", bd: "list[f32]", m: 'i64', n: 'i64',
+                   k: 'i64', ndim: 'i64', trans_b: 'i32', trans_a: 'i32',
+                   ta: "list[f32]", tb: "list[f32]", T: 'i64') -> 'i64':
+    w = 0
+    i0 = 0
+    while i0 < m:
+        ib = _cb_imin(T, m - i0)
+        p0 = 0
+        while p0 < k:
+            pw = _cb_imin(T, k - p0)
+            if trans_a == 1:
+                r1 = _cb_tile_a_at_w(ta, ad, m, i0, ib, p0, pw, T)
+            else:
+                r1 = _cb_tile_a_w(ta, ad, k, i0, ib, p0, pw, T)
+            j0 = 0
+            while j0 < n:
+                jb = _cb_imin(T, n - j0)
+                r2 = _cb_tile_b_w(tb, bd, ndim, p0, pw, j0, jb, T, trans_b)
+                w = w + 1
+                j0 = j0 + jb
+            p0 = p0 + pw
+        i0 = i0 + ib
+    return w
+
+# GEMM: reps*ng goi simd_gemm lien tuc tren dung 3 buffer — per-pass = tong/reps
+def _cb_gemm_pass(ng: 'i64', reps: 'i64', ta: "list[f32]", tb: "list[f32]",
+                  ct: "list[f32]", T: 'i64') -> 'i64':
+    r = 0
+    while r < reps:
+        i = 0
+        while i < ng:
+            simd_gemm(ta, tb, ct, T)
+            i = i + 1
+        r = r + 1
+    return ng * reps
+
+# ACC: moi (i0,p0,j0) tich luy vung that — giong vong _smm_core.
+def _cb_acc_pass(cd: "list[f32]", ct: "list[f32]", m: 'i64', n: 'i64',
+                 k: 'i64', T: 'i64') -> 'i64':
+    w = 0
+    i0 = 0
+    while i0 < m:
+        ib = _cb_imin(T, m - i0)
+        p0 = 0
+        while p0 < k:
+            pw = _cb_imin(T, k - p0)
+            j0 = 0
+            while j0 < n:
+                jb = _cb_imin(T, n - j0)
+                r1 = _cb_acc_f(cd, ct, n, i0, ib, j0, jb, T)
+                w = w + 1
+                j0 = j0 + jb
+            p0 = p0 + pw
+        i0 = i0 + ib
+    return w
 
 def main() -> 'i32':
-    N = 124000000
-    print("CB AdamW n=" + str(N))
-    p = _cb_zeros(N)
-    g = _cb_zeros(N)
-    m = _cb_zeros(N)
-    v = _cb_zeros(N)
-    pref = _cb_zeros(N)
-    i = 0
-    while i < N:
-        g[i] = float((i % 131) - 65) * 0.0001
-        i = i + 1
-    coef = 1.0
-    b1 = 0.9
-    b2 = 0.999
-    step_size = 0.05
-    bc2s = 0.0316
-    eps = 0.00000001
-    wdf = 1.0
+    cfg = load_ints(CFG)
+    mode = 0
+    if len(cfg) > 0:
+        mode = cfg[0]
+    print("CB mode=" + str(mode))
 
-    # ---- W (tham chieu) ----
-    _cb_seed(p, m, v, N)
-    tW = 1.0e18
-    for rep in range(2):
-        if rep > 0:
-            _cb_seed(p, m, v, N)
-        t0 = _cb_time()
-        _cb_w(p, g, m, v, N, coef, b1, b2, step_size, bc2s, eps, wdf)
-        t1 = _cb_time()
-        if (t1 - t0) < tW:
-            tW = t1 - t0
-    # luu p cua W lam tham chieu (chay lai 1 lan nua tren du lieu seed)
-    _cb_seed(p, m, v, N)
-    _cb_w(p, g, m, v, N, coef, b1, b2, step_size, bc2s, eps, wdf)
-    j = 0
-    while j < N:
-        pref[j] = p[j]
-        j = j + 1
-    print("CB[W ] t=" + str(tW) + "s  ns/ptu=" + str(tW * 1000000000.0 / float(N)))
+    nq = 1024
+    h = 768
+    V = 50257
+    four = 3072
 
-    # ---- V1 ----
-    _cb_seed(p, m, v, N)
-    tV = 1.0e18
-    for rep in range(2):
-        if rep > 0:
-            _cb_seed(p, m, v, N)
-        t0 = _cb_time()
-        _cb_v1(p, g, m, v, N, coef, b1, b2, step_size, bc2s, eps, wdf)
-        t1 = _cb_time()
-        if (t1 - t0) < tV:
-            tV = t1 - t0
-    dV = _cb_maxdiff(p, pref, N)
-    print("CB[V1] t=" + str(tV) + "s  ns/ptu=" + str(tV * 1000000000.0 / float(N))
-          + "  speedup=" + str(tW / tV) + "  maxdiff(W)=" + str(dV))
+    # 4 shape P7b: m, n, k, ndim, trans_b, trans_a + label (giong CG)
+    ms = []
+    ns = []
+    ks = []
+    nds = []
+    tbs = []
+    tas = []
+    nms = []
+    ms.append(nq)
+    ns.append(h)
+    ks.append(four)
+    nds.append(four)
+    tbs.append(1)
+    tas.append(0)
+    nms.append("S1 dx1  [1024x768x3072]")
+    ms.append(nq)
+    ns.append(h)
+    ks.append(V)
+    nds.append(h)
+    tbs.append(0)
+    tas.append(0)
+    nms.append("S3 dxf  [1024x768x50257]")
+    ms.append(V)
+    ns.append(h)
+    ks.append(nq)
+    nds.append(h)
+    tbs.append(0)
+    tas.append(1)
+    nms.append("S4 dwte [50257x768x1024]")
+    ms.append(nq)
+    ns.append(V)
+    ks.append(h)
+    nds.append(h)
+    tbs.append(1)
+    tas.append(0)
+    nms.append("S5 lgts [1024x50257x768]")
 
-    # ---- V2 ----
-    _cb_seed(p, m, v, N)
-    tV = 1.0e18
-    for rep in range(2):
-        if rep > 0:
-            _cb_seed(p, m, v, N)
-        t0 = _cb_time()
-        _cb_v2(p, g, m, v, N, coef, b1, b2, step_size, bc2s, eps, wdf)
-        t1 = _cb_time()
-        if (t1 - t0) < tV:
-            tV = t1 - t0
-    dV = _cb_maxdiff(p, pref, N)
-    print("CB[V2] t=" + str(tV) + "s  ns/ptu=" + str(tV * 1000000000.0 / float(N))
-          + "  speedup=" + str(tW / tV) + "  maxdiff(W)=" + str(dV))
+    # grid T (da boi 64) + buffer dung chung theo T
+    gts = []
+    gts.append(256)
+    gts.append(384)
+    gts.append(512)
+    gts.append(768)
+    gts.append(1024)
+    # 4 tensor dau vao dung chung (giong CG mode 0/2/3)
+    A1 = t_zeros([nq, four])
+    B1 = t_zeros([h, four])
+    A34 = t_zeros([nq, V])
+    B35 = t_zeros([V, h])
+    D45 = t_zeros([nq, h])
+    aas = []
+    bas = []
+    aas.append(A1)
+    aas.append(A34)
+    aas.append(A34)
+    aas.append(D45)
+    bas.append(B1)
+    bas.append(B35)
+    bas.append(D45)
+    bas.append(B35)
 
-    # ---- V3 ----
-    _cb_seed(p, m, v, N)
-    tV = 1.0e18
-    for rep in range(2):
-        if rep > 0:
-            _cb_seed(p, m, v, N)
-        t0 = _cb_time()
-        _cb_v3(p, g, m, v, N, coef, b1, b2, step_size, bc2s, eps, wdf)
-        t1 = _cb_time()
-        if (t1 - t0) < tV:
-            tV = t1 - t0
-    dV = _cb_maxdiff(p, pref, N)
-    print("CB[V3] t=" + str(tV) + "s  ns/ptu=" + str(tV * 1000000000.0 / float(N))
-          + "  speedup=" + str(tW / tV) + "  maxdiff(W)=" + str(dV))
+    # best SUM theo shape (danh gia gate) + T tuong ung
+    best_s = []
+    best_t = []
+    si = 0
+    while si < 4:
+        best_s.append(1.0e18)
+        best_t.append(0)
+        si = si + 1
 
+    # ---- grid: shape x T -> ALLOC/BUILD/GEMM/ACC/SUM ------------------------
+    idx = 0
+    while idx < 4:
+        m = ms[idx]
+        n = ns[idx]
+        k = ks[idx]
+        ndim = nds[idx]
+        tb = tbs[idx]
+        ta = tas[idx]
+        nm = nms[idx]
+        gi = 0
+        while gi < len(gts):
+            T = gts[gi]
+            # buffer 3 pha theo T — lap lai dung mau CG mode 0 (nested list[f32]
+            # trong list bi compiler giong loi P6 GD4 -> KHONG dung list[list])
+            At = _cb_zeros(T * T)
+            Bt = _cb_zeros(T * T)
+            Ct = _cb_zeros(T * T)
+            # ng = ceil(m,T)*ceil(k,T)*ceil(n,T) — tinh thu cong
+            cm = 0
+            r = 0
+            while r < m:
+                r = r + T
+                cm = cm + 1
+            ck = 0
+            r = 0
+            while r < k:
+                r = r + T
+                ck = ck + 1
+            cn = 0
+            r = 0
+            while r < n:
+                r = r + T
+                cn = cn + 1
+            ng = cm * ck * cn
+            pad = float(ng) * float(T) * float(T) * float(T) / (float(m) * float(n) * float(k))
+
+            # ALLOC: C = t_zeros + 3 buffer (At/Bt/Ct dung chung theo T -> chi C)
+            t0 = now_ms()
+            C = t_zeros([m, n])
+            cd = C.data
+            t1 = now_ms()
+            v_al = t1 - t0
+
+            # BUILD
+            t0 = now_ms()
+            rb = _cb_build_pass(aas[idx].data, bas[idx].data, m, n, k, ndim,
+                                tb, ta, At, Bt, T)
+            t1 = now_ms()
+            v_bd = t1 - t0
+
+            # GEMM: >=100 goi, toi da 4 reps — per-pass = tong/reps
+            reps = 1
+            while reps * ng < 100 and reps < 4:
+                reps = reps + 1
+            t0 = now_ms()
+            rg = _cb_gemm_pass(ng, reps, At, Bt, Ct, T)
+            t1 = now_ms()
+            v_gm = (t1 - t0) / float(reps)
+
+            # ACC
+            t0 = now_ms()
+            ra = _cb_acc_pass(cd, Ct, m, n, k, T)
+            t1 = now_ms()
+            v_ac = t1 - t0
+
+            v_sum = v_al + v_bd + v_gm + v_ac
+            if v_sum < best_s[idx]:
+                best_s[idx] = v_sum
+                best_t[idx] = T
+            print("CB0 " + nm + " T=" + str(T) + " ng=" + str(ng)
+                  + " pad=" + str(pad) + "x"
+                  + " ALLOC=" + str(v_al) + " BUILD=" + str(v_bd)
+                  + " GEMM=" + str(v_gm) + " ACC=" + str(v_ac)
+                  + " SUM=" + str(v_sum) + " ms"
+                  + "  GEMM_GFP=" + str(2.0 * float(ng) * float(T) * float(T) * float(T) / (v_gm * 1000000.0))
+                  + "  calls(build=" + str(rb) + " gemm=" + str(rg) + " acc=" + str(ra) + ")")
+            gi = gi + 1
+        idx = idx + 1
+
+    # ---- FULL wrapper that (production T=768) best-of-2 — tham chieu ---------
+    idx = 0
+    while idx < 4:
+        m = ms[idx]
+        n = ns[idx]
+        k = ks[idx]
+        nm = nms[idx]
+        t0 = now_ms()
+        if tas[idx] == 1:
+            cF = smm_fwd_at(aas[idx], bas[idx], m, n, k)
+        else:
+            if tbs[idx] == 1:
+                cF = smm_dot(aas[idx], bas[idx], m, n, k)
+            else:
+                cF = smm_fwd(aas[idx], bas[idx], m, n, k)
+        t1 = now_ms()
+        v_fv = t1 - t0
+        t0 = now_ms()
+        if tas[idx] == 1:
+            cF = smm_fwd_at(aas[idx], bas[idx], m, n, k)
+        else:
+            if tbs[idx] == 1:
+                cF = smm_dot(aas[idx], bas[idx], m, n, k)
+            else:
+                cF = smm_fwd(aas[idx], bas[idx], m, n, k)
+        t1 = now_ms()
+        v_fv = _cb_min2(v_fv, t1 - t0)
+        Tp = _cb_imin(_cb_tilek(k), _cb_ru64(_cb_imin(m, n)))
+        print("CB1 " + nm + " FULL_prod(T=" + str(Tp) + ")=" + str(v_fv)
+              + " ms  GFLOPS=" + str(2.0 * float(m) * float(n) * float(k) / (v_fv * 1000000.0)))
+        idx = idx + 1
+
+    # ---- ket luan gate: best T vs FULL production ---------------------------
+    idx = 0
+    while idx < 4:
+        print("CB2 " + nms[idx] + " best_T=" + str(best_t[idx])
+              + " best_SUM=" + str(best_s[idx]) + " ms")
+        idx = idx + 1
     print("CB done")
     return 0

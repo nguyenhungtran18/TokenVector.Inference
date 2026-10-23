@@ -1901,6 +1901,29 @@ out/ch.exe && python tools/probe_threads.py out/ch.exe 2
 
 **Trạng thái git:** probe CH + `out/ch_run.log` + roadmap §14 + HANDOFF §0.37/§0.38 — commit trong chương này. Chưa wire, không đổi code train → không cần gate 84/84.
 
+### 0.39 M3b — T-DISPATCH GIẾT PAD ĐÃ ĐO: BÁC BỎ (2026-10-23)
+
+**Probe:** `tv/tests/simd_probe_cb.tkv` (compile sạch → `out/cb.exe`, log `out/cb_run.log`). Grid T = 256/384/512/768/1024 trên 4 shape P7b, mỗi (shape, T) đo ALLOC/BUILD/GEMM(per-pass, ≥100 calls)/ACC → SUM thủ công; tham chiếu = full-wrapper production T=768 best-of-2. 0 thay đổi code train. Buffer 3 pha cấp phát trong vòng lặp (bug compiler nested list[f32] — lần chạy đầu crash NullReference với list[list[f32]] index, sửa bằng cách copy đúng cấu trúc CG mode 0).
+
+**Số đo (ms, 1 lần gọi wrapper; FULL_prod đo thật S1 94 / S3 968 / S4 1703 / S5 1500 — khớp CG mode 3 trong ±3%):**
+
+| Shape | T=256 | T=384 | T=512 | T=768 (prod) | T=1024 | GEMM GF @256 vs @768 |
+|---|---|---|---|---|---|---|
+| S1 dx1 | 156 | 150.7 | 92.8 | **89.8** | **70.8** | 302 vs 617 |
+| S3 dxf | 1781 | 1313 | 1125 | **953** | **750** | 282 vs 586 |
+| S4 dwte | 2375 | 2031 | 1750 | **1657** | **1407** | 281 vs 549 |
+| S5 lgts | 2375 | 1937 | 1734 | **1438** | **1180** | 282 vs 546 |
+
+**CHỐT:**
+1. **Pad 1.0× (T=256) là TỆ nhất cả 4 shape** — đảo ngược giả định §14.5 ("T=256 pad 1.0 nhưng calls ×18 — phải đo"). Calls ×18 không phải vấn đề chính; **kernel simd_gemm mất throughput ở tile nhỏ**: 282 GFLOP/s @256, 380 @384, 485 @512, 546-616 @768. GEMM phase S3 @T=256 = 281 ms dù flop hữu ích chỉ 66% của @T=768 (204 ms) → hiệu suất ~0.47×, bù không nổi BUILD+ACC tăng theo số tile.
+2. **T=1024 (pad 1.36×) thắng SUM cả 4 shape nhưng chỉ 1.18-1.33×** (S1 1.27, S3 1.27, S4 1.18, S5 1.22). Quá sát ngưỡng wire 1.3× trên **SUM thủ công** (chưa phải wrapper thật — CG đã thấy RESID in-context); wire thật phải sửa 3 đường hard-code `T = _imin(_tilek(k), _roundup64(_imin(m,n)))` (`_smm_core`, `_p58_core_simple`, `_smm_core_pd`) + wave-12 T=1024 tốn 24 buffer × 4 MB = 96 MB (alloc ~2×). Theo §13.2 — không wire trên số mỏng + chưa đo wrapper thật.
+3. **Quyết định: KHÔNG wire.** 3 đường core giữ nguyên T=768 rule. Lever M3b duy nhất còn ghi nhận: đo lại **full-wrapper thật ở T=1024** (không phải SUM tách pha) nếu quay lại — nhưng ưu tiên hạ dưới M3c.
+4. **Bài học:** (a) "giết pad" đổi GEMM lấy BUILD+ACC và kernel throughput là hàm của T — pad 1.5× ở T=768 **rẻ hơn** pad 1.0× ở T=256 trong wrapper này; (b) SUM thủ công tách pha ≠ full-wrapper — mọi wire phải đo wrapper thật; (c) pattern "grid T × 4 shape + FULL_prod tham chiếu" của probe CB dùng lại được.
+
+**Hệ quả menu:** M3b ❌ đóng. Cửa sổ còn lại theo thứ tự: **M3c tái dùng buffer tile/C** (S4/S5 ALLOC 375-422 ms/call — lever đo được duy nhất còn lại) → parallel-ACC biến thể gốc (chỉ S4/S5; S3 p-reduction chặn — chưa đo) → M1 OpenBLAS.
+
+**Trạng thái git:** probe CB + `_cb_cfg.txt` (untracked theo tiền lệ `_ch_cfg.txt`) + `out/cb_run.log` + roadmap §14.4/§14.5/§14.6 + HANDOFF §0.39 — commit trong chương này. Chưa wire, không đổi code train → không cần gate 84/84.
+
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
 
 | Gate | Command / Path | Result |
