@@ -1875,6 +1875,32 @@ D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_ch.tkv out/ch.exe ma
 out/ch.exe && python tools/probe_threads.py out/ch.exe 2
 ```
 
+### 0.38 M3a — PIPELINE build(w+1)∥replay(w) ĐÃ ĐO: BIT-EXACT NHƯNG SPEEDUP BUST — KHÔNG WIRE (2026-10-23)
+
+**Probe:** `tv/tests/simd_probe_ch.tkv` (compile sạch từ source → `out/ch.exe`, log `out/ch_run.log`). Pipeline double-buffer theo đúng thiết kế §0.37: worker `_ch_one` tự derive i0/p0/j0 từ gidx (giải clobber), 2 set buffer 48 list, handle hA*/hB* reassign theo wave le/chan. Best-of-2, cùng phiên, 4 shape P7b; baseline = `smm_*_pd` production.
+
+**Số đo (1 lần gọi wrapper, ms):**
+
+| Shape | base PD | pipeline | speedup | BIT |
+|---|---|---|---|---|
+| S3 dxf [1024×768×50257] | 812 | 797 | **1.02×** | **0.0** |
+| S4 dwte [50257×768×1024] | 1235 | 1312 | **0.94×** ❌ | **0.0** |
+| S5 logits [1024×50257×768] | 1359 | 1234 | **1.10×** | **0.0** |
+| S1 dx1 [1024×768×3072] | 94 | 219 | 0.43× (serial route — pipeline không nham) | **0.0** |
+| alloc 48 buffer (T=768) | — | **187 ms** | — | — |
+
+**CHỐT:**
+1. **Pipeline BIT-EXACT 0.0 cả 4 shape** — thiết kế §0.37 đúng về kỹ thuật: worker-derive + set disjoint + handle reassign chạy ổn trên compiler này (pattern dùng lại được).
+2. **NHƯNG KHÔNG ĐẠT NGƯỠNG WIRE ≥1.3×** (S3 1.02, S4 0.94 chậm hơn, S5 1.10). Chi phí 48 buffer = 187 ms/call (vs 24 của PD, +93 ms) ăn hết phần lãi nhỏ.
+3. **Nguyên nhân — ĐẢO NGƯỢC kỳ vọng 1.6-1.7× của §0.37:** trong đường PD, build ĐÃ song song hoá bởi 12 worker (BH GĐ3) → pipeline chỉ ẩn được build(w+1) vốn đã nhỏ (~7 ms/wave so với replay ~74 ms/wave cho S3: 812 ms / 11 wave). Bottleneck thật = **replay tuần tự trên main**: 12 × (simd_gemm T=768 + acc interpreted) mỗi wave; simd_gemm T≥96 re-entrancy (`g_job` không lock, CG mode 4) cấm chạy đồng thời → không song song được replay theo cách này. S4 âm (0.94×): oversubscription 12 builder + pool ~21 thread trên 28T làm overlap mất hiệu lực.
+4. **Quyết định: KHÔNG wire** — `_smm_core_pd` giữ nguyên serial-wave. Đúng kỷ luật §13.2 (BIT=0.0 đạt, speedup bust).
+
+**Hệ quả menu (roadmap §14.5 đã cập nhật):** M3a-pipeline ❌ đóng. Cửa sổ còn lại theo thứ tự: **M3b T-dispatch giết pad 1.5×** (lever thật cho S3 — pad chính là thứ làm nó thua torch 1.57×) → **M3c tái dùng buffer tile/C** (lever thật cho S4/S5 — ALLOC ~400 ms/call; pipeline bust xác nhận alloc là thực) → parallel-ACC biến thể gốc (chỉ khả thi S4/S5 slot rời rạc; **S3 bị p-reduction chặn**: 12 p-tile cộng cùng 1 block — chưa đo). Trần "S3 938 → ~250-300 ms" của §0.37 **không còn đứng** — đã ghi chú trong roadmap.
+
+**Bài học:** (1) pipeline overlap chỉ có ý nghĩa khi phase bị ẩn lớn hơn phase chính; (2) số ước lượng 1.6-1.7× xuất phát từ giả định "build là bottleneck" — bị chính số CG (BUILD đã parallel trong PD) phản bác ngay khi đo; (3) probe CH chạy sạch BIT=0.0 ngay lần đầu xác nhận worker-derive + double-buffer an toàn.
+
+**Trạng thái git:** probe CH + `out/ch_run.log` + roadmap §14 + HANDOFF §0.37/§0.38 — commit trong chương này. Chưa wire, không đổi code train → không cần gate 84/84.
+
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
 
 | Gate | Command / Path | Result |

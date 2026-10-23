@@ -255,6 +255,7 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 | `tv/tests/simd_probe_cc.tkv` | P6 GĐ13: probe chẩn đoán AdamW parallel lần 3 @124M (V0 serial / V1 OWN-seg / V2 SHARED+readback / V3 OWN+merge / V4 copy / **V5 REGISTERS**) — **kết quả: V5 (toàn bộ phep toan trong thanh ghi, ghi p/m/v 1 lần, KHÔNG read-back) vẫn BUST 0.33× ≈ V2 0.30× → ĐÓNG GĐ13** (bệnh = phep toan + ghi list CHUNG, không phải read-back; xem §12 dòng GĐ13) |
 | `tv/tests/simd_probe_cd.tkv` | **P7b ĐÃ ĐO**: tkv `simd_gemm` vs `torch.matmul` cùng shape cùng phiên — kernel tkv **chậm 6-14×** torch (standalone `simd_probe_cd` tái xác nhận: 93/968/1734/1562 ms vs 6.5/134/234/248; wrapper PAR12 chỉ ~1.25× → khoảng cách nằm trong KERNEL, không phải driver → chốt parity phải đi qua native/C (§13.3 P7b) — **~~chốt này ĐẢO NGƯỢC bởi probe CG (§14.5): wrapper-bound, kernel đã parity~~** |
 | `tv/tests/simd_probe_cg.tkv` | **M3 ĐÃ ĐO 2026-10-23** — phân rã wrapper 4 shape P7b thành ALLOC/BUILD/GEMM/ACC (mode 0) + 3 phép cpu/wall qua `tools/probe_threads.py` (GEMM ratio **22.64**, BUILD ratio **1.00**, FULL ratio **3.97**) + re-entrancy (mode 4): 2 thread gọi `simd_gemm` T=192 đồng thời → **HANG > 90 s** (`tkv_run_mt` dùng `g_job` global không lock — đúng cảnh báo simd_matmul:419/BH:11). **CHỐT: GEMM phase 567-589 GFLOP/s pad ≈ torch; BUILD+ACC+ALLOC = 76-89% wrapper (đơn luồng) + pad 1.5× → wrapper-bound, KHÔNG phải kernel (§14.5)** |
+| `tv/tests/simd_probe_ch.tkv` | **M3a ĐÃ ĐO 2026-10-23 — BÁC BỎ** — pipeline double-buffer build(w+1)∥replay(w) cho `_smm_core_pd` (worker tự derive i0/p0/j0, 2 set 48 buffer, handle reassign theo wave le/chan): **BIT-EXACT 0.0 cả 4 shape** nhưng speedup S3 1.02× / S4 0.94× / S5 1.10× + alloc 48 buffer 187 ms → dưới ngưỡng wire 1.3×. PD đã song song build → pipeline chỉ ẩn build(w+1); bottleneck thật = replay tuần tự (simd_gemm re-entrancy) → **kỳ vọng 1.6-1.7× đảo ngược** (§14.5, HANDOFF §0.38) |
 
 ---
 
@@ -579,7 +580,7 @@ Resource chưa dùng (xếp theo đòn bẩy):
 
 ### 14.4 Thứ tự đề xuất + KPI gate
 
-0. **M3 — điều tra shape-gap** ✅ **ĐÃ ĐO 2026-10-23 (probe CG, §14.5): nguyên nhân = BUILD/ACC/ALLOC ĐƠN LUỒNG (BUILD ratio 1.00) + pad 1.5×, KHÔNG phải kernel — GEMM phase đã 567-589 GFLOP/s pad ≈ torch, S4/S5 thắng torch tuyệt đối.** Chuyển thành **M3a song song ACC → M3b T-dispatch giết pad → M3c tái dùng buffer** (đều `.tkv`, gate §13.2) → trần ước lượng S3 938 → ~250-300 ms ≈ 3.1-3.7× (chưa đo — phải qua probe).
+0. **M3 — điều tra shape-gap** ✅ **ĐÃ ĐO 2026-10-23 (probe CG, §14.5): nguyên nhân = BUILD/ACC/ALLOC ĐƠN LUỒNG (BUILD ratio 1.00) + pad 1.5×, KHÔNG phải kernel — GEMM phase đã 567-589 GFLOP/s pad ≈ torch, S4/S5 thắng torch tuyệt đối.** Chuyển thành **M3a song song ACC → M3b T-dispatch giết pad → M3c tái dùng buffer** (đều `.tkv`, gate §13.2). **M3a biến thể pipeline ĐÃ ĐO BÁC BỎ 2026-10-23** (probe CH, §14.5): BIT=0.0 nhưng 0.94-1.10× — replay tuần tự là sàn cứng; sang **M3b (giết pad) + M3c (tái dùng buffer)**.
 1. **M1 dlopen OpenBLAS** giữ ABI `simd_gemm` — ~~nếu M3 không đóng được gap~~ **M3 đã đóng phần wrapper; M1 giờ chỉ nhắm residual kernel-side ~1.2-1.6× + "numerics = numerics torch"** → đo lại 4 shape P7b + full step 3 seq + 84/84. Nếu M1 cũng bị chặn (build/deploy/license) → **M2**.
 2. **M4 + M5** (prepack + fused step native) → step tiếp về **~11-13 s ≈ 1.8×**.
 3. **M6 + M7** (fused lm-head + attention épilogue + dispatch theo shape) → mục tiêu dải **1.1-1.3×**; stretch goal 1.0× đòi thêm fused attention-stage kernel.
@@ -621,10 +622,10 @@ Resource chưa dùng (xếp theo đòn bẩy):
 - **M3 ✅ đóng** ở đây.
 - **M1 (dlopen BLAS) + M2 (micro-kernel) hạ ưu tiên:** chỉ nhắm phần kernel-side còn ~1.2-1.6× (pad + arch) — không phải 7×. M1 giữ vai trò "cùng thư viện = cùng numerics torch" cho bước 1.0× cuối.
 - **Mục mới (đều `.tkv`, KHÔNG cần native, gate §13.2):**
-  - **M3a — song song ACC theo wave 12** (reuse pattern dựng-tile-parallel BIT-EXACT BH/PD; ACC xử lý đúng tile đã có): S4 ACC 359 → ~30 ms.
+  - **M3a — song song ACC theo wave 12**: ❌ **biến thể pipeline double-buffer (§0.37) ĐÃ ĐO BÁC BỎ 2026-10-23** (probe CH): BIT=0.0 nhưng speedup 0.94-1.10× (S3 1.02/S4 0.94/S5 1.10), alloc 48 buffer 187 ms — dưới ngưỡng wire 1.3×. PD đã song song build bằng 12 worker nên pipeline chỉ ẩn được build(w+1) (nhỏ); bottleneck thật = replay tuần tự 12×(simd_gemm+acc) trên main, simd_gemm T≥96 re-entrancy cấm song song → **kỳ vọng 1.6-1.7× bị số đo đảo ngược** (HANDOFF §0.38). Biến thể gốc "song song ACC tile rời rạc" chỉ khả thi S4/S5 (slot wave ghi C khác block); **S3 bị p-reduction chặn** (12 p-tile cộng cùng 1 block, giữ bit-exact) — chưa đo.
   - **M3b — T-dispatch giết pad 1.5×** (hiện thực hóa M7): chọn T theo shape class để tile chia hết (S3: T=512 pad 1.33×, T=256 pad 1.0× nhưng calls ×18 — phải gate đo; S4/S5 tính riêng).
   - **M3c — tái dùng buffer tile/C** (S4/S5 ALLOC ~400 ms/call biến mất).
-- **Trần ước lượng (CHƯA ĐO — chỉ là phân tích):** S3 FULL 938 → ~250-300 ms ≈ 3.1-3.7×; S4 1719 → ~500-700 ms; S5 1484 → ~450-650 ms. **Không hứa số bước tổng trước khi đo.**
+- **Trần ước lượng (CHƯA ĐO — chỉ là phân tích):** ~~S3 FULL 938 → ~250-300 ms ≈ 3.1-3.7×~~ **đã bị số đo M3a (probe CH) hạ thấp** — M3a-pipeline bust cho thấy replay tuần tự là sàn cứng; cửa sổ thật còn lại: M3b (giết pad, attack trực tiếp cái làm S3 thua torch 1.57×) + M3c (tái dùng buffer, −400 ms S4/S5). **Không hứa số bước tổng trước khi đo.**
 - **KPI gate diễn giải lại:** "≥250 GFLOP/s mỗi shape" tính cho pha GEMM (pad) → **4/4 ĐÃ VƯỢT** (552-588); gate thật còn lại là FULL-vs-torch theo ms/shape + full step 3 seq + 84/84.
 
 > Lưu ý trung thực: M1-M8 là **phân tích + ước lượng từ số đo đã có** (P3, P7b, BH, GĐ13), CHƯA có số đo mới — mọi bước đều phải qua probe/Gate trước khi wire, đúng kỷ luật §13.2.

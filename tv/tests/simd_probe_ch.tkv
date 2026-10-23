@@ -1,0 +1,837 @@
+# PROBE CH — M3a: PIPELINE build(w+1) || replay(w) CHO `_smm_core_pd`
+#
+# Y TUONG (§0.37): _smm_core_pd hien tai = spawn 12 build -> JOIN toan bo ->
+# replay tuan tu -> wave sau — KHONG overlap. Pipeline: pre-loop spawn wave0
+# (set 0) -> loop: join(w) -> spawn(w+1) vao set (w+1)%2 -> replay(w) tu set
+# w%2 -> w++. Bit-exact by construction: thu tu/noi dung replay giu nguyen
+# (w tang, slot tang = i0->p0->j0); worker ghi set disjoint; worker KHONG
+# simd_gemm (ton re-entrancy, CG mode 4).
+#
+# GIAI VAN DE CLOBBER (§0.37): khoi derive 12 slot se bi clobber khi
+# spawn(w+1) chay truoc replay(w) -> chuyen derive vao worker (_ch_one tu
+# tinh i0/p0/j0 tu gidx; job co field ng + guard gidx >= ng). Main derive lai
+# cho replay (main doc sau khi join — an toan).
+#
+# BUFFER: 48 list (24+24) = +24 list/call vs serial. Do chi phi alloc (mode 3).
+#
+# CHAY (tu goc repo):
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_ch.tkv out/ch.exe main
+#   ./out/ch.exe
+#   python tools/probe_threads.py out/ch.exe 2
+#
+# GATE wire: >=1.3x tren S3/S4/S5 + BIT=0.0 -> simd_matmul._smm_core_pd
+# -> gate 84/84 + trainer_tests + bench 3 seq (ky luat §13.2).
+
+import tv.training.tensor
+import tv.training.simd_matmul
+
+# ---- helpers copy tu simd_matmul (khong dua vao flatten import) ----------
+
+def _ch_imin(a: 'i64', b: 'i64') -> 'i64':
+    if a < b:
+        return a
+    return b
+
+def _ch_ru64(x: 'i64') -> 'i64':
+    r = 64
+    while r < x:
+        r = r + 64
+    return r
+
+def _ch_tilek(k: 'i64') -> 'i64':
+    r = _ch_ru64(k)
+    if r > 1024:
+        r = 1024
+    return r
+
+def _ch_ceil(x: 'i64', T: 'i64') -> 'i64':
+    q = 0
+    r = 0
+    while r < x:
+        r = r + T
+        q = q + 1
+    return q
+
+# chia nguyen — g < 0 -> 0 (slot kem gidx = -1 van tinh duoc an toan)
+def _ch_gq(g: 'i64', stride: 'i64') -> 'i64':
+    if g < 0:
+        return 0
+    q = 0
+    s = g
+    while s >= stride:
+        s = s - stride
+        q = q + 1
+    return q
+
+# gidx -> i0/p0/j0 theo thu tu i0 ngoai, p0, j0 (gidx = i0idx*(n_p*n_j) + p0idx*n_j + j0idx)
+def _ch_i0(g: 'i64', stride: 'i64', T: 'i64') -> 'i64':
+    return _ch_gq(g, stride) * T
+
+def _ch_p0(g: 'i64', stride: 'i64', n_j: 'i64', T: 'i64') -> 'i64':
+    i0idx = _ch_gq(g, stride)
+    rem = g - i0idx * stride
+    return _ch_gq(rem, n_j) * T
+
+def _ch_j0(g: 'i64', stride: 'i64', n_j: 'i64', T: 'i64') -> 'i64':
+    i0idx = _ch_gq(g, stride)
+    rem = g - i0idx * stride
+    p0idx = _ch_gq(rem, n_j)
+    return (rem - p0idx * n_j) * T
+
+# list[f32] zeros — quy uoc append bieu thuc (x - 0.0)/1.0 cho simd_gemm
+def _ch_zeros(n: 'i64') -> 'list[f32]':
+    out = []
+    i = 0
+    while i < n:
+        out.append((float(0) - 0.0) / 1.0)
+        i = i + 1
+    return out
+
+# ---- tile builders (copy nguyen van tu simd_matmul — BIT-EXACT) ----------
+
+def _ch_tile_a_w(out: "list[f32]", d: "list[f32]", kdim: 'i64', i0: 'i64',
+                 ib: 'i64', p0: 'i64', pw: 'i64', T: 'i64') -> 'i64':
+    z = 0.0
+    i = 0
+    dst = 0
+    j = 0
+    src = i0 * kdim + p0
+    while i < ib:
+        j = 0
+        while j < pw:
+            out[dst] = d[src + j]
+            dst = dst + 1
+            j = j + 1
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        src = src + kdim
+        i = i + 1
+    while i < T:
+        j = 0
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        i = i + 1
+    return 0
+
+def _ch_tile_b_w(out: "list[f32]", d: "list[f32]", ndim: 'i64', p0: 'i64',
+                 pw: 'i64', r0: 'i64', br: 'i64', T: 'i64', trans_b: 'i32') -> 'i64':
+    z = 0.0
+    i = 0
+    dst = 0
+    j = 0
+    row = p0 * ndim + r0
+    idx = r0 * ndim + p0
+    while i < pw:
+        if trans_b == 1:
+            idx = r0 * ndim + p0 + i
+            j = 0
+            while j < br:
+                out[dst] = d[idx]
+                dst = dst + 1
+                idx = idx + ndim
+                j = j + 1
+        else:
+            row = (p0 + i) * ndim + r0
+            j = 0
+            while j < br:
+                out[dst] = d[row + j]
+                dst = dst + 1
+                j = j + 1
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        i = i + 1
+    while i < T:
+        j = 0
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        i = i + 1
+    return 0
+
+def _ch_tile_a_at_w(out: "list[f32]", d: "list[f32]", mdim: 'i64', i0: 'i64',
+                    ib: 'i64', p0: 'i64', pw: 'i64', T: 'i64') -> 'i64':
+    z = 0.0
+    r = 0
+    t = 0
+    dst = 0
+    src = p0 * mdim + i0
+    while r < ib:
+        t = 0
+        src = p0 * mdim + i0 + r
+        while t < pw:
+            out[dst] = d[src]
+            dst = dst + 1
+            src = src + mdim
+            t = t + 1
+        while t < T:
+            out[dst] = z
+            dst = dst + 1
+            t = t + 1
+        r = r + 1
+    while r < T:
+        t = 0
+        while t < T:
+            out[dst] = z
+            dst = dst + 1
+            t = t + 1
+        r = r + 1
+    return 0
+
+def _ch_acc_f(cd: "list[f32]", Ct: "list[f32]", n: 'i64', i0: 'i64',
+              ib: 'i64', j0: 'i64', jb: 'i64', T: 'i64') -> 'i64':
+    r = 0
+    bc = i0 * n + j0
+    bt = T * 0
+    c = 0
+    while r < ib:
+        bc = i0 * n + j0 + r * n
+        bt = r * T
+        c = 0
+        while c < jb:
+            cd[bc] = cd[bc] + Ct[bt]
+            bc = bc + 1
+            bt = bt + 1
+            c = c + 1
+        r = r + 1
+    return 0
+
+def _ch_maxdiff(a: "Tensor", b: "Tensor", cnt: 'i64') -> 'f64':
+    dmax = 0.0
+    ad = a.data
+    bd = b.data
+    i = 0
+    while i < cnt:
+        e = ad[i] - bd[i]
+        if e < 0.0:
+            e = -e
+        if e > dmax:
+            dmax = e
+        i = i + 1
+    return dmax
+
+def _ch_fill(t: "Tensor", seed: 'i64') -> 'i64':
+    d = t.data
+    m = len(d)
+    i = 0
+    while i < m:
+        d[i] = float(((i * 131 + seed) % 97) - 48) * 0.0021
+        i = i + 1
+    return m
+
+# ---- PIPELINE worker: derive + build tile TRONG worker (khong clobber) ----
+
+class _ChJob:
+    gidx: 'i64'
+    ng: 'i64'
+    stride: 'i64'
+    n_j: 'i64'
+    ad: "list[f32]"
+    bd: "list[f32]"
+    kdim: 'i64'
+    mdim: 'i64'
+    ndim: 'i64'
+    n: 'i64'
+    T: 'i64'
+    trans_a: 'i32'
+    trans_b: 'i32'
+    ta: "list[f32]"
+    tb: "list[f32]"
+    def __init__(self, gidx: 'i64', ng: 'i64', stride: 'i64', n_j: 'i64',
+                  ad: "list[f32]", bd: "list[f32]", kdim: 'i64', mdim: 'i64',
+                  ndim: 'i64', n: 'i64', T: 'i64', trans_a: 'i32',
+                  trans_b: 'i32', ta: "list[f32]", tb: "list[f32]"):
+        self.gidx = gidx
+        self.ng = ng
+        self.stride = stride
+        self.n_j = n_j
+        self.ad = ad
+        self.bd = bd
+        self.kdim = kdim
+        self.mdim = mdim
+        self.ndim = ndim
+        self.n = n
+        self.T = T
+        self.trans_a = trans_a
+        self.trans_b = trans_b
+        self.ta = ta
+        self.tb = tb
+
+def _ch_one(j: "_ChJob") -> 'i64':
+    # worker: derive i0/p0/j0 TU gidx + build tile — KHONG simd_gemm,
+    # KHONG append (buffer main pre-alloc) -> an toan concurrent
+    if j.gidx >= j.ng:
+        return 0
+    i0 = _ch_i0(j.gidx, j.stride, j.T)
+    ib = _ch_imin(j.T, j.mdim - i0)
+    p0 = _ch_p0(j.gidx, j.stride, j.n_j, j.T)
+    pw = _ch_imin(j.T, j.kdim - p0)
+    j0 = _ch_j0(j.gidx, j.stride, j.n_j, j.T)
+    jb = _ch_imin(j.T, j.n - j0)
+    rv = 0
+    if j.trans_a == 1:
+        rv = _ch_tile_a_at_w(j.ta, j.ad, j.mdim, i0, ib, p0, pw, j.T)
+    else:
+        rv = _ch_tile_a_w(j.ta, j.ad, j.kdim, i0, ib, p0, pw, j.T)
+    rv2 = _ch_tile_b_w(j.tb, j.bd, j.ndim, p0, pw, j0, jb, j.T, j.trans_b)
+    return rv + rv2
+
+def _ch_do(Ct: "list[f32]", ta: "list[f32]", tb: "list[f32]", T: 'i64',
+           cd: "list[f32]", i0: 'i64', ib: 'i64', j0: 'i64', jb: 'i64',
+           n: 'i64') -> 'i64':
+    simd_gemm(ta, tb, Ct, T)
+    rvc = _ch_acc_f(cd, Ct, n, i0, ib, j0, jb, T)
+    return 0
+
+# ---- PIPELINE core: double-buffer build(w+1) || replay(w) ---------------
+# 2 set buffer: set0 = ta0_*, tb0_*; set1 = ta1_*, tb1_*.
+# 2 set handle: hA* (set0/chan le), hB* (set1/chan le). Reassign LOCAL
+# handle giua cac vong (wave = wave + 1 da chung minh local reassign OK).
+# Thu tu: join(w) -> spawn(w+1) vao set (w+1)%2 -> replay(w) tu set w%2.
+
+def _ch_core_pipe(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64',
+                  ndim: 'i64', trans_b: 'i32', trans_a: 'i32') -> "Tensor":
+    T = _ch_imin(_ch_tilek(k), _ch_ru64(_ch_imin(m, n)))
+    n_i = _ch_ceil(m, T)
+    n_p = _ch_ceil(k, T)
+    n_j = _ch_ceil(n, T)
+    C = t_zeros([m, n])
+    cd = C.data
+    Ct = _ch_zeros(T * T)
+    # set 0 (24 buffer)
+    ta0_0 = _ch_zeros(T * T)
+    ta0_1 = _ch_zeros(T * T)
+    ta0_2 = _ch_zeros(T * T)
+    ta0_3 = _ch_zeros(T * T)
+    ta0_4 = _ch_zeros(T * T)
+    ta0_5 = _ch_zeros(T * T)
+    ta0_6 = _ch_zeros(T * T)
+    ta0_7 = _ch_zeros(T * T)
+    ta0_8 = _ch_zeros(T * T)
+    ta0_9 = _ch_zeros(T * T)
+    ta0_10 = _ch_zeros(T * T)
+    ta0_11 = _ch_zeros(T * T)
+    tb0_0 = _ch_zeros(T * T)
+    tb0_1 = _ch_zeros(T * T)
+    tb0_2 = _ch_zeros(T * T)
+    tb0_3 = _ch_zeros(T * T)
+    tb0_4 = _ch_zeros(T * T)
+    tb0_5 = _ch_zeros(T * T)
+    tb0_6 = _ch_zeros(T * T)
+    tb0_7 = _ch_zeros(T * T)
+    tb0_8 = _ch_zeros(T * T)
+    tb0_9 = _ch_zeros(T * T)
+    tb0_10 = _ch_zeros(T * T)
+    tb0_11 = _ch_zeros(T * T)
+    # set 1 (24 buffer)
+    ta1_0 = _ch_zeros(T * T)
+    ta1_1 = _ch_zeros(T * T)
+    ta1_2 = _ch_zeros(T * T)
+    ta1_3 = _ch_zeros(T * T)
+    ta1_4 = _ch_zeros(T * T)
+    ta1_5 = _ch_zeros(T * T)
+    ta1_6 = _ch_zeros(T * T)
+    ta1_7 = _ch_zeros(T * T)
+    ta1_8 = _ch_zeros(T * T)
+    ta1_9 = _ch_zeros(T * T)
+    ta1_10 = _ch_zeros(T * T)
+    ta1_11 = _ch_zeros(T * T)
+    tb1_0 = _ch_zeros(T * T)
+    tb1_1 = _ch_zeros(T * T)
+    tb1_2 = _ch_zeros(T * T)
+    tb1_3 = _ch_zeros(T * T)
+    tb1_4 = _ch_zeros(T * T)
+    tb1_5 = _ch_zeros(T * T)
+    tb1_6 = _ch_zeros(T * T)
+    tb1_7 = _ch_zeros(T * T)
+    tb1_8 = _ch_zeros(T * T)
+    tb1_9 = _ch_zeros(T * T)
+    tb1_10 = _ch_zeros(T * T)
+    tb1_11 = _ch_zeros(T * T)
+    stride = n_p * n_j
+    ng = n_i * stride
+    # PRE-LOOP: spawn wave0 vao set 0 (handle hA*)
+    hA0 = thread_spawn(_ch_one, _ChJob(0, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_0, tb0_0))
+    hA1 = thread_spawn(_ch_one, _ChJob(1, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_1, tb0_1))
+    hA2 = thread_spawn(_ch_one, _ChJob(2, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_2, tb0_2))
+    hA3 = thread_spawn(_ch_one, _ChJob(3, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_3, tb0_3))
+    hA4 = thread_spawn(_ch_one, _ChJob(4, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_4, tb0_4))
+    hA5 = thread_spawn(_ch_one, _ChJob(5, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_5, tb0_5))
+    hA6 = thread_spawn(_ch_one, _ChJob(6, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_6, tb0_6))
+    hA7 = thread_spawn(_ch_one, _ChJob(7, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_7, tb0_7))
+    hA8 = thread_spawn(_ch_one, _ChJob(8, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_8, tb0_8))
+    hA9 = thread_spawn(_ch_one, _ChJob(9, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_9, tb0_9))
+    hA10 = thread_spawn(_ch_one, _ChJob(10, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_10, tb0_10))
+    hA11 = thread_spawn(_ch_one, _ChJob(11, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_11, tb0_11))
+    wave = 0
+    while wave * 12 < ng:
+        # ---- join(w): handle cua wave w (hA neu w le? khong — xem ghi chu) --
+        # wave 0 -> hA* (pre-loop); wave le (1,3,..) -> hB*; wave chan (2,4,..) -> hA*
+        if wave % 2 == 0:
+            rj0 = thread_join(hA0)
+            rj1 = thread_join(hA1)
+            rj2 = thread_join(hA2)
+            rj3 = thread_join(hA3)
+            rj4 = thread_join(hA4)
+            rj5 = thread_join(hA5)
+            rj6 = thread_join(hA6)
+            rj7 = thread_join(hA7)
+            rj8 = thread_join(hA8)
+            rj9 = thread_join(hA9)
+            rj10 = thread_join(hA10)
+            rj11 = thread_join(hA11)
+        else:
+            rj0 = thread_join(hB0)
+            rj1 = thread_join(hB1)
+            rj2 = thread_join(hB2)
+            rj3 = thread_join(hB3)
+            rj4 = thread_join(hB4)
+            rj5 = thread_join(hB5)
+            rj6 = thread_join(hB6)
+            rj7 = thread_join(hB7)
+            rj8 = thread_join(hB8)
+            rj9 = thread_join(hB9)
+            rj10 = thread_join(hB10)
+            rj11 = thread_join(hB11)
+        # ---- spawn(w+1) vao set (w+1)%2, handle: hB neu w+1 le, hA neu w+1 chan
+        if (wave + 1) * 12 < ng:
+            base = (wave + 1) * 12
+            if (wave + 1) % 2 == 1:
+                hB0 = thread_spawn(_ch_one, _ChJob(base + 0, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta1_0, tb1_0))
+                hB1 = thread_spawn(_ch_one, _ChJob(base + 1, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta1_1, tb1_1))
+                hB2 = thread_spawn(_ch_one, _ChJob(base + 2, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta1_2, tb1_2))
+                hB3 = thread_spawn(_ch_one, _ChJob(base + 3, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta1_3, tb1_3))
+                hB4 = thread_spawn(_ch_one, _ChJob(base + 4, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta1_4, tb1_4))
+                hB5 = thread_spawn(_ch_one, _ChJob(base + 5, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta1_5, tb1_5))
+                hB6 = thread_spawn(_ch_one, _ChJob(base + 6, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta1_6, tb1_6))
+                hB7 = thread_spawn(_ch_one, _ChJob(base + 7, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta1_7, tb1_7))
+                hB8 = thread_spawn(_ch_one, _ChJob(base + 8, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta1_8, tb1_8))
+                hB9 = thread_spawn(_ch_one, _ChJob(base + 9, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta1_9, tb1_9))
+                hB10 = thread_spawn(_ch_one, _ChJob(base + 10, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta1_10, tb1_10))
+                hB11 = thread_spawn(_ch_one, _ChJob(base + 11, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta1_11, tb1_11))
+            else:
+                hA0 = thread_spawn(_ch_one, _ChJob(base + 0, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_0, tb0_0))
+                hA1 = thread_spawn(_ch_one, _ChJob(base + 1, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_1, tb0_1))
+                hA2 = thread_spawn(_ch_one, _ChJob(base + 2, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_2, tb0_2))
+                hA3 = thread_spawn(_ch_one, _ChJob(base + 3, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_3, tb0_3))
+                hA4 = thread_spawn(_ch_one, _ChJob(base + 4, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_4, tb0_4))
+                hA5 = thread_spawn(_ch_one, _ChJob(base + 5, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_5, tb0_5))
+                hA6 = thread_spawn(_ch_one, _ChJob(base + 6, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_6, tb0_6))
+                hA7 = thread_spawn(_ch_one, _ChJob(base + 7, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_7, tb0_7))
+                hA8 = thread_spawn(_ch_one, _ChJob(base + 8, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_8, tb0_8))
+                hA9 = thread_spawn(_ch_one, _ChJob(base + 9, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_9, tb0_9))
+                hA10 = thread_spawn(_ch_one, _ChJob(base + 10, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_10, tb0_10))
+                hA11 = thread_spawn(_ch_one, _ChJob(base + 11, ng, stride, n_j, a.data, b.data, k, m, ndim, n, T, trans_a, trans_b, ta0_11, tb0_11))
+        # ---- replay(w) tu set w%2 (main derive lai — an toan sau join) -----
+        base_w = wave * 12
+        if wave % 2 == 0:
+            # replay tu set 0
+            g0 = base_w + 0
+            if g0 < ng:
+                i0 = _ch_i0(g0, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g0, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g0, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta0_0, tb0_0, T, cd, i0, ib, j0, jb, n)
+            g1 = base_w + 1
+            if g1 < ng:
+                i0 = _ch_i0(g1, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g1, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g1, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta0_1, tb0_1, T, cd, i0, ib, j0, jb, n)
+            g2 = base_w + 2
+            if g2 < ng:
+                i0 = _ch_i0(g2, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g2, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g2, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta0_2, tb0_2, T, cd, i0, ib, j0, jb, n)
+            g3 = base_w + 3
+            if g3 < ng:
+                i0 = _ch_i0(g3, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g3, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g3, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta0_3, tb0_3, T, cd, i0, ib, j0, jb, n)
+            g4 = base_w + 4
+            if g4 < ng:
+                i0 = _ch_i0(g4, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g4, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g4, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta0_4, tb0_4, T, cd, i0, ib, j0, jb, n)
+            g5 = base_w + 5
+            if g5 < ng:
+                i0 = _ch_i0(g5, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g5, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g5, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta0_5, tb0_5, T, cd, i0, ib, j0, jb, n)
+            g6 = base_w + 6
+            if g6 < ng:
+                i0 = _ch_i0(g6, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g6, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g6, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta0_6, tb0_6, T, cd, i0, ib, j0, jb, n)
+            g7 = base_w + 7
+            if g7 < ng:
+                i0 = _ch_i0(g7, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g7, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g7, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta0_7, tb0_7, T, cd, i0, ib, j0, jb, n)
+            g8 = base_w + 8
+            if g8 < ng:
+                i0 = _ch_i0(g8, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g8, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g8, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta0_8, tb0_8, T, cd, i0, ib, j0, jb, n)
+            g9 = base_w + 9
+            if g9 < ng:
+                i0 = _ch_i0(g9, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g9, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g9, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta0_9, tb0_9, T, cd, i0, ib, j0, jb, n)
+            g10 = base_w + 10
+            if g10 < ng:
+                i0 = _ch_i0(g10, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g10, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g10, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta0_10, tb0_10, T, cd, i0, ib, j0, jb, n)
+            g11 = base_w + 11
+            if g11 < ng:
+                i0 = _ch_i0(g11, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g11, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g11, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta0_11, tb0_11, T, cd, i0, ib, j0, jb, n)
+        else:
+            # replay tu set 1
+            g0 = base_w + 0
+            if g0 < ng:
+                i0 = _ch_i0(g0, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g0, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g0, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta1_0, tb1_0, T, cd, i0, ib, j0, jb, n)
+            g1 = base_w + 1
+            if g1 < ng:
+                i0 = _ch_i0(g1, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g1, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g1, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta1_1, tb1_1, T, cd, i0, ib, j0, jb, n)
+            g2 = base_w + 2
+            if g2 < ng:
+                i0 = _ch_i0(g2, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g2, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g2, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta1_2, tb1_2, T, cd, i0, ib, j0, jb, n)
+            g3 = base_w + 3
+            if g3 < ng:
+                i0 = _ch_i0(g3, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g3, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g3, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta1_3, tb1_3, T, cd, i0, ib, j0, jb, n)
+            g4 = base_w + 4
+            if g4 < ng:
+                i0 = _ch_i0(g4, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g4, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g4, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta1_4, tb1_4, T, cd, i0, ib, j0, jb, n)
+            g5 = base_w + 5
+            if g5 < ng:
+                i0 = _ch_i0(g5, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g5, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g5, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta1_5, tb1_5, T, cd, i0, ib, j0, jb, n)
+            g6 = base_w + 6
+            if g6 < ng:
+                i0 = _ch_i0(g6, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g6, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g6, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta1_6, tb1_6, T, cd, i0, ib, j0, jb, n)
+            g7 = base_w + 7
+            if g7 < ng:
+                i0 = _ch_i0(g7, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g7, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g7, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta1_7, tb1_7, T, cd, i0, ib, j0, jb, n)
+            g8 = base_w + 8
+            if g8 < ng:
+                i0 = _ch_i0(g8, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g8, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g8, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta1_8, tb1_8, T, cd, i0, ib, j0, jb, n)
+            g9 = base_w + 9
+            if g9 < ng:
+                i0 = _ch_i0(g9, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g9, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g9, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta1_9, tb1_9, T, cd, i0, ib, j0, jb, n)
+            g10 = base_w + 10
+            if g10 < ng:
+                i0 = _ch_i0(g10, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g10, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g10, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta1_10, tb1_10, T, cd, i0, ib, j0, jb, n)
+            g11 = base_w + 11
+            if g11 < ng:
+                i0 = _ch_i0(g11, stride, T)
+                ib = _ch_imin(T, m - i0)
+                p0 = _ch_p0(g11, stride, n_j, T)
+                pw = _ch_imin(T, k - p0)
+                j0 = _ch_j0(g11, stride, n_j, T)
+                jb = _ch_imin(T, n - j0)
+                _ch_do(Ct, ta1_11, tb1_11, T, cd, i0, ib, j0, jb, n)
+        wave = wave + 1
+    return C
+
+# ---- main: do baseline PD vs pipeline + BIT + alloc, 4 shape P7b ---------
+# Moi shape: baseline smm_*_pd best-of-2, pipeline best-of-2, BIT maxdiff,
+# in speedup. S3/S4/S5 la shape WAVE (vol > 40M) — gat wire >= 1.3x + BIT=0.
+# S1 di serial (vol 4.7M < 40M) — pipeline khong nham, ghi nhan suy nghi.
+
+def main() -> 'i64':
+    rs = 2
+    nq = 1024
+    h = 768
+    V = 50257
+    four = 3072
+
+    print("CH M3a: pipeline build(w+1)||replay(w) vs baseline PD")
+
+    # ---- S3 dxf [nq, V] x [V, h] = smm_fwd_pd --------------------------------
+    a3 = t_zeros([nq, V])
+    b3 = t_zeros([V, h])
+    _ch_fill(a3, 3)
+    _ch_fill(b3, 4)
+    v3b = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c3b = smm_fwd_pd(a3, b3, nq, h, V)
+        t1 = now_ms()
+        d3 = t1 - t0
+        if d3 < v3b:
+            v3b = d3
+        kk = kk + 1
+    v3p = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c3p = _ch_core_pipe(a3, b3, nq, h, V, h, 0, 0)
+        t1 = now_ms()
+        d3 = t1 - t0
+        if d3 < v3p:
+            v3p = d3
+        kk = kk + 1
+    bit3 = _ch_maxdiff(c3b, c3p, nq * h)
+    print("S3 dxf    base=" + str(v3b) + " pipe=" + str(v3p) + " sp=" + str(v3b / v3p) + "x BIT=" + str(bit3))
+
+    # ---- S4 dwte [nq, V] x [nq, h] = smm_fwd_at_pd (trans_a=1) --------------
+    a4 = t_zeros([nq, V])
+    b4 = t_zeros([nq, h])
+    _ch_fill(a4, 5)
+    _ch_fill(b4, 6)
+    v4b = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c4b = smm_fwd_at_pd(a4, b4, V, h, nq)
+        t1 = now_ms()
+        d4 = t1 - t0
+        if d4 < v4b:
+            v4b = d4
+        kk = kk + 1
+    v4p = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c4p = _ch_core_pipe(a4, b4, V, h, nq, h, 0, 1)
+        t1 = now_ms()
+        d4 = t1 - t0
+        if d4 < v4p:
+            v4p = d4
+        kk = kk + 1
+    bit4 = _ch_maxdiff(c4b, c4p, V * h)
+    print("S4 dwte   base=" + str(v4b) + " pipe=" + str(v4p) + " sp=" + str(v4b / v4p) + "x BIT=" + str(bit4))
+
+    # ---- S5 logits [nq, h] x [V, h] = smm_dot_pd (trans_b=1) ----------------
+    a5 = t_zeros([nq, h])
+    b5 = t_zeros([V, h])
+    _ch_fill(a5, 7)
+    _ch_fill(b5, 8)
+    v5b = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c5b = smm_dot_pd(a5, b5, nq, V, h)
+        t1 = now_ms()
+        d5 = t1 - t0
+        if d5 < v5b:
+            v5b = d5
+        kk = kk + 1
+    v5p = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c5p = _ch_core_pipe(a5, b5, nq, V, h, h, 1, 0)
+        t1 = now_ms()
+        d5 = t1 - t0
+        if d5 < v5p:
+            v5p = d5
+        kk = kk + 1
+    bit5 = _ch_maxdiff(c5b, c5p, nq * V)
+    print("S5 logits base=" + str(v5b) + " pipe=" + str(v5p) + " sp=" + str(v5b / v5p) + "x BIT=" + str(bit5))
+
+    # ---- S1 dx1 [nq, four] x [h, four] = smm_dot_pd (SERIAL — vol < 40M) ----
+    a1 = t_zeros([nq, four])
+    b1 = t_zeros([h, four])
+    _ch_fill(a1, 1)
+    _ch_fill(b1, 2)
+    v1b = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c1b = smm_dot_pd(a1, b1, nq, h, four)
+        t1 = now_ms()
+        d1 = t1 - t0
+        if d1 < v1b:
+            v1b = d1
+        kk = kk + 1
+    v1p = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c1p = _ch_core_pipe(a1, b1, nq, h, four, four, 1, 0)
+        t1 = now_ms()
+        d1 = t1 - t0
+        if d1 < v1p:
+            v1p = d1
+        kk = kk + 1
+    bit1 = _ch_maxdiff(c1b, c1p, nq * h)
+    print("S1 dx1    base=" + str(v1b) + " pipe=" + str(v1p) + " sp=" + str(v1b / v1p) + "x BIT=" + str(bit1) + " (serial route, pipeline khong nham)")
+
+    # ---- chi phi alloc 48 buffer (T=768) -------------------------------------
+    T7 = 768
+    t0 = now_ms()
+    ba0 = _ch_zeros(T7 * T7)
+    ba1 = _ch_zeros(T7 * T7)
+    ba2 = _ch_zeros(T7 * T7)
+    ba3 = _ch_zeros(T7 * T7)
+    ba4 = _ch_zeros(T7 * T7)
+    ba5 = _ch_zeros(T7 * T7)
+    ba6 = _ch_zeros(T7 * T7)
+    ba7 = _ch_zeros(T7 * T7)
+    ba8 = _ch_zeros(T7 * T7)
+    ba9 = _ch_zeros(T7 * T7)
+    ba10 = _ch_zeros(T7 * T7)
+    ba11 = _ch_zeros(T7 * T7)
+    bb0 = _ch_zeros(T7 * T7)
+    bb1 = _ch_zeros(T7 * T7)
+    bb2 = _ch_zeros(T7 * T7)
+    bb3 = _ch_zeros(T7 * T7)
+    bb4 = _ch_zeros(T7 * T7)
+    bb5 = _ch_zeros(T7 * T7)
+    bb6 = _ch_zeros(T7 * T7)
+    bb7 = _ch_zeros(T7 * T7)
+    bb8 = _ch_zeros(T7 * T7)
+    bb9 = _ch_zeros(T7 * T7)
+    bb10 = _ch_zeros(T7 * T7)
+    bb11 = _ch_zeros(T7 * T7)
+    bc0 = _ch_zeros(T7 * T7)
+    bc1 = _ch_zeros(T7 * T7)
+    bc2 = _ch_zeros(T7 * T7)
+    bc3 = _ch_zeros(T7 * T7)
+    bc4 = _ch_zeros(T7 * T7)
+    bc5 = _ch_zeros(T7 * T7)
+    bc6 = _ch_zeros(T7 * T7)
+    bc7 = _ch_zeros(T7 * T7)
+    bc8 = _ch_zeros(T7 * T7)
+    bc9 = _ch_zeros(T7 * T7)
+    bc10 = _ch_zeros(T7 * T7)
+    bc11 = _ch_zeros(T7 * T7)
+    bd0 = _ch_zeros(T7 * T7)
+    bd1 = _ch_zeros(T7 * T7)
+    bd2 = _ch_zeros(T7 * T7)
+    bd3 = _ch_zeros(T7 * T7)
+    bd4 = _ch_zeros(T7 * T7)
+    bd5 = _ch_zeros(T7 * T7)
+    bd6 = _ch_zeros(T7 * T7)
+    bd7 = _ch_zeros(T7 * T7)
+    bd8 = _ch_zeros(T7 * T7)
+    bd9 = _ch_zeros(T7 * T7)
+    bd10 = _ch_zeros(T7 * T7)
+    bd11 = _ch_zeros(T7 * T7)
+    t1 = now_ms()
+    print("alloc 48 buffer (T=768): " + str(t1 - t0) + " ms")
+
+    print("CH done")
+    return 0
