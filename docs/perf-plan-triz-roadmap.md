@@ -625,8 +625,8 @@ Resource chưa dùng (xếp theo đòn bẩy):
 - **Mục mới (đều `.tkv`, KHÔNG cần native, gate §13.2):**
   - **M3a — song song ACC theo wave 12**: ❌ **biến thể pipeline double-buffer (§0.37) ĐÃ ĐO BÁC BỎ 2026-10-23** (probe CH): BIT=0.0 nhưng speedup 0.94-1.10× (S3 1.02/S4 0.94/S5 1.10), alloc 48 buffer 187 ms — dưới ngưỡng wire 1.3×. PD đã song song build bằng 12 worker nên pipeline chỉ ẩn được build(w+1) (nhỏ); bottleneck thật = replay tuần tự 12×(simd_gemm+acc) trên main, simd_gemm T≥96 re-entrancy cấm song song → **kỳ vọng 1.6-1.7× bị số đo đảo ngược** (HANDOFF §0.38). Biến thể gốc "song song ACC tile rời rạc" chỉ khả thi S4/S5 (slot wave ghi C khác block); **S3 bị p-reduction chặn** (12 p-tile cộng cùng 1 block, giữ bit-exact) — chưa đo.
   - **M3b — T-dispatch giết pad 1.5×**: ❌ **ĐÃ ĐO BÁC BỎ 2026-10-23** (probe CB, §14.6) — grid T=256/384/512/768/1024 trên 4 shape: T=256 (pad 1.0×) **tệ nhất mọi shape** (SUM 156/1781/2375/2375 ms — kernel mất throughput ở tile nhỏ: 282 GFLOP/s @256 vs 546-616 @768); T=1024 (pad 1.36×) thắng SUM cả 4 shape nhưng chỉ 1.18-1.33× — quá mỏng cho ngưỡng wire 1.3×, phải sửa 3 đường code + wave-12 96 MB buffer, wrapper thật chưa đo. **Bài học: "giết pad" chỉ đổi GEMM lấy BUILD+ACC; pad 1.5× giá rẻ hơn pad 1.0× ở wrapper này.** Cửa sổ còn lại: M3c tái dùng buffer.
-  - **M3c — tái dùng buffer tile/C** (S4/S5 ALLOC ~400 ms/call biến mất).
-- **Trần ước lượng (CHƯA ĐO — chỉ là phân tích):** ~~S3 FULL 938 → ~250-300 ms ≈ 3.1-3.7×~~ **đã bị số đo M3a (probe CH) hạ thấp** — M3a-pipeline bust cho thấy replay tuần tự là sàn cứng; ~~M3b (giết pad)~~ **cũng ĐÃ ĐO BÁC BỎ** (probe CB, §14.6). Cửa sổ thật còn lại: **M3c tái dùng buffer** (−375-422 ms ALLOC ở S4/S5 — lever đo được duy nhất còn lại trong `.tkv`) + parallel-ACC biến thể gốc (chỉ S4/S5 slot rời rạc; S3 bị p-reduction chặn — chưa đo). **Không hứa số bước tổng trước khi đo.**
+  - **M3c — tái dùng buffer tile/C**: 🟡 **ĐÃ ĐO — CÓ LỜI (conditional win), CHƯA WIRE** (probe CI, §14.7) — t_zeros C S4/S5 tốn 359-421 ms/call, ZERO_FILL chỉ 63-94 ms (ratio 0.18-0.22 « 0.3) → reuse + zero-fill cắt ~623 ms/bước trên đường PD lm-head. **NHƯNG** cần persistent-C (module-var state — simd_matmul.tkv:430 cấm, sinh từ 2 bug corruption) + BIT=0.0 + gate 84/84. Lever `.tkv` duy nhất còn đo được lời.
+- **Trần ước lượng (CHƯA ĐO — chỉ là phân tích):** ~~S3 FULL 938 → ~250-300 ms ≈ 3.1-3.7×~~ **đã bị số đo M3a (probe CH) hạ thấp** — M3a-pipeline bust cho thấy replay tuần tự là sàn cứng; ~~M3b (giết pad)~~ **cũng ĐÃ ĐO BÁC BỎ** (probe CB, §14.6). Cửa sổ thật còn lại: **M3c tái dùng buffer** (đã đo CÓ LỜI — probe CI, §14.7: −623 ms/bước trên PD lm-head, ratio zero/alloc 0.18-0.22) + parallel-ACC biến thể gốc (chỉ S4/S5 slot rời rạc; S3 bị p-reduction chặn — chưa đo). **Không hứa số bước tổng trước khi đo.**
 - **KPI gate diễn giải lại:** "≥250 GFLOP/s mỗi shape" tính cho pha GEMM (pad) → **4/4 ĐÃ VƯỢT** (552-588); gate thật còn lại là FULL-vs-torch theo ms/shape + full step 3 seq + 84/84.
 
 ### 14.6 M3b — ĐÃ ĐO (2026-10-23, probe CB): T-DISPATCH BÁC BỎ — GIẢM PAD LUÔN LÀM CHẬM HƠN
@@ -657,7 +657,7 @@ Resource chưa dùng (xếp theo đòn bẩy):
 
 **CHỐT — M3b BÁC BỎ:**
 
-1. **Pad 1.0× (T=256) là TỆ nhất trên cả 4 shape** — SUM 156/1781/2375/2375 ms, chậm hơn production T=768 (89.8/953/1657/1438) từ 1.3× đến 2.0×. Giả định gốc "T=256 pad 1.0× nhưng calls ×18 — phải gate đo" đã được đo: **calls ×18 không phải vấn đề, mà là kernel失去了 throughput ở tile nhỏ**.
+1. **Pad 1.0× (T=256) là TỆ nhất trên cả 4 shape** — SUM 156/1781/2375/2375 ms, chậm hơn production T=768 (89.8/953/1657/1438) từ 1.3× đến 2.0×. Giả định gốc "T=256 pad 1.0× nhưng calls ×18 — phải gate đo" đã được đo: **calls ×18 không phải vấn đề, mà là kernel mất throughput ở tile nhỏ**.
 2. **Kernel throughput suy giảm mạnh khi T nhỏ** (GEMM GFLOP/s pad): 282 @256 → 380 @384 → 485 @512 → 546-616 @768 → 529-831 @1024. T=256 cho GEMM phase 281 ms cho S3 dù flop hữu ích chỉ 66% của T=768 (204 ms) — tức **hiệu suất kernel ở T=256 ≈ 0.47× của T=768**, bù không nổi phần BUILD+ACC tăng thêm.
 3. **T=1024 (pad 1.36×) là T tốt nhất đo được** — SUM 70.8/750/1407/1180 ms vs T=768 thủ công 89.8/953/1657/1438 → **T=1024 thắng SUM trên cả 4 shape** (1.18-1.33×), NHUNG không đủ để wire: (a) biên lợi nhuận quá mỏng — lever chính S3 chỉ 1.26× (750 vs 953), cả 4 shape 1.18-1.33× đều quanh ngưỡng wire 1.3×, và đây mới là SUM thủ công chứ không phải wrapper thật; (b) **chưa tính chi phí wire**: `_smm_core`/`_p58_core_simple`/`_smm_core_pd` 3 đường đều hard-code `T = _imin(_tilek(k), _roundup64(_imin(m,n)))` — dispatch T=1024 phải sửa 3 chỗ, mỗi chỗ có wave-12 (pd) với 24 buffer T² (T=1024 → 4 MB/buffer, 24 buffer = 96 MB, alloc ~2× hiện tại); (c) full-wrapper T=1024 chưa đo thật (probe CB chỉ đo SUM thủ công tách pha — wrapper thật có thể lệch do in-context effect, như CG đã thấy RESID). **Kết luận trung thực: T=1024 là ứng viên tốt nhất nhưng là lever MỎNG — 1.18-1.33× ở SUM thủ công, sát ngưỡng wire 1.3×, đòi sửa 3 đường code + wave-12 96 MB buffer, mà wrapper thật chưa đo.** Theo §13.2 ("mọi lever phải đo wrapper thật trước khi wire"), KHÔNG wire trên số SUM thủ công — nhưng đây là lever DUY NHẤT còn mở của M3b, ghi nhận để đo lại đầy đủ nếu quay lại.
 4. **Bài học (đảo ngược giả định §14.5):** "giết pad" bằng T nhỏ đổi lấy GEMM nhanh hơn nhưng BUILD+ACC tăng theo số tile (ng × T²) — và kernel simd_gemm không duy trì throughput ở T nhỏ. Pad 1.5× ở T=768 **rẻ hơn** pad 1.0× ở T=256 trong wrapper này. Kết luận: **không có lever T-dispatch an toàn trên grid đã đo**; nếu quay lại, chỉ số đo T=1024 full-wrapper thật (không phải SUM thủ công) mới quyết định.
@@ -666,4 +666,24 @@ Resource chưa dùng (xếp theo đòn bẩy):
 
 **Bài học chung:** (1) T-dispatch không free — pad chỉ là 1 trong 3 thành phần (GEMM ∝ pad, BUILD ∝ ng×T², ACC ∝ ng×T²), và kernel throughput là hàm của T; (2) SUM thủ công ≠ full-wrapper — mọi wire phải đo wrapper thật; (3) probe CB xác nhận pattern "grid T + so với production" dùng lại được cho mục sau.
 
-> Lưu ý trung thực: M1-M8 là **phân tích + ước lượng từ số đo đã có** (P3, P7b, BH, GĐ13), CHƯA có số đo mới — mọi bước đều phải qua probe/Gate trước khi wire, đúng kỷ luật §13.2.
+### 14.7 M3c — ĐÃ ĐO (2026-10-23, probe CI): RE-USE BUFFER CÓ LỜI — CONDITIONAL WIN, CHƯA WIRE
+
+*Mục tiêu (§14.5 M3c): S4/S5 ALLOC ~400 ms/call biến mất nếu re-use C đã cấp phát. Probe thuần `tv/tests/simd_probe_ci.tkv` (0 thay đổi code train): đo (1) chi phí `t_zeros([m,n])` thật cho 2 shape lớn nhất và (2) chi phí zero-fill C đó (điều kiện bắt buộc của re-use — phải xóa C trước mỗi lần tích lũy). Best-of-3, cùng phiên.*
+
+**Số đo (ms, best-of-3):**
+
+| Shape (C) | ptu (m×n) | ALLOC (`t_zeros`) | ZERO_FILL | ratio zero/alloc |
+|---|---|---|---|---|
+| S5 logits [1024×50257] | 51,463,168 | **421** | **94** | **0.22** |
+| S4 dwte [50257×768] | 38,597,376 | **359** | **63** | **0.18** |
+
+**CHỐT — M3c CÓ LỜI (đảo ngược kết luận "bust-by-construction" chưa đo):**
+
+1. **Zero-fill rẻ hơn alloc 4-5×** (ratio 0.18-0.22, « ngưỡng 0.3 "không lời" giả định). Nguyên nhân: `t_zeros` dựng C bằng vòng interpreted `append(0.0)` (capacity-doubling, ~8 ns/ptu), còn zero-fill ghi thẳng `cd[i] = z` trên List[Single] đã có capacity (~2 ns/ptu). Cùng m×n, cùng thứ tự thao tác trên list — chỉ khác append vs indexed write.
+2. **Lợi nhuận tái tạo:** re-use C + zero-fill mỗi call cắt **(421−94) + (359−63) ≈ 623 ms/bước** trên đường PD lm-head (S5 forward `smm_dot_pd` + S4 backward `smm_fwd_at_pd`) — so với full-step ~36.7 s thì nhỏ (~1.7%), nhưng đây là lever `.tkv` **duy nhất còn đo được lời** sau khi M3a/M3b bust.
+3. **Ràng buộc còn lại (chưa giải quyết — cần quyết định wire):** re-use đòi C persistent qua các call → **module-variable mutable state** — đúng thứ `simd_matmul.tkv:430` cấm ("không gán lại biến module", sinh từ 2 bug corruption). Đường an toàn hơn: caller truyền scratch-Tensor vào wrapper (nhưng 3 call site ở `gpt2_ref.tkv:497/1322/1334` đều gán C vào biến sống trên tape — không phải transient). Bất kỳ đường nào cũng phải qua **BIT=0.0 + gate 84/84 + full step 3 seq**.
+4. **Kết luận: CHƯA wire ngay** — lever đã đo CÓ LỜI nhưng vướng ràng buộc state; chờ quyết định cách giữ state (module-var có kiểm chứng vs scratch-passing) trước khi viết code. Nếu wire, ước tính trần ~−623 ms/bước (chưa trừ overhead dispatch).
+
+**Bài học:** (1) lại một lần "argument vs measurement" — kết luận "bust-by-construction" tôi suy ra từ `t_zeros` + aliasing **bị số đo CI đảo ngược** (zero-fill 0.18-0.22 alloc); đúng kỷ luật §13.2: mọi lever phải ĐO, không được argue.; (2) append-0.0 interpreted là gốc mọi chi phí alloc lớn trong TKV — đã thấy ở BH (builder 1203 ms), nay ở C-tensor; (3) probe CI cực nhỏ (1 hàm zero-fill + t_zeros) — pattern "mổ xẻ 1 thành phần nghi vấn" rẻ, dùng lại được.
+
+> Lưu ý trung thực: M1-M8 là **phân tích + ước lượng từ số đo đã có** (P3, P7b, BH, GĐ13), CHƯA có số đo mới — mọi bước đều phải qua probe/Gate trước khi wire, đúng kỷ luật §13.2. **Cập nhật 2026-10-23: M3a (CH), M3b (CB), M3c (CI) đã có số đo thật — xem §14.5/§14.6/§14.7.**

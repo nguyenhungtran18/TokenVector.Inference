@@ -1924,6 +1924,27 @@ out/ch.exe && python tools/probe_threads.py out/ch.exe 2
 
 **Trạng thái git:** probe CB + `_cb_cfg.txt` (untracked theo tiền lệ `_ch_cfg.txt`) + `out/cb_run.log` + roadmap §14.4/§14.5/§14.6 + HANDOFF §0.39 — commit trong chương này. Chưa wire, không đổi code train → không cần gate 84/84.
 
+### 0.40 M3c — RE-USE BUFFER C ĐÃ ĐO: CONDITIONAL WIN (ratio 0.18-0.22), CHƯA WIRE (2026-10-23)
+
+**Probe:** `tv/tests/simd_probe_ci.tkv` (compile sạch → `out/ci.exe`, log `out/ci_run.log`). Đo (1) `t_zeros([m,n])` thật cho 2 shape C lớn nhất của đường PD lm-head và (2) zero-fill C đó (điều kiện bắt buộc của re-use — xóa trước mỗi lần tích lũy). Best-of-3, 0 thay đổi code train.
+
+**Số đo (ms, best-of-3):**
+
+| Shape (C) | ptu (m×n) | ALLOC (`t_zeros`) | ZERO_FILL | ratio zero/alloc |
+|---|---|---|---|---|
+| S5 logits [1024×50257] | 51,463,168 | **421** | **94** | **0.22** |
+| S4 dwte [50257×768] | 38,597,376 | **359** | **63** | **0.18** |
+
+**CHỐT:**
+1. **Zero-fill rẻ hơn alloc 4-5×** (0.18-0.22 « ngưỡng 0.3). Nguyên nhân: `t_zeros` dựng C bằng vòng interpreted `append(0.0)` capacity-doubling (~8 ns/ptu); zero-fill ghi thẳng `cd[i] = z` trên List[Single] đã có capacity (~2 ns/ptu).
+2. **Lợi nhuận đo được:** re-use C + zero-fill mỗi call cắt **≈ 623 ms/bước** (S5 421→94 + S4 359→63) trên đường PD lm-head — ~1.7% của full-step ~36.7 s, nhưng là lever `.tkv` **duy nhất còn lời** sau M3a/M3b bust.
+3. **Ràng buộc chưa giải quyết:** re-use đòi C persistent → module-variable mutable state — đúng thứ `simd_matmul.tkv:430` cấm (sinh từ 2 bug corruption). Đường thay thế: caller truyền scratch-Tensor — nhưng 3 call site (`gpt2_ref.tkv` S5 fwd + S3/S4 bwd) đều gán C vào biến sống trên tape, không transient. Bất kỳ đường nào cũng phải qua BIT=0.0 + 84/84 + full step 3 seq.
+4. **Quyết định: CHƯA wire** — chờ lựa chọn cách giữ state (module-var có kiểm chứng vs scratch-passing) trước khi viết code. Trước đó: kết luận "M3c bust-by-construction" (suy ra từ t_zeros + aliasing, KHÔNG đo) **bị chính số CI đảo ngược** — đúng kỷ luật §13.2: argument ≠ measurement.
+
+**Bài học:** (1) thêm 1 lần argument-vs-measurement — đã viết suy luận "bust" vào docs giữa chừng, số đo CI đập tan (0.18-0.22); (2) append-0.0 interpreted là gốc mọi chi phí alloc lớn TKV (BH builder 1203 ms, nay C-tensor); (3) probe CI 1 hàm + 2 shape — pattern "mổ xẻ 1 thành phần nghi vấn" cực rẻ, dùng lại được.
+
+**Menu `.tkv` sau 3 probe:** M3a ❌ (replay-floor), M3b ❌ (kernel throughput sụp ở T nhỏ), M3c 🟡 (đo CÓ LỜI, chờ quyết định wire). Còn song song-ACC biến thể gốc (S4/S5 slot rời rạc, S3 p-reduction chặn — chưa đo) → M1 OpenBLAS (native).
+
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
 
 | Gate | Command / Path | Result |
