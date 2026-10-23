@@ -1849,6 +1849,32 @@ thông ~1.0-1.1 s, không cần thread) — mục con của P7b. Docs: §12 dòn
 
 **Hệ quả menu TRIZ (roadmap §14.5):** M3 ✅ đóng; **M1/M2 hạ ưu tiên** (chỉ nhắm residual 1.2-1.6×); mục mới **M3a song song ACC → M3b T-dispatch giết pad → M3c tái dùng buffer** (đều `.tkv`, gate §13.2) — trần ước lượng S3 938 → ~250-300 ms ≈ 3.1-3.7×, **chưa đo, không hứa số bước tổng**. KPI "≥250 GFLOP/s/shape" tính cho pha GEMM: **4/4 đã vượt**. Logs: `out/cg_m0..m4.log`.
 
+### 0.37 M3a — PIPELINE build(w+1) ∥ replay(w) CHO `_smm_core_pd`: THIẾT KẾ CHỐT, CHƯA VIẾT CODE (2026-10-23)
+
+**Bối cảnh:** sau M3 (§0.36, commit `9512e13`), "LÀM TIẾP" = bước §14.4/§14.5 kế tiếp = **M3a**. Đã đọc code + chốt thiết kế. **CHƯA viết probe CH, CHƯA đo, CHƯA đổi code production.**
+
+**Đã xác minh bằng đọc code:**
+1. **Production đi `smm_*_pd` → `_smm_core_pd` (wave-12) CHỈ ở 4 site lm-head:** `gpt2_ref124.tkv:609` (logits fwd), `:1622` (logits_t bwd), `:1644` (dxf), `:1656` (dwte). Các GEMM khác (MLP/attention) gọi plain `smm_*` → `_smm_core`/`_p58_core_simple` (serial, không wave).
+2. **Cấu trúc `_smm_core_pd` (simd_matmul:534-753):** mỗi wave = spawn 12 worker `_pd_one` (chỉ dựng tile ta/tb, **KHÔNG simd_gemm**) → **join toàn bộ** → main replay tuần tự `_pd_do` (simd_gemm + `_acc_f`) đúng thứ tự i0→p0→j0 → wave sau. **KHÔNG overlap build(w+1) vs replay(w)**; buffer **1 set** (ta0..ta11 + tb0..tb11, `_zeros_list` mỗi call = 24 list T²/call).
+3. **Gate 40M:** `n_i*n_p*n_j*T*T < 40000000` → serial (trans_a → `_p58_core_simple`, else `_smm_core`). S1 (vol 4.7M) → serial; S3/S4/S5 (78M) → wave. T = 768 cả 4 shape.
+4. **CG mode 3 baseline = plain `smm_*`, KHÔNG phải production `_pd`** → probe CH **phải** baseline bằng `smm_fwd_pd/smm_dot_pd/smm_fwd_at_pd`.
+5. Số đo CG (§14.5): GEMM ratio 22.64, BUILD serial 1.00, FULL 3.97; re-entrancy: 2 thread `simd_gemm` T≥96 đồng thời → HANG (g_job không lock).
+
+**Thiết kế M3a (Plan A — double-buffer pipeline):**
+- Pre-loop spawn wave0 (set 0) → loop: `join(w)` → `if (w+1)*12 < ng: spawn(w+1) vào set (w+1)%2` → `replay(w) từ set w%2` → w++.
+- **Bit-exact by construction:** thứ tự/nội dung replay giữ nguyên (w↑, slot↑ = i0→p0→j0); worker ghi set disjoint (pattern BG2); worker KHÔNG simd_gemm (tôn trọng re-entrancy — CG mode 4).
+- Buffer: 48 list (24+24) = **+24 list/call** → phải đo chi phí alloc (probe mode 3); nếu lớn → gộp M3c (module-scratch cấp phát 1 lần).
+- **Vấn đề kỹ thuật đã giải:** khối derive 12 slot unrolled sẽ bị clobber khi spawn(w+1) chạy trước replay(w) → **chuyển derive vào worker** (`_ch_one` tự tính i0/p0/j0 từ gidx; job thêm field `nout` + guard `gidx >= ng` trong worker) → spawn block chỉ còn 12 dòng đơn giản, 2 vị trí nguồn (pre-loop wave=0 + in-loop wave=w+1) hoặc trick `first_iter` cho 1 vị trí.
+- Kỳ vọng (**ước lượng, CHƯA ĐO**): S3 FULL ~937 → ~510-590 ≈ 1.6-1.7×; S4 1719 → ~1200 ≈ 1.4×; S5 1484 → ~1050 ≈ 1.4×. Rủi ro đo: oversubscription 12 builder + ~21 pool threads trên 28T.
+- **Ngưỡng wire:** ≥1.3× trên S3/S4/S5 + BIT=0.0 → wire `_smm_core_pd` → gate 84/84 + trainer_tests + bench 3 seq (kỷ luật §13.2).
+
+**Chưa làm:** viết probe CH (modes: 0 = baseline `smm_*_pd`, 1 = pipe, 2 = BIT filled-input, 3 = chi phí alloc 48 buffer), compile + chạy qua `tools/probe_threads.py`, wire, gate, cập nhật §14.5 + ROADMAP_TRAIN, commit. Runbook dự kiến giống CG:
+```
+printf "0\n" > tv/tests/_ch_cfg.txt
+D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_ch.tkv out/ch.exe main
+out/ch.exe && python tools/probe_threads.py out/ch.exe 2
+```
+
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
 
 | Gate | Command / Path | Result |
