@@ -1,0 +1,664 @@
+# PROBE CX — T=1024 FULL-WRAPPER THAT (dong footnote §14.6)
+# ---------------------------------------------------------------------------
+# Bo cuc (§14.6 M3b/CB): T-dispatch grid do duoc T=1024 (pad 1.36x) thang SUM
+# ca 4 shape P7b (1.18-1.33x) NHUNG chi o SUM THU CONG (alloc/build/gemm/acc
+# do tach pha) — chu chua do WRAPPER THAT (_smm_core_pd wave-12 + _smm_core
+# serial), va CG da do RESID 24-184 ms nen SUM != FULL. §14.6 chan: "neu quay
+# lai, chi do T=1024 full-wrapper that moi quyet dinh".
+#
+# Probe nay do dung do: sao chep NGUYEN VAN co `_smm_core_pd` (wave-12 day du)
+# + `_smm_core` (serial) vao probe voi T la THAM SO (T=1024), A/B voi wrapper
+# PRODUCTION da import (T=768) tren DUNG 4 shape P7b. 0 thay doi code train.
+#   - S1 dx1  [1024x768x3072] tb=1 -> production smm_dot      (SERIAL, vol<40M)
+#   - S3 dxf  [1024x768x50257] tb=0 -> production smm_fwd_pd  (WAVE-12)
+#   - S4 dwte [50257x768x1024] ta=1 -> production smm_fwd_at_pd (WAVE-12)
+#   - S5 lgts [1024x50257x768] tb=1 -> production smm_dot_pd  (WAVE-12)
+# Vol T=1024 cua S3/S4/S5 = 52.4M >= 40M -> van di wave-12 (khop route production).
+#
+# KHONG BIT-EXACT giua 2 arm (T khac -> chunk reduce khac): doi maxdiff, trong
+# cua so dung sai quen thuoc ~1e-5 (kv ±1). Cung chay mot MINI tolerance check
+# 256x256x256 so voi scalar cho T=1024 (nho, chong sai logic builder).
+#
+# Cach dung (tu goc repo):
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_cx.tkv out/cx.exe main
+#   ./out/cx.exe
+# Gate wire (§14.6 + §13.2): T=1024 full-wrapper >= 1.3x tren S3/S4/S5 moi mo
+# duong wire (sua cong thuc T tai 3 loi + bench full-step + gate 84/84); duoi
+# do la BUST nhu CB du doan.
+import tv.training.tensor
+import tv.training.simd_matmul
+
+def _cx_imin(a: 'i64', b: 'i64') -> 'i64':
+    if a < b:
+        return a
+    return b
+
+def _cx_zeros(n: 'i64') -> "list[f32]":
+    out = []
+    i = 0
+    while i < n:
+        out.append((float(0) - 0.0) / 1.0)
+        i = i + 1
+    return out
+
+def _cx_fill_list(d: "list[f32]", seed: 'i64') -> 'i64':
+    n = len(d)
+    i = 0
+    while i < n:
+        d[i] = float(((i * 131 + seed) % 97) - 48) * 0.0021
+        i = i + 1
+    return n
+
+def _cx_maxdiff(a: "list[f32]", b: "list[f32]", cnt: 'i64') -> 'f64':
+    dmax = 0.0
+    i = 0
+    while i < cnt:
+        dv = a[i] - b[i]
+        if dv < 0.0:
+            dv = -dv
+        if dv > dmax:
+            dmax = dv
+        i = i + 1
+    return dmax
+
+# ---- builder sao chep NGUYEN VAN tu simd_matmul (G8 index-chay) ------------
+
+def _cx_tile_a_w(out: "list[f32]", d: "list[f32]", kdim: 'i64', i0: 'i64',
+                 ib: 'i64', p0: 'i64', pw: 'i64', T: 'i64') -> 'i64':
+    z = 0.0
+    i = 0
+    dst = 0
+    j = 0
+    src = i0 * kdim + p0
+    while i < ib:
+        j = 0
+        while j < pw:
+            out[dst] = d[src + j]
+            dst = dst + 1
+            j = j + 1
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        src = src + kdim
+        i = i + 1
+    while i < T:
+        j = 0
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        i = i + 1
+    return 0
+
+def _cx_tile_b_w(out: "list[f32]", d: "list[f32]", ndim: 'i64', p0: 'i64',
+                 pw: 'i64', r0: 'i64', br: 'i64', T: 'i64', trans_b: 'i32') -> 'i64':
+    z = 0.0
+    i = 0
+    dst = 0
+    j = 0
+    while i < pw:
+        if trans_b == 1:
+            idx = r0 * ndim + p0 + i
+            j = 0
+            while j < br:
+                out[dst] = d[idx]
+                dst = dst + 1
+                idx = idx + ndim
+                j = j + 1
+        else:
+            row = (p0 + i) * ndim + r0
+            j = 0
+            while j < br:
+                out[dst] = d[row + j]
+                dst = dst + 1
+                j = j + 1
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        i = i + 1
+    while i < T:
+        j = 0
+        while j < T:
+            out[dst] = z
+            dst = dst + 1
+            j = j + 1
+        i = i + 1
+    return 0
+
+def _cx_tile_a_at_w(out: "list[f32]", d: "list[f32]", mdim: 'i64', i0: 'i64',
+                    ib: 'i64', p0: 'i64', pw: 'i64', T: 'i64') -> 'i64':
+    z = 0.0
+    r = 0
+    t = 0
+    dst = 0
+    while r < ib:
+        t = 0
+        src = p0 * mdim + i0 + r
+        while t < pw:
+            out[dst] = d[src]
+            dst = dst + 1
+            src = src + mdim
+            t = t + 1
+        while t < T:
+            out[dst] = z
+            dst = dst + 1
+            t = t + 1
+        r = r + 1
+    while r < T:
+        t = 0
+        while t < T:
+            out[dst] = z
+            dst = dst + 1
+            t = t + 1
+        r = r + 1
+    return 0
+
+def _cx_acc_f(cd: "list[f32]", Ct: "list[f32]", n: 'i64', i0: 'i64',
+              ib: 'i64', j0: 'i64', jb: 'i64', T: 'i64') -> 'i64':
+    r = 0
+    bc = i0 * n + j0
+    bt = T * 0
+    c = 0
+    while r < ib:
+        bc = i0 * n + j0 + r * n
+        bt = r * T
+        c = 0
+        while c < jb:
+            cd[bc] = cd[bc] + Ct[bt]
+            bc = bc + 1
+            bt = bt + 1
+            c = c + 1
+        r = r + 1
+    return 0
+
+# ---- serial core voi T tham so (S1 — production route vol<40M) -------------
+
+def _cx_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64',
+             ndim: 'i64', trans_b: 'i32', T: 'i64') -> "Tensor":
+    cd = t_zeros([m, n]).data
+    Ct = _cx_zeros(T * T)
+    AtB = _cx_zeros(T * T)
+    BtB = _cx_zeros(T * T)
+    i0 = 0
+    while i0 < m:
+        ib = _cx_imin(T, m - i0)
+        p0 = 0
+        while p0 < k:
+            pw = _cx_imin(T, k - p0)
+            rva = _cx_tile_a_w(AtB, a.data, k, i0, ib, p0, pw, T)
+            j0 = 0
+            while j0 < n:
+                jb = _cx_imin(T, n - j0)
+                rvb = _cx_tile_b_w(BtB, b.data, ndim, p0, pw, j0, jb, T, trans_b)
+                simd_gemm(AtB, BtB, Ct, T)
+                rvc = _cx_acc_f(cd, Ct, n, i0, ib, j0, jb, T)
+                j0 = j0 + jb
+            p0 = p0 + pw
+        i0 = i0 + ib
+    return Tensor(cd, [m, n], 0)
+
+# ---- pd helpers + worker (sao chep nguyen van, doi tien to _cx_) -----------
+
+def _cx_ceil(x: 'i64', T: 'i64') -> 'i64':
+    q = 0
+    r = 0
+    while r < x:
+        r = r + T
+        q = q + 1
+    return q
+
+def _cx_gq(g: 'i64', stride: 'i64') -> 'i64':
+    if g < 0:
+        return 0
+    q = 0
+    s = g
+    while s >= stride:
+        s = s - stride
+        q = q + 1
+    return q
+
+def _cx_i0(g: 'i64', stride: 'i64', T: 'i64') -> 'i64':
+    return _cx_gq(g, stride) * T
+
+def _cx_p0(g: 'i64', stride: 'i64', n_j: 'i64', T: 'i64') -> 'i64':
+    i0idx = _cx_gq(g, stride)
+    rem = g - i0idx * stride
+    return _cx_gq(rem, n_j) * T
+
+def _cx_j0(g: 'i64', stride: 'i64', n_j: 'i64', T: 'i64') -> 'i64':
+    i0idx = _cx_gq(g, stride)
+    rem = g - i0idx * stride
+    p0idx = _cx_gq(rem, n_j)
+    return (rem - p0idx * n_j) * T
+
+class _CxJob:
+    gidx: 'i64'
+    ad: "list[f32]"
+    bd: "list[f32]"
+    kdim: 'i64'
+    mdim: 'i64'
+    ndim: 'i64'
+    T: 'i64'
+    trans_a: 'i32'
+    trans_b: 'i32'
+    i0: 'i64'
+    ib: 'i64'
+    p0: 'i64'
+    pw: 'i64'
+    j0: 'i64'
+    jb: 'i64'
+    ta: "list[f32]"
+    tb: "list[f32]"
+    def __init__(self, gidx: 'i64', ad: "list[f32]", bd: "list[f32]",
+                  kdim: 'i64', mdim: 'i64', ndim: 'i64', T: 'i64',
+                  trans_a: 'i32', trans_b: 'i32',
+                  i0: 'i64', ib: 'i64', p0: 'i64', pw: 'i64',
+                  j0: 'i64', jb: 'i64', ta: "list[f32]", tb: "list[f32]"):
+        self.gidx = gidx
+        self.ad = ad
+        self.bd = bd
+        self.kdim = kdim
+        self.mdim = mdim
+        self.ndim = ndim
+        self.T = T
+        self.trans_a = trans_a
+        self.trans_b = trans_b
+        self.i0 = i0
+        self.ib = ib
+        self.p0 = p0
+        self.pw = pw
+        self.j0 = j0
+        self.jb = jb
+        self.ta = ta
+        self.tb = tb
+
+def _cx_one(j: "_CxJob") -> 'i64':
+    if j.gidx < 0:
+        return 0
+    rv = 0
+    if j.trans_a == 1:
+        rv = _cx_tile_a_at_w(j.ta, j.ad, j.mdim, j.i0, j.ib, j.p0, j.pw, j.T)
+    else:
+        rv = _cx_tile_a_w(j.ta, j.ad, j.kdim, j.i0, j.ib, j.p0, j.pw, j.T)
+    rv2 = _cx_tile_b_w(j.tb, j.bd, j.ndim, j.p0, j.pw, j.j0, j.jb, j.T, j.trans_b)
+    return rv + rv2
+
+def _cx_do(Ct: "list[f32]", ta: "list[f32]", tb: "list[f32]", T: 'i64',
+           cd: "list[f32]", i0: 'i64', ib: 'i64', j0: 'i64', jb: 'i64',
+           n: 'i64') -> 'i64':
+    simd_gemm(ta, tb, Ct, T)
+    rvc = _cx_acc_f(cd, Ct, n, i0, ib, j0, jb, T)
+    return 0
+
+# wave-12 day du voi T tham so — KHONG fallback serial (caller da route)
+def _cx_core_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64',
+                ndim: 'i64', trans_b: 'i32', trans_a: 'i32', T: 'i64') -> "Tensor":
+    n_i = _cx_ceil(m, T)
+    n_p = _cx_ceil(k, T)
+    n_j = _cx_ceil(n, T)
+    cd = t_zeros([m, n]).data
+    Ct = _cx_zeros(T * T)
+    ta0 = _cx_zeros(T * T)
+    ta1 = _cx_zeros(T * T)
+    ta2 = _cx_zeros(T * T)
+    ta3 = _cx_zeros(T * T)
+    ta4 = _cx_zeros(T * T)
+    ta5 = _cx_zeros(T * T)
+    ta6 = _cx_zeros(T * T)
+    ta7 = _cx_zeros(T * T)
+    ta8 = _cx_zeros(T * T)
+    ta9 = _cx_zeros(T * T)
+    ta10 = _cx_zeros(T * T)
+    ta11 = _cx_zeros(T * T)
+    tb0 = _cx_zeros(T * T)
+    tb1 = _cx_zeros(T * T)
+    tb2 = _cx_zeros(T * T)
+    tb3 = _cx_zeros(T * T)
+    tb4 = _cx_zeros(T * T)
+    tb5 = _cx_zeros(T * T)
+    tb6 = _cx_zeros(T * T)
+    tb7 = _cx_zeros(T * T)
+    tb8 = _cx_zeros(T * T)
+    tb9 = _cx_zeros(T * T)
+    tb10 = _cx_zeros(T * T)
+    tb11 = _cx_zeros(T * T)
+    stride = n_p * n_j
+    ng = n_i * stride
+    wave = 0
+    while wave * 12 < ng:
+        g0 = -1
+        if wave * 12 + 0 < ng:
+            g0 = wave * 12 + 0
+        i0_0 = _cx_i0(g0, stride, T)
+        ib_0 = _cx_imin(T, m - i0_0)
+        p0_0 = _cx_p0(g0, stride, n_j, T)
+        pw_0 = _cx_imin(T, k - p0_0)
+        j0_0 = _cx_j0(g0, stride, n_j, T)
+        jb_0 = _cx_imin(T, n - j0_0)
+
+        g1 = -1
+        if wave * 12 + 1 < ng:
+            g1 = wave * 12 + 1
+        i0_1 = _cx_i0(g1, stride, T)
+        ib_1 = _cx_imin(T, m - i0_1)
+        p0_1 = _cx_p0(g1, stride, n_j, T)
+        pw_1 = _cx_imin(T, k - p0_1)
+        j0_1 = _cx_j0(g1, stride, n_j, T)
+        jb_1 = _cx_imin(T, n - j0_1)
+
+        g2 = -1
+        if wave * 12 + 2 < ng:
+            g2 = wave * 12 + 2
+        i0_2 = _cx_i0(g2, stride, T)
+        ib_2 = _cx_imin(T, m - i0_2)
+        p0_2 = _cx_p0(g2, stride, n_j, T)
+        pw_2 = _cx_imin(T, k - p0_2)
+        j0_2 = _cx_j0(g2, stride, n_j, T)
+        jb_2 = _cx_imin(T, n - j0_2)
+
+        g3 = -1
+        if wave * 12 + 3 < ng:
+            g3 = wave * 12 + 3
+        i0_3 = _cx_i0(g3, stride, T)
+        ib_3 = _cx_imin(T, m - i0_3)
+        p0_3 = _cx_p0(g3, stride, n_j, T)
+        pw_3 = _cx_imin(T, k - p0_3)
+        j0_3 = _cx_j0(g3, stride, n_j, T)
+        jb_3 = _cx_imin(T, n - j0_3)
+
+        g4 = -1
+        if wave * 12 + 4 < ng:
+            g4 = wave * 12 + 4
+        i0_4 = _cx_i0(g4, stride, T)
+        ib_4 = _cx_imin(T, m - i0_4)
+        p0_4 = _cx_p0(g4, stride, n_j, T)
+        pw_4 = _cx_imin(T, k - p0_4)
+        j0_4 = _cx_j0(g4, stride, n_j, T)
+        jb_4 = _cx_imin(T, n - j0_4)
+
+        g5 = -1
+        if wave * 12 + 5 < ng:
+            g5 = wave * 12 + 5
+        i0_5 = _cx_i0(g5, stride, T)
+        ib_5 = _cx_imin(T, m - i0_5)
+        p0_5 = _cx_p0(g5, stride, n_j, T)
+        pw_5 = _cx_imin(T, k - p0_5)
+        j0_5 = _cx_j0(g5, stride, n_j, T)
+        jb_5 = _cx_imin(T, n - j0_5)
+
+        g6 = -1
+        if wave * 12 + 6 < ng:
+            g6 = wave * 12 + 6
+        i0_6 = _cx_i0(g6, stride, T)
+        ib_6 = _cx_imin(T, m - i0_6)
+        p0_6 = _cx_p0(g6, stride, n_j, T)
+        pw_6 = _cx_imin(T, k - p0_6)
+        j0_6 = _cx_j0(g6, stride, n_j, T)
+        jb_6 = _cx_imin(T, n - j0_6)
+
+        g7 = -1
+        if wave * 12 + 7 < ng:
+            g7 = wave * 12 + 7
+        i0_7 = _cx_i0(g7, stride, T)
+        ib_7 = _cx_imin(T, m - i0_7)
+        p0_7 = _cx_p0(g7, stride, n_j, T)
+        pw_7 = _cx_imin(T, k - p0_7)
+        j0_7 = _cx_j0(g7, stride, n_j, T)
+        jb_7 = _cx_imin(T, n - j0_7)
+
+        g8 = -1
+        if wave * 12 + 8 < ng:
+            g8 = wave * 12 + 8
+        i0_8 = _cx_i0(g8, stride, T)
+        ib_8 = _cx_imin(T, m - i0_8)
+        p0_8 = _cx_p0(g8, stride, n_j, T)
+        pw_8 = _cx_imin(T, k - p0_8)
+        j0_8 = _cx_j0(g8, stride, n_j, T)
+        jb_8 = _cx_imin(T, n - j0_8)
+
+        g9 = -1
+        if wave * 12 + 9 < ng:
+            g9 = wave * 12 + 9
+        i0_9 = _cx_i0(g9, stride, T)
+        ib_9 = _cx_imin(T, m - i0_9)
+        p0_9 = _cx_p0(g9, stride, n_j, T)
+        pw_9 = _cx_imin(T, k - p0_9)
+        j0_9 = _cx_j0(g9, stride, n_j, T)
+        jb_9 = _cx_imin(T, n - j0_9)
+
+        g10 = -1
+        if wave * 12 + 10 < ng:
+            g10 = wave * 12 + 10
+        i0_10 = _cx_i0(g10, stride, T)
+        ib_10 = _cx_imin(T, m - i0_10)
+        p0_10 = _cx_p0(g10, stride, n_j, T)
+        pw_10 = _cx_imin(T, k - p0_10)
+        j0_10 = _cx_j0(g10, stride, n_j, T)
+        jb_10 = _cx_imin(T, n - j0_10)
+
+        g11 = -1
+        if wave * 12 + 11 < ng:
+            g11 = wave * 12 + 11
+        i0_11 = _cx_i0(g11, stride, T)
+        ib_11 = _cx_imin(T, m - i0_11)
+        p0_11 = _cx_p0(g11, stride, n_j, T)
+        pw_11 = _cx_imin(T, k - p0_11)
+        j0_11 = _cx_j0(g11, stride, n_j, T)
+        jb_11 = _cx_imin(T, n - j0_11)
+
+        hb0 = thread_spawn(_cx_one, _CxJob(g0, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_0, ib_0, p0_0, pw_0, j0_0, jb_0, ta0, tb0))
+        hb1 = thread_spawn(_cx_one, _CxJob(g1, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_1, ib_1, p0_1, pw_1, j0_1, jb_1, ta1, tb1))
+        hb2 = thread_spawn(_cx_one, _CxJob(g2, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_2, ib_2, p0_2, pw_2, j0_2, jb_2, ta2, tb2))
+        hb3 = thread_spawn(_cx_one, _CxJob(g3, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_3, ib_3, p0_3, pw_3, j0_3, jb_3, ta3, tb3))
+        hb4 = thread_spawn(_cx_one, _CxJob(g4, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_4, ib_4, p0_4, pw_4, j0_4, jb_4, ta4, tb4))
+        hb5 = thread_spawn(_cx_one, _CxJob(g5, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_5, ib_5, p0_5, pw_5, j0_5, jb_5, ta5, tb5))
+        hb6 = thread_spawn(_cx_one, _CxJob(g6, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_6, ib_6, p0_6, pw_6, j0_6, jb_6, ta6, tb6))
+        hb7 = thread_spawn(_cx_one, _CxJob(g7, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_7, ib_7, p0_7, pw_7, j0_7, jb_7, ta7, tb7))
+        hb8 = thread_spawn(_cx_one, _CxJob(g8, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_8, ib_8, p0_8, pw_8, j0_8, jb_8, ta8, tb8))
+        hb9 = thread_spawn(_cx_one, _CxJob(g9, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_9, ib_9, p0_9, pw_9, j0_9, jb_9, ta9, tb9))
+        hb10 = thread_spawn(_cx_one, _CxJob(g10, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_10, ib_10, p0_10, pw_10, j0_10, jb_10, ta10, tb10))
+        hb11 = thread_spawn(_cx_one, _CxJob(g11, a.data, b.data, k, m, ndim, T, trans_a, trans_b, i0_11, ib_11, p0_11, pw_11, j0_11, jb_11, ta11, tb11))
+
+        rj0 = thread_join(hb0)
+        rj1 = thread_join(hb1)
+        rj2 = thread_join(hb2)
+        rj3 = thread_join(hb3)
+        rj4 = thread_join(hb4)
+        rj5 = thread_join(hb5)
+        rj6 = thread_join(hb6)
+        rj7 = thread_join(hb7)
+        rj8 = thread_join(hb8)
+        rj9 = thread_join(hb9)
+        rj10 = thread_join(hb10)
+        rj11 = thread_join(hb11)
+
+        if g0 >= 0:
+            rrp0 = _cx_do(Ct, ta0, tb0, T, cd, i0_0, ib_0, j0_0, jb_0, n)
+        if g1 >= 0:
+            rrp1 = _cx_do(Ct, ta1, tb1, T, cd, i0_1, ib_1, j0_1, jb_1, n)
+        if g2 >= 0:
+            rrp2 = _cx_do(Ct, ta2, tb2, T, cd, i0_2, ib_2, j0_2, jb_2, n)
+        if g3 >= 0:
+            rrp3 = _cx_do(Ct, ta3, tb3, T, cd, i0_3, ib_3, j0_3, jb_3, n)
+        if g4 >= 0:
+            rrp4 = _cx_do(Ct, ta4, tb4, T, cd, i0_4, ib_4, j0_4, jb_4, n)
+        if g5 >= 0:
+            rrp5 = _cx_do(Ct, ta5, tb5, T, cd, i0_5, ib_5, j0_5, jb_5, n)
+        if g6 >= 0:
+            rrp6 = _cx_do(Ct, ta6, tb6, T, cd, i0_6, ib_6, j0_6, jb_6, n)
+        if g7 >= 0:
+            rrp7 = _cx_do(Ct, ta7, tb7, T, cd, i0_7, ib_7, j0_7, jb_7, n)
+        if g8 >= 0:
+            rrp8 = _cx_do(Ct, ta8, tb8, T, cd, i0_8, ib_8, j0_8, jb_8, n)
+        if g9 >= 0:
+            rrp9 = _cx_do(Ct, ta9, tb9, T, cd, i0_9, ib_9, j0_9, jb_9, n)
+        if g10 >= 0:
+            rrp10 = _cx_do(Ct, ta10, tb10, T, cd, i0_10, ib_10, j0_10, jb_10, n)
+        if g11 >= 0:
+            rrp11 = _cx_do(Ct, ta11, tb11, T, cd, i0_11, ib_11, j0_11, jb_11, n)
+
+        wave = wave + 1
+    return Tensor(cd, [m, n], 0)
+
+# ---- mini tolerance check T=1024 vs scalar (256x256x256) -------------------
+# Chong sai logic builder khi force T > min(m,n) (pad 0 nhu production).
+def _cx_ref_fwd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64') -> "Tensor":
+    cd = t_zeros([m, n]).data
+    ad = a.data
+    bd = b.data
+    i = 0
+    while i < m:
+        j = 0
+        while j < n:
+            s = 0.0
+            p = 0
+            while p < k:
+                s = s + ad[i * k + p] * bd[p * n + j]
+                p = p + 1
+            cd[i * n + j] = s
+            j = j + 1
+        i = i + 1
+    return Tensor(cd, [m, n], 0)
+
+def main() -> 'i32':
+    print("CX: T=1024 full-wrapper that vs production T=768 (dong footnote §14.6)")
+    rs = 3
+    nq = 1024
+    h = 768
+    V = 50257
+    four = 3072
+
+    # ---- S1 dx1 [nq,h] = [nq,four] x^T [four->h] : smm_dot (serial, tb=1) ----
+    a1 = t_zeros([nq, four])
+    b1 = t_zeros([h, four])
+    rv1a = _cx_fill_list(a1.data, 1)
+    rv1b = _cx_fill_list(b1.data, 2)
+    v1b = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c1b = smm_dot(a1, b1, nq, h, four)
+        t1 = now_ms()
+        d1 = t1 - t0
+        if d1 < v1b:
+            v1b = d1
+        kk = kk + 1
+    v1t = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c1t = _cx_core(a1, b1, nq, h, four, four, 1, 1024)
+        t1 = now_ms()
+        d1 = t1 - t0
+        if d1 < v1t:
+            v1t = d1
+        kk = kk + 1
+    md1 = _cx_maxdiff(c1b.data, c1t.data, nq * h)
+    print("CX S1 dx1  serial   base=" + str(v1b) + " T1024=" + str(v1t)
+          + " sp=" + str(v1b / v1t) + "x  maxdiff=" + str(md1))
+
+    # ---- S3 dxf [nq,V] x [V,h] = smm_fwd_pd (WAVE) --------------------------
+    a3 = t_zeros([nq, V])
+    b3 = t_zeros([V, h])
+    rv3a = _cx_fill_list(a3.data, 3)
+    rv3b = _cx_fill_list(b3.data, 4)
+    v3b = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c3b = smm_fwd_pd(a3, b3, nq, h, V)
+        t1 = now_ms()
+        d3 = t1 - t0
+        if d3 < v3b:
+            v3b = d3
+        kk = kk + 1
+    v3t = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c3t = _cx_core_pd(a3, b3, nq, h, V, h, 0, 0, 1024)
+        t1 = now_ms()
+        d3 = t1 - t0
+        if d3 < v3t:
+            v3t = d3
+        kk = kk + 1
+    md3 = _cx_maxdiff(c3b.data, c3t.data, nq * h)
+    print("CX S3 dxf  wave-12  base=" + str(v3b) + " T1024=" + str(v3t)
+          + " sp=" + str(v3b / v3t) + "x  maxdiff=" + str(md3))
+
+    # ---- S4 dwte [V,h] = ggT [V,nq] x xf [nq,h] : smm_fwd_at_pd (WAVE) ------
+    a4 = t_zeros([nq, V])
+    b4 = t_zeros([nq, h])
+    rv4a = _cx_fill_list(a4.data, 5)
+    rv4b = _cx_fill_list(b4.data, 6)
+    v4b = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c4b = smm_fwd_at_pd(a4, b4, V, h, nq)
+        t1 = now_ms()
+        d4 = t1 - t0
+        if d4 < v4b:
+            v4b = d4
+        kk = kk + 1
+    v4t = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c4t = _cx_core_pd(a4, b4, V, h, nq, h, 0, 1, 1024)
+        t1 = now_ms()
+        d4 = t1 - t0
+        if d4 < v4t:
+            v4t = d4
+        kk = kk + 1
+    md4 = _cx_maxdiff(c4b.data, c4t.data, V * h)
+    print("CX S4 dwte wave-12  base=" + str(v4b) + " T1024=" + str(v4t)
+          + " sp=" + str(v4b / v4t) + "x  maxdiff=" + str(md4))
+
+    # ---- S5 lgts [nq,V] = xf [nq,h] x^T wte [V,h] : smm_dot_pd (WAVE) ------
+    a5 = t_zeros([nq, h])
+    b5 = t_zeros([V, h])
+    rv5a = _cx_fill_list(a5.data, 7)
+    rv5b = _cx_fill_list(b5.data, 8)
+    v5b = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c5b = smm_dot_pd(a5, b5, nq, V, h)
+        t1 = now_ms()
+        d5 = t1 - t0
+        if d5 < v5b:
+            v5b = d5
+        kk = kk + 1
+    v5t = 1.0e18
+    kk = 0
+    while kk < rs:
+        t0 = now_ms()
+        c5t = _cx_core_pd(a5, b5, nq, V, h, h, 1, 0, 1024)
+        t1 = now_ms()
+        d5 = t1 - t0
+        if d5 < v5t:
+            v5t = d5
+        kk = kk + 1
+    md5 = _cx_maxdiff(c5b.data, c5t.data, nq * V)
+    print("CX S5 lgts wave-12  base=" + str(v5b) + " T1024=" + str(v5t)
+          + " sp=" + str(v5b / v5t) + "x  maxdiff=" + str(md5))
+
+    # ---- mini tolerance 256x256x256: T=1024 (T > min dim, pad 0) vs scalar --
+    am = t_zeros([256, 256])
+    bm = t_zeros([256, 256])
+    rvma = _cx_fill_list(am.data, 9)
+    rvmb = _cx_fill_list(bm.data, 10)
+    cmr = _cx_ref_fwd(am, bm, 256, 256, 256)
+    cmt = _cx_core(am, bm, 256, 256, 256, 256, 0, 1024)
+    mdm = _cx_maxdiff(cmr.data, cmt.data, 256 * 256)
+    okm = 0
+    if mdm <= 0.0001:
+        okm = 1
+    print("CX mini tol 256^3 T=1024 vs scalar: maxdiff=" + str(mdm)
+          + " tol=0.0001 -> " + str(okm))
+
+    print("CX done")
+    return 0

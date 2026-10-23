@@ -2045,12 +2045,41 @@ alloc 12 Ct (T=768) = **46-47 ms/call** (đã nằm trong số variant). Run 1 (
 **Hệ quả menu (đãi hết ở mức đo):**
 - **M2 micro-kernel: tiền đề ĐÃ BỊ CG BÁC** — kernel đang 552-612 GFLOP/s ≈ torch (588-741), M2 hứa "chuẩn hóa 45-82 → 150-300" là con số đã bị phân rã phase đảo ngược (§0.36) → không còn mục tiêu để viết.
 - **M4 (prepack) / M5 (fused AdamW f32) / M6 (fused lm-head+attn) / M7 (dispatch):** đều cần **builtin/ABI MỚI trong compiler** (`simd_gemm_packed`, fused kernels) — `.tkv` không khai báo được pinvoke mới (chỉ compiler sinh IL pinvoke; đã xác minh qua IL) ⇒ **chặn trên compiler team**, ngoài tầm repo-local.
-- **Còn 1 mục `.tkv` treo có điều kiện:** T=1024 full-wrapper thật (§14.6 footnote — SUM thủ công đã đo 1.18-1.33×, wrapper thật chưa đo).
+- **Còn 1 mục `.tkv` treo có điều kiện:** T=1024 full-wrapper thật (§14.6 footnote — SUM thủ công đã đo 1.18-1.33×, wrapper thật chưa đo) **→ ĐÃ ĐO BÁC BỎ: §0.44 (probe CX — wrapper thật 1.01-1.12× « 1.3).**
 - **Kết luận lớn của chương trình đo:** nút thắt full-step = **wrapper interpreted (build/acc/alloc)**, đã thu hẹp qua 7 chu trình đo (CG/CH/CB/CI/CU/CW/M1): mọi lever kernel/threading-side đều neutral, mọi lever song-song `.tkv` bust. Parity 1.0× với torch **không đạt được từ repo-local** — chỉ attack được từ compiler (native fused/packing ABI).
 
 **Logs:** `out/m1_smoke_gemm*.log`, `out/m1_smoke_threads.log`, `out/m1_m0_{base,shim}.log`, `out/m1_step_{base,shim28,shim14,reps}.log`, `out/m1_gates4.log`, `out/m1_smoke_tol.log`.
 
 **Trạng thái git:** `tools/simd_native/{tkv_simd_native_m1.c,build_m1.ps1}` (mới, tracked-worthy) + HANDOFF §0.43 + roadmap §14.3/§14.4/§14.9 + ROADMAP_TRAIN — working tree, chưa commit. Code train không đổi → gate 84/84 trên DLL gốc giữ nguyên (đã chạy trọn vẹn ở CU).
+
+### 0.44 M3b DU PHONG — T=1024 FULL-WRAPPER THAT (probe CX) ĐÃ ĐO: BUST 1.01-1.12× « NGƯỠNG 1.3 — MỤC TREO CUỐI CỦA CHƯƠNG TRÌNH ĐO ĐÓNG LẠI (2026-10-23)
+
+**Bối cảnh:** sau M1 (§0.43), mục DUY NHẤT còn treo có điều kiện = footnote §14.6: CB đo SUM thủ công T=1024 thắng cả 4 shape (1.18-1.33×) nhưng từ chối wire vì SUM ≠ wrapper thật (CG đo RESID 24-184 ms) — đúng kỷ luật §13.2, cánh cửa chỉ mở nếu wrapper THẬT ≥1.3×.
+
+**Probe:** `tv/tests/simd_probe_cx.tkv` → `out/cx.exe`, log `out/cx_run.log`. A/B NGAY TRONG 1 EXE, cùng phiên, best-of-3:
+- **Arm base:** wrapper PRODUCTION import (`smm_dot` S1 serial / `smm_fwd_pd` S3 / `smm_fwd_at_pd` S4 / `smm_dot_pd` S5 — công thức T hiện tại cho 4 shape = 768).
+- **Arm T1024:** sao chep NGUYEN VAN `_smm_core` (serial, không fallback route) + `_smm_core_pd` (wave-12 đầy đủ 12 slot) vào probe với T là tham số = 1024; caller tự route như production (vol T=1024 của S3/S4/S5 = 52.4M ≥ 40M → wave).
+- 4 shape P7b + mini tolerance 256³ (T=1024 > mọi dim → pad 0, so với scalar ref). 0 thay đổi code train.
+- Lần compile đầu fail: tests module thiếu `import tv.training.tensor` → annotation `"Tensor"` không resolve → `Ky vong dtype (f32/f64/i32/i64/str), gap 'Tensor' (vi tri ~18)` — thêm import là đủ (quy ước đã có ở mọi probe BF/CB/CD/CH/CW); ghi lại để lần sau khỏi đoán.
+
+**Số đo (ms, best-of-3, cùng phiên — `out/cx_run.log`):**
+
+| Shape | route | base (prod) | T=1024 | speedup | maxdiff |
+|---|---|---|---|---|---|
+| S1 dx1 [1024×768×3072] | serial (smm_dot) | 94 | 78 | **1.205×** | 1.91e-06 |
+| S3 dxf [1024×768×50257] | wave-12 | 735 | 656 | **1.120×** | 1.34e-05 |
+| S4 dwte [50257×768×1024] | wave-12 | 1250 | 1141 | **1.096×** | 2.98e-08 |
+| S5 lgts [1024×50257×768] | wave-12 | 1187 | 1171 | **1.014×** | 0.0 |
+| mini 256³ vs scalar | serial | — | — | — | 3.73e-08 ≤ 1e-4 ✓ |
+
+**CHỐT:**
+1. **BUST — gate ≥1.3× trên S3/S4/S5 không đạt (1.120/1.096/1.014×).** KHÔNG wire; 3 đường công thức T (`_smm_core`/`_p58_core_simple`/`_smm_core_pd`) giữ nguyên `T = _imin(_tilek(k), _roundup64(_imin(m,n)))`.
+2. **SUM thủ công ≠ wrapper — CB bị số đo thật xác nhận đúng:** SUM ratio 1.18-1.33× rơi xuống 1.01-1.12× khi đo wrapper. Hai nhánh: (a) production in-context đã nhanh hơn SUM tách pha (S3: wrapper base 735 vs SUM thủ công 953 — build/acc chồng lấn được với replay trong wave thật) nên headroom CB cộng dồn theo pha đã bị tính trùng; (b) phần T=1024 thực cắt được chỉ là build/ng×T² + pad flop, còn thành phần cố định (spawn/join, alloc C, replay tuần tự simd_gemm-reentrancy — sàn cứng thấy qua CH/CW) không đổi theo T. S5 k=768 < T=1024 → pad k vô ích → 1.014×.
+3. **S1 serial lời nhất (1.205×)** nhưng base chỉ 94 ms → tiết kiệm ~16 ms, không đổi bức tranh lớn.
+4. **Numerics trong biên, tolerance contract không đổi:** maxdiff 0 – 1.34e-5 (cửa sổ ~1e-5 đã ghi ở header probe, kv ±1); mini 256³ T=1024 vs scalar = 3.73e-8 ≤ 1e-4 → builder đúng kể cả T > mọi dim (pad 0). Không wire → production 84/84 + loss `13.442912` giữ nguyên.
+5. **Chu trình đo thứ 8 (CX) khép chương trình:** mục treo cuối biến mất → chương trình đo TRIZ repo-local kết thúc: M3a-pipeline ❌ (CH), M3a-ACC-variant ❌ (CW), M3b ❌×2 (CB SUM-grid + CX wrapper thật), M3c ✅ (CI, wired), M1 ❌ (OpenBLAS shim) — mọi lever repo-local đã có số đo; parity 1.0× chỉ còn đi qua compiler team (M4-M7 builtin/ABI, §14.9).
+
+**Trạng thái git:** probe `simd_probe_cx.tkv` (mới) + `out/cx_run.log` + HANDOFF §0.44 + roadmap §14.6 patch/§14.9 patch/§14.10 + ROADMAP_TRAIN — working tree, chưa commit. **3 phiên trước ĐÃ commit `e7a3eb4`** (§0.41-§0.43 + §14.8/§14.9 — dòng “chưa commit” trong §0.43 là trạng thái lúc viết). 0 thay đổi code train → không cần gate 84/84.
 
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
 

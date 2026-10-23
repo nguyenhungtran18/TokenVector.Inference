@@ -660,7 +660,7 @@ Resource chưa dùng (xếp theo đòn bẩy):
 1. **Pad 1.0× (T=256) là TỆ nhất trên cả 4 shape** — SUM 156/1781/2375/2375 ms, chậm hơn production T=768 (89.8/953/1657/1438) từ 1.3× đến 2.0×. Giả định gốc "T=256 pad 1.0× nhưng calls ×18 — phải gate đo" đã được đo: **calls ×18 không phải vấn đề, mà là kernel mất throughput ở tile nhỏ**.
 2. **Kernel throughput suy giảm mạnh khi T nhỏ** (GEMM GFLOP/s pad): 282 @256 → 380 @384 → 485 @512 → 546-616 @768 → 529-831 @1024. T=256 cho GEMM phase 281 ms cho S3 dù flop hữu ích chỉ 66% của T=768 (204 ms) — tức **hiệu suất kernel ở T=256 ≈ 0.47× của T=768**, bù không nổi phần BUILD+ACC tăng thêm.
 3. **T=1024 (pad 1.36×) là T tốt nhất đo được** — SUM 70.8/750/1407/1180 ms vs T=768 thủ công 89.8/953/1657/1438 → **T=1024 thắng SUM trên cả 4 shape** (1.18-1.33×), NHUNG không đủ để wire: (a) biên lợi nhuận quá mỏng — lever chính S3 chỉ 1.26× (750 vs 953), cả 4 shape 1.18-1.33× đều quanh ngưỡng wire 1.3×, và đây mới là SUM thủ công chứ không phải wrapper thật; (b) **chưa tính chi phí wire**: `_smm_core`/`_p58_core_simple`/`_smm_core_pd` 3 đường đều hard-code `T = _imin(_tilek(k), _roundup64(_imin(m,n)))` — dispatch T=1024 phải sửa 3 chỗ, mỗi chỗ có wave-12 (pd) với 24 buffer T² (T=1024 → 4 MB/buffer, 24 buffer = 96 MB, alloc ~2× hiện tại); (c) full-wrapper T=1024 chưa đo thật (probe CB chỉ đo SUM thủ công tách pha — wrapper thật có thể lệch do in-context effect, như CG đã thấy RESID). **Kết luận trung thực: T=1024 là ứng viên tốt nhất nhưng là lever MỎNG — 1.18-1.33× ở SUM thủ công, sát ngưỡng wire 1.3×, đòi sửa 3 đường code + wave-12 96 MB buffer, mà wrapper thật chưa đo.** Theo §13.2 ("mọi lever phải đo wrapper thật trước khi wire"), KHÔNG wire trên số SUM thủ công — nhưng đây là lever DUY NHẤT còn mở của M3b, ghi nhận để đo lại đầy đủ nếu quay lại.
-4. **Bài học (đảo ngược giả định §14.5):** "giết pad" bằng T nhỏ đổi lấy GEMM nhanh hơn nhưng BUILD+ACC tăng theo số tile (ng × T²) — và kernel simd_gemm không duy trì throughput ở T nhỏ. Pad 1.5× ở T=768 **rẻ hơn** pad 1.0× ở T=256 trong wrapper này. Kết luận: **không có lever T-dispatch an toàn trên grid đã đo**; nếu quay lại, chỉ số đo T=1024 full-wrapper thật (không phải SUM thủ công) mới quyết định.
+4. **Bài học (đảo ngược giả định §14.5):** "giết pad" bằng T nhỏ đổi lấy GEMM nhanh hơn nhưng BUILD+ACC tăng theo số tile (ng × T²) — và kernel simd_gemm không duy trì throughput ở T nhỏ. Pad 1.5× ở T=768 **rẻ hơn** pad 1.0× ở T=256 trong wrapper này. Kết luận: **không có lever T-dispatch an toàn trên grid đã đo**; nếu quay lại, chỉ số đo T=1024 full-wrapper thật (không phải SUM thủ công) mới quyết định. **[ĐÃ ĐO 2026-10-23 — probe CX: wrapper thật 1.01-1.12× « 1.3 → BUST — §14.10]**
 
 **Quyết định:** KHÔNG wire. `_smm_core`/`_p58_core_simple`/`_smm_core_pd` giữ nguyên `T = _imin(_tilek(k), _roundup64(_imin(m,n)))`. Menu còn lại: ~~M3c tái dùng buffer tile/C~~ **✅ ĐÃ WIRE 2026-10-23** (HANDOFF §0.41) → ~~parallel-ACC biến thể gốc~~ **❌ ĐÃ ĐO BÁC BỎ 2026-10-23** (probe CW, §14.8) → M1 OpenBLAS.
 
@@ -735,4 +735,27 @@ alloc 12 Ct (T=768) = 46-47 ms/call (trong số variant).
 3. **"Numerics = numerics torch" THẤT BẠI cả nguyên lý:** shim nạp OpenBLAS scipy = cùng nhóm np-BLAS (bit-diff 1609/2048), torch = oneMKL (1618) — 2 thứ tự tich luy KHÁC NHAU, đã ghi ở `docs/numerics-contract.md`; không có đường "gọi đúng thứ torch dùng" mà không kèm oneMKL proprietary.
 4. **KHÔNG wire** — production giữ `tkv_simd_native.dll` gốc.
 
-**Hệ quả menu — chương trình đo ĐÃI HẾT ở mức repo-local:** M2 mất mục tiêu (CG chứng minh kernel đã parity — tiền đề "45-82 GFLOP/s" bị đảo ngược); M4/M5/M6/M7 đều đòi **builtin/ABI mới trong compiler** (`simd_gemm_packed`, fused AdamW/elementwise/lm-head kernels) — `.tkv` không khai báo được pinvoke mới → chặn trên compiler team. Còn đúng 1 mục `.tkv` treo có điều kiện: **T=1024 full-wrapper thật** (§14.6 footnote — SUM thủ công 1.18-1.33×, wrapper thật chưa đo). Kết luận lớn: nút thắt full-step = wrapper interpreted, đã thu hẹp qua 7 chu trình đo (CG/CH/CB/CI/CU/CW/M1); **parity 1.0× không đạt được từ repo-local.** Logs: `out/m1_*.log`.
+**Hệ quả menu — chương trình đo ĐÃI HẾT ở mức repo-local:** M2 mất mục tiêu (CG chứng minh kernel đã parity — tiền đề "45-82 GFLOP/s" bị đảo ngược); M4/M5/M6/M7 đều đòi **builtin/ABI mới trong compiler** (`simd_gemm_packed`, fused AdamW/elementwise/lm-head kernels) — `.tkv` không khai báo được pinvoke mới → chặn trên compiler team. Còn đúng 1 mục `.tkv` treo có điều kiện: **T=1024 full-wrapper thật** (§14.6 footnote — SUM thủ công 1.18-1.33×, wrapper thật chưa đo) **→ ĐÃ ĐO BÁC BỎ 2026-10-23 (probe CX, §14.10): wrapper thật 1.01-1.12×.** Kết luận lớn: nút thắt full-step = wrapper interpreted, đã thu hẹp qua **8 chu trình đo (CG/CH/CB/CI/CU/CW/M1/CX)**; **parity 1.0× không đạt được từ repo-local.** Logs: `out/m1_*.log`, `out/cx_run.log`.
+
+### 14.10 M3b DU PHONG — T=1024 FULL-WRAPPER THAT (probe CX, 2026-10-23): ĐÃ ĐO BÁC BỎ — MỤC TREO CUỐI ĐÓNG
+
+*Mục tiêu (footnote §14.6): số đo duy nhất còn treo có điều kiện — T=1024 wrapper THẬT (không phải SUM thủ công như CB). Gate: wrapper thật ≥1.3× trên S3/S4/S5 mới mở đường wire (sửa công thức T ở 3 đường + bench full-step + gate 84/84).*
+
+**Cách đo:** `tv/tests/simd_probe_cx.tkv` (0 thay đổi code train, log `out/cx_run.log`) — A/B cùng exe, best-of-3: wrapper production (công thức T = 768 cho 4 shape) vs bản sao nguyên vẹn `_smm_core` (serial) + `_smm_core_pd` (wave-12) với T=1024 tham số; mini tol 256³ so scalar. (Compile lần đầu fail vì thiếu `import tv.training.tensor` → annotation `"Tensor"` không resolve — thêm import là đủ.)
+
+**Số đo (ms, best-of-3, cùng phiên):**
+
+| Shape | route | base prod | T=1024 | sp | maxdiff |
+|---|---|---|---|---|---|
+| S1 dx1 | serial | 94 | 78 | **1.205×** | 1.9e-06 |
+| S3 dxf | wave-12 | 735 | 656 | **1.120×** | 1.3e-05 |
+| S4 dwte | wave-12 | 1250 | 1141 | **1.096×** | 3.0e-08 |
+| S5 lgts | wave-12 | 1187 | 1171 | **1.014×** | 0.0 |
+
+mini 256³ T=1024 vs scalar: 3.73e-08 ≤ 1e-4 ✓ (builder đúng khi T > mọi dim).
+
+**CHỐT:**
+1. **BUST — 1.01-1.12× « ngưỡng wire 1.3×.** KHÔNG wire, 3 đường công thức T giữ nguyên. Footnote §14.6 đóng: SUM thủ công 1.18-1.33× **không** phản ánh wrapper — production in-context đã nhanh hơn SUM tách pha (S3: 735 vs 953 — build/acc chồng lấn với replay trong wave thật) nên headroom SUM bị tính trùng; phần cố định (spawn/join, alloc C, replay simd_gemm-reentrancy) không giảm theo T; S5 k=768 < T=1024 pad k vô ích → 1.014×.
+2. **Menu repo-local khép lại hoàn toàn** — mục treo cuối đã có số đo. 8 chu trình đo (CG/CH/CB/CI/CU/CW/M1/CX): M3a ❌×2, M3b ❌×2, M3c ✅, M1 ❌. Từ đây parity 1.0× chỉ qua compiler team (M4-M7 builtin/ABI — §14.9).
+
+Chi tiết: HANDOFF §0.44.
