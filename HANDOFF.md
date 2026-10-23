@@ -1828,6 +1828,27 @@ thông ~1.0-1.1 s, không cần thread) — mục con của P7b. Docs: §12 dòn
 
 **Kết luận chung sau GĐ11-13 + P7 + P7b:** trần `.tkv`-only ≈ **10.4×** (giữ nguyên, không cải thiện thêm được); parity 1.0× **bắt buộc** đi qua native/C hoặc compiler (f32 locals, fused kernel). P7b là probe quyết định, không phải tối ưu. **Phân tích TRIZ + menu giải pháp chi tiết cho native-team (M1-M7): roadmap §14.** Docs: §12 dòng P7b + §13.3 P7b + §13.4.
 
+### 0.36 M3 — PHÂN RÃ WRAPPER GEMM 4 SHAPE P7b: CHỐT WRAPPER-BOUND, KERNEL ĐÃ PARITY (2026-10-23)
+
+**Mục tiêu (roadmap §14.3 M3 — làm đầu tiên theo §14.4):** trả lời "vì sao shape thật chỉ ăn 6-33% đỉnh 539 GFLOP/s đã đo (P3)?". Probe thuần `tv/tests/simd_probe_cg.tkv`, **0 thay đổi code train**, 5 chế độ: (0) phân rã wrapper `smm_*` thành ALLOC/BUILD/GEMM/ACC trên đúng 4 shape P7b; (1) GEMM thuần tile dựng sẵn; (2) BUILD thuần; (3) FULL wrapper; (4) re-entrancy — modes 1-3 đo cpu/wall qua `tools/probe_threads.py`. Cùng phiên, cùng máy, best-of; SUM khớp FULL ±5-12%.
+
+**Mode 0 — phân rã (ms / 1 lần gọi wrapper):**
+
+| Shape | ALLOC | BUILD | GEMM | ACC | FULL | GEMM GF (pad) | FULL GF (hữu ích) | GEMM vs torch |
+|---|---|---|---|---|---|---|---|---|
+| S1 dx1 [1024x768x3072] | 31 | 62 | 13.1 | 15 | 109 | 552 | 44.3 | 13.1 vs 7.1 ms |
+| S3 dxf [1024x768x50257] | 16 | 468 | 203.3 | 234 | 969 | 588 | 81.6 | 203 vs 129 ms (≈ pad 1.5×) |
+| S4 dwte [50257x768x1024] | 406 | 750 | 207 | 359 | 1828 | 578 | 43.2 | 207 vs 254 ms — **thắng** |
+| S5 logits [1024x50257x768] | 422 | 562 | 211 | 234 | 1563 | 567 | 50.6 | 211 vs 240 ms — **thắng** |
+
+**Tỉ lệ luồng (cpu/wall):** GEMM thuần **22.64** (pool hết công suất, per-pass 203-214 ms khớp mode 0) · BUILD thuần **1.00** (tile-build 100% đơn luồng, tổng 1813 ms) · FULL wrapper **3.68-3.97** (phần đơn luồng làm loãng 22 luồng).
+
+**Re-entrancy (mode 4) — BẰNG CHỨNG MỚI:** serial 24 call T=192 = 187 ms; 2 thread `thread_spawn`, mỗi thread `simd_gemm` trên A/B/C riêng rọ → **HANG > 90 s** (timeout giết). Đúng cơ chế cảnh báo `simd_matmul.tkv:419` + BH:11-13 (T≥96 → `tkv_run_mt` dùng `g_job` global không lock): race dispatcher biểu hiện **deadlock**, không chỉ sai số. **Ràng buộc: mọi GEMM song song phải qua 1 entry point duy nhất; wave-12 giữ worker dựng tile, main gọi simd_gemm (đúng BH/PD).**
+
+**CHỐT:** (1) pha GEMM chạy 552-588 GFLOP/s pad ≈ torch useful (S1 683/S3 612/S4 311/S5 329) — số "45-82 GFLOP/s" của §0.35 = chia flop hữu ích cho thời gian WRAPPER gồm build/acc/alloc + 1.5× pad → **quy sai cho kernel**; (2) pad 1.5× (T=768, m=1024 → pad 1536) giải thích trọn phần kernel S3 (79×1.51/0.588 = 202 ms ≈ 203 đo được); (3) BUILD+ACC+ALLOC = **76-89% FULL** (BUILD 2.2-3.6× GEMM, ACC 1.1-1.7×, ALLOC ~400 ms ở S4/S5) — BUILD ratio 1.00; (4) khoảng cách FULL 6.5-14× = **pad × wrapper, KHÔNG phải kernel** → **kết luận "khoảng cách nằm ở KERNEL/threading" ở §0.35 BỊ ĐẢO NGƯỢC MỘT PHẦN** (đã ghi chú tại chỗ).
+
+**Hệ quả menu TRIZ (roadmap §14.5):** M3 ✅ đóng; **M1/M2 hạ ưu tiên** (chỉ nhắm residual 1.2-1.6×); mục mới **M3a song song ACC → M3b T-dispatch giết pad → M3c tái dùng buffer** (đều `.tkv`, gate §13.2) — trần ước lượng S3 938 → ~250-300 ms ≈ 3.1-3.7×, **chưa đo, không hứa số bước tổng**. KPI "≥250 GFLOP/s/shape" tính cho pha GEMM: **4/4 đã vượt**. Logs: `out/cg_m0..m4.log`.
+
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
 
 | Gate | Command / Path | Result |
