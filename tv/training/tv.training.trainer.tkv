@@ -97,6 +97,8 @@ class AdamW:
     pg: 'i64'
     pt: 'i64'
     pone: 'i64'
+    # M5-opt: 1 = p list da sua ngoai (setup) — buoc sau se day list->buf.
+    pdirty: 'i32'
 
     def __init__(self, n: 'i64', warmup: 'i64', total: 'i64',
                  lr_max: 'f32', lr_min: 'f32',
@@ -104,8 +106,10 @@ class AdamW:
         self.n = n
         self.p = _zeros(n)
         self.g = _zeros(n)
-        self.m = _zeros(n)
-        self.v = _zeros(n)
+        # M5-opt (2026-10-25): m/v LAZY — khong alloc list o day (@124M thi
+        # ~1GB RAM); sync_mv() cap phat + doc tu buffer khi ckpt/test can doc.
+        self.m = _zeros(0)
+        self.v = _zeros(0)
         self.t = 0
         self.warmup = warmup
         self.total = total
@@ -128,6 +132,7 @@ class AdamW:
         self.pg = alloc_bytes(n * 4)
         self.pt = alloc_bytes(n * 4)
         self.pone = alloc_bytes(n * 4)
+        self.pdirty = 1
         p0 = self.pp
         m0 = self.pm
         v0 = self.pv
@@ -230,17 +235,40 @@ class AdamW:
             rzp = f32_zero(ptl, self.n)
             rax = f32_addcmul(ptl, pgl, ponl, coef, self.n)
             gsrc = ptl
-        r2 = f32_copy_to_buf(pl, ppl, self.n)
+        # M5-opt (probe CJ7 bit-exact): BO r2 moi buoc — p day 1 lan luc setup
+        # (pdirty=1 tu __init__; site ghi opt.p ngoai setup thi push_p()).
+        # r3 van giu p list = anh chinh doc boi unflatten/bench/ckpt.
+        if self.pdirty != 0:
+            r2 = f32_copy_to_buf(pl, ppl, self.n)
+            self.pdirty = 0
         wde = self.wd * bc1
         stw = adamw_step(ppl, pml, pvl, gsrc, self.n,
                          step_size, self.b1, self.b2, self.eps, wde, bc1, bc2s)
         r3 = f32_copy_from_buf(ppl, pl, self.n)
-        # sync m/v ve list sau moi buoc — test/ckpt doc truc tiep opt.m/opt.v
-        # (list = anh chinh cua state; buffer la ban tinh) — +2 memcpy/buoc.
-        r4 = f32_copy_from_buf(pml, self.m, self.n)
-        r5 = f32_copy_from_buf(pvl, self.v, self.n)
+        # M5-opt: BO r4/r5 (+188ms/buoc @124M — do _cj8) — m/v song TRUC TIEP
+        # o buffer; ckpt_save/test doc qua sync_mv() (lazy cap phat list).
         self.t = self.t + 1
         return lr
+
+    # ==== M5-opt (2026-10-25): push_p + sync_mv ================================
+    def push_p(self) -> 'i64':
+        # Danh dau p list da duoc sua NGOAI setup — buoc sau se day list->buf
+        # (thay cho r2 moi buoc). Goi NGAY SAU moi lan ghi vao opt.p khi do.
+        self.pdirty = 1
+        return 0
+
+    def sync_mv(self) -> 'i64':
+        # Doc state m/v tu buffer ve list (lazy: chua co list thi cap phat n).
+        # Goi truoc ckpt_save serialize va truoc khi test doc opt.m/opt.v.
+        if len(self.m) != self.n:
+            self.m = _zeros(self.n)
+        if len(self.v) != self.n:
+            self.v = _zeros(self.n)
+        ml: "list[f32]" = self.m
+        vl: "list[f32]" = self.v
+        rs1 = f32_copy_from_buf(self.pm, ml, self.n)
+        rs2 = f32_copy_from_buf(self.pv, vl, self.n)
+        return 0
 
 # ============================================================================
 #  Sampler: xao tron moi epoch bang LCG 31-bit (Fisher-Yates), giong fixture
@@ -595,13 +623,8 @@ def _mk_file(dir: 'str', name: 'str') -> 'str':
     return dir + "/" + name
 
 def ckpt_save(path: 'str', opt: "AdamW", smp: "Sampler") -> 'i32':
-    # M5: m/v state chinh o buffer native — sync ve list truoc khi serialize
-    mlist = opt.m
-    vlist = opt.v
-    pml = opt.pm
-    pvl = opt.pv
-    rs1 = f32_copy_from_buf(pml, mlist, opt.n)
-    rs2 = f32_copy_from_buf(pvl, vlist, opt.n)
+    # M5-opt: m/v LAZY — sync_mv() cap phat list (neu chua co) + doc tu buffer
+    rs1 = opt.sync_mv()
     lines = []
     lines.append("# TVTRAIN1")
     lines.append("n=" + str(opt.n) + " t=" + str(opt.t)

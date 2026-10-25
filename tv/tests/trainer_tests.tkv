@@ -246,6 +246,7 @@ def main() -> 'i32':
     o3.step()
     _coef = 1.0 / (_gn3 + 0.000001)
     _want_m = (1.0 - b1) * _coef
+    _smv = o3.sync_mv()
     cases = cases + 1
     fails = fails + report("clip: grad lon bi scale (norm=" + str(_gn3) + ")",
                            _fabs(o3.m[0] - _want_m), 1e-6)
@@ -254,6 +255,7 @@ def main() -> 'i32':
         o3b.g[i] = 0.0001
     o3b.step()
     _want_m2 = (1.0 - b1) * 0.0001
+    _smv2 = o3b.sync_mv()
     cases = cases + 1
     fails = fails + report("clip: grad nho khong doi", _fabs(o3b.m[0] - _want_m2), 1e-9)
 
@@ -298,6 +300,8 @@ def main() -> 'i32':
         ok5 = 0
     if _bits_equal(oa.p, oc.p) == 0:
         ok5 = 0
+    _smv3 = oa.sync_mv()
+    _smv4 = oc.sync_mv()
     if _bits_equal(oa.m, oc.m) == 0:
         ok5 = 0
     if _bits_equal(oa.v, oc.v) == 0:

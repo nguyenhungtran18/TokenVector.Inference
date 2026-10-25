@@ -177,6 +177,7 @@ def main() -> 'i32':
         bc2s = sqrt(bc2)
         wdf = 1.0 - lr * opt.wd
         groups = opt.groups
+        rs = opt.sync_mv()
         go = 0
         for gi in range(len(groups)):
             sz = groups[gi]
@@ -193,6 +194,7 @@ def main() -> 'i32':
                 opt.p[j] = opt.p[j] - step_size * opt.m[j] / denom
                 # AH5: bo ghi d
             go = go + sz
+        rp = opt.push_p()
         opt.t = opt.t + 1
         dd = now_ms()
         ds = b - a

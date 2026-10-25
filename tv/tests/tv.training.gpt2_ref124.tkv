@@ -1,4 +1,4 @@
-﻿# GPT-2 reference — G2 (ROADMAP_TRAIN.md)
+# GPT-2 reference — G2 (ROADMAP_TRAIN.md)
 # ---------------------------------------------------
 # Kien truc GIONG HF `gpt2`, 124M tham so (de chinh minh thuat toan va train):
 #   vocab 50257, n_embd 768, n_head 12, n_layer 12, max_pos 1024
@@ -1378,6 +1378,38 @@ def _mlp_gelu_one(j: "_MlpGJob") -> 'i64':
         j.outd[i] = r.data[i]
     return 0
 
+# ==== P6 EMBED_BWD OVERLAP (gwte_e worker || gwpe main) =====================
+class _EmbBwdJob:
+    idx: "list[i64]"
+    d: 'i64'
+    gy_data: "list[f32]"
+    out_data: "list[f32]"
+    def __init__(self, idx: "list[i64]", d: 'i64', gy_data: "list[f32]", out_data: "list[f32]"):
+        self.idx = idx
+        self.d = d
+        self.gy_data = gy_data
+        self.out_data = out_data
+
+def _emb_bwd_worker(j: "_EmbBwdJob") -> 'i64':
+    n = len(j.idx)
+    d = j.d
+    pos = []
+    for t in range(n):
+        pos.append(t)
+    for a in range(n):
+        for b in range(a + 1, n):
+            if j.idx[pos[b]] < j.idx[pos[a]]:
+                tmp = pos[a]
+                pos[a] = pos[b]
+                pos[b] = tmp
+    for q in range(n):
+        t = pos[q]
+        r = j.idx[t]
+        for c in range(d):
+            j.out_data[r * d + c] = j.out_data[r * d + c] + j.gy_data[t * d + c]
+    return 0
+
+
 def gpt2_mlp_bwd(x: "Tensor", w1: "Tensor", b1: "Tensor",
                  w2: "Tensor", b2: "Tensor", n: 'i64', gout: "Tensor", simd: 'i32' = 0,
                  gflat: 'list[f32]' = None, o_w1: 'i64' = -1, o_b1: 'i64' = -1,
@@ -1738,11 +1770,20 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
         for j in range(1, 13):
             rblocks.append(rb[j])
     # embedding bwd: wte nhan grad tu 2 duong (tie)
-    gwte_e = op_embed_bwd(wte, ids, h, gx)
-    gwpe = op_embed_bwd(wpe, pos, h, gx)
+    # P6 EMBED_BWD OVERLAP (2026-10-25): gwte_e || gwpe song song khi simd==1
+    if simd == 1:
+        gwte_e = t_zeros([VocabSize * h])
+        emb_job = _EmbBwdJob(ids, h, gx.data, gwte_e.data)
+        emb_h = thread_spawn(_emb_bwd_worker, emb_job)
+        gwpe = op_embed_bwd(wpe, pos, h, gx)
+        emb_r = thread_join(emb_h)
+    else:
+        gwte_e = op_embed_bwd(wte, ids, h, gx)
+        gwpe = op_embed_bwd(wpe, pos, h, gx)
     for k in range(VocabSize * h):
         dwte.data[k] = dwte.data[k] + gwte_e.data[k]
     # xep theo layout: layer 0 truoc
+
     out = []
     if use_flat == 1:
         # ghi thang dwte/gwpe vao flat (dwte gom 2 duong da gop)

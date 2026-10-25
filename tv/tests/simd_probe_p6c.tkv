@@ -1,0 +1,80 @@
+# PROBE P6C - GRAD_NORM + COPY_TO_BUF OVERLAP TEST
+# ---------------------------------------------------------------------------
+# Trong AdamW.step():
+#   Sequential:
+#     t_gn: gn = opt.grad_norm() (12 threads parallel)
+#     t_r1: r1 = f32_copy_to_buf(gl, pgl, n)
+#   Overlap:
+#     Spawn thread copy gl -> pgl dong thoi main tinh grad_norm()
+#     Do doc tu gl la read-only, khong ghi de -> AN TOAN TUYET DOI.
+
+import tv.training.trainer
+
+class _CopyJob:
+    src: "list[f32]"
+    dst: 'i64'
+    n: 'i64'
+    def __init__(self, src: "list[f32]", dst: 'i64', n: 'i64'):
+        self.src = src
+        self.dst = dst
+        self.n = n
+
+def _copy_worker(j: "_CopyJob") -> 'i64':
+    gl: "list[f32]" = j.src
+    return f32_copy_to_buf(gl, j.dst, j.n)
+
+
+def main() -> 'i32':
+    print("PROBE P6C: GRAD_NORM + COPY_TO_BUF OVERLAP TEST")
+    n = 124439808
+    groups = []
+    # simulate groups of 124M
+    # layer param groups
+    groups.append(50257 * 768)
+    groups.append(1024 * 768)
+    groups.append(768)
+    groups.append(768)
+    for i in range(12):
+        groups.append(768)
+        groups.append(768)
+        groups.append(768 * 2304)
+        groups.append(2304)
+        groups.append(768 * 768)
+        groups.append(768)
+        groups.append(768)
+        groups.append(768)
+        groups.append(768 * 3072)
+        groups.append(3072)
+        groups.append(3072 * 768)
+        groups.append(768)
+
+    opt = new_adamw_g(n, groups, 2, 1000, 0.05, 0.0025, 0.9, 0.999, 0.00000001, 0.0, 1.0)
+    # mock g
+    for i in range(100000):
+        opt.g[i] = float(i % 100) / 1000.0
+
+    # 1. Sequential
+    t0 = now_ms()
+    gn_seq = opt.grad_norm()
+    t1 = now_ms()
+    r1_seq = f32_copy_to_buf(opt.g, opt.pg, opt.n)
+    t2 = now_ms()
+    t_seq = t2 - t0
+    print("Sequential: grad_norm=" + str(t1 - t0) + " ms | copy_g=" + str(t2 - t1) + " ms | total=" + str(t_seq) + " ms")
+
+    # 2. Parallel / Overlap
+    t3 = now_ms()
+    c_job = _CopyJob(opt.g, opt.pg, opt.n)
+    c_h = thread_spawn(_copy_worker, c_job)
+    gn_par = opt.grad_norm()
+    c_res = thread_join(c_h)
+    t4 = now_ms()
+    t_par = t4 - t3
+    print("Parallel overlap: total=" + str(t_par) + " ms | speedup=" + str(t_seq / t_par) + "x")
+
+    diff = gn_seq - gn_par
+    if diff < 0.0:
+        diff = 0.0 - diff
+    print("Parity diff=" + str(diff))
+    print("PROBE P6C DONE")
+    return 0

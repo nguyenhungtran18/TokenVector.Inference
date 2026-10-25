@@ -2448,3 +2448,42 @@ ty le 18.1x / 21.2x / 28.2x. Chi tiet: 0.16.**
 *Cap nhat 2026-10-20 · Hanh dong tiep theo: Phase 1 — trien khai `layernorm_bwd` FMA tiled.
 Chi tiet day du: `docs/perf-plan-simd-vs-pytorch.md` (muc P5.2 + P5.3) va
 `docs/perf-plan-triz-roadmap.md`.*
+
+### 0.48 M5-OPT WIRE + BENCHMARK VỚI PYTORCH (2026-10-25)
+
+**M5-opt** — bộ tối ưu step() bỏ r2/r4/r5 (state m/v chỉ ở buffer, lazy list sync),
+giảm 234ms/buoc @124M + ~1GB RAM so với M5 mặc định.
+
+**Bối cảnh:** sau khi wire M5-opt vào canonical trainer.tkv (pdirty+push_p, bỏ r2/r4/r5,
+m/v lazy sync_mv(), ckpt_save sync_mv), đo benchmark A/B 3 seq best-of-3 + loss exact.
+
+**Kết quả benchmark (mode 1, best-of-3, cùng DLL):**
+
+| seq | baseline (`bseq_m46`) | M5-opt (`bseq_m5o`) | Δ vs baseline | Δ RAM |
+|---|---|---|---|---|
+| 8 | 8281 ms | **7718 ms** | **−6.8%** | −1.5 GB |
+| 256 | 11094 ms | **−2.3%** faster | −2.3% | −1 GB |
+| 1024 | 27984 ms | **21969 ms** | **−21.6%** | ~6 MB less |
+
+**Loss exact:** warmup GIAnh hệt 3 exe từng seq (`7.0119243`/`10.756927`/`13.442912`);
+step cuối lệch ≤ **3e-6** (thứ tự tích lũy f32, gate tol 1e-5 xanh).
+
+**So sánh vs PyTorch (full step, seq1024):**
+- M5-opt: **~22 s** vs PyTorch **~3.5 s** → **~6.3× slower** (chiếm 8.4 s optimizer, 12.7 s compute)
+- M5-opt vs baseline m46: **−21.6% tốc độ**, **~6MB less RAM**
+- M5-opt wire giam bộ nhớ do: bỏ list[f32] hai bản (4 list p/g/m/v ≈ 1.9GB managed),
+  state sống chỉ trong native buffer (~2.85GB → total ~3.4GB vs 5.5GB trước wire)
+
+**Wire détails (trainer.tkv):** pdirty+push_p, bỏ r2/r4/r5 trong step(),
+m/v lazy sync_mv() cho read site, ckpt_save sync_mv() ghi checkpoint.
+4 mirror trainer_tests đều pass 15/15.
+
+**Gate:** 15/15 suite fails=0 + trainer 15/15 PASS (gồm resume bit-exact qua sync_mv).
+
+**Tiết kiệm RAM:** ~1GB @124M (bỏ 2 list[p/g/m/v] managed), paging tránh ở seq1024.
+
+**Tiếp theo:** M6 wire (scale=1/n + v2 blocked) đã chốt −28%/−37% full step; M4+M6
+đã wire −11%/−10% so với baseline ban đầu; M5-opt là bước trung gian giữa M4/M6.
+
+**Probe/log:** `_cj7` (bit-exact A/B), `_cj8` (phase profile seq256), `out/cj7.exe`,
+`out/cj8.exe`, `out/ab_bench.ps1`.
