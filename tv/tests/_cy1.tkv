@@ -1,0 +1,114 @@
+# PROBE TAM _cy1 — chien luoc chuyen Tensor.data (List[Double]) -> list[f32]
+# (List[Single]) cho packed (M4). Moi kien: in thoi gian TRUOC khi goi packed
+# (neu packed nem -> van co log).
+#   T1: build bang append(0.0) + return-annotation list[f32]  (giong trainer._zeros)
+#   T2: param list[f64] -> return list[f32] (co ép kieu compile-time khong?)
+#   T3: build bang append((x-0.0)/1.0)                        (giong _zeros_list)
+import tv.training.tensor
+
+# T1 — giong hinh trainer._zeros / t_zeros (append 0.0 thuan)
+def _zd(n: 'i64') -> "list[f32]":
+    out = []
+    for i in range(n):
+        out.append(0.0)
+    return out
+
+# T2 — khai param f64, return f32 — hy vong compiler ep ve List[Single] tai return
+def _conv(d: "list[f64]") -> "list[f32]":
+    return d
+
+# T3 — giong _zeros_list cua simd_matmul (bieu thuc (x-0.0)/1.0)
+def _zf(n: 'i64') -> "list[f32]":
+    out = []
+    for i in range(n):
+        out.append((float(0) - 0.0) / 1.0)
+    return out
+
+def _fill(d: "list[f32]", n: 'i64', seed: 'i64') -> 'i64':
+    i = 0
+    while i < n:
+        d[i] = float(((i * 131 + seed) % 97) - 48) * 0.0021
+        i = i + 1
+    return n
+
+def _maxdiff(a: "list[f32]", b: "list[f32]", cnt: 'i64') -> 'f64':
+    dmax = 0.0
+    i = 0
+    while i < cnt:
+        dv = a[i] - b[i]
+        if dv < 0.0:
+            dv = -dv
+        if dv > dmax:
+            dmax = dv
+        i = i + 1
+    return dmax
+
+def main() -> 'i32':
+    m: "i64" = 64
+    n: "i64" = 48
+    k: "i64" = 80
+    T: "i64" = 64
+
+    # ---- T1: append(0.0) + annotation --------------------------------------
+    a1 = _zd(m * k)
+    rv1 = _fill(a1, m * k, 1)
+    b1 = _zd(k * n)
+    rv2 = _fill(b1, k * n, 2)
+    c1 = _zd(m * n)
+    hA: "i64" = 0
+    hB: "i64" = 0
+    hA = simd_gemm_packed_create(a1, m, k, k, T, 0)
+    hB = simd_gemm_packed_create(b1, k, n, n, T, 0)
+    st1 = simd_gemm_packed(hA, hB, c1, T)
+    print("CY1 T1 append(0.0)+annot packed st=" + str(st1)
+          + " c1[0]=" + str(c1[0]) + " c1[1]=" + str(c1[1]))
+
+    # ---- T2: param f64 -> return f32, goi voi Tensor.data -------------------
+    ta = t_zeros([m, k])
+    tb = t_zeros([k, n])
+    rv3 = _fill(ta.data, m * k, 3)
+    rv4 = _fill(tb.data, k * n, 4)
+    tc0 = now_ms()
+    ad2 = _conv(ta.data)
+    tc1 = now_ms()
+    print("CY1 T2 _conv(Tensor.data) ms=" + str(tc1 - tc0) + " len=" + str(len(ad2)))
+    bd2 = _conv(tb.data)
+    c2 = _zd(m * n)
+    hA2: "i64" = 0
+    hB2: "i64" = 0
+    hA2 = simd_gemm_packed_create(ad2, m, k, k, T, 0)
+    hB2 = simd_gemm_packed_create(bd2, k, n, n, T, 0)
+    st2 = simd_gemm_packed(hA2, hB2, c2, T)
+    print("CY1 T2 packed tu Tensor.data da chuyen st=" + str(st2)
+          + " c2[0]=" + str(c2[0]) + " c2[1]=" + str(c2[1]))
+
+    # ---- T3: do thoi gian chuyen 38M ptu (309MB double -> 154MB single) -----
+    big = t_zeros([1000000, 38])
+    rvb = _fill(big.data, 38000000, 5)
+    best2 = 1.0e18
+    conv2 = []
+    q = 0
+    while q < 3:
+        t0 = now_ms()
+        conv2 = _conv(big.data)
+        t1 = now_ms()
+        d2 = t1 - t0
+        if d2 < best2:
+            best2 = d2
+        q = q + 1
+    print("CY1 T3 _conv 38M ptu best=" + str(best2) + " ms len=" + str(len(conv2)))
+
+    # ---- T4: tf kieu cua _zf (dung cho doi chieu) --------------------------
+    a4 = _zf(m * k)
+    rv5 = _fill(a4, m * k, 6)
+    b4 = _zf(k * n)
+    rv6 = _fill(b4, k * n, 7)
+    c4 = _zf(m * n)
+    hA4: "i64" = 0
+    hB4: "i64" = 0
+    hA4 = simd_gemm_packed_create(a4, m, k, k, T, 0)
+    hB4 = simd_gemm_packed_create(b4, k, n, n, T, 0)
+    st4 = simd_gemm_packed(hA4, hB4, c4, T)
+    print("CY1 T4 _zf((x-0.0)/1.0) packed st=" + str(st4) + " c4[0]=" + str(c4[0]))
+    print("CY1 done")
+    return 0

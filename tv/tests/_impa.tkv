@@ -1,0 +1,7 @@
+# PROBE TAM (xoa sau) — resolve import `tv.training.gpt2_ref`
+import tv.training.tensor
+import tv.training.gpt2_ref
+
+def main() -> 'i32':
+    print("IMPA gpt2_ref VocabSize=" + str(VocabSize) + " NLayers=" + str(NLayers))
+    return 0

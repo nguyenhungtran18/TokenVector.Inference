@@ -2081,6 +2081,106 @@ alloc 12 Ct (T=768) = **46-47 ms/call** (đã nằm trong số variant). Run 1 (
 
 **Trạng thái git:** probe `simd_probe_cx.tkv` (mới) + `out/cx_run.log` + HANDOFF §0.44 + roadmap §14.6 patch/§14.9 patch/§14.10 + ROADMAP_TRAIN — working tree, chưa commit. **3 phiên trước ĐÃ commit `e7a3eb4`** (§0.41-§0.43 + §14.8/§14.9 — dòng “chưa commit” trong §0.43 là trạng thái lúc viết). 0 thay đổi code train → không cần gate 84/84.
 
+### 0.45 NHẬN BÀN GIAO COMPILER (M4-M7) + CHẠY LẠI BENCHMARK — 135/135, LOSS EXACT, FULL STEP KHÔNG ĐỔI (2026-10-24)
+
+**Bối cảnh:** spec `docs/spec-m4-m7-compiler-team.md` giao compiler team (2026-10-24 buổi sáng) → buổi tối compiler team bàn giao: `dist/tkvc-tv.exe` build **24/10 16:12**, `runtime/tkv_simd_native.dll` build **24/10 18:39**, `docs/REFERENCE.md` cập nhật **24/10 16:05**, kèm 4 test mới trong repo compiler: `simd_gemm_packed_test.tkv` (M4), `adamw_step_test.tkv` (M5), `lmhead_bwd_fused_test.tkv` (M6), `gemm_dispatch_test.tkv` (M7 — **REFERENCE chưa có entry M7**).
+
+**Builtin mới theo REFERENCE (repo này CHƯA dùng):**
+
+| Mục | Builtin |
+|---|---|
+| M4 prepack | `simd_gemm_packed_create(src,rows,cols,stride,T,trans)` → handle `i64`; `simd_gemm_packed(hA,hB,C,T)` (ghi thẳng `_items`); `simd_gemm_packed_free(h)` — pack 1 lần/step, pad về `T`, zero-fill phần thiếu |
+| M5 buffer+step | `f32_zero` / `f32_copy_to_buf` / `f32_copy_from_buf` / `f32_addcmul` / `adamw_step(p,m,v,g,n,lr,b1,b2,eps,wd,bc1s,bc2s)` — buffer = `alloc_bytes(n*4)` + `f32buf_wrap` (**không container mới**), công thức đúng GĐ10 (1 div/ptần tử) |
+| M6 lm-head | `lmhead_bwd_fused(logits,ids,wte,xf,dxf,dwte,B,S,E,V)` — v1 **single-thread/naive, chưa đo**; `ids` buffer `i32` (`alloc_bytes` + `write_i32`) |
+
+**Chạy lại benchmark — biên dịch lại TOÀN BỘ bằng compiler 24/10 (nguồn `.tkv` không đổi 1 dòng):**
+
+- Biên dịch 11 gate + `out/bseq.exe`: OK, không lỗi.
+- **Gate 135/135** (9 suite 102 = simd_matmul 20 + gpt2 17 + scope 9 + train 5 + grad 20 + parity 4 + pack 6 + inplace 5 + gap 16; + `gpt2_full` 33; fails=0) **+ `trainer_tests` 15/15** — log `out/gate_newcc_20261024.log`.
+- **Bench full-step best-of-3** (`simd_bench_124m_seq` mode 1, steps 1 — log `out/bseq_newcc_20261024.log`):
+
+| seq | 3 lần chạy (ms) | best | baseline `7c7ff44` | Δ |
+|---|---|---|---|---|
+| 8 | 12484 / 12422 / **12312** | **12.312 s** | 12.516 | **−1.6%** |
+| 256 | 19219 / 17062 / **17000** | **17.000 s** | 17.313 | **−1.8%** |
+| 1024 | 37156 / 37062 / **36719** | **36.719 s** | 36.703 | **+0.04%** |
+
+- **Loss khớp EXACT từng chữ số cả 3 seq:** `10.572291 → 7.0119243` / `10.756927 → 11.807251` / `10.760399 → 13.442912` — cùng chuẩn với baseline (rep1 seq256 19.2 s = outlier lạnh, bỏ theo best-of-3).
+
+**A/B cùng phiên vs PyTorch (2026-10-24 tối — 3 rep XEN KẼ torch↔tkv, `tools/bench_torch.py d <seq>` torch 2.14.0+cpu 14 luồng, log `out/ab_tkv_torch_20261024.log`):**
+
+| seq | torch best / median (ms) | tkv best / median (ms) | **tỉ lệ best** | tỉ lệ median | baseline ghi trong tài liệu |
+|---|---|---|---|---|---|
+| 8 | 934.2 / 944.1 | 12312 / 12594 | **13.2×** | 13.3× | 13.4× |
+| 256 | 1394.1 / 1416.6 | 16844 / 16937 | **12.1×** | 12.0× | 12.3× |
+| 1024 | 3546.7 / 3675.8 | 36375 / 36813 | **10.3×** | 10.0× | 10.4× |
+
+- torch hôm nay tái lập đúng số đã ghi (0.934 / 1.404 / 3.542 s) khi chạy ấm — các lần đầu 4334/3791 ms là cold-start/nhiễu (cùng machine, `BackgroundDownload` đang ăn CPU) → phải lấy best-of-3 xen kẽ như kỷ luật §13.2.
+- **Tỉ lệ giữ nguyên 13.2/12.1/10.3× so với baseline 13.4/12.3/10.4×** → compiler fix (M4-M7) chưa đẩy tỉ lệ vì chưa wire; khoảng cách còn lại so với mục tiêu 1.0× vẫn là **10-13×**.
+
+**CHỐT:**
+
+1. **Không regression — và không tăng tốc (đúng dự đoán):** Δ −1.6/−1.8/+0.04% nằm trong nhiễu đo. Compiler mới thêm **builtin M4/M5/M6** nhưng đường train hiện tại **không gọi builtin nào trong số đó** (`simd_gemm` cũ, AdamW scalar, lm-head dựng tay) → số đo phải ra số cũ, và nó đã vậy.
+2. **Hợp đồng numerics giữ nguyên với DLL mới:** 135/135 + trainer 15/15 + loss 3 seq bit-identical → `tkv_simd_native.dll` 24/10 không đổi hành vi đường train cũ.
+3. **Chưa smoke-test builtin từ repo này** (mới đối chiếu REFERENCE + test của compiler team). Rủi ro đã ghi (`v_*` từng whitelist nhưng không đăng ký trong compiler) → bước wire đầu tiên PHẢI xác nhận `adamw_step`/`simd_gemm_packed_*` gọi được từ `.tkv` ở repo này, TOL 1e-6 như gate của compiler team.
+4. **Việc tiếp theo = wire theo §4 spec:** M4+M5 trước (kỳ vọng spec: full step → ~11-13 s ≈ 1.8×), rồi M6; mỗi bước wire phải qua **gate 135/135 + trainer 15/15 + bench 3 seq best-of-3 + loss exact** (kỷ luật §13.2). M7 chờ REFERENCE.
+
+**Trạng thái git:** 0 dòng `.tkv` code train sửa → không cần gate vì wire; chỉ thêm tài liệu §0.45 (và log `out/gate_newcc_20261024.log` + `out/bseq_newcc_20261024.log`, `out/` nằm trong gitignore). `tv/tests/_seq_cfg.txt` đã khôi phục `1024/1/1` sau khi đo.
+
+### 0.46 SMOKE BUILTIN TỪ REPO + WIRE M5 + ĐO A/B M4/M6 — M5 ĐÃ WIRE (−11%/−10%), M4/M6 ĐO BÁC BỎ (2026-10-25)
+
+**Bối cảnh:** sau §0.45, user xác nhận đã làm M4-M7 ở compiler → phần việc còn lại = việc repo này: smoke builtin từ `.tkv`, wire, gate, bench, ghi số. 3 chu trình đo: `_cy0` (smoke) → `simd_probe_cy` CY (A/B M4 đơn giản hóa) → `_cj` (A/B M4 production-real).
+
+**(a) Smoke builtin từ `.tkv` — probe `tv/tests/_cy0.tkv` (TOL theo spec §3.3):**
+
+- **M4 OK numerics:** `simd_gemm_packed` vs scalar ref: maxdiff **4.47e-08** (fwd + `trans=1`), free 0/0, trạng thái 0.
+- **M5 OK numerics:** `adamw_step` vs công thức GĐ10: dp **3.4e-13**, dm **4.7e-10**, dv **9.3e-10** « tol 1e-6; `f32_zero` (buffer thật, 0 số khác 0) + `f32_addcmul` maxdiff **0.0**.
+- **M6 FAIL numerics** — xem (d) bên dưới.
+- **2 phát hiện cấu hình dữ liệu (quyết định wire):**
+  1. **`Tensor.data` = List[DOUBLE]** (`t_zeros` append `0.0` literal) → `simd_gemm_packed_create` ném `ArgumentException` (native đọc `_items` = `float[]`). `simd_gemm_packed` cũng chỉ nhận `C` List[Single].
+  2. Không có builtin convert f64→f32; convert interpreted 2-pass (append ép Single + assign) đo được **343 ms/38M ptu** (`_cy0(2d)`) — chậm hơn memcpy native nhiều.
+
+**(b) WIRE M5 (2026-10-24/25) — `AdamW.step()` → `adamw_step` native, 4 mirror:**
+
+- Patch `tv/training/tv.training.trainer.tkv` + `tv/training/trainer.tkv` + 2 mirror snapshot (`tv/tests/`, `tv/tools/`). `_zeros(n)` đổi `append(0.0)` → `append((float(0)-0.0)/1.0)` để optimizer list là **f32 thật** (native đọc `_items`). Buffer native `pp/pm/pv/pg` + scratch `pt/pone` = 6×n×4B; `lr_native = step_size`, `wd_native = wd*bc1` (đảo ngược đúng giá trị vòng cũ), clip (`coef != 1.0`) đi `f32_addcmul` scratch; **sync buffer→list cuối mỗi step + trước ckpt** (test/bench đọc `opt.p/m/v` trực tiếp).
+- **Gate: `out/gate_m5.log` = 135/135 (9 suite + `gpt2_full` 33) + `trainer_tests` 15/15** (clip 0.0, resume bit-exact qua buffer, ulp ≤ 1.2e-7); chạy lại 2026-10-25 mọi suite `fails=0`.
+- **Bench M5 (`bseq_m5`, mode 1, best-of-3, loss EXACT cả 3 seq):**
+
+| seq | 3 rep (ms) | best | baseline §0.45 | Δ |
+|---|---|---|---|---|
+| 8 | 12781 / **10953** / 11563 | **10.953 s** | 12.312 | **−11.0%** |
+| 256 | 15063 / 17375 / **15234** | **15.234 s** | 17.000 | **−10.4%** |
+| 1024 | **42515** / 54656 / 52047 | 42.515 s | 36.719 | +15.8% (nhiễu — xem dưới) |
+
+- **seq1024 A/B xen kẽ** (`bseq.exe` baseline vs `bseq_m5.exe` cùng dải): base best **37.58 s** vs M5 best **40.27 s** (+7.1%), loss bit-exact → **M5 + ~2 GB buffer (4×124M×4B) vượt RAM máy 11.8 GB → pagefile pressure**; mode=0 (chỉ FWD+BWD, không alloc AdamW) của 2 exe giống hệt (32.1-33.2 s) → GEMM không đổi, delta nằm ở vùng alloc buffer; step thật (profile `_cy4/_cy6`) ≈ base. Kết luận: **M5 thắng ở seq8/256, seq1024 bottleneck RAM** — tối ưu kế tiếp (nếu làm) = bỏ sync list `p/m/v` (giữ state chỉ ở buffer, ~2 GB), nhưng phải đổi test/ckpt đọc list.
+
+**(c) M4 A/B 2 chu trình — CY « CJ, CJ quyết định:**
+
+- **CY (probe `simd_probe_cy`, `out/cy_run*.log`) — cả 2 arm trên list[Single] (không chịu convert):** S1 2.04×, S3 1.57-1.72×, S5 1.79-1.97×, **S4 (trans-A, m=50257) 0.57-0.61× BUST**; maxdiff 2.9e-6 … 4.0e-5. Số này THIẾU chi phí convert của production → chưa đủ để wire.
+- **CJ (probe `tv/tests/_cj.tkv`, production-real — Tensor Double, pipeline wire đúng gồm conv d2s + pack + run + copy C), best-of-3:**
+
+| shape | entry | base (ms) | M4 (ms) | ratio | phân rã M4 (convA/convB/packrun/copyC) |
+|---|---|---|---|---|---|
+| S1 dx1 | `smm_dot` serial | 93 | 94 | **0.99×** | 31 / 15 / 47 / 16 |
+| S3 dxf | `smm_fwd_pd` | 750 | 1125 | **0.67×** | 375 / 296 / 454 / 0 (sc) |
+| S5 lgts | `smm_dot_pd` | 1219 | 1531 | **0.80×** | 16 / 296 / 719 / 516 |
+| S6 att nhỏ | `smm_dot` | 15 | 15 | **1.0×** | 0 / 0 / 32 / 15 |
+
+- maxdiff M4 vs production: 2.9e-6 / 4.0e-5 / **0.0** / 0.0 — numerics đạt (f32 ulp), nhưng **tốc độ không đạt**: native pack THẬT sự nhanh hơn build+acc (S5 packrun 719 vs base 1219) nhưng **convert Double↔Single 2-pass interpreted nuốt hết lợi thế** (S3 convA+convB = 671 ms; S5 copyC = 516 ms). Chi phí convert ≈ 7-9 ns/ptu × số phần tử — tuyến tính với kích thước, không có caching nào cứu được C (51.5M ptu/lần gọi).
+- **→ QUYẾT ĐỊNH: KHÔNG WIRE M4** với ABI hiện tại. Số không đạt ngưỡng wire 1.3× của kỷ luật đo (thậm chí < 1.0×).
+
+**(d) M6 — FAIL numerics contract:** probe `_cy0` (4) (`lmhead_bwd_fused` 6 buffer native vs reference scalar GĐ10, sau khi sửa reference onehot theo `ids` thay vì `i`): nat = ref × **6 = B*S** ở mọi ptử → **kernel thiếu chuẩn hóa 1/n**; maxdiff dxf **0.55**, dwte **1.17** vs tol 1e-5. Production contract = `(p − onehot)/n` (gpt2_ref `g_logits`, `inv_n`). Thêm nữa v1 naive single-thread (chưa đo perf). **→ KHÔNG WIRE M6.**
+
+**(e) M7:** REFERENCE chưa có entry → chưa dùng được từ repo này.
+
+**ASK GIAO LẠI COMPILER TEAM (đề nghị ghi vào vòng spec tiếp):**
+
+1. **M4:** `simd_gemm_packed_create`/`simd_gemm_packed` cần nhận **`List[Double]`** (hoặc builtin convert native bulk f64 list → f32 list/buf) — Tensor production toàn bộ là List[Double], ABI f32-only khiến chi phí convert interpreted ăn hết gain (số đo CJ ở trên). Với ABI f64, M4 được chờ 1.6-2× ở S1/S3/S5 (số CY).
+2. **M6:** chuẩn hóa **1/n** trong `lmhead_bwd_fused` (thêm param scale hoặc chia trong kernel) — hợp đồng `(p−onehot)/n` của GĐ10; đồng thời đo perf v1 (naive single-thread).
+3. **M7:** bổ sung REFERENCE entry (cơ chế dispatch, env `TKV_GEMM_DISPATCH`?) để repo này dùng được.
+
+**Trạng thái git:** working tree = patch M5 (4 mirror trainer) + HANDOFF §0.45+§0.46 + ROADMAP_TRAIN + spec `docs/spec-m4-m7-compiler-team.md` + probe mới (`_cy0`-`_cy7`, `_cj`, `_impa/b`, `simd_probe_cy`) — **chưa commit**. `out/` gitignore. 0 thay đổi số liệu bench §0.45 (M4/M6 không wire → bench hiện tại = số M5 ở (b)).
+
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
 
 | Gate | Command / Path | Result |

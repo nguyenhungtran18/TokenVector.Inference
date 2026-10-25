@@ -40,7 +40,10 @@ N_PARAM = 67
 def _zeros(n: 'i64') -> 'list[f32]':
     out = []
     for i in range(n):
-        out.append(0.0)
+        # M5 (2026-10-24): append BIEU THUC -> compiler ep List[Single] (f32 THUC).
+        # append(0.0) thuan tao List[Double] -> f32_copy_to_buf/adamw_step nem
+        # (native doc `_items` cua List[Single]) — xem HANDOFF §0.46.
+        out.append((float(0) - 0.0) / 1.0)
     return out
 
 def _absf(v: 'f32') -> 'f32':
@@ -84,6 +87,16 @@ class AdamW:
     wd: 'f32'
     clip: 'f32'
     groups: 'list[i64]'
+    # ==== M5 (2026-10-24, SPEC M4-M7 §2): buffer native ====================
+    # p/m/v/g state chinh thuc cho adamw_step o day (native, khong boxing);
+    # p van SYNC ve list moi buoc (trainer/bench doc opt.p), g doc tu list moi
+    # buoc (backward ghi vao opt.g), m/v sync ve list truoc ckpt_save.
+    pp: 'i64'
+    pm: 'i64'
+    pv: 'i64'
+    pg: 'i64'
+    pt: 'i64'
+    pone: 'i64'
 
     def __init__(self, n: 'i64', warmup: 'i64', total: 'i64',
                  lr_max: 'f32', lr_min: 'f32',
@@ -107,6 +120,28 @@ class AdamW:
         # PyTorch clip_grad_norm_ (L2 tung tensor roi L2 cac norm). Rong =
         # layout MLP 4-8-3 (mac dinh cua trainer demo).
         self.groups = []
+        # cap phat buffer native (M5) — m/v song song (state chinh o buf);
+        # pt/pone = scratch cho truong hop clip (coef != 1.0).
+        self.pp = alloc_bytes(n * 4)
+        self.pm = alloc_bytes(n * 4)
+        self.pv = alloc_bytes(n * 4)
+        self.pg = alloc_bytes(n * 4)
+        self.pt = alloc_bytes(n * 4)
+        self.pone = alloc_bytes(n * 4)
+        p0 = self.pp
+        m0 = self.pm
+        v0 = self.pv
+        g0 = self.pg
+        rz1 = f32_zero(p0, n)
+        rz2 = f32_zero(m0, n)
+        rz3 = f32_zero(v0, n)
+        rz4 = f32_zero(g0, n)
+        o0 = self.pone
+        onb = f32buf_wrap(o0, n)
+        i = 0
+        while i < n:
+            onb[i] = 1.0
+            i = i + 1
 
     def zero_grad(self) -> 'i32':
         for i in range(self.n):
@@ -164,17 +199,46 @@ class AdamW:
         bc2s = sqrt(bc2)
         wdf = 1.0 - lr * self.wd
         # ==== P6 GĐ10 (2026-10-22, probe CB): GỘP 2 DIV THÀNH 1 ====
-        # m / (sqrt(v)/bc2s + eps) == (m*bc2s) / (sqrt(v) + eps*bc2s)
-        # PyTorch cung chi co 1 div/ptu. Do (probe CB, N=124M): 1.07x;
-        # maxdiff voi duong cu 1.19e-07 sau 1 buoc.
+        # Cong thuc dai so (chinh xac): m / (sqrt(v)/bc2s + eps)
+        #   == (m*bc2s) / (sqrt(v) + eps*bc2s)
+        # PyTorch (torch/optim/adamw.py) cung chi co 1 div/ptu.
+        # Do (probe CB, N=124M): 30.7 -> 28.8 ns/ptu = 1.07x; maxdiff voi
+        # duong cu = 1.19e-07 sau 1 buoc. Hoist (1-b1)/(1-b2) + gop p: do
+        # lai khong anh huong (V1 0.93x, V2 0.92x) -> giu nguyen.
         epss = self.eps * bc2s
         ks = step_size * bc2s
-        for i in range(self.n):
-            gi = self.g[i] * coef
-            self.p[i] = self.p[i] * wdf
-            self.m[i] = self.b1 * self.m[i] + (1.0 - self.b1) * gi
-            self.v[i] = self.b2 * self.v[i] + (1.0 - self.b2) * gi * gi
-            self.p[i] = self.p[i] - ks * self.m[i] / (sqrt(self.v[i]) + epss)
+        # ==== M5 (2026-10-24): fused AdamW NATIVE (builtin adamw_step) =======
+        # Vong interpreted ~3930 ms/buoc @124M (boxing list[f64]) thay bang
+        # kernel AVX2+FMA. Cong thuc GĐ10 giu nguyen; doi so:
+        #   lr_native = step_size (= lr/bc1), wd_native = wd*bc1
+        #   -> native tinh (lr/bc1)*(m*bc2s)/(sqrt(v)+eps*bc2s) + (lr/bc1)*(wd*bc1)*p
+        #   = step_size*bc2s*m/(...) + lr*wd*p  — DUNG gia tri vong cu.
+        # Lech ulp (thu tu nhan/phep tru ~1e-7) — trong TOL 1e-5 trainer_tests.
+        # coef != 1.0 (clip hoat dong): toan tu g bang f32_addcmul scratch
+        # (pt = coef*g*1) vi kernel khong co tham so coef.
+        gl = self.g
+        pl = self.p
+        pgl = self.pg
+        ppl = self.pp
+        pml = self.pm
+        pvl = self.pv
+        ptl = self.pt
+        ponl = self.pone
+        r1 = f32_copy_to_buf(gl, pgl, self.n)
+        gsrc: "i64" = pgl
+        if coef != 1.0:
+            rzp = f32_zero(ptl, self.n)
+            rax = f32_addcmul(ptl, pgl, ponl, coef, self.n)
+            gsrc = ptl
+        r2 = f32_copy_to_buf(pl, ppl, self.n)
+        wde = self.wd * bc1
+        stw = adamw_step(ppl, pml, pvl, gsrc, self.n,
+                         step_size, self.b1, self.b2, self.eps, wde, bc1, bc2s)
+        r3 = f32_copy_from_buf(ppl, pl, self.n)
+        # sync m/v ve list sau moi buoc — test/ckpt doc truc tiep opt.m/opt.v
+        # (list = anh chinh cua state; buffer la ban tinh) — +2 memcpy/buoc.
+        r4 = f32_copy_from_buf(pml, self.m, self.n)
+        r5 = f32_copy_from_buf(pvl, self.v, self.n)
         self.t = self.t + 1
         return lr
 
@@ -531,6 +595,13 @@ def _mk_file(dir: 'str', name: 'str') -> 'str':
     return dir + "/" + name
 
 def ckpt_save(path: 'str', opt: "AdamW", smp: "Sampler") -> 'i32':
+    # M5: m/v state chinh o buffer native — sync ve list truoc khi serialize
+    mlist = opt.m
+    vlist = opt.v
+    pml = opt.pm
+    pvl = opt.pv
+    rs1 = f32_copy_from_buf(pml, mlist, opt.n)
+    rs2 = f32_copy_from_buf(pvl, vlist, opt.n)
     lines = []
     lines.append("# TVTRAIN1")
     lines.append("n=" + str(opt.n) + " t=" + str(opt.t)
@@ -565,7 +636,7 @@ def _floats_of(ln: 'str') -> 'list[f32]':
     toks = ln.split(" ")
     for i in range(len(toks)):
         if len(toks[i]) > 0:
-            out.append(float(toks[i]))
+            out.append((float(toks[i]) - 0.0) / 1.0)
     return out
 
 def _bits_of(ln: 'str') -> 'list[f32]':
@@ -573,7 +644,7 @@ def _bits_of(ln: 'str') -> 'list[f32]':
     toks = ln.split(" ")
     for i in range(len(toks)):
         if len(toks[i]) > 0:
-            out.append(f32_bits_to_f64(_i64tok(toks[i])))
+            out.append((f32_bits_to_f64(_i64tok(toks[i])) - 0.0) / 1.0)
     return out
 
 def _i64tok(t: 'str') -> 'i64':
@@ -637,4 +708,14 @@ def ckpt_load(path: 'str', opt: "AdamW", smp: "Sampler") -> 'i32':
     opt.v = _bits_of(_sec_after(lines, "v"))
     if len(opt.p) != opt.n or len(opt.m) != opt.n or len(opt.v) != opt.n:
         return 0
+    # M5: day lai p/m/v vao buffer native (copy bit-exact List[Single] -> buf)
+    pll = opt.p
+    mll = opt.m
+    vll = opt.v
+    ppl = opt.pp
+    pml = opt.pm
+    pvl = opt.pv
+    rs3 = f32_copy_to_buf(pll, ppl, opt.n)
+    rs4 = f32_copy_to_buf(mll, pml, opt.n)
+    rs5 = f32_copy_to_buf(vll, pvl, opt.n)
     return 1

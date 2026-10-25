@@ -1,0 +1,369 @@
+# PROBE TAM _cy0 — smoke builtin M4/M5/M6 (0 thay doi code train)
+# Trat tu: chay truoc cac section an toan, section rui ro (Tensor.data) cuoi.
+#   (1) packed vs scalar tren list[f32] chuan (hinh chu nhat)
+#   (3) adamw_step + f32_zero + f32_addcmul vs cong thuc GĐ10 (TOL 1e-6)
+#   (4) lmhead_bwd_fused vs reference scalar (TOL 1e-5)
+#   (2) packed src = Tensor.data (t_zeros) — xem kieu co dung khong
+#   (2b) packed C  = Tensor.data
+#   (2c) chuyen Tensor.data qua ham co return-annotation list[f32] + do thoi gian
+import tv.training.tensor
+
+def _z(n: 'i64') -> "list[f32]":
+    out = []
+    i = 0
+    while i < n:
+        out.append((float(0) - 0.0) / 1.0)
+        i = i + 1
+    return out
+
+def _fill(d: "list[f32]", n: 'i64', seed: 'i64') -> 'i64':
+    i = 0
+    while i < n:
+        d[i] = float(((i * 131 + seed) % 97) - 48) * 0.0021
+        i = i + 1
+    return n
+
+def _ref(a: "list[f32]", b: "list[f32]", c: "list[f32]", m: 'i64', n: 'i64', k: 'i64') -> 'i64':
+    i = 0
+    while i < m:
+        j = 0
+        while j < n:
+            s = 0.0
+            p = 0
+            while p < k:
+                s = s + a[i * k + p] * b[p * n + j]
+                p = p + 1
+            c[i * n + j] = s
+            j = j + 1
+        i = i + 1
+    return 0
+
+def _maxdiff(a: "list[f32]", b: "list[f32]", cnt: 'i64') -> 'f64':
+    dmax = 0.0
+    i = 0
+    while i < cnt:
+        dv = a[i] - b[i]
+        if dv < 0.0:
+            dv = -dv
+        if dv > dmax:
+            dmax = dv
+        i = i + 1
+    return dmax
+
+# ep kieu qua return-annotation (xem co copy/ep List[Single] khong)
+def _as_f32(d: "list[f32]") -> "list[f32]":
+    # Tao list[Single] dung pattern chuan: append bieu thuc cho ep Single tai
+    # return, roi gan gia tri bang index (store ep f64 -> f32).
+    n = len(d)
+    out = []
+    i = 0
+    while i < n:
+        out.append((float(0) - 0.0) / 1.0)
+        i = i + 1
+    i = 0
+    while i < n:
+        out[i] = d[i]
+        i = i + 1
+    return out
+
+def main() -> 'i32':
+    # ---- (1) packed tren list[f32] chuan, hinh chu nhat 64x48x80 ----------
+    m: "i64" = 64
+    n: "i64" = 48
+    k: "i64" = 80
+    T: "i64" = 64
+    a1 = _z(m * k)
+    b1 = _z(k * n)
+    rv1 = _fill(a1, m * k, 1)
+    rv2 = _fill(b1, k * n, 2)
+    c1 = _z(m * n)
+    c0 = _z(m * n)
+    _r1 = _ref(a1, b1, c0, m, n, k)
+    hA1: "i64" = 0
+    hB1: "i64" = 0
+    hA1 = simd_gemm_packed_create(a1, m, k, k, T, 0)
+    hB1 = simd_gemm_packed_create(b1, k, n, n, T, 0)
+    st1 = simd_gemm_packed(hA1, hB1, c1, T)
+    fd1 = simd_gemm_packed_free(hA1)
+    fd2 = simd_gemm_packed_free(hB1)
+    md1 = _maxdiff(c1, c0, m * n)
+    print("CY0(1) packed list[f32] st=" + str(st1) + " hA=" + str(hA1)
+          + " free=" + str(fd1) + "/" + str(fd2) + " maxdiff=" + str(md1))
+
+    # ---- (1b) trans=1 (B luu [n][k]) --------------------------------------
+    c2 = _z(m * n)
+    hA2: "i64" = 0
+    hB2: "i64" = 0
+    bT = _z(n * k)
+    i = 0
+    while i < n:
+        j = 0
+        while j < k:
+            bT[i * k + j] = b1[j * n + i]
+            j = j + 1
+        i = i + 1
+    hA2 = simd_gemm_packed_create(a1, m, k, k, T, 0)
+    hB2 = simd_gemm_packed_create(bT, n, k, k, T, 1)
+    st2 = simd_gemm_packed(hA2, hB2, c2, T)
+    fd3 = simd_gemm_packed_free(hA2)
+    fd4 = simd_gemm_packed_free(hB2)
+    md2 = _maxdiff(c2, c0, m * n)
+    print("CY0(1b) packed trans=1 st=" + str(st2) + " maxdiff=" + str(md2))
+
+    # ---- (3) adamw_step + f32_zero + f32_addcmul vs GĐ10 (TOL 1e-6) ------
+    nn: "i64" = 100003
+    pl = _z(nn)
+    ml = _z(nn)
+    vl = _z(nn)
+    gl = _z(nn)
+    i = 0
+    while i < nn:
+        pl[i] = float(((i * 7) % 13) - 6) * 0.01
+        ml[i] = float(((i * 11) % 9) - 4) * 0.001
+        vl[i] = float(((i * 13) % 17) - 8) * 0.0001 + 0.01
+        gl[i] = float(((i * 17) % 19) - 9) * 0.002
+        i = i + 1
+    bp = alloc_bytes(nn * 4)
+    bm = alloc_bytes(nn * 4)
+    bv = alloc_bytes(nn * 4)
+    bg = alloc_bytes(nn * 4)
+    cp = f32_copy_to_buf(pl, bp, nn)
+    cm = f32_copy_to_buf(ml, bm, nn)
+    cv = f32_copy_to_buf(vl, bv, nn)
+    cg = f32_copy_to_buf(gl, bg, nn)
+    lr: "f32" = 0.001
+    b1_: "f32" = 0.9
+    b2_: "f32" = 0.999
+    eps_: "f32" = 0.00000001
+    wd_: "f32" = 0.0
+    bc1s: "f32" = 0.1
+    bc2s: "f32" = 0.031
+    stw = adamw_step(bp, bm, bv, bg, nn, lr, b1_, b2_, eps_, wd_, bc1s, bc2s)
+    pa = _z(nn)
+    ma = _z(nn)
+    va = _z(nn)
+    q1 = f32_copy_from_buf(bp, pa, nn)
+    q2 = f32_copy_from_buf(bm, ma, nn)
+    q3 = f32_copy_from_buf(bv, va, nn)
+    pr = _z(nn)
+    mr = _z(nn)
+    vr = _z(nn)
+    i = 0
+    while i < nn:
+        pi = pl[i]
+        mi = b1_ * ml[i] + (1.0 - b1_) * gl[i]
+        vi = b2_ * vl[i] + (1.0 - b2_) * gl[i] * gl[i]
+        pr[i] = pi - lr * (mi * bc2s) / (sqrt(vi) + eps_ * bc2s) - lr * wd_ * pi
+        mr[i] = mi
+        vr[i] = vi
+        i = i + 1
+    md3 = _maxdiff(pa, pr, nn)
+    md4 = _maxdiff(ma, mr, nn)
+    md5 = _maxdiff(va, vr, nn)
+    print("CY0(3) adamw st=" + str(stw) + " copy=" + str(cp) + "/" + str(q1)
+          + " dp=" + str(md3) + " dm=" + str(md4) + " dv=" + str(md5) + " tol=1e-6")
+
+    # f32_zero — kiem tren BUFFER (khong phai list da copy ra)
+    zr = f32_zero(bp, nn)
+    bb = f32buf_wrap(bp, nn)
+    bad = 0
+    i = 0
+    while i < nn:
+        if bb[i] != 0.0:
+            bad = bad + 1
+        i = i + 1
+    print("CY0(3b) f32_zero st=" + str(zr) + " con_so_khac_0_trong_buffer=" + str(bad))
+
+    # f32_addcmul: dst += scale*x*y
+    nd: "i64" = 1000
+    pdx = alloc_bytes(nd * 4)
+    pdy = alloc_bytes(nd * 4)
+    pdz = alloc_bytes(nd * 4)
+    sx = _z(nd)
+    sy = _z(nd)
+    sz = _z(nd)
+    i = 0
+    while i < nd:
+        sx[i] = float((i % 7) - 3) * 0.5
+        sy[i] = float((i % 5) - 2) * 0.25
+        sz[i] = float((i % 3) - 1) * 1.5
+        i = i + 1
+    e1 = f32_copy_to_buf(sx, pdx, nd)
+    e2 = f32_copy_to_buf(sy, pdy, nd)
+    e3 = f32_copy_to_buf(sz, pdz, nd)
+    scale: "f32" = 0.125
+    sa = f32_addcmul(pdz, pdx, pdy, scale, nd)
+    outz = _z(nd)
+    e4 = f32_copy_from_buf(pdz, outz, nd)
+    mda = 0.0
+    i = 0
+    while i < nd:
+        dv2 = outz[i] - (sz[i] + scale * sx[i] * sy[i])
+        if dv2 < 0.0:
+            dv2 = -dv2
+        if dv2 > mda:
+            mda = dv2
+        i = i + 1
+    print("CY0(3c) addcmul st=" + str(sa) + " maxdiff=" + str(mda))
+
+    # ---- (4) lmhead_bwd_fused vs reference scalar (TOL 1e-5) --------------
+    B: "i64" = 2
+    S: "i64" = 3
+    E: "i64" = 4
+    V: "i64" = 5
+    TT = B * S
+    nlg = TT * V
+    nwe = V * E
+    nxe = TT * E
+    p_lg = alloc_bytes(nlg * 4)
+    p_id = alloc_bytes(TT * 4)
+    p_we = alloc_bytes(nwe * 4)
+    p_xe = alloc_bytes(nxe * 4)
+    p_dx = alloc_bytes(nxe * 4)
+    p_dw = alloc_bytes(nwe * 4)
+    lgb = f32buf_wrap(p_lg, nlg)
+    web = f32buf_wrap(p_we, nwe)
+    xeb = f32buf_wrap(p_xe, nxe)
+    dxb = f32buf_wrap(p_dx, nxe)
+    dwb = f32buf_wrap(p_dw, nwe)
+    i = 0
+    while i < nlg:
+        lgb[i] = float((i % 7) - 3) * 0.5
+        i = i + 1
+    i = 0
+    while i < nwe:
+        web[i] = float((i % 5) - 2) * 0.25
+        i = i + 1
+    i = 0
+    while i < nxe:
+        xeb[i] = float((i % 3) - 1) * 0.75
+        i = i + 1
+    i = 0
+    wi: "i64" = 0
+    while i < TT:
+        wi = write_i32(p_id, i * 4, int((i * 3) % V))
+        i = i + 1
+    i = 0
+    while i < nxe:
+        dxb[i] = 0.0
+        i = i + 1
+    i = 0
+    while i < nwe:
+        dwb[i] = 0.0
+        i = i + 1
+    stl = lmhead_bwd_fused(p_lg, p_id, p_we, p_xe, p_dx, p_dw, int(B), int(S), int(E), int(V))
+    dxa = _z(nxe)
+    dwa = _z(nwe)
+    f1 = f32_copy_from_buf(p_dx, dxa, nxe)
+    f2 = f32_copy_from_buf(p_dw, dwa, nwe)
+    # reference scalar
+    lg2 = _z(nlg)
+    we2 = _z(nwe)
+    xe2 = _z(nxe)
+    f3 = f32_copy_from_buf(p_lg, lg2, nlg)
+    f4 = f32_copy_from_buf(p_we, we2, nwe)
+    f5 = f32_copy_from_buf(p_xe, xe2, nxe)
+    drx = _z(nxe)
+    drw = _z(nwe)
+    idl = _z(TT)
+    i = 0
+    while i < TT:
+        idl[i] = float(read_i32(p_id, i * 4))
+        i = i + 1
+    i = 0
+    while i < TT:
+        mxf = lg2[i * V]
+        o = 1
+        while o < V:
+            if lg2[i * V + o] > mxf:
+                mxf = lg2[i * V + o]
+            o = o + 1
+        tot = 0.0
+        o = 0
+        while o < V:
+            tot = tot + exp(lg2[i * V + o] - mxf)
+            o = o + 1
+        inv = 1.0 / tot
+        invn = 1.0 / float(TT)
+        o = 0
+        while o < V:
+            gv = exp(lg2[i * V + o] - mxf) * inv * invn
+            if float(o) == idl[i]:
+                gv = gv - invn
+            kk = 0
+            while kk < E:
+                drx[i * E + kk] = drx[i * E + kk] + gv * we2[o * E + kk]
+                drw[o * E + kk] = drw[o * E + kk] + gv * xe2[i * E + kk]
+                kk = kk + 1
+            o = o + 1
+        i = i + 1
+    md6 = _maxdiff(dxa, drx, nxe)
+    md7 = _maxdiff(dwa, drw, nwe)
+    print("CY0(4) lmhead st=" + str(stl) + " dxf=" + str(md6) + " dwte=" + str(md7)
+          + " tol=1e-5")
+    dbg = ""
+    i = 0
+    while i < nxe:
+        dbg = dbg + " dxf[" + str(i) + "] nat=" + str(dxa[i]) + " ref=" + str(drx[i])
+        i = i + 1
+    print("CY0(4a)" + dbg)
+    dbg2 = ""
+    i = 0
+    while i < nwe:
+        dbg2 = dbg2 + " dwte[" + str(i) + "] nat=" + str(dwa[i]) + " ref=" + str(drw[i])
+        i = i + 1
+    print("CY0(4b)" + dbg2)
+
+    # ---- (2d) DO THOI GIAN chuyen 38M ptu Double -> Single (TRUOC de luon do duoc) ----
+    big = t_zeros([1000000, 38])
+    rvb = _fill(big.data, 38000000, 5)
+    bestc = 1.0e18
+    conv = []
+    q = 0
+    while q < 3:
+        tc0 = now_ms()
+        conv = _as_f32(big.data)
+        tc1 = now_ms()
+        dc = tc1 - tc0
+        if dc < bestc:
+            bestc = dc
+        q = q + 1
+    print("CY0(2d) _as_f32 38M ptu (309MB double -> 154MB single) best=" + str(bestc) + " ms len=" + str(len(conv)))
+
+    # ---- (2) Tensor.data = List[Double] -> khong truc tiep cho packed -------
+    # Goi truc tiep `simd_gemm_packed_create(ta.data, ...)` nem ArgumentException:
+    #   List[Single] vs List[Double] (doc `_items`). Phai chuyen qua _as_f32.
+    ta = t_zeros([m, k])
+    tb = t_zeros([k, n])
+    rv3 = _fill(ta.data, m * k, 3)
+    rv4 = _fill(tb.data, k * n, 4)
+    ad = _as_f32(ta.data)
+    bd = _as_f32(tb.data)
+    c3 = _z(m * n)
+    hA3: "i64" = 0
+    hB3: "i64" = 0
+    hA3 = simd_gemm_packed_create(ad, m, k, k, T, 0)
+    hB3 = simd_gemm_packed_create(bd, k, n, n, T, 0)
+    st3 = simd_gemm_packed(hA3, hB3, c3, T)
+    fd5 = simd_gemm_packed_free(hA3)
+    fd6 = simd_gemm_packed_free(hB3)
+    _r2 = _ref(ta.data, tb.data, c0, m, n, k)
+    md8 = _maxdiff(c3, c0, m * n)
+    print("CY0(2) packed src qua _as_f32 st=" + str(st3) + " maxdiff=" + str(md8))
+
+    # ---- (2b) packed C — C cung phai la List[Single] -----------------------
+    c4 = t_zeros([m, n])
+    cd4 = _as_f32(c4.data)
+    hA4: "i64" = 0
+    hB4: "i64" = 0
+    hA4 = simd_gemm_packed_create(a1, m, k, k, T, 0)
+    hB4 = simd_gemm_packed_create(b1, k, n, n, T, 0)
+    st4 = simd_gemm_packed(hA4, hB4, cd4, T)
+    fd7 = simd_gemm_packed_free(hA4)
+    fd8 = simd_gemm_packed_free(hB4)
+    md9 = _maxdiff(cd4, c0, m * n)
+    print("CY0(2b) packed C qua _as_f32 st=" + str(st4) + " maxdiff=" + str(md9))
+    md10 = _maxdiff(c4.data, c0, m * n)
+    print("CY0(2c) c4.data (Double) sau packed maxdiff=" + str(md10) + " (lon -> _as_f32 la COPY, khong alias)")
+    print("CY0 done")
+    return 0
