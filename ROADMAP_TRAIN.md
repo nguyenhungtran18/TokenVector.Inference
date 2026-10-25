@@ -332,3 +332,28 @@ một thiết bị đã chứng minh được thuật toán. Chỉ làm khi th�
 | Train parity harness (G5) | `powershell -File tools\verify_train_parity.ps1` |
 
 Mọi gate trong tài liệu này đều phải giữ ba cổng trên ở trạng thái xanh.
+
+---
+
+## 14.11 M4+M6 WIRE THÀNH CÔNG (2026-10-25) — FULL STEP −28% ĐẾN −37%
+
+Sau khi compiler team sửa theo `docs/spec-m4-m7-compiler-team.md` §6 (bàn giao
+e_handoff 2026-10-25: M4 ABI f64, M6 param scale 1/n + v2 blocked, M7 dispatch
+trong REFERENCE), repo này đã đo lại và wire (chi tiết HANDOFF §0.47 + spec §7):
+
+- **Phát hiện cấu trúc:** `t_zeros` sinh `List[float64>` nhưng managed code ghi/đọc
+  bằng token `List<float32>` → layout nhớt f32@4i; ABI f64 native đọc cặp float
+  → rác → **fix repo**: `t_zeros`/`t_alloc_grad` khai `list[f32]` thật (3 mirror) —
+  layout managed nguyên vẹn, gate 15 suite XANH, nửa bộ nhớ Tensor.
+- **M4 WIRE** (`_smm_pk`, `simd_matmul.tkv` ×3, routing `trans_a=0 && k>=256`):
+  S1 2.04× / S3 1.69× / S5 2.43×, không case regress (probe `_cj2`/`_cj5`).
+- **M6 WIRE** (5 mirror gpt2_ref, bỏ `gg` + softmax interpreted + 2 GEMM cũ):
+  A/B production seq1024 **2.98×** (4844→1625 ms), maxdiff ≤ 5.4e-9 (probe `_cj6`).
+- **Gate:** 15/15 suite fails=0 + trainer 15/15 (gpt2_full 33/33 vs PyTorch).
+- **Bench best-of-3 (cùng phiên):** seq8 **8.422 s (−32.8%)**, seq256 **11.297 s
+  (−36.7%)**, seq1024 **29.484 s (−28.0%)** vs baseline; M5 +10.4% tại seq1024
+  (paging) được giải quyết nhờ type fix + M6 bỏ gg. Loss warmup giống hệt, step
+  cuối lệch ≤3e-6 (thứ tự tích lũy f32, gate torch tol 1e-5 xanh).
+
+→ Mục M4-M7 trong menu §14 khép lại: **M5 + M4 + M6 đã wire, M7 chạy mặc định
+định, M1/M2/M3a/M3b đã đo bác bỏ, M3c wired trước đó.**

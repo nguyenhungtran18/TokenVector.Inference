@@ -62,7 +62,12 @@ def t_new(data: 'list[f32]', shape: 'list[i64]') -> "Tensor":
 
 def t_zeros(shape: 'list[i64]') -> "Tensor":
     n = t_numel(shape)
-    data = []
+    # KHOI TAO list[f32] THAT (khong de inference tu append(0.0) sinh List[Double]):
+    # native f32 (simd_gemm_packed_create/... M4) castclass float[] tren _items —
+    # List[Double] -> ArgumentException; cung luc giu NGUYEN layout f32@4i ma toan
+    # code managed van doc ghi (punned get/set Item token float32) — do nen gate
+    # 135/135 + loss exact se xac nhan an toan.
+    data: "list[f32]" = []
     for i in range(n):
         data.append(0.0)
     return Tensor(data, shape, 0)
@@ -119,7 +124,8 @@ def t_alloc_grad(t: "Tensor") -> 'i32':
     # so de toi uoc.
     n = t_numel(t.shape)
     if len(t.grad) < n:
-        g = []
+        # cung ly do nhu t_zeros: list[f32] that de native f32 doc duoc grad
+        g: "list[f32]" = []
         for i in range(n):
             g.append(0.0)
         t.grad = g

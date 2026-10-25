@@ -270,8 +270,52 @@ def _smm_cd(m: 'i64', n: 'i64', sc: "list[f32]" = None) -> "list[f32]":
     C0 = t_zeros([m, n])
     return C0.data
 
+# ---- M4 WIRED (2026-10-25, probe CJ2/CJ5 @ out/cj2_run.log, out/cj5_run.log) ----
+# Packed native TRUC TIEP tu Tensor.data, khong convert:
+#   So do best-of-3 T=256: S3 m=1024 1.69x / m=256 3.21x / m=8 2.58x;
+#   S5 m=1024 2.43x / m=256 2.0x / m=8 1.22x; S1 m=1024 2.04x / m=256 1.48x,
+#   S1 m=8 1.0x — KHONG case nao regress (CJ5). Numerics: md <= 4e-5 (f32 ulp,
+#   thu tu KC khac wave-12), S5/S6 bit-exact 0.0, diag vs scalar khop.
+# Dieu kien routing:
+#   - trans_a = 0 (S4 trans-A lon do 0.6x tai CY -> LOAI, giu duong cu);
+#   - k >= 256 (attention head k=64 khong pack — pad T=256 lang phi 4x).
+# Tensor.data GIO la list[f32] THAT (fix t_zeros 2026-10-25) -> packed_create
+# nhan truc tiep; convert interpreted truoc do (CJ cu) nuot het gain -> khong dung.
+# C: packed ghi de DAY DU m*n (da chot m=8 vs C len=m*n khong tran) -> khong can
+# zero-fill khi muon sc (tiet 63-94ms/40M ptu theo M3c).
+
+def _smm_pk_c(m: 'i64', n: 'i64', sc: "list[f32]" = None) -> "list[f32]":
+    if sc != None:
+        if len(sc) >= m * n:
+            return sc
+    C0 = t_zeros([m, n])
+    return C0.data
+
+def _smm_pk(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64',
+            ndim: 'i64', trans_b: 'i32', sc: "list[f32]" = None) -> "Tensor":
+    T = 256
+    cd = _smm_pk_c(m, n, sc)
+    ad = a.data
+    bd = b.data
+    hA = 0
+    hB = 0
+    hA = simd_gemm_packed_create(ad, m, k, k, T, 0)
+    if trans_b == 0:
+        # B luu [k][ndim] (ndim = n): rows=k, cols=n, stride=n
+        hB = simd_gemm_packed_create(bd, k, ndim, ndim, T, 0)
+    else:
+        # B luu [n][k] (ndim = k): rows=n, cols=k, stride=k — KHONG dung ndim lam rows
+        hB = simd_gemm_packed_create(bd, n, k, k, T, 1)
+    st = simd_gemm_packed(hA, hB, cd, T)
+    fa = simd_gemm_packed_free(hA)
+    fb = simd_gemm_packed_free(hB)
+    return Tensor(cd, [m, n], 0)
+
 # ---- core: C = A x B (trans_b=0) hoac A x B^T (trans_b=1), tiled -----------
 def _smm_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32', sc: "list[f32]" = None) -> "Tensor":
+    # M4 wire: k du lon -> packed native (xem ghi chu M4 WIRED ben tren)
+    if k >= 256:
+        return _smm_pk(a, b, m, n, k, ndim, trans_b, sc)
     # P0.4 (perf-plan): T = min(_tilek(k), roundup64(min(m,n))) — truoc do T
     # chi theo k -> o gian (m=8, k=50257) dan len T=1024, A-tile dung 8/1024
     # hang (0.8% huu dung). Cong thuc chon: V(T) = (ceil(m/T)+ceil(n/T))*ceil(k/T)*T^2
@@ -553,6 +597,10 @@ def _pd_do(Ct: "list[f32]", ta: "list[f32]", tb: "list[f32]", T: 'i64',
 
 def _smm_core_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64',
                  ndim: 'i64', trans_b: 'i32', trans_a: 'i32', sc: "list[f32]" = None) -> "Tensor":
+    # M4 wire: trans_a=0 + k du lon -> packed native (S4 trans-A giu duong cu)
+    if trans_a == 0:
+        if k >= 256:
+            return _smm_pk(a, b, m, n, k, ndim, trans_b, sc)
     T = _imin(_tilek(k), _roundup64(_imin(m, n)))
     n_i = _pd_ceil(m, T)
     n_p = _pd_ceil(k, T)

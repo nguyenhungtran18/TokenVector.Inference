@@ -1303,38 +1303,51 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
             logits_t = smm_dot_pd(xf, wte, n, VocabSize, h)
         else:
             logits_t = saves[0]
-        gg = t_zeros([n, VocabSize])
-        for i in range(n):
-            base = i * VocabSize
-            mxf = logits_t.data[base]
-            for o in range(1, VocabSize):
-                if logits_t.data[base + o] > mxf:
-                    mxf = logits_t.data[base + o]
-            tot = 0.0
-            for o in range(VocabSize):
-                e = exp(logits_t.data[base + o] - mxf)
-                gg.data[base + o] = e
-                tot = tot + e
-            inv_tot = 1.0 / tot
-            inv_n = 1.0 / float(n)
-            for o in range(VocabSize):
-                ggv = gg.data[base + o] * inv_tot * inv_n
-                if o == ids[i]:
-                    ggv = ggv - inv_n
-                gg.data[base + o] = ggv
-        dxf = smm_fwd_pd(gg, wte, n, h, VocabSize)
-        # dwte[o,k] = sum_t gg[o,t]*xf[t,k] — trans-A: smm_fwd_at nhan truc
-        # tiep gg [n][V] nhu A^T, khong materialize ggT.
-        # P5.7 (2026-10-20): DA THU duong xfT/dwteT + transpose nguoc (dung
-        # probe AV: GEMM 2360 < 3062ms) — nhung transpose nguoc h x V = 38.6M
-        # ptu CO DINH, trong khi ggT chi n x V (nho khi seq nho) -> REGRESSION
-        # seq8 +22%, seq256 +17.6% (loss van bit-exact). REVERT.
-        # P5.8 (2026-10-21): dwte = smm_fwd_at(gg, xf) — BO transpose ggT,
-        # bit-exact 0.0 (probe AX @256/@1024), dwte loi ~400ms @256 / ~900ms
-        # @1024 so voi duong ggT + smm_fwd cu.
-        # KHAC P5.7: dxf van giu smm_fwd nguyen (P5.7 bo qua dxf -> bug gradient,
-        # hunk do da revert ve pre-6bf4a1c truoc khi wire).
-        dwte = smm_fwd_at_pd(gg, xf, VocabSize, h, n, sc4)
+        # M6 WIRED (2026-10-25, probe CJ6 @ out/cj6_run.log): native fused
+        # softmax-grad + dxf + dwte — BO toan bo gg (51.5M t_zeros interpreted)
+        # + softmax loop interpreted. A/B seq1024 best-of-3: base 4844ms
+        # (softmax 2735 + dxf 453 + dwte 1125) vs M6 1625ms = 2.98x;
+        # maxdiff vs base: dxf 5.4e-9, dwte 7.0e-10; smoke vs scalar 3.6e-8 < 1e-5.
+        # scale = 1/n theo hop dong (p - onehot)/n (compiler fix SPEC §6 ask 2).
+        # Lich su duong cu: P5.7 revert (transpose nguoc REGRESSION seq8/256),
+        # P5.8 smm_fwd_at_pd bit-exact — xem git.
+        m6_lgd = logits_t.data
+        m6_wtd = wte.data
+        m6_xfd = xf.data
+        m6_dd = dxf.data
+        m6_dw = dwte.data
+        m6_nlg = n * VocabSize
+        m6_nwe = VocabSize * h
+        m6_nxe = n * h
+        m6_plg = alloc_bytes(m6_nlg * 4)
+        m6_pids = alloc_bytes(n * 4)
+        m6_pwte = alloc_bytes(m6_nwe * 4)
+        m6_pxf = alloc_bytes(m6_nxe * 4)
+        m6_pdxf = alloc_bytes(m6_nxe * 4)
+        m6_pdwe = alloc_bytes(m6_nwe * 4)
+        m6_c1 = f32_copy_to_buf(m6_lgd, m6_plg, m6_nlg)
+        m6_c2 = f32_copy_to_buf(m6_wtd, m6_pwte, m6_nwe)
+        m6_c3 = f32_copy_to_buf(m6_xfd, m6_pxf, m6_nxe)
+        m6_i = 0
+        while m6_i < n:
+            m6_w = write_i32(m6_pids, m6_i * 4, ids[m6_i])
+            m6_i = m6_i + 1
+        m6_z1 = f32_zero(m6_pdxf, m6_nxe)
+        m6_z2 = f32_zero(m6_pdwe, m6_nwe)
+        m6_sc: "f32" = 1.0 / float(n)
+        m6_st = lmhead_bwd_fused(m6_plg, m6_pids, m6_pwte, m6_pxf,
+                                 m6_pdxf, m6_pdwe, n, 1, h, VocabSize, m6_sc)
+        if m6_st != 0:
+            raise ValueError("lmhead_bwd_fused loi st=" + str(m6_st))
+        m6_c4 = f32_copy_from_buf(m6_pdxf, m6_dd, m6_nxe)
+        m6_c5 = f32_copy_from_buf(m6_pdwe, m6_dw, m6_nwe)
+        m6_f1 = free_bytes(m6_plg)
+        m6_f2 = free_bytes(m6_pids)
+        m6_f3 = free_bytes(m6_pwte)
+        m6_f4 = free_bytes(m6_pxf)
+        m6_f5 = free_bytes(m6_pdxf)
+        m6_f6 = free_bytes(m6_pdwe)
+        # dxf/dwte van la Tensor t_zeros o tren — du lieu da dien day du
     if simd == 0:
         for i in range(n):
             row = []

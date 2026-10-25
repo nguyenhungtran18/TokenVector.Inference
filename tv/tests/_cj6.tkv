@@ -1,0 +1,290 @@
+# PROBE CJ6 — M6 `lmhead_bwd_fused` A/B PRODUCTION (SPEC §6 ask 2 da fix scale)
+# ---------------------------------------------------------------------------
+# Compiler da giao (2026-10-25): scale = 1/n theo hop dong (p - onehot)/n,
+# v2 blocked/threaded 1.40-1.51s @ T=1024 (do ben compiler, chua tin — do day).
+# Day do THEO DUONG WIRE se dung:
+#   BASE : production simd==1 — gg = t_zeros + softmax-grad interpreted
+#          + dxf = smm_fwd_pd(gg, wte) (gio da M4 packed) + dwte = smm_fwd_at_pd
+#   M6   : alloc_bytes 6 buffer + f32_copy_to_buf (memcpy native) + ids write_i32
+#          + lmhead_bwd_fused(..., scale=1.0/n) + f32_copy_from_buf ra list.
+# (A) smoke nho (n=24, V=100, E=16) vs scalar f64 ref — TOL 1e-5.
+# (B) production n=1024, V=50257, E=768 — best-of-3 ca 2 arm, maxdiff dxf/dwte.
+# Goi: D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_cj6.tkv out/cj6.exe main
+import tv.training.tensor
+import tv.training.simd_matmul
+
+def _cj6_fill(d: "list[f32]", n: 'i64', seed: 'i64', scale: 'f64') -> 'i64':
+    i = 0
+    while i < n:
+        d[i] = float(((i * 131 + seed) % 97) - 48) * scale
+        i = i + 1
+    return n
+
+def _maxdiff(a: "list[f32]", b: "list[f32]", cnt: 'i64') -> 'f64':
+    dmax = 0.0
+    i = 0
+    while i < cnt:
+        dv = a[i] - b[i]
+        if dv < 0.0:
+            dv = -dv
+        if dv > dmax:
+            dmax = dv
+        i = i + 1
+    return dmax
+
+# ---- BASE arm: y hhet production simd==1 (softmax interpreted + 2 GEMM) -----
+def _base(logits: "Tensor", wte: "Tensor", xf: "Tensor", ids: "list[i64]",
+          n: 'i64', V: 'i64', h: 'i64', sc4: "list[f32]", ph: "list[f64]",
+          out_dxf: "list[f32]", out_dwte: "list[f32]") -> 'i32':
+    t0 = now_ms()
+    gg = t_zeros([n, V])
+    i = 0
+    while i < n:
+        base = i * V
+        mxf = logits.data[base]
+        for o in range(1, V):
+            if logits.data[base + o] > mxf:
+                mxf = logits.data[base + o]
+        tot = 0.0
+        for o in range(V):
+            e = exp(logits.data[base + o] - mxf)
+            gg.data[base + o] = e
+            tot = tot + e
+        inv_tot = 1.0 / tot
+        inv_n = 1.0 / float(n)
+        for o in range(V):
+            ggv = gg.data[base + o] * inv_tot * inv_n
+            if o == ids[i]:
+                ggv = ggv - inv_n
+            gg.data[base + o] = ggv
+        i = i + 1
+    t1 = now_ms()
+    dxf = smm_fwd_pd(gg, wte, n, h, V)
+    t2 = now_ms()
+    dwte = smm_fwd_at_pd(gg, xf, V, h, n, sc4)
+    t3 = now_ms()
+    i = 0
+    while i < n * h:
+        out_dxf[i] = dxf.data[i]
+        i = i + 1
+    i = 0
+    while i < V * h:
+        out_dwte[i] = dwte.data[i]
+        i = i + 1
+    ph.append(t1 - t0)
+    ph.append(t2 - t1)
+    ph.append(t3 - t2)
+    return 0
+
+# ---- M6 arm: buffers native + memcpy + fused call --------------------------
+def _m6(logits: "Tensor", wte: "Tensor", xf: "Tensor", ids: "list[i64]",
+        n: 'i64', V: 'i64', h: 'i64', ph: "list[f64]",
+        out_dxf: "list[f32]", out_dwte: "list[f32]") -> 'i32':
+    t0 = now_ms()
+    nlg = n * V
+    nwe = V * h
+    nxe = n * h
+    lgd = logits.data
+    wtd = wte.data
+    xfd = xf.data
+    p_lg = alloc_bytes(nlg * 4)
+    p_ids = alloc_bytes(n * 4)
+    p_wte = alloc_bytes(nwe * 4)
+    p_xf = alloc_bytes(nxe * 4)
+    p_dxf = alloc_bytes(nxe * 4)
+    p_dwte = alloc_bytes(nwe * 4)
+    r1 = f32_copy_to_buf(lgd, p_lg, nlg)
+    r2 = f32_copy_to_buf(wtd, p_wte, nwe)
+    r3 = f32_copy_to_buf(xfd, p_xf, nxe)
+    i = 0
+    while i < n:
+        w = write_i32(p_ids, i * 4, ids[i])
+        i = i + 1
+    z1 = f32_zero(p_dxf, nxe)
+    z2 = f32_zero(p_dwte, nwe)
+    t1 = now_ms()
+    sc: "f32" = 1.0 / float(n)
+    st = lmhead_bwd_fused(p_lg, p_ids, p_wte, p_xf, p_dxf, p_dwte,
+                          n, 1, h, V, sc)
+    t2 = now_ms()
+    o1 = f32_copy_from_buf(p_dxf, out_dxf, nxe)
+    o2 = f32_copy_from_buf(p_dwte, out_dwte, nwe)
+    t3 = now_ms()
+    fa = free_bytes(p_lg)
+    fb = free_bytes(p_ids)
+    fc = free_bytes(p_wte)
+    fd = free_bytes(p_xf)
+    fe = free_bytes(p_dxf)
+    ff = free_bytes(p_dwte)
+    ph.append(t1 - t0)
+    ph.append(t2 - t1)
+    ph.append(t3 - t2)
+    return st
+
+# ---- (A) smoke nho vs scalar f64 ------------------------------------------
+def _smoke() -> 'i64':
+    n = 24
+    V = 100
+    h = 16
+    logits = t_zeros([n, V])
+    wte = t_zeros([V, h])
+    xf = t_zeros([n, h])
+    _cj6_fill(logits.data, n * V, 1, 0.01)
+    _cj6_fill(wte.data, V * h, 2, 0.05)
+    _cj6_fill(xf.data, n * h, 3, 0.05)
+    ids: "list[i64]" = []
+    i = 0
+    while i < n:
+        ids.append((i * 7) % V)
+        i = i + 1
+    dxf_r: "list[f64]" = []
+    dwte_r: "list[f64]" = []
+    i = 0
+    while i < n * h:
+        dxf_r.append(0.0)
+        i = i + 1
+    i = 0
+    while i < V * h:
+        dwte_r.append(0.0)
+        i = i + 1
+    t = 0
+    while t < n:
+        mxf = logits.data[t * V]
+        o = 1
+        while o < V:
+            if logits.data[t * V + o] > mxf:
+                mxf = logits.data[t * V + o]
+            o = o + 1
+        tot = 0.0
+        o = 0
+        while o < V:
+            tot = tot + exp(logits.data[t * V + o] - mxf)
+            o = o + 1
+        inv_n = 1.0 / float(n)
+        o = 0
+        while o < V:
+            pr = exp(logits.data[t * V + o] - mxf) / tot
+            dl = pr * inv_n
+            if o == ids[t]:
+                dl = dl - inv_n
+            k = 0
+            while k < h:
+                dxf_r[t * h + k] = dxf_r[t * h + k] + dl * wte.data[o * h + k]
+                k = k + 1
+            k = 0
+            while k < h:
+                dwte_r[o * h + k] = dwte_r[o * h + k] + dl * xf.data[t * h + k]
+                k = k + 1
+            o = o + 1
+        t = t + 1
+    o_dxf: "list[f32]" = []
+    i = 0
+    while i < n * h:
+        o_dxf.append(0.0)
+        i = i + 1
+    o_dwte: "list[f32]" = []
+    i = 0
+    while i < V * h:
+        o_dwte.append(0.0)
+        i = i + 1
+    ph: "list[f64]" = []
+    st = _m6(logits, wte, xf, ids, n, V, h, ph, o_dxf, o_dwte)
+    mdx = 0.0
+    i = 0
+    while i < n * h:
+        dv = o_dxf[i] - dxf_r[i]
+        if dv < 0.0:
+            dv = -dv
+        if dv > mdx:
+            mdx = dv
+        i = i + 1
+    mdw = 0.0
+    i = 0
+    while i < V * h:
+        dv = o_dwte[i] - dwte_r[i]
+        if dv < 0.0:
+            dv = -dv
+        if dv > mdw:
+            mdw = dv
+        i = i + 1
+    print("CJ6(A) smoke st=" + str(st) + " md_dxf=" + str(mdx) + " md_dwte=" + str(mdw)
+          + " tol=1e-5 pack=" + str(ph[0]) + " call=" + str(ph[1]) + " back=" + str(ph[2]))
+    return 0
+
+def main() -> 'i32':
+    print("CJ6: M6 lmhead_bwd_fused A/B production")
+    _smoke()
+
+    # ---- (B) production seq1024 ----
+    n = 1024
+    V = 50257
+    h = 768
+    logits = t_zeros([n, V])
+    wte = t_zeros([V, h])
+    xf = t_zeros([n, h])
+    _cj6_fill(logits.data, n * V, 11, 0.01)
+    _cj6_fill(wte.data, V * h, 12, 0.05)
+    _cj6_fill(xf.data, n * h, 13, 0.05)
+    ids2: "list[i64]" = []
+    i = 0
+    while i < n:
+        ids2.append((i * 131) % V)
+        i = i + 1
+    sc4t = t_zeros([V, h])
+    sc4 = sc4t.data
+    ph_dxf: "list[f32]" = []
+    i = 0
+    while i < n * h:
+        ph_dxf.append(0.0)
+        i = i + 1
+    ph_dwte: "list[f32]" = []
+    i = 0
+    while i < V * h:
+        ph_dwte.append(0.0)
+        i = i + 1
+    o_dxf: "list[f32]" = []
+    i = 0
+    while i < n * h:
+        o_dxf.append(0.0)
+        i = i + 1
+    o_dwte: "list[f32]" = []
+    i = 0
+    while i < V * h:
+        o_dwte.append(0.0)
+        i = i + 1
+
+    # base best-of-3
+    vb = 1.0e18
+    phb: "list[f64]" = []
+    i = 0
+    while i < 3:
+        phb = []
+        t0 = now_ms()
+        rb = _base(logits, wte, xf, ids2, n, V, h, sc4, phb, ph_dxf, ph_dwte)
+        t1 = now_ms()
+        if t1 - t0 < vb:
+            vb = t1 - t0
+        i = i + 1
+    print("CJ6(B) base best=" + str(vb) + " softmax=" + str(phb[0])
+          + " dxf=" + str(phb[1]) + " dwte=" + str(phb[2]))
+
+    # m6 best-of-3
+    vm = 1.0e18
+    phm: "list[f64]" = []
+    stm = 0
+    i = 0
+    while i < 3:
+        phm = []
+        t0 = now_ms()
+        stm = _m6(logits, wte, xf, ids2, n, V, h, phm, o_dxf, o_dwte)
+        t1 = now_ms()
+        if t1 - t0 < vm:
+            vm = t1 - t0
+        i = i + 1
+    mdx = _maxdiff(ph_dxf, o_dxf, n * h)
+    mdw = _maxdiff(ph_dwte, o_dwte, V * h)
+    print("CJ6(B) m6 best=" + str(vm) + " st=" + str(stm)
+          + " pack=" + str(phm[0]) + " call=" + str(phm[1]) + " back=" + str(phm[2]))
+    print("CJ6(B) speedup=" + str(vb / vm) + "x md_dxf=" + str(mdx) + " md_dwte=" + str(mdw))
+    print("CJ6 done")
+    return 0

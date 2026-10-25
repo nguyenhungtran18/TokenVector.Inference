@@ -2181,6 +2181,58 @@ alloc 12 Ct (T=768) = **46-47 ms/call** (đã nằm trong số variant). Run 1 (
 
 **Trạng thái git:** working tree = patch M5 (4 mirror trainer) + HANDOFF §0.45+§0.46 + ROADMAP_TRAIN + spec `docs/spec-m4-m7-compiler-team.md` + probe mới (`_cy0`-`_cy7`, `_cj`, `_impa/b`, `simd_probe_cy`) — **chưa commit**. `out/` gitignore. 0 thay đổi số liệu bench §0.45 (M4/M6 không wire → bench hiện tại = số M5 ở (b)).
 
+### 0.47 M4+M6 ĐÃ WIRE SAU KHI COMPILER GIAO ĐÚNG SPEC §6 — FIX t_zeros list[f32], BENCH −28% ĐẾN −37% (2026-10-25)
+
+**Bối cảnh:** compiler team bàn giao `docs/e_handoff/2026-10-25-m4-f64-m6-scale-ban-giao.md` đáp đúng 3 ask §6: (1) M4 ABI f64 (`SgemmPackedCreate64`/`SgemmPacked64`, convert double→float trong pack), (2) M6 thêm param `scale` = 1/n hợp đồng `(p−onehot)/n` + v2 blocked/threaded đo 1.40-1.51 s, (3) M7 dispatch env `TKV_GEMM_DISPATCH` ghi vào REFERENCE. DLL mới (`runtime/tkv_simd_native.dll` 25/10 10:48) đã copy vào `out/`.
+
+**(a) PHÁT HIỆN CẤU TRÚC DỮ LIỆU QUYẾT ĐỊNH CẢ PHIÊN — M4 f64 ABI THỰC TẾ KHÔNG DÙNG ĐƯỢC CHO PRODUCTION:**
+
+- Probe `_cj2` v1 (arm f64 identity-view trên `t_zeros` data) → **kết quả RÃNH 2^65** ở mọi shape dù `st=0`. Chu trình cô lập:
+  1. `_cj3`: f32 arm (list Single coerce) = base **md 0.0 / 4e-5 ĐÚNG**; f64 arm rác 6-13% ptử — kể cả 32³/64³ căn chỉnh T (case giống hệt test compiler đang PASS) → không phải bug shape/DLL.
+  2. `_cj4`: literal `list[f64]` (y hệt test `packed_f64` compiler) **PASS md 0.0**; src = `t_zeros` data **FAIL**; target = `t_zeros` data **PASS** → lỗi ở src.
+  3. IL + memory forensics: `t_zeros` sinh `List[float64>` (newobj + append `0.0`), field khai `list[f32]`; toàn bộ managed code ghi/đọc qua token `List<float32>::set/get_Item` (IL production: 170-361 set vs 9-40 set f64) → **store float32 @ stride 4 BYTE vào double[]** → layout bộ nhớ = **f32@4i tự nhất cho managed** (đọc vuông, gate xanh từ đầu), nhưng **native f64 đọc 8-byte = CẶP 2 float → rác** (va[0]=0.0078125 = cặp (0f,1f) — khớp chính xác 0x3F80000000000000).
+  4. J4(4) xác nhận runtime type thật = `List[float64]` (reflection CheckConsistency) — tức CLR type, static annotation và layout 3 chiều KHÔNG khớp nhau.
+- **→ QUYẾT ĐỊNH: sửa repo thay vì dùng f64 ABI** — `t_zeros` + `t_alloc_grad` khai `data: "list[f32]" = []` (3 mirror tensor.tkv): runtime → `List[Single]` thật, **layout f32@4i NGUYÊN VẸN** (managed punned access tính toán y hệt trước — element size 4 trùng), GC/memory giảm nửa (logits 412→206 MB), và **native f32 path nhận thẳng `Tensor.data`** (castclass float[] khớp). Cả 15 suite gate build lại: **fails=0 toàn bộ** → refactor type an toàn.
+- Lưu ý cho compiler team: ABI f64 hoạt động đúng theo test bên đó (literal f64 list) — chỉ là production **chưa bao giờ** chứa double thật; ask §6.1 khép lại bằng fix repo, không cần lại ABI.
+
+**(b) M4 WIRE (f32 direct, 0 convert) — probe `_cj2` v3 + `_cj5`, routing `trans_a=0 && k>=256`:**
+
+| shape (T=768/256) | base | M4 | ratio | maxdiff | ghi chú |
+|---|---|---|---|---|---|
+| S1 dx1 m=1024 | 94 | 46 | **2.04×** | 2.9e-6 | diag khớp scalar |
+| S3 dxf m=1024 | 765 | 453 | **1.69×** | 4.0e-5 | wave-12 vs KC order |
+| S5 lgts m=1024 | 1063 | 437 | **2.43×** | **0.0** | bit-exact |
+| S3 m=256 / m=8 | 500 / 281 | 156 / 109 | **3.21× / 2.58×** | ≤3.6e-5 | `_cj5` |
+| S5 m=256 / m=8 | 594 / 343 | 297 / 281 | **2.0× / 1.22×** | 4.8e-7 | `_cj5` |
+| S1 m=256 / m=8 | 46 / 15 | 31 / 15 | 1.48× / 1.0× | 3.8e-6 | không regress |
+
+- T=256 ≈ T=768 (sweep `_cj5` (b)(c)/(e)(f)) → chọn **T=256** (pad nhỏ hơn). Không case nào < 1.0× → routing chỉ loại **trans_a=1** (S4 trans-A lớn 0.57× ở CY) và **k<256** (head k=64, pad T=256 lang phí).
+- **Wire:** helper `_smm_pk` + `_smm_pk_c` (muon sc không zero-fill — packed ghi đè đủ m×n, đã chốt m=8 không tran) trong `simd_matmul.tkv` ×3 mirror; route đầu `_smm_core` (k≥256) + đầu `_smm_core_pd` (trans_a=0 && k≥256). Bug dính 1 vòng: trans_b=1 truyền `ndim`(=k) làm rows → native reject `src_len` → sửa `rows=n`.
+
+**(c) M6 WIRE — probe `_cj6` (scale=1/n + v2 blocked):**
+
+- (A) smoke n=24/V=100/E=16 vs scalar f64: **md_dxf 3.6e-8, md_dwte 3.1e-8** « tol 1e-5 → fix 1/n của compiler ĐÚNG hợp đồng GĐ10.
+- (B) production seq1024 best-of-3, arm = đúng pipeline wire (alloc_bytes 6 buffer + memcpy native + `write_i32` ids + call + copyback): **base 4844 ms** (softmax interpreted 2735 + dxf 453 + dwte 1125) vs **M6 1625 ms** (copy-in 156 + call 1406 + copy-out 32) = **2.98×**; **maxdiff vs base: dxf 5.4e-9, dwte 7.0e-10**.
+- **Wire:** thay khối `gg = t_zeros + softmax loop + smm_fwd_pd + smm_fwd_at_pd` trong nhánh `simd==1` của `gpt2_backward` — **5 mirror** (`gpt2_ref.tkv`, `tv.training.gpt2_ref.tkv` ×2, `tv.training.gpt2_ref124.tkv` ×2), biến `m6_*` (tránh merge slot tên trùng), free 6 buffer cuối call, `raise` nếu st≠0. Bỏ hẳn `gg` 51.5M interpreted + 2 GEMM cũ.
+
+**(d) GATE sau M4+M6: 15/15 suite `fails=0`** — gồm `gpt2_full` 33/33 (SIMD grad vs PyTorch), `gpt2` 17/17, `simd_matmul` 20/20, `trainer` 15/15.
+
+**(e) BENCH (mode 1, best-of-3, cùng phiên, cùng DLL 25/10; `out/bseq*`):**
+
+| seq | baseline (`bseq`) | M5 (`bseq_m5`) | **M4+M6 (`bseq_m46`)** | Δ vs base | Δ vs M5 |
+|---|---|---|---|---|---|
+| 8 | 12.531 s | 12.094 s | **8.422 s** | **−32.8%** | −30.4% |
+| 256 | 17.844 s | 14.750 s | **11.297 s** | **−36.7%** | −23.4% |
+| 1024 | 40.921 s | 45.172 s | **29.484 s** | **−28.0%** | −34.8% |
+
+- **Loss:** warmup GIỐNG HỆT cả 3 exe từng seq (`10.572291` / `10.756927` / `10.760399`); loss step cuối lệch ≤ **3e-6** (seq8 `7.0119243→7.011928`, seq256 `11.807251→11.807273`, seq1024 `13.442912→13.442915`) — do thứ tự tích lũy KC packed + softmax f32, trong ngưỡng f32 (gate vs PyTorch tol 1e-5 vẫn XANH).
+- **seq1024 đảo chiều so với §0.46:** M5 (+2GB buffer) đo +10.4% trong phiên này (bseq_m5 45.2 vs base 40.9) → nay **−28.0%**: fix `t_zeros` làm nửa bộ nhớ Tensor (logits 412→206 MB) + M6 bỏ `gg` 206 MB → hết pagefile pressure. Bottleneck RAM của M5 tự giải quyết một phần nhờ type fix.
+- M7: dispatch `shape` là mặc định native (env `TKV_GEMM_DISPATCH`) — chạy ngầm qua mọi call `simd_gemm`/`packed`, A/B bit-identical theo bàn giao; không cần wire gì thêm.
+
+**Probe/log phiên này:** `_cj2` (v3 f32), `_cj3` (f64-vs-f32 isolation), `_cj4` (nguồn list), `_cj5` (threshold+T sweep), `_cj6` (M6 A/B) + `out/cj2_run.log` … `out/cj6_run.log`.
+
+**Trạng thái git:** working tree = fix tensor ×3 + simd_matmul ×3 + gpt2_ref ×5 (M4+M6) + docs + probe — **chưa commit** (chưa được yêu cầu).
+
 ## 1. STATUS (snapshot 2026-10-17): FULLY VERIFIED ACROSS ALL GATES
 
 | Gate | Command / Path | Result |

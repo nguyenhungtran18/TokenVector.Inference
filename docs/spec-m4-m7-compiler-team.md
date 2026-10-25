@@ -258,3 +258,30 @@ với ABI f64, M4 giữ kỳ vọng 1.6-2× ở S1/S3/S5 (số CY).
 2. **M6 cần chuẩn hóa 1/n** (param scale hoặc chia trong kernel) theo hợp đồng
    `(p − onehot)/n` của GĐ10 + đo perf v1.
 3. M7: bổ sung REFERENCE entry.
+
+---
+
+## 7. KẾT QUẢ VÒNG 2 (2026-10-25) — COMPILER ĐÃ SỬA ĐÚNG, REPO WIRE M4+M6, BENCH −28% ĐẾN −37%
+
+Bàn giao `e_handoff/2026-10-25-m4-f64-m6-scale-ban-giao.md` đáp đủ 3 ask §6. Quy trình đo lại theo §4 (probe `_cj2`-`_cj6`, log `out/cj*_run.log`, chi tiết HANDOFF §0.47):
+
+| Mục | Chu trình đo | Kết quả | Quyết định |
+|---|---|---|---|
+| **M4 ABI f64** | `_cj2` v1 (f64 trên production) + `_cj3` (f32-vs-f64 isolation) + `_cj4` (nguồn list) | ABI f64 hoạt động đúng với literal `list[f64]` (md 0.0) — nhưng production KHÔNG chứa double thật: `t_zeros` sinh `List[float64>` trong khi toàn bộ managed code ghi/đọc bằng token `List<float32>` → layout nhớt **f32@4i**; native f64 đọc cặp float → rác 2^65 | **⚙ FIX REPO** thay vì dùng ABI: `t_zeros`/`t_alloc_grad` khai `list[f32]` thật (3 mirror) — layout managed nguyên vẹn, gate 15 suite XANH, native f32 nhận thẳng |
+| **M4 wire (f32 direct)** | `_cj2` v3 + `_cj5` (m=8/256/1024, sweep T) | S1 2.04×, S3 1.69×, S5 2.43× (m=1024); m=256: 1.48-3.21×; m=8: 1.0-2.58× — **không case nào regress**; T=256≈768; maxdiff ≤ 4e-5 (S5 bit-exact 0.0) | **✅ ĐÃ WIRE** — `_smm_pk` trong `simd_matmul.tkv` ×3, routing `trans_a=0 && k>=256` (loại S4 trans-A 0.57× + head k=64) |
+| **M6 scale 1/n + v2** | `_cj6` (A) smoke vs scalar f64 + (B) A/B production seq1024 | smoke md 3.6e-8/3.1e-8 « 1e-5 → **hợp đồng GĐ10 đúng**; A/B: base 4844 ms (softmax 2735+dxf 453+dwte 1125) vs M6 1625 ms = **2.98×**, md vs base 5.4e-9/7.0e-10 | **✅ ĐÃ WIRE** — thay khối gg+softmax+2 GEMM trong `gpt2_backward` (5 mirror gpt2_ref) |
+| **M7 dispatch** | — | Mặc định `shape` chạy ngầm qua mọi call (A/B bit-identical theo bàn giao) | ✅ Không cần wire thêm |
+
+**Gate:** 15/15 suite `fails=0` (gpt2_full 33/33 vs PyTorch, simd_matmul 20/20, trainer 15/15).
+
+**Bench best-of-3 cùng phiên (mode 1):**
+
+| seq | baseline | M5 | M4+M6 | Δ vs base |
+|---|---|---|---|---|
+| 8 | 12.531 s | 12.094 s | **8.422 s** | **−32.8%** |
+| 256 | 17.844 s | 14.750 s | **11.297 s** | **−36.7%** |
+| 1024 | 40.921 s | 45.172 s | **29.484 s** | **−28.0%** |
+
+Loss warmup giống hệt; loss step cuối lệch ≤3e-6 (thứ tự tích lũy f32) — gate torch tol 1e-5 vẫn xanh. seq1024 hết pagefile pressure nhờ type fix (nửa bộ nhớ Tensor) + M6 bỏ `gg`.
+
+**Lưu ý cho vòng spec sau (không chặn):** M4 pack hiện làm mỗi call (đo đã net-win); prepack handle tái dùng nhiều call/trong 1 step là bước tối ưu tiếp theo nếu cần thêm — cần ABI giữ handle sống qua call + đo re-entrancy với attention worker.
