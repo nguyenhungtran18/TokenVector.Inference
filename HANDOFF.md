@@ -2533,3 +2533,50 @@ trả buffer thay list) — không còn lever `.tkv`-only nào theo §13.2.
 **Trạng thái git:** thêm `_f32s.tkv`, `_f32s_neg.tkv`, `_f32p.tkv`,
 `tools/gate_f32.sh`, `docs/COMPILER_TEAM_REQUEST.md`; 0 dòng code train sửa →
 không cần gate wire; HANDOFF §0.49 ghi tại đây.
+
+### 0.50 M6b WIRED — simd_gemm_full routing m≤256 + bench 3 seq (2026-10-26)
+
+**Bối cảnh:** compiler team trả lời Yêu cầu #2 Ưu tiên A — `simd_gemm_full` (reply `D:\TokenVector\Release\docs\e_handoff\2026-10-26-simd-gemm-full-compiler-reply.md` 10:55): 1 ABI `simd_gemm_full(a,b,c,m,n,k,ndim,trans_b,T,mode)` BUILD tile + GEMM + ACC trọn trong DLL, mode 0 ghi đè / 1 tích lũy, BIT=0.0 vs `_smm_core` cổ điển (testkit của họ 7/7). Cần cả `dist/tkvc-tv.exe` (10:05) + `runtime/tkv_simd_native.dll` (09:38).
+
+**Smoke từ repo này** (`tv/tests/_gf0.tkv`): **5/5 PASS** — mode0 tb0/tb1 vs scalar ref ~1e-9, mode1 acc ~7e-9, **BIT=0.0 vs `_smm_pk`** (32×48×256 T=256), edge T>min(m,n). Bài học cũ tái hiện: builtin không nhận field-access `A.data` trực tiếp → local có annotation `"list[f32]"`. `out/tkv_simd_native.dll` cũ (25/10) thiếu export `SgemmFull` → copy DLL `runtime/` mới vào `out/` (pinvoke resolve theo thư mục exe).
+
+**Gate baseline với compiler mới:** `tools/gate_f32.sh` → **135/135** + trainer **15/15** — nền xanh trước khi wire.
+
+**Probe A/B `_gf1`** (best-of-5, T=256, cur = `_smm_pk` M4 đang wire vs `simd_gemm_full`, 4 shape CG + guard):
+
+| shape | m=8 | m=256 | m=1024 |
+|---|---|---|---|
+| S1 [m×768×3072] tb1 | thắng (16 → ~0 ms) | **2.07×** | 1.0× (47/47) |
+| S3 [m×768×50257] tb0 | ~hòa | **1.26×** | 0.83× (453→547 ms) |
+| S5 [m×50257×768] tb1 | **2.01×** (281→140) | **1.63×** | **0.57×** (422→735 ms) |
+| S4 dwte ta=1 | full N/A (không có trans_a) | — | — |
+
+- **Chốt nguyên nhân (đo, không argue):** full tránh pack nguyên ma trận → thắng khi m ≤ 256; build lại B-tile mỗi `(i0,p0,j0)` với số lần nhân `ceil(m/T)` → thua packed (pack 1 lần/call) khi m=1024. Đúng hướng tối ưu tiếp compiler tự nêu trong reply §3 (B-tile cache theo i0).
+- **ROUTING wire:** `m ≤ 256 → _smm_full`, `m > 256 → _smm_pk` — 2 site (`_smm_core` + `_smm_core_pd`), S4 trans-A giữ nguyên `smm_fwd_at`/`_p58`. seq1024 numerics giữ nguyên bit.
+- BIT full vs packed ≤ **3.6e-5** (f32 ulp, khác thứ tự tile) — trong tol gate 1e-4.
+- Sync 3 mirror (`tv/training/simd_matmul.tkv` + 2 bản sao `tv.training.simd_matmul.tkv`) — md5 khớp.
+
+**Gate sau wire:** **135/135 + trainer 15/15 PASS** (eval throughput 63.0 → **47.0 ms/buoc**).
+
+**A/B full-step 3 seq xen kẽ base↔wired (exe `simd_bench_124m_seq` mode 1, cùng DLL, base = `git checkout HEAD --` 3 file mirror rồi build `out/bseq_base.exe`, wired = `out/bseq.exe`):**
+
+| seq | base best | wired best | Δ | loss base → wired |
+|---|---|---|---|---|
+| 8 | 7813 | **7187** | **−8.0%** (3 round) | `10.572291 → 7.011928` vs `→ 7.0119185` (Δ9.5e-6) |
+| 256 | 10937 | **9609** | **−12.1%** (3 round) | `10.756927 → 11.807273` vs `→ 11.807267` (Δ6e-6) |
+| 1024 | 21469 | 21641 | +0.8% (best-of-6, noise — r4 21640/21641) | `10.760399 → 13.442915` **EXACT cả 6 round** |
+
+- seq1024 loss EXACT = bằng chứng routing giữ nguyên packed (m=1024 không đi `_smm_full`); time chênh là nhiễu (spread base 21469-26172, wired 21641-31891 — outlier r1).
+- loss lệch ≤9.5e-6 ở seq8/256 = hệ quả BIT ≤3.6e-5 ở grad, **trong tol gate 1e-4**; parity/loss tests trong gate vẫn PASS.
+
+**Tỉ lệ vs PyTorch 14 luồng (số cũ `out/ab_tkv_torch_20261024.log` 934.2/1394.1/3546.7 ms — không rerun theo yêu cầu):**
+
+| seq | tkv trước wire | tkv sau wire | tỉ lệ trước → sau |
+|---|---|---|---|
+| 8 | 7813 | 7187 | 8.4× → **7.7×** |
+| 256 | 10937 | 9609 | 7.8× → **6.9×** |
+| 1024 | 21469 | 21641 | 6.1× → **6.1×** |
+
+**CHỐT:** (1) `simd_gemm_full` đúng hợp đồng — smoke 5/5, gate xanh, wire m≤256 cho thắng thật −8%/−12% ở seq8/256 mà không đụng numerics seq1024; (2) m=1024 full BUST 0.57-0.83× → chưa chạm KPI §5 đơn 2 (≤350-400 ms) — cần compiler làm B-tile cache theo i0 rồi đo lại trước khi nới routing; (3) khoảng cách vs PyTorch 14T còn **6.1-7.7×** (mục tiêu ≤1.0× chưa tới).
+
+**Trạng thái git:** sửa 3 file simd_matmul (mirror sync) + 2 probe `_gf0`/`_gf1` + HANDOFF §0.50; `tv/tests/_seq_cfg.txt` giữ `1024/1/1` (chuẩn sau đo). Chưa commit.

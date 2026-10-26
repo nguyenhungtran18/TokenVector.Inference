@@ -153,4 +153,4 @@ thật = **list indexing + append/bounds-check interpreted**, không phải wide
 **Yêu cầu 1.1 khép lại.** Khoảng cách còn lại vs PyTorch (~6.3×) cần yêu cầu mới
 hướng vào **list access interpreted** — ví dụ ABI native build-tile/acc nhận
 `list[f32]` và trả buffer, hoặc bulk copy builtin (`f32_list_copy(dst, src, n)`
-native) thay vòng `while` interpreted — đề xuất cụ thể ở vòng handoff tới.
+native) thay vòng `while` interpreted — **đã viết thành `docs/COMPILER_TEAM_REQUEST2.md` (2026-10-26): Ưu tiên A `simd_gemm_full` (BUILD+GEMM+ACC trong DLL, 1 ABI) / Ưu tiên B 3 bulk builtin, bằng chứng bảng CG + `_f32p`.**

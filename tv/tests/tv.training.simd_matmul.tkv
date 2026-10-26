@@ -291,6 +291,28 @@ def _smm_pk_c(m: 'i64', n: 'i64', sc: "list[f32]" = None) -> "list[f32]":
     C0 = t_zeros([m, n])
     return C0.data
 
+# ---- M6b WIRED (2026-10-26, probe GF1 @ tv/tests/_gf1.tkv) -----------------
+# simd_gemm_full = 1 ABI goi toan bo BUILD tile + GEMM + ACC trong DLL
+# (compiler reply 2026-10-26, Yeu cau #2 Uu tien A). A/B vs _smm_pk M4
+# best-of-5 T=256, 4 shape + guard:
+#   m=8:   S5 2.01x, S1 thang (16ms -> ~0), S3 ~hoa
+#   m=256: S5 1.63x, S3 1.26x, S1 2.07x
+#   m=1024: S5 0.57x (422->735ms), S3 0.83x, S1 1.0x — THUA
+# NGUYEN NHAN: full avoid pack nguyen ma tran (thang m nho) nhung build lai
+# B-tile moi (i0,p0,j0) — so lan nhan voi ceil(m/T) (m lon -> thua packed
+# pack 1 lan). Compiler bao chua lam B-tile cache theo i0 (huong toi uu 2
+# cua ho). ROUTING: m <= 256 -> full (so do thang), m > 256 -> _smm_pk
+# NGUYEN CON (seq1024 numerics giu nguyen bit). BIT full vs packed <= 3.6e-5
+# (f32 ulp, khac thu tu tile — trong tol gate 1e-4).
+# S4 trans_a=1: full khong co trans_a -> van di smm_fwd_at/_p58 (khong doi).
+def _smm_full(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64',
+              ndim: 'i64', trans_b: 'i32', sc: "list[f32]" = None) -> "Tensor":
+    cd = _smm_pk_c(m, n, sc)
+    ad = a.data
+    bd = b.data
+    rv = simd_gemm_full(ad, bd, cd, m, n, k, ndim, trans_b, 256, 0)
+    return Tensor(cd, [m, n], 0)
+
 def _smm_pk(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64',
             ndim: 'i64', trans_b: 'i32', sc: "list[f32]" = None) -> "Tensor":
     T = 256
@@ -314,7 +336,10 @@ def _smm_pk(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64',
 # ---- core: C = A x B (trans_b=0) hoac A x B^T (trans_b=1), tiled -----------
 def _smm_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32', sc: "list[f32]" = None) -> "Tensor":
     # M4 wire: k du lon -> packed native (xem ghi chu M4 WIRED ben tren)
+    # M6b wire: packed + m nho -> simd_gemm_full (xem ghi chu M6b WIRED)
     if k >= 256:
+        if m <= 256:
+            return _smm_full(a, b, m, n, k, ndim, trans_b, sc)
         return _smm_pk(a, b, m, n, k, ndim, trans_b, sc)
     # P0.4 (perf-plan): T = min(_tilek(k), roundup64(min(m,n))) — truoc do T
     # chi theo k -> o gian (m=8, k=50257) dan len T=1024, A-tile dung 8/1024
@@ -598,8 +623,11 @@ def _pd_do(Ct: "list[f32]", ta: "list[f32]", tb: "list[f32]", T: 'i64',
 def _smm_core_pd(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64',
                  ndim: 'i64', trans_b: 'i32', trans_a: 'i32', sc: "list[f32]" = None) -> "Tensor":
     # M4 wire: trans_a=0 + k du lon -> packed native (S4 trans-A giu duong cu)
+    # M6b wire: packed + m nho -> simd_gemm_full (xem ghi chu M6b WIRED)
     if trans_a == 0:
         if k >= 256:
+            if m <= 256:
+                return _smm_full(a, b, m, n, k, ndim, trans_b, sc)
             return _smm_pk(a, b, m, n, k, ndim, trans_b, sc)
     T = _imin(_tilek(k), _roundup64(_imin(m, n)))
     n_i = _pd_ceil(m, T)
