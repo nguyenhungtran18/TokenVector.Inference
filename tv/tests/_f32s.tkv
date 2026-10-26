@@ -1,0 +1,53 @@
+# PROBE _f32s — smoke f32() builtin (tkvc 2026-10-26) — 0 thay doi code train
+# Nguon: D:\TokenVector\Release\docs\e_handoff\2026-10-26-f32-builtin-compiler-reply.md
+# Chay:
+#   /d/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_f32s.tkv <out>.exe main
+#   <out>.exe
+# Kiem tra: (1) local f32 thuan khong widen f64  (2) narrow 0.1+0.2 -> 0.3
+#   (3) str -> f32  (4) i64 -> f32  (5) auto-widen f64  (6) f32 thuc su
+#   (1e8+1 lam tron — neu f64 noi bo se FAIL)
+# NEG rieng: _f32s_neg.tkv — f32(container) PHAI bi tu choi luc bien dich.
+
+def _rep(name: 'str', d: 'f64', tol: 'f64') -> 'i32':
+    if d <= tol:
+        print("  [PASS] " + name + "  diff=" + str(d))
+        return 0
+    print("  [FAIL] " + name + "  diff=" + str(d) + "  tol=" + str(tol))
+    return 1
+
+def main() -> 'i32':
+    fails = 0
+    print("=== f32 builtin smoke (tkvc 2026-10-26) ===")
+
+    # (1) local f32 thuan — phep nhan khong widen qua f64
+    x: "f32" = 1.5
+    y: "f32" = x * 2.0
+    fails = fails + _rep("(1) local f32 1.5*2.0=3.0", abs(float(y) - 3.0), 1e-6)
+
+    # (2) narrow: 0.1+0.2 tinh f64 = 0.30000000000000004 -> f32 -> 0.3
+    z = f32(0.1 + 0.2)
+    w = f32(0.3)
+    fails = fails + _rep("(2) f32(0.1+0.2)==f32(0.3)", abs(float(z) - float(w)), 1e-6)
+
+    # (3) str -> f32 (TkvStr::ParseF64)
+    s = f32("3.5")
+    fails = fails + _rep("(3) f32('3.5')=3.5", abs(float(s) - 3.5), 1e-6)
+
+    # (4) i64 -> f32 (conv.i8 + conv.r4)
+    q = int64("42")
+    r = f32(q)
+    fails = fails + _rep("(4) f32(int64('42'))=42", abs(float(r) - 42.0), 1e-6)
+
+    # (5) auto-widen: f64 context nhan f32
+    d: "f64" = f32(2.5)
+    fails = fails + _rep("(5) f64 = f32(2.5)", abs(d - 2.5), 1e-6)
+
+    # (6) f32 THUC SU: 1e8 + 1 (f32, ulp=8) bi lam tron ve 1e8.
+    #     Neu noi bo van la f64 -> 100000001.0 -> diff=1.0 > tol -> FAIL.
+    p: "f32" = 100000000.0
+    one: "f32" = 1.0
+    b: "f32" = p + one
+    fails = fails + _rep("(6) f32 1e8+1 rounds to 1e8", abs(float(b) - 100000000.0), 0.5)
+
+    print("=== f32 smoke cases=6 fails=" + str(fails) + " ===")
+    return fails

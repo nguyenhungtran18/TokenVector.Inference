@@ -2487,3 +2487,49 @@ m/v lazy sync_mv() cho read site, ckpt_save sync_mv() ghi checkpoint.
 
 **Probe/log:** `_cj7` (bit-exact A/B), `_cj8` (phase profile seq256), `out/cj7.exe`,
 `out/cj8.exe`, `out/ab_bench.ps1`.
+
+### 0.49 COMPILER GIAO f32() BUILTIN — SMOKE + GATE XANH, NHƯNG A/B f32 LOCALS BUST TRÊN HOT LOOP (2026-10-26)
+
+**Bối cảnh:** user đã sửa compiler theo `docs/COMPILER_TEAM_REQUEST.md` (yêu cầu 1.1 —
+builtin `f32(x)` + local f32 không widen). Handoff compiler:
+`D:\TokenVector\Release\docs\e_handoff\2026-10-26-f32-builtin-compiler-reply.md`
+(tkvc build lại 26/10 07:45, self-host IL_IDENTICAL, 130/130 + NEG 36/36 ở phía compiler).
+
+**Việc repo này đã làm (đúng quy trình §4 spec — probe trước, wire sau):**
+
+1. **Smoke `f32()` từ `.tkv`** — probe `tv/tests/_f32s.tkv`: **6/6 PASS** (local f32
+   không widen, narrow 0.1+0.2→0.3, str→f32, i64→f32, auto-widen, f32 thật 1e8+1
+   rounds down). Negative `_f32s_neg.tkv`: `f32(container)` **bị từ chối đúng**
+   tại compile (`il_codegen: f32() chi nhan SO VO HUONG … khong nhan container`).
+2. **Gate baseline với compiler mới TRƯỚC khi wire:** `tools/gate_f32.sh` →
+   **135/135** (9 suite + gpt2_full 33) + `trainer_tests` **15/15 PASS**
+   → compiler mới không phá gì; nền xanh.
+3. **Probe A/B f32 locals trên hot loop** — `tv/tests/_f32p.tkv` (0 thay đổi code
+   train), 3 case, batch >300 ms/việc đo vượt phân giải `now_ms` 15.6 ms, best-of-3
+   × 4 lần chạy:
+
+| Case | Đường code | Kết quả 4 lần chạy | Speedup |
+|---|---|---|---|
+| [1] BUILD tile 512/768 (`_tile_a_w` copy, zero-fill `z`) | `z: f64` vs `z: "f32"` | 0.92× / 1.00× / 1.20× / 0.99× / 1.09× | **~1.0× (nhiễu)** |
+| [2] ACC T=768 (`_acc_f` form production) | không local vs `v: "f32"` | 0.97× / 1.03× / 0.97× / 0.97× / 1.00× | **0.97-1.0×** |
+| [3] ARITH thuần 12M phep (`x*x+0.5`) | `f64` local vs `f32` local | 1.05× / 1.00× / 0.95× / 1.00× | **~1.0×** |
+
+**BIT_MAXDIFF = 0.0 cả 3 case** (numerics giữ nguyên — f32 locals an toàn nhưng
+**không nhanh hơn**).
+
+**CHỐT — BUST, KHÔNG WIRE (ngưỡng 1.3× §13.2):** giả định trong
+`docs/COMPILER_TEAM_REQUEST.md` §2 ("f32 locals sẽ giảm wrapper overhead 76-89%
+xuống 10-20%") **không đúng trên số đo**. Wrapper BUILD/ACC vốn đã chạy trên
+`list[f32]` (List[Single]) — phép toán element/zero-fill là f32 từ đầu, chỉ local
+accumulator(`s`, `z`, `tot`) mới là f64 và chúng không phải bottleneck. Chi phí
+BUILD+ACC+ALLOC = **list indexing + append/bounds-check interpreted**, không phải
+widen f32↔f64 → đổi kieu local không attack được root cause.
+
+**Hệ quả cho roadmap:** cửa sổ f32-locals đóng lại. Gap còn lại vs PyTorch
+(~6.3× seq8/256, ~6.3× seq1024) nằm ở **list indexing interpreted trong BUILD/ACC**
+(phần việc compiler/native: kernel build-tile + acc thành native, hoặc ABI nhận
+trả buffer thay list) — không còn lever `.tkv`-only nào theo §13.2.
+
+**Trạng thái git:** thêm `_f32s.tkv`, `_f32s_neg.tkv`, `_f32p.tkv`,
+`tools/gate_f32.sh`, `docs/COMPILER_TEAM_REQUEST.md`; 0 dòng code train sửa →
+không cần gate wire; HANDOFF §0.49 ghi tại đây.

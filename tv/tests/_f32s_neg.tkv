@@ -1,0 +1,9 @@
+# NEG _f32s_neg — f32(container) PHAI bi tu choi luc bien dich
+# Theo handoff: "il_codegen: f32() chi nhan SO VO HUONG ... khong nhan container"
+# Compile PHAI FAIL (exit != 0) — day la tich cuc (guard duoc cai dung).
+
+def main() -> 'i32':
+    xs = [1.0, 2.0, 3.0]
+    y = f32(xs)
+    print("FAIL: f32(list) khong bi tu choi, y=" + str(y))
+    return 1
