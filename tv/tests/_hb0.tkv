@@ -1,0 +1,189 @@
+# PROBE _HB0 — SMOKE PHASE B: f32_list_copy / f32_list_add / f32_grad_norm / adamw_step_glm
+# ------------------------------------------------------------------------------
+# Ky hieu theo de xuat COMPILER_TEAM_REQUEST3 §1 — CHUA compile duoc toi khi
+# compiler giao builtin (tkvc se bao "ham khong ton tai"). Khi giao:
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_hb0.tkv out/hb0.exe main
+#   out/hb0.exe
+# Yeu cau: moi muc in "HB0 [n] ... PASS" hoac chi tiet FAIL; fails=0 la xanh.
+# [1] f32_list_copy: copy 8 phan tu co pre-fill 999 + copy 38.6M (496MB-class)
+# [2] f32_list_add : accumulate 8 phan tu vs reference interpreted (TOL 1e-6)
+# [3] f32_grad_norm: [3,4]->5.0 + 4M phan tu vs interpreted sqrt(sum sq) (rel 1e-6)
+# [4] adamw_step_glm: cung tham so vs adamw_step (g da copy vao buf) -> BIT-EXACT
+import tv.training.tensor
+
+def _mkf(n: 'i64', v: 'f64') -> "list[f32]":
+    out: "list[f32]" = []
+    for i in range(n):
+        out.append(v)
+    return out
+
+def _fill_pat(x: "list[f32]"):
+    n = len(x)
+    i = 0
+    while i < n:
+        x[i] = float((i % 13) - 6) * 0.001
+        i = i + 1
+
+def _ref_norm(x: "list[f32]") -> 'f64':
+    s = 0.0
+    i = 0
+    n = len(x)
+    while i < n:
+        s = s + float(x[i]) * float(x[i])
+        i = i + 1
+    return sqrt(s)
+
+def main() -> 'i32':
+    fails = 0
+
+    # ---- [1] f32_list_copy ---------------------------------------------------
+    a = _mkf(8, 0.0)
+    a[0] = 1.5
+    a[1] = -2.25
+    a[2] = 3.0
+    a[3] = 4.75
+    a[4] = 5.5
+    a[5] = -6.125
+    a[6] = 7.0
+    a[7] = 8.25
+    b = _mkf(8, 999.0)
+    r1 = f32_list_copy(b, a, 8)
+    i = 0
+    while i < 8:
+        if b[i] != a[i]:
+            print("HB0 [1] FAIL i=" + str(i) + " got=" + str(b[i]) + " exp=" + str(a[i]))
+            fails = fails + 1
+        i = i + 1
+    print("HB0 [1] f32_list_copy 8 pt r=" + str(r1) + " -> " + str(8 - fails) + "/8")
+
+    # [1b] bulk 38.6M: copy b2 = a2 (a2 da co gia tri mau), do thoi gian
+    nbig = 38597376
+    a2 = _mkf(nbig, 0.0)
+    _fill_pat(a2)
+    b2 = _mkf(nbig, 999.0)
+    t0 = now_ms()
+    rb = f32_list_copy(b2, a2, nbig)
+    t1 = now_ms()
+    bad = 0
+    k = 0
+    while k < nbig:
+        if b2[k] != a2[k]:
+            bad = bad + 1
+        k = k + 1
+    if bad != 0:
+        fails = fails + 1
+    print("HB0 [1b] copy 38.6M r=" + str(rb) + " diff=" + str(bad) + " = " + str(float(t1 - t0)) + " ms")
+
+    # ---- [2] f32_list_add ----------------------------------------------------
+    c = _mkf(8, 1.0)
+    ref: "list[f32]" = []
+    for j in range(8):
+        ref.append(1.0 + a[j])
+    r2 = f32_list_add(c, a, 8)
+    e2 = 0
+    i = 0
+    while i < 8:
+        d = float(c[i]) - float(ref[i])
+        if d > 0.000001 or d < -0.000001:
+            print("HB0 [2] FAIL i=" + str(i) + " got=" + str(c[i]) + " ref=" + str(ref[i]))
+            e2 = e2 + 1
+        i = i + 1
+    if e2 != 0:
+        fails = fails + 1
+    print("HB0 [2] f32_list_add 8 pt r=" + str(r2) + " -> " + str(8 - e2) + "/8")
+
+    # [2b] bulk: c2 = ones + a2 vs interpreted reference tren 4M (khong 38.6M cho nhanh)
+    nmid = 4194304
+    c2 = _mkf(nmid, 1.0)
+    r2b = f32_list_add(c2, a2, nmid)
+    bad2 = 0
+    k = 0
+    while k < nmid:
+        refv = float(1.0) + float(a2[k])
+        d = float(c2[k]) - refv
+        if d > 0.000001 or d < -0.000001:
+            bad2 = bad2 + 1
+        k = k + 1
+    if bad2 != 0:
+        fails = fails + 1
+    print("HB0 [2b] add 4M r=" + str(r2b) + " diff=" + str(bad2))
+
+    # ---- [3] f32_grad_norm ---------------------------------------------------
+    g3 = _mkf(2, 0.0)
+    g3[0] = 3.0
+    g3[1] = 4.0
+    n3 = f32_grad_norm(g3, 2)
+    d3 = n3 - 5.0
+    if d3 > 0.000001 or d3 < -0.000001:
+        print("HB0 [3] FAIL [3,4] norm=" + str(n3) + " exp=5.0")
+        fails = fails + 1
+    print("HB0 [3] norm [3,4] = " + str(n3))
+
+    g4 = _mkf(nmid, 0.0)
+    _fill_pat(g4)
+    refn = _ref_norm(g4)
+    t0 = now_ms()
+    bn = f32_grad_norm(g4, nmid)
+    t1 = now_ms()
+    rd = (bn - refn) / refn
+    if rd > 0.000001 or rd < -0.000001:
+        print("HB0 [3b] FAIL norm=" + str(bn) + " ref=" + str(refn) + " rel=" + str(rd))
+        fails = fails + 1
+    tr0 = now_ms()
+    rn2 = _ref_norm(g4)
+    tr1 = now_ms()
+    print("HB0 [3b] norm 4M native=" + str(float(t1 - t0)) + " ms vs interpreted=" + str(float(tr1 - tr0)) + " ms rel=" + str(rd))
+
+    # ---- [4] adamw_step_glm vs adamw_step (g da copy vao buf) — BIT-EXACT -----
+    n4 = 1024
+    gp = _mkf(n4, 0.0)
+    _fill_pat(gp)
+    # 2 bo state giong nhau: p/m/v list + buf
+    pl_a = _mkf(n4, 0.01)
+    pl_b = _mkf(n4, 0.01)
+    k = 0
+    while k < n4:
+        pl_a[k] = 0.01 + float(k % 7) * 0.001
+        pl_b[k] = pl_a[k]
+        k = k + 1
+    ml = _mkf(n4, 0.001)
+    vl = _mkf(n4, 0.0001)
+    pp_a = alloc_bytes(n4 * 4)
+    pm = alloc_bytes(n4 * 4)
+    pv = alloc_bytes(n4 * 4)
+    pg = alloc_bytes(n4 * 4)
+    z1 = f32_zero(pp_a, n4)
+    z2 = f32_zero(pm, n4)
+    z3 = f32_zero(pv, n4)
+    cp = f32_copy_to_buf(pl_a, pp_a, n4)
+    cm = f32_copy_to_buf(ml, pm, n4)
+    cv = f32_copy_to_buf(vl, pv, n4)
+    cg = f32_copy_to_buf(gp, pg, n4)
+    # duong tham chieu: adamw_step voi g = buf
+    ra = adamw_step(pp_a, pm, pv, pg, n4, 0.0025, 0.9, 0.999, 0.00000001, 0.0, 0.1, 0.001)
+    # duong moi: adamw_step_glm voi g = list truc tiep, p/m/v cung state
+    pp_b = alloc_bytes(n4 * 4)
+    z5 = f32_zero(pp_b, n4)
+    cp2 = f32_copy_to_buf(pl_b, pp_b, n4)
+    cm2 = f32_copy_to_buf(ml, pm, n4)
+    cv2 = f32_copy_to_buf(vl, pv, n4)
+    rg = adamw_step_glm(pp_b, pm, pv, gp, n4, 0.0025, 0.9, 0.999, 0.00000001, 0.0, 0.1, 0.001)
+    out_a = _mkf(n4, 0.0)
+    out_b = _mkf(n4, 0.0)
+    ca = f32_copy_from_buf(pp_a, out_a, n4)
+    cb = f32_copy_from_buf(pp_b, out_b, n4)
+    bad4 = 0
+    k = 0
+    while k < n4:
+        if out_a[k] != out_b[k]:
+            bad4 = bad4 + 1
+        k = k + 1
+    if bad4 != 0:
+        fails = fails + 1
+    print("HB0 [4] adamw_step_glm ra=" + str(ra) + " rg=" + str(rg) + " bitdiff=" + str(bad4) + "/" + str(n4))
+
+    if fails == 0:
+        print("HB0 ALL PASS")
+    else:
+        print("HB0 FAILS=" + str(fails))
+    return fails
