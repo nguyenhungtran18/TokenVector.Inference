@@ -2580,3 +2580,38 @@ không cần gate wire; HANDOFF §0.49 ghi tại đây.
 **CHỐT:** (1) `simd_gemm_full` đúng hợp đồng — smoke 5/5, gate xanh, wire m≤256 cho thắng thật −8%/−12% ở seq8/256 mà không đụng numerics seq1024; (2) m=1024 full BUST 0.57-0.83× → chưa chạm KPI §5 đơn 2 (≤350-400 ms) — cần compiler làm B-tile cache theo i0 rồi đo lại trước khi nới routing; (3) khoảng cách vs PyTorch 14T còn **6.1-7.7×** (mục tiêu ≤1.0× chưa tới).
 
 **Trạng thái git:** sửa 3 file simd_matmul (mirror sync) + 2 probe `_gf0`/`_gf1` + HANDOFF §0.50; `tv/tests/_seq_cfg.txt` giữ `1024/1/1` (chuẩn sau đo). Chưa commit.
+
+### 0.51 ĐO MỞ RỘNG — chốt ngưỡng routing M6b tại m≤256 (2026-10-26)
+
+**Probe `tv/tests/_gf2.tkv`** (bổ sung `_gf1`): m=512 cho S1/S3/S5 + shape production
+thật (qkv fwd/dx, fc up, fc down fwd/dx, c_proj fwd/dx, gCtx attention), cur =
+`_smm_pk` vs full T=256. Vòng lặp **auto-calibration** (inner ≥200ms vượt phân giải
+`now_ms` 15.6ms — lần đo đầu ra toàn 0.0ms không kết luận được). BIT đều ≤ 3.6e-5 ≤
+tol 1e-4 → **fails=0**. fc dx (m,768,3072,tb1) = S1 nên không lặp.
+
+**Crossover m=512 (chốt ngưỡng):**
+
+| shape | m=512 | crossover |
+|---|---|---|
+| S1 [m×768×3072] tb1 | **1.55×** (43.8→28.2) | full thắng đến ≥512 |
+| S3 [m×768×50257] tb0 | 1.00× hòa (265/265) | 512→1024 |
+| S5 [m×50257×768] tb1 | **0.87×** (312→359) | 256→512 |
+
+→ **Ngưỡng `m ≤ 256` CHỐT ĐÚNG**: nâng lên 512 sẽ regress S5 (lm-head fwd) 0.87× ở
+seq512; giữ 256 an toàn cho cả 3 shape. Không đổi code.
+
+**Shape production tại m≤256 (nơi routing dùng full):** qkvF 0.94×/1.79× (m=8/256),
+qkvD 0.99×/1.08×, fcupF 1.06×/1.62×, **fcdnF 0.76×/1.31×**, **fcdnD 0.86×/1.33×**,
+cprjF 1.01×/1.50×, cprjD 1.00×/0.99×, gCtx 1.00× (m=256, 0.23ms).
+- Lỗ m=8 ở fcdnF/D chỉ **−1.4/−1.1 ms/lần gọi** (shape <10ms, ×12 layer ≈ −25-50ms
+  /step) — bị S5 m=8 thắng 141ms/lần lấn át; bench full-step seq8 −8.0% đã xác nhận
+  net dương (đúng kỷ luật §13.2: số tổng quan quyết định, không tối ưu từng milis).
+
+**m=1024 KHÔNG nới routing** (đo thêm để kiểm chứng): nhiều shape nhỏ full thực ra
+thắng (qkvF 1.21×, qkvD 1.11×, fcupF 1.15×, gCtx 1.95×, cprjF 1.33×) nhưng S3/S5/fcdn
+thua 0.83-0.85×; tổng tiết kiệm ước chỉ ~50-130 ms/step trên nền 21.5s (**<0.6%**) —
+không đáng đổi rủi ro numerics + phức tạp routing. Chờ compiler v2 (B-tile cache theo
+i0, đơn 2 §6) rồi đo lại toàn bộ.
+
+**Trạng thái git:** thêm `tv/tests/_gf2.tkv` + HANDOFF §0.51 — **0 dòng code train đổi**
+(không cần gate lại). Chưa commit.
