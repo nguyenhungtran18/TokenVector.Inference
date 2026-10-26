@@ -2615,3 +2615,83 @@ i0, đơn 2 §6) rồi đo lại toàn bộ.
 
 **Trạng thái git:** thêm `tv/tests/_gf2.tkv` + HANDOFF §0.51 — **0 dòng code train đổi**
 (không cần gate lại). Chưa commit.
+
+### 0.52 PHASE A XONG — BUDGET 2 PHÍA (TORCH TIER E + PHÂN RÃ BWD) + 2 BUG COMPILER (2026-10-26)
+
+**Mục tiêu** theo `docs/PLAN_TO_PARITY.md` Phase A: đối chuẩn 2 phía, **0 dòng code
+train đổi**. Deliverable = bảng budget cho Phase B-F.
+
+**A1 — PyTorch tier E** (`python tools/bench_torch.py e <seq>`, log
+`out/bench_torch_e.log`, torch 2.14.0+cpu, median ms, n=3):
+
+| seq | zero_grad 14T | fwd+CE 14T | bwd 14T | opt.step 14T | TOTAL 14T | TOTAL 1T |
+|---|---|---|---|---|---|---|
+| 8 | 10.3 | 87.3 | 333.1 | 743.0 | **1189.9** | 1336.8 |
+| 256 | 12.8 | 307.4 | 577.2 | 665.6 | **1563.1** | 4402.1 |
+| 1024 | 56.7 | 982.2 | 2242.3 | 658.6 | **3936.4** | 14350.5 |
+
+- **`opt.step` = ~650-835 ms CỐ ĐỊNH mọi seq** (bandwidth-bound: 124M×4 array
+  p/m/v/g ≈ 2GB đọc+ghi) — sàn cứng, mọi kế hoạch ≤1× phải tính trên nó.
+- fwd/bwd scale theo seq và ăn lợi thế 14T (1T/14T ≈ 4×); opt.step gần như không
+  lợi threading (memory-bound). zero_grad không đáng kể.
+
+**A2 — Phân rã BWD 4922ms (seq8)** — probe mới `tv/tests/_bd2.tkv`, synthetic cùng
+kích thước thật, best-of-3 (context đầy đủ: ~3.5s do RAM pressure; số isolated):
+
+| thành phần | thời gian | ghi chú |
+|---|---|---|
+| 12 × block_bwd | 2244 ms | probe AM (đo cũ) |
+| [1] `dwte += gwte_e` 38.6M interpreted | 531 ms | vong dense #1 |
+| [2] `gflat += dwte` 38.6M interpreted (use_flat=1) | 671 ms | vong dense #2 |
+| [3] wpe loop 0.8M | 15 ms | |
+| [4] m6 lmhead section (6 alloc + 3 copy_to + 2 zero + fused + 2 copy_from + 6 free) | 359 ms | fused builtin đã làm phần tính; còn lại alloc/copy/free |
+| [5] op_embed_bwd ×2 (P6 worker) | 219 ms | |
+| **Tổng tail đo được** | **≈1795 ms** | |
+| Ít giải thích được (glue blocks/attention) | ≈880 ms | 4922 − 2244 − 1795 |
+
+→ 2 vòng interpreted dense [1]+[2] = **1202 ms = 24% BWD** — ứng viên trực tiếp
+cho bulk builtin Phase B (đơn compiler #3: `f32_list_add`/`f32_list_copy` gộp
+2 vòng thành 1 pass native).
+
+**A3 — `f32_copy_to_buf`**: 78-94 ms cho 496MB = **6.4 GB/s** (probe `tv/tests/_cp1.tkv`
+— mọi yếu tố context: +live-set, worker, churn, interpreted-read đều 78-94ms).
+**r1=1516ms trong CJ8 = artifact `opt.sync_mv()`** (first-call `_zeros(124M)×2` ≈1.7s)
+chỉ có trong probe; production `step()` không gọi sync_mv → ngân sách CJ8 sửa lại:
+bộ copy thật chỉ ~78ms, không phải 1516ms.
+
+**A4 — Threading**: GEMM ratio **21.5 core** (499 GFLOP/s — đã song song, không phải
+bottleneck); **cả bước train ratio 1.37** → glue/norm/copy/elementwise 1 luồng trong
+khi torch 14T. Khoảng cách cấu trúc này thuộc Phase D.
+
+**2 BUG COMPILER tìm được trong lúc bisect `_bd2`** (tkvc 26/10 — giao compiler team):
+
+**(C1) Local shadowing module global → `InvalidProgramException` (compile KHÔNG báo lỗi).**
+Repro tối giản:
+```text
+import tv.training.gpt2_ref
+
+def main() -> 'i32':
+    MaxPos = 1024        # gpt2_ref có global `MaxPos = 1024` — trùng tên local
+    print(str(MaxPos))
+    return 0
+```
+→ exe build được nhưng JIT `main` ném `System.InvalidProgramException`. Đổi tên local
+(`MaxPosN`) là chạy ngay. Quy tắc né: **khai local trùng tên global của module đã import**.
+
+**(C2) `f32_zero(p, n)` gọi trong `while` ở `main` → `InvalidProgramException`.** Bisect
+A/B cùng code: giữ 2 dòng `f32_zero` trong loop = lỗi; xóa = chạy; `f32_copy_to_buf`,
+`alloc_bytes`, `free_bytes` trong đúng loop đó thì OK; `f32_zero` ở top-level thì OK
+(_cp1 chạy tốt). Đo ở `out/` (import không resolve) — cần compiler team tái hiện.
+
+**Bảng budget 2 phía** (input cho Phase B-F):
+
+| bucket | torch 14T seq8 | tkv seq8 (đo) | gap | phase xử lý |
+|---|---|---|---|---|
+| fwd+CE | 87 ms | chưa tách riêng | — | |
+| bwd | 333 ms | 4922 ms (trong đó 1202 interpreted dense tail) | **14.8×** | B+C |
+| opt + glue | 753 ms | M5-opt fused đã có; sàn opt ~650-800 | ≈sàn | B |
+| FULL step | **1190 ms** | ~7950-8650 ms (post-M6b ước tính từ bench −8% của 8645) | **6.7-7.3×** | B+C+D+E |
+
+**Trạng thái git:** thêm `tv/tests/_bd2.tkv` + `tv/tests/_cp1.tkv` + mở rộng
+`tools/bench_torch.py` (tier E, log `out/bench_torch_e.log` — out/ gitignore) +
+HANDOFF §0.52. **0 dòng code train đổi** (không cần gate lại). Chưa commit.

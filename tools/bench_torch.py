@@ -145,12 +145,64 @@ def tier_d(seq=1024):
            "loss=%.4f params=%d" % (l0, npar))
 
 
+def tier_e(seq=8):
+    """PHASE A — doi chuan 2 phia (docs/PLAN_TO_PARITY.md): tach tung phase
+    (zero / fwd / bwd / opt) va chay ca 1T + 14T de so bucket voi CJ8 tkv.
+    Goi: python tools/bench_torch.py e <seq>"""
+    from transformers import GPT2Config
+    from transformers import GPT2LMHeadModel
+    ids_l = [(i * 37 + 11) % 50257 for i in range(seq)]
+    pos_l = list(range(seq))
+    ids = torch.tensor([ids_l], dtype=torch.long)
+    pos = torch.tensor([pos_l], dtype=torch.long)
+    cfg = GPT2Config(vocab_size=50257, n_positions=1024, n_embd=768, n_head=12,
+                     n_layer=12, resid_pdrop=0.0, embd_pdrop=0.0, attn_pdrop=0.0)
+    for nt in (1, 14):
+        torch.set_num_threads(nt)
+        torch.manual_seed(7)
+        model = GPT2LMHeadModel(cfg)
+        opt = torch.optim.AdamW(model.parameters(), lr=0.0025, betas=(0.9, 0.999),
+                                eps=1e-8, weight_decay=0.0)
+
+        def loss_fn():
+            logits = model(ids, position_ids=pos).logits
+            return F.cross_entropy(logits.view(-1, 50257), ids.view(-1))
+
+        # warmup 2 buoc (thu cho nong + init opt state)
+        for _ in range(2):
+            opt.zero_grad(set_to_none=True)
+            loss_fn().backward()
+            opt.step()
+
+        zs, fs, bs, os_ = [], [], [], []
+        for _ in range(3):
+            t0 = time.perf_counter()
+            opt.zero_grad(set_to_none=True)
+            t1 = time.perf_counter()
+            loss = loss_fn()
+            t2 = time.perf_counter()
+            loss.backward()
+            t3 = time.perf_counter()
+            opt.step()
+            t4 = time.perf_counter()
+            zs.append((t1 - t0) * 1000.0)
+            fs.append((t2 - t1) * 1000.0)
+            bs.append((t3 - t2) * 1000.0)
+            os_.append((t4 - t3) * 1000.0)
+        report("E torch zero_grad seq%d T=%d" % (seq, nt), zs)
+        report("E torch fwd(+CE) seq%d T=%d" % (seq, nt), fs)
+        report("E torch bwd seq%d T=%d" % (seq, nt), bs)
+        report("E torch opt.step seq%d T=%d" % (seq, nt), os_)
+        tot = [a + b + c + d for a, b, c, d in zip(zs, fs, bs, os_)]
+        report("E torch TOTAL seq%d T=%d" % (seq, nt), tot)
+
+
 def main():
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     seq = int(sys.argv[2]) if len(sys.argv) > 2 else 1024
     # chap nhan "all" hoac chuoi chu giup hop ("ab", "a", "bc", ...)
-    tiers = {"a", "b", "c", "d"} if which == "all" else set(which)
-    unknown = tiers - {"a", "b", "c", "d"}
+    tiers = {"a", "b", "c", "d", "e"} if which == "all" else set(which)
+    unknown = tiers - {"a", "b", "c", "d", "e"}
     if unknown:
         print("BENCH unknown tier(s): %s — dung a|b|c|d|all" % sorted(unknown))
         sys.exit(2)
@@ -165,6 +217,8 @@ def main():
         tier_c()
     if "d" in tiers:
         tier_d(seq)
+    if "e" in tiers:
+        tier_e(seq)
     print("BENCH done")
 
 

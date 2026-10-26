@@ -1,0 +1,174 @@
+# PROBE _BD2 — A2: do TAIL cua gpt2_backward tai seq8 (rest = BWD 4922 - 12*187)
+# ----------------------------------------------------------------------------
+# nghi vung: 2 vong interpreted dense V*h (dwte += gwte_e; gflat += dwte)
+# + m6 lm-head (copies/zero/fused/free) + wpe loop.
+# Do synthetic cung kich thuoc that (khong can forward), best-of-3.
+# FIX 26/10: (a) pdwe phai alloc nwe*4 (truoc do nxe*4 -> AV 24KB doc 154MB);
+#             (b) f32_zero trong while o main -> IL bug compiler -> goi helper
+#                 (mau _cp1 chay tot).
+# Goi: D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_bd2.tkv out/bd2.exe main; out/bd2.exe
+import tv.training.tensor
+import tv.training.gpt2_ref
+import tv.training.simd_matmul
+
+def _mkz(n: 'i64') -> "list[f32]":
+    out = []
+    for i in range(n):
+        out.append((float(0) - 0.0) / 1.0)
+    return out
+
+# ---- section m6: toan bo alloc+copy+zero+fused+copy_from+free, tra ve ms ----
+def _s4(lgd: "list[f32]", gwte: "list[f32]", xfd: "list[f32]",
+        dd: "list[f32]", dw: "list[f32]",
+        n: 'i64', h: 'i64', V: 'i64') -> 'f64':
+    nlg = n * V
+    nwe = 50257 * 768
+    nxe = n * h
+    t0 = now_ms()
+    plg = alloc_bytes(nlg * 4)
+    pids = alloc_bytes(n * 4)
+    pwte = alloc_bytes(nwe * 4)
+    pxf = alloc_bytes(nxe * 4)
+    pdxf = alloc_bytes(nxe * 4)
+    pdwe = alloc_bytes(nwe * 4)
+    c1 = f32_copy_to_buf(lgd, plg, nlg)
+    c2 = f32_copy_to_buf(gwte, pwte, nwe)
+    c3 = f32_copy_to_buf(xfd, pxf, nxe)
+    i2 = 0
+    while i2 < n:
+        wq = write_i32(pids, i2 * 4, i2)
+        i2 = i2 + 1
+    sc: "f32" = 1.0 / float(n)
+    z1 = f32_zero(pdxf, nxe)
+    z2 = f32_zero(pdwe, nwe)
+    st = lmhead_bwd_fused(plg, pids, pwte, pxf, pdxf, pdwe, n, 1, h, V, sc)
+    c4 = f32_copy_from_buf(pdxf, dd, nxe)
+    c5 = f32_copy_from_buf(pdwe, dw, nwe)
+    f1 = free_bytes(plg)
+    f2 = free_bytes(pids)
+    f3 = free_bytes(pwte)
+    f4 = free_bytes(pxf)
+    f5 = free_bytes(pdxf)
+    f6 = free_bytes(pdwe)
+    t1 = now_ms()
+    return float(t1 - t0)
+
+# ---- section 5: op_embed_bwd x2 (goi helper tranh IL bug) -------------------
+def _s5(wte: "Tensor", wpe: "Tensor", gx: "Tensor",
+        ids: "list[i64]", pos: "list[i64]", h: 'i64') -> 'f64':
+    t0 = now_ms()
+    e1 = op_embed_bwd(wte, ids, h, gx)
+    e2 = op_embed_bwd(wpe, pos, h, gx)
+    t1 = now_ms()
+    return float(t1 - t0)
+
+def main() -> 'i32':
+    n = 8
+    h = 768
+    V = 50257
+    MaxPosN = 1024
+    wh = V * h
+
+    dwte = _mkz(wh)
+    gwte = _mkz(wh)
+    gflat = _mkz(124439808)
+    gwpe = _mkz(MaxPosN * h)
+    dwp2 = _mkz(MaxPosN * h)
+
+    # [1] vong dense dwte += gwte_e (38.6M interpreted)
+    best = 1.0e18
+    q = 0
+    while q < 3:
+        t0 = now_ms()
+        k = 0
+        while k < wh:
+            dwte[k] = dwte[k] + gwte[k]
+            k = k + 1
+        t1 = now_ms()
+        d = float(t1 - t0)
+        if d < best:
+            best = d
+        q = q + 1
+    print("BD2 [1] dwte += gwte_e (38.6M) = " + str(best) + " ms")
+
+    # [2] vong dense gflat += dwte (38.6M, use_flat=1 production)
+    off = 40000000
+    best = 1.0e18
+    q = 0
+    while q < 3:
+        t0 = now_ms()
+        k = 0
+        while k < wh:
+            gflat[off + k] = gflat[off + k] + dwte[k]
+            k = k + 1
+        t1 = now_ms()
+        d = float(t1 - t0)
+        if d < best:
+            best = d
+        q = q + 1
+    print("BD2 [2] gflat += dwte (38.6M) = " + str(best) + " ms")
+
+    # [3] wpe loops (0.8M x2)
+    best = 1.0e18
+    q = 0
+    while q < 3:
+        t0 = now_ms()
+        k = 0
+        while k < MaxPosN * h:
+            dwp2[k] = dwp2[k] + gwpe[k]
+            k = k + 1
+        t1 = now_ms()
+        d = float(t1 - t0)
+        if d < best:
+            best = d
+        q = q + 1
+    print("BD2 [3] wpe += gwpe (0.8M) = " + str(best) + " ms")
+
+    # [4] m6 section: alloc + copies + zero + fused + copy_from + free
+    nlg = n * V
+    nxe = n * h
+    lgd = _mkz(nlg)
+    xfd = _mkz(nxe)
+    dd = _mkz(nxe)
+    dw = _mkz(wh)
+    # init wte-like source + dlogits with values
+    i = 0
+    while i < wh:
+        gwte[i] = float((i % 13) - 6) * 0.001
+        i = i + 1
+    i = 0
+    while i < nlg:
+        lgd[i] = float((i % 17) - 8) * 0.001
+        i = i + 1
+
+    best = 1.0e18
+    q = 0
+    st = 0
+    while q < 3:
+        d = _s4(lgd, gwte, xfd, dd, dw, n, h, V)
+        if d < best:
+            best = d
+        q = q + 1
+    print("BD2 [4] m6 section toan bo (6 alloc + 3 copy_to + zero + fused + 2 copy_from + 6 free) st="
+          + str(st) + " = " + str(best) + " ms")
+
+    # [5] op_embed_bwd 2 lan (P6 — doi chieu)
+    wte = t_zeros([V, h])
+    wpe = t_zeros([MaxPosN, h])
+    gx = t_zeros([n, h])
+    ids: "list[i64]" = []
+    for i in range(n):
+        ids.append(i * 3)
+    pos: "list[i64]" = []
+    for i in range(n):
+        pos.append(i)
+    best = 1.0e18
+    q = 0
+    while q < 3:
+        d = _s5(wte, wpe, gx, ids, pos, h)
+        if d < best:
+            best = d
+        q = q + 1
+    print("BD2 [5] op_embed_bwd x2 (P6) = " + str(best) + " ms")
+    print("BD2 done")
+    return 0
