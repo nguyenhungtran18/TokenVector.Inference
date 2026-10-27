@@ -1,0 +1,8 @@
+# NEG _hb0_neg — f32_list_copy PHAI bi tu choi luc dich khi dst/src = list[f64]
+# Ky vong: tkvc loi dich ro (khong phai InvalidProgram luc chay).
+#   tkvc-tv.exe tv/tests/_hb0_neg.tkv out/hb0_neg.exe main   -> exit != 0
+def main() -> 'i32':
+    a: "list[f64]" = [1.0, 2.0]
+    b: "list[f64]" = [3.0, 4.0]
+    r = f32_list_copy(a, b, 2)
+    return r

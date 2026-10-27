@@ -1,0 +1,66 @@
+# PROBE _lc0 — semantics gan list[f32]: annotated local = reference hay copy?
+# Nghi van: `b: "list[f32]" = a` (kieu danh) bi copy-in/copy-out → ~2s/buoc
+# + ~700MB RAM o seq1024 (an chung chi phi gan o 3 local dwl/gwl/dwg).
+# Moi muc in "LC0 ... ms=..." + ket qua aliasing; fails = so muc LOI.
+import tv.training.tensor
+
+def main() -> 'i32':
+    fails = 0
+    n = 38597376
+    t = t_zeros([n])
+    a = t.data
+    print("LC0 n=" + str(n))
+
+    # [1] annotated assign — timing
+    t0 = now_ms()
+    b: "list[f32]" = a
+    t1 = now_ms()
+    print("LC0 [1] annotated assign ms=" + str(t1 - t0))
+
+    # [2] plain assign — timing
+    t2 = now_ms()
+    c = a
+    t3 = now_ms()
+    print("LC0 [2] plain assign ms=" + str(t3 - t2))
+
+    # [3] aliasing annotated: ghi qua b roi doc a
+    b[100] = 7.5
+    if a[100] != 7.5:
+        print("LC0 [3] annotated = COPY (a[100]=" + str(a[100]) + ")")
+        fails = fails + 1
+    else:
+        print("LC0 [3] annotated = REFERENCE (a[100]=7.5)")
+
+    # [4] aliasing plain
+    c[101] = 8.5
+    if a[101] != 8.5:
+        print("LC0 [4] plain = COPY (a[101]=" + str(a[101]) + ")")
+        fails = fails + 1
+    else:
+        print("LC0 [4] plain = REFERENCE (a[101]=8.5)")
+
+    # [5] f32_list_add qua local KHONG annotated — co compile + ghi vao a khong
+    a[0] = 1.0
+    d = a
+    d[1] = 0.0
+    t4 = now_ms()
+    r = f32_list_add(d, d, 8)
+    t5 = now_ms()
+    if d[0] != 2.0:
+        print("LC0 [5] add qua plain local FAIL d[0]=" + str(d[0]))
+        fails = fails + 1
+    else:
+        print("LC0 [5] f32_list_add(plain local) OK ms=" + str(t5 - t4) + " r=" + str(r))
+
+    # [6] ghi qua annotated local voi f32_list_add — a co doi khong?
+    a[2] = 3.0
+    e: "list[f32]" = a
+    r2 = f32_list_add(e, d, 8)
+    if a[2] != 6.0:
+        print("LC0 [6] add qua annotated local KHONG den a (a[2]=" + str(a[2]) + ")")
+        fails = fails + 1
+    else:
+        print("LC0 [6] add qua annotated local den a (a[2]=6.0)")
+
+    print("LC0 done fails=" + str(fails))
+    return fails

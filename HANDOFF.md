@@ -2695,3 +2695,52 @@ A/B cùng code: giữ 2 dòng `f32_zero` trong loop = lỗi; xóa = chạy; `f32
 **Trạng thái git:** thêm `tv/tests/_bd2.tkv` + `tv/tests/_cp1.tkv` + mở rộng
 `tools/bench_torch.py` (tier E, log `out/bench_torch_e.log` — out/ gitignore) +
 HANDOFF §0.52. **0 dòng code train đổi** (không cần gate lại). Chưa commit.
+
+### 0.53 PHASE B — WIRE `f32_list_add` (GIỮ 1/3) + BENCH 3 SEQ (2026-10-27)
+
+**Compiler giao reply #3** (`native-data-plane-compiler-reply.md`, 22:39 26/10): 4 builtin
+`f32_list_copy` (67×) · `f32_list_add` (35×) · `f32_grad_norm` (69×, ⚠ phẳng ≠ nhóm §2) ·
+`adamw_step_glm` (g=list) + fix bug C1/C2. Smoke từ `.tkv`: `_hb0` **6/6 PASS**
+(add 38.6M diff 0 · copy 38.6M 15ms · norm [3,4]=5.0 · glm bitdiff 0/1024) + negative
+`_hb0_neg` (dịch chối list[f64]) + `_hb0_oor` (runtime chối n > len) 2/2.
+
+**Wire + bisect A/B cùng compiler/tkvc/DLL** (pb0 = pre-wire, 3 rep xen kẽ, best-of):
+
+| thí điểm | kết quả bench | quyết định |
+|---|---|---|
+| `f32_list_add` thay 2 vòng dense BWD (dwte 38.6M + gflat[dwte] 38.6M, `o_wte=poff[0]=0`) | seq1024 −7.3% (pb3 21062 vs pb0 22719); seq8/256 hưởng phần lớn −16…−20% | ✅ **GIỮ** |
+| `adamw_step_glm` bỏ r1 copy (nhánh `coef==1.0`) | **+3.2s/buoc @seq1024** (pb2 24172 vs pb3 21062 — 2 wire khác giống hệt); seq8 bị che bởi gain kia | ❌ DROP |
+| unflatten đọc slice `f32buf_wrap(buf+off*4)` (thay vòng 844ms uoc tính) | **0% seq8** (pb3 5907 vs pb4 5906), seq1024 noise + ~0.9GB RAM | ❌ DROP |
+| `f32_grad_norm` thay `_norm_groups` | không đo — flat ≠ nhóm (reply §2) làm loss mất EXACT | ❌ hoãn (đợi `f32_grad_norm_groups`) |
+
+**Bench chính thức cấu hình cuối (pb5 = list-add only, tkvc 21:48 + DLL 20:55):**
+
+| seq | pb0 pre-wire | pb5 sau wire | Δ | peakRAM |
+|---|---|---|---|---|
+| 8 | 7531 ms | **6015 ms** | **−20.1%** | 6487 → 6487 MB |
+| 256 | 10094 ms | **8422 ms** | **−16.6%** | 5809 → 5847 MB |
+| 1024 | 23391 ms | **20406 ms** | **−12.8%** | 9093 → **7915 MB (−1.1GB)** |
+
+**Loss EXACT cả 3 seq** (pb5 == pb0 từng chữ số: `10.572291→7.0119185` /
+`10.756927→11.807267` / `10.760399→13.442915`). **Gate cấu hình cuối: trainer 15/15
+(kèm resume) + simd_matmul 20/20 + gpt2_full 33/33 — xanh.** CJ8@1024: BWD
+18062→17297ms (list-add ăn đúng bucket); copy-back thật ≈875ms nhưng wire buffer-slice
+không cải thiện được (mất both ways).
+
+**Phát hiện đo đạc (probe `_lc0`):** gán `b: "list[f32]" = a` là **REFERENCE 0ms**
+(không copy-in/out — mọi nghi vấn local annotate bị loại); `f32_list_add` qua local
+phải bind trc (contract từ chối field-access `dwte.data` trực tiếp — đúng nghĩa
+"không nhận biểu thức" của REFERENCE).
+
+**Gửi compiler team (feedback lần sau):** (1) `adamw_step_glm` n=124M chậm bất thường
+(+3.2s so với `adamw_step` cùng input — nghi marshal/copy 496MB trong wrapper; bench_dp
+§4.1 chưa đo entry này); (2) số "copy-back 844ms" trong đơn §2.2 không đúng ở production
+— A/B cho 0%, xem lại cách đo; (3) `f32_list_*` từ chối `t.data` field-access → mọi call
+cần bind local trước (nên ghi rõ trong REFERENCE để khỏi bisect).
+
+**So plan (PLAN_TO_PARITY):** seq8 7187 (M6b) → **6015** (−16%, plan mục tiêu +B ≈ 4200
+— đã ăn phần list-add, còn data-plane thật B2.3/B2.4 + Phase C codegen). Log:
+`out/ab_fin_s{8,256,1024}.log`, `out/tt_fin.log`, `out/g2f_fin.log`, probe `_lc0`.
+
+**Trạng thái git:** sửa 12 file `*.tkv` (5 gpt2_ref + 4 trainer + 3 gpt2_train — sync
+toàn bộ mirror), thêm probe `_hb0/_hb0_neg/_hb0_oor/_f32v/_lc0` + HANDOFF §0.53.

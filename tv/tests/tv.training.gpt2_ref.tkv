@@ -1418,14 +1418,19 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
     # embedding bwd: wte nhan grad tu 2 duong (tie)
     gwte_e = op_embed_bwd(wte, ids, h, gx)
     gwpe = op_embed_bwd(wpe, pos, h, gx)
-    for k in range(VocabSize * h):
-        dwte.data[k] = dwte.data[k] + gwte_e.data[k]
+    if len(dwte.data) > 0:
+        dwl: "list[f32]" = dwte.data
+        gwl: "list[f32]" = gwte_e.data
+        nv1: "i64" = VocabSize * h
+        rsd = f32_list_add(dwl, gwl, nv1)
     # xep theo layout: layer 0 truoc
     out = []
     if use_flat == 1:
         # ghi thang dwte/gwpe vao flat (dwte gom 2 duong da gop)
-        for k in range(VocabSize * h):
-            gflat[o_wte + k] = gflat[o_wte + k] + dwte.data[k]
+        if len(gflat) > 0:
+            dwg: "list[f32]" = dwte.data
+            nv2: "i64" = VocabSize * h
+            rsg = f32_list_add(gflat, dwg, nv2)
         for k in range(MaxPos * h):
             gflat[o_wpe + k] = gflat[o_wpe + k] + gwpe.data[k]
         out.append(t_zeros([0]))

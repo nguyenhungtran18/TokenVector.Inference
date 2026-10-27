@@ -47,6 +47,9 @@ def gpt2_flatten(ps: 'list[Tensor]') -> 'list[f32]':
     return out
 
 def gpt2_unflatten(ps: 'list[Tensor]', flat: 'list[f32]') -> 'i32':
+    # Phase B2 (2026-10-27): thu duong buffer slice (f32buf_wrap + copy_from_buf)
+    # — bench A/B cho 0% tai ca seq8/seq1024 + phinh ~0.9GB RAM @seq1024
+    # (so voi 844ms uoc tinh) → DROP, giu duong interpreted cu.
     off = 0
     for i in range(len(ps)):
         t = ps[i]

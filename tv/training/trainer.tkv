@@ -239,6 +239,9 @@ class AdamW:
         pvl = self.pv
         ptl = self.pt
         ponl = self.pone
+        # Phase B2 (2026-10-27): thu adamw_step_glm (bo copy r1, doc gl list
+        # truc tiep) — bench A/B tu choi: +3.2s/buoc @seq1024 (n=124M, cong
+        # them alloc/marshal 496MB duoi ap luc RAM) → giu nguyen duong copy + adamw_step.
         r1 = f32_copy_to_buf(gl, pgl, self.n)
         gsrc: "i64" = pgl
         if coef != 1.0:
