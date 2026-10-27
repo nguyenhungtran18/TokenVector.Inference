@@ -1,0 +1,21 @@
+# -*- coding: utf-8 -*-
+"""GUARD negative: `v_load4a` voi kieu SAI phai bi TU CHOI luc dich.
+
+Truoc khi co guard, builtin nhan bat cu gi va sinh `ldelema float32` thang -
+IL khong hop le (ilasm/JIT loi hoac chay sai). Nay phai nem SyntaxError.
+
+CHU Y: CLI `tkvc-tv.exe` LUON tra exit code 0 (ke ca khi loi), nen script
+phai kiem TUYEN DAU RA chu khong phai $?. Xem
+Release/tests/bug_local_retype_test.ps1.
+
+Goi:
+  D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_p6_guard_neg.tkv out/_p6gn.exe main
+  # mong doi: dau ra chua 'v_load4a/v_store4a chi nhan'
+"""
+
+
+def main() -> "i32":
+    # `x` la i32 - khong phai float32[] cung khong phai list[f32]
+    x = 3
+    v = v_load4a(x, 0)
+    return 0

@@ -1,0 +1,84 @@
+# -*- coding: utf-8 -*-
+"""GUARD kieu cua `v_load4a`/`v_store4a` (2026-10-27).
+
+Truoc day 2 builtin nay chi duoc goi NGAM qua P6 (vi `viet_lai_rhs`/
+`_p6_vec_phat` LUON truyen local `__p6a*` da hoist). Neu goi TRUC TIEP mot
+bien `list[f32]` thi truoc day se sinh `List<float32>` thang vao
+`ldelema float32` -> IL khong hop le.
+
+Nay co guard: `list[f32]` -> lay `_items` bang reflection NGAY TAI CHO
+(IL hop le, ket qua dung), `float32[]` -> duong nong nhu cu, kieu khac ->
+SyntaxError (khong sinh IL hong).
+
+Goi:
+  D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_p6_guard.tkv out/_p6g.exe main
+  ./out/_p6g.exe
+"""
+
+
+def main() -> "i32":
+    print("=== P6 GUARD: goi truc tiep v_load4a/v_store4a tren list[f32] ===")
+    fails = 0
+
+    # --- [1] load + store TRUC TIEP tren list[f32] ---
+    xs: "list[f32]" = []
+    i = 0
+    while i < 8:
+        xs.append(f32(float(i)) * 1.5 + 0.25)
+        i = i + 1
+
+    v = v_load4a(xs, 0)          # doc xs[0..3] -> f32x4
+    _s1: "i32" = v_store4a(xs, 4, v)   # ghi vao xs[4..7]
+
+    bad = 0
+    i = 4
+    while i < 8:
+        if xs[i] != xs[i - 4]:
+            bad = bad + 1
+        i = i + 1
+    print("[1] truc tiep list[f32]: bad=" + str(bad) + " len=" + str(len(xs)))
+    if bad != 0:
+        fails = fails + 1
+
+    # --- [2] ghi o giua, khong lanh vung khac ---
+    w = v_load4a(xs, 4)
+    _s2: "i32" = v_store4a(xs, 0, w)
+    bad2 = 0
+    i = 0
+    while i < 4:
+        if xs[i] != xs[i + 4]:
+            bad2 = bad2 + 1
+        i = i + 1
+    print("[2] ghi vao 0..3 tu 4..7: bad=" + str(bad2))
+    if bad2 != 0:
+        fails = fails + 1
+
+    # --- [3] trang thai cuoi: ca 8 o deu = gia tri goc cua o (i % 4) ---
+    # Sau [1]: xs[4..7] = xs[0..3]. Sau [2]: doc xs[4..7] ghi vao xs[0..3]
+    # -> khong doi gi, ca 8 = [v0, v1, v2, v3, v0, v1, v2, v3].
+    bad3 = 0
+    i = 0
+    while i < 8:
+        expect = f32(float(i % 4)) * 1.5 + 0.25
+        if xs[i] != expect:
+            bad3 = bad3 + 1
+        i = i + 1
+    print("[3] trang thai cuoi khop goc: bad=" + str(bad3))
+    if bad3 != 0:
+        fails = fails + 1
+
+    # --- [4] OOB van bi chan boi bounds-check cua ldelema ---
+    # Khong co preheader o duong nay (goi truc tiep), nen luoi bao la
+    # bounds-check cua `ldelema` - nem IndexOutOfRangeException (khong phai
+    # ArgumentOutOfRangeException cua preheader nhu duong P6).
+    msg = "no-throw"
+    try:
+        _bad = v_load4a(xs, 8)
+    except Exception as e:
+        msg = str(e)
+    print("[4] OOB -> '" + msg + "'")
+    if str(msg) == "no-throw":
+        fails = fails + 1
+
+    print("_p6_guard done fails=" + str(fails))
+    return 0

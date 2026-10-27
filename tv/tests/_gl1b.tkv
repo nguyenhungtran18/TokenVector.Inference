@@ -1,0 +1,95 @@
+# PROBE _gl1b — YEU CAU #4 MUC A: 2 DIEU KIEN (IDLE vs CHURN) cho adamw_step_glm
+#
+# Yeu cau #4 A4: chay _gl1 o 2 dieu kien — (i) may idle (repo do duoc parity),
+# (ii) sau khi churn ~GB truoc do (mo phong bench) — neu slowdown chi hien o dieu
+# kien (ii) -> xac nhan gia thuyet GC/pin.
+#
+# Cach chay (2 lan, moi lan 1 process sach):
+#   GL1_CHURN=  ./out/gl1b.exe     -> dieu kien IDLE
+#   GL1_CHURN=1 ./out/gl1b.exe     -> dieu kien CHURN (4GB LOH song + gen2 gc moi rep)
+#
+# gc_counts() = 'gen0/gen1/gen2' — dung de chung minh co gen2 collection xay ra
+# TRONG luc AdamwGlmM dang hold pin 496MB (gia thuyet A3.1).
+#
+# Moi timer trong main (bug #8: now_ms() trong local ham doc SAI).
+import tv.training.tensor
+
+
+def main() -> 'i32':
+    lr = 0.0025
+    b1 = 0.9
+    b2 = 0.999
+    eps = 0.00000001
+    wd = 0.0
+    bc1 = 0.1
+    bc2s = 0.001
+
+    mode = os_getenv("GL1_CHURN")
+    if mode == "":
+        mode = "0"
+
+    # ==== buffer giong nhu [1c] cua _gl1: n = 124,439,808 ====================
+    n3 = 124439808
+    p3 = alloc_bytes(n3 * 4)
+    m3 = alloc_bytes(n3 * 4)
+    v3 = alloc_bytes(n3 * 4)
+    g3b = alloc_bytes(n3 * 4)
+    rz10 = f32_zero(p3, n3)
+    rz11 = f32_zero(m3, n3)
+    rz12 = f32_zero(v3, n3)
+    rz13 = f32_zero(g3b, n3)
+    g3t = t_zeros([n3])
+    g3 = g3t.data
+    rc4 = f32_copy_to_buf(g3, g3b, n3)
+
+    # warmup ca 2 duong truoc khi do (jit lam no xong o day)
+    warmA = adamw_step(p3, m3, v3, g3b, n3, lr, b1, b2, eps, wd, bc1, bc2s)
+    warmB = adamw_step_glm(p3, m3, v3, g3, n3, lr, b1, b2, eps, wd, bc1, bc2s)
+
+    print("GL1B mode=" + mode + " gc_at_start=" + gc_counts())
+
+    # ==== pha CHURN: dung ~1GB LOH song + churn 512MB ========================
+    # chi chay khi GL1_CHURN=1 — mo phong heap day cua bench seq1024.
+    keep: "list[Tensor]" = []
+    tmp: "list[Tensor]" = []
+    if mode == "1":
+        k = 0
+        while k < 4:
+            tk = t_zeros([67108864])
+            keep.append(tk)
+            k = k + 1
+        print("GL1B churn live_list=" + str(len(keep)) + " gc=" + gc_counts())
+
+    # ==== TIMING xen ketch, best-of, moi rep co gen2 gc truoc (dieu kien 2) ===
+    bestA = 1000000000.0
+    bestB = 1000000000.0
+    gc0 = gc_counts()
+    r = 0
+    while r < 5:
+        if mode == "1":
+            tmp = t_zeros([134217728])
+            gc_collect()
+        t0 = now_ms()
+        ra2 = adamw_step(p3, m3, v3, g3b, n3, lr, b1, b2, eps, wd, bc1, bc2s)
+        t1 = now_ms()
+        rb2 = adamw_step_glm(p3, m3, v3, g3, n3, lr, b1, b2, eps, wd, bc1, bc2s)
+        t2 = now_ms()
+        dA = t1 - t0
+        dB = t2 - t1
+        if dA < bestA:
+            bestA = dA
+        if dB < bestB:
+            bestB = dB
+        print("GL1B rep" + str(r) + " adamw_step=" + str(dA) + " ms | glm=" + str(dB) + " ms")
+        r = r + 1
+    gc1 = gc_counts()
+
+    print("GL1B RESULT mode=" + mode + " best adamw_step=" + str(bestA) + " ms | glm=" + str(bestB) + " ms | delta=" + str(bestB - bestA) + " ms")
+    print("GL1B gc_before=" + gc0 + " gc_after=" + gc1)
+
+    fb1 = free_bytes(p3)
+    fb2 = free_bytes(m3)
+    fb3 = free_bytes(v3)
+    fb4 = free_bytes(g3b)
+    print("GL1B done")
+    return 0

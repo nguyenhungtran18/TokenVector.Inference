@@ -1,0 +1,120 @@
+# GATE P6 list[f32] (YEU CAU #5, Phase C1) — `while i < n: r[i] = a[i] + b[i]`
+#
+# Truoc C1 vong nay di theo duong SCALAR (get_Item/set_Item moi phan tu).
+# Sau C1 no bi khop boi `_p6_vectorize_while` -> vong vector buoc 4
+# (`v_load4a`/`v_store4a`) + duoi scalar.
+#
+# Kiem:
+#   1. ket qua DUNG het cho nhieu mau (le/chan, n khong chia 4)
+#   2. hop dong OOB van dung: vong qua len PHAI nem
+#      ArgumentOutOfRangeException + message chinh xac
+#   3. vong khong chay (n <= 0) van KHONG nem
+#
+# Chay:
+#   /d/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_p6_list_test.tkv out/_p6.exe main
+#   ./out/_p6.exe
+
+
+def _mk(n: "i32", a1: "f32", a2: "f32") -> "list[f32]":
+    out: "list[f32]" = []
+    i = 0
+    while i < n:
+        out.append(a1)
+        i = i + 1
+    return out
+
+
+def _sum_dong_hop(a: "list[f32]", b: "list[f32]", n: "i32") -> "list[f32]":
+    r: "list[f32]" = []
+    i = 0
+    while i < n:
+        r.append(0.0)
+        i = i + 1
+    i = 0
+    while i < n:
+        r[i] = a[i] + b[i]
+        i = i + 1
+    return r
+
+
+def main() -> "i32":
+    total = 0
+
+    # ---- [1] cac mau khac nhau (n le, n chia 4, n nho, n lon) ----
+    ns = [1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 64, 100, 1000, 4097]
+    k = 0
+    while k < len(ns):
+        n = ns[k]
+        a = _mk(n, 1.5, 0.0)
+        b = _mk(n, 2.25, 0.0)
+        r = _sum_dong_hop(a, b, n)
+        bad = 0
+        i = 0
+        while i < n:
+            if r[i] != 3.75:
+                bad = bad + 1
+            i = i + 1
+        total = total + bad
+        print("P6[1] n=" + str(n) + " bad=" + str(bad) + " len=" + str(len(r)))
+        k = k + 1
+
+    # ---- [2] phep tru/nhan (kiem ve phai khong chi la cong) ----
+    n2 = 257
+    a2 = _mk(n2, 4.0, 0.0)
+    b2 = _mk(n2, 0.5, 0.0)
+    r2: "list[f32]" = []
+    i = 0
+    while i < n2:
+        r2.append(0.0)
+        i = i + 1
+    i = 0
+    while i < n2:
+        r2[i] = a2[i] * b2[i] - a2[i]
+        i = i + 1
+    bad2 = 0
+    i = 0
+    while i < n2:
+        if r2[i] != -2.0:
+            bad2 = bad2 + 1
+        i = i + 1
+    total = total + bad2
+    print("P6[2] a*b-a bad=" + str(bad2))
+
+    # ---- [3] OOB: vong chay qua len PHAI nem dung thong diep ----
+    msg3: "str" = "no-throw"
+    try:
+        n3 = 5
+        c = _mk(3, 1.0, 0.0)
+        d = _mk(3, 1.0, 0.0)
+        rr = _sum_dong_hop(c, d, n3)
+        msg3 = "no-throw len=" + str(len(rr))
+    except Exception as e:
+        msg3 = str(e)
+    print("P6[3] OOB -> '" + msg3 + "'")
+    # .NET Framework bo sung "\r\nParameter name: <paramName>" vao Message
+    # (xem _oob_probe.tkv - do la chuan hien tai cua get_Item). Kiem 2 mui:
+    # (a) message dung, (b) paramName dung.
+    exp3 = "Index was out of range. Must be non-negative and less than the size of the collection."
+    if msg3.find(exp3) < 0:
+        total = total + 1
+        print("P6[3] FAIL - message KHONG dung hop dong")
+    if msg3.find("Parameter name: index") < 0:
+        total = total + 1
+        print("P6[3] FAIL - paramName KHONG dung hop dong")
+
+    # ---- [4] vong KHONG chay (n=0) van KHONG nem ----
+    msg4: "str" = "no-throw"
+    try:
+        c4: "list[f32]" = []
+        d4: "list[f32]" = []
+        rr4 = _sum_dong_hop(c4, d4, 0)
+        msg4 = "no-throw len=" + str(len(rr4))
+    except Exception as e:
+        msg4 = str(e)
+    print("P6[4] n=0 -> '" + msg4 + "'")
+    if msg4 != "no-throw len=0":
+        total = total + 1
+        print("P6[4] FAIL (vong khong chay ma van nem)")
+
+    print("_p6_list_test done fails=" + str(total))
+    return 0

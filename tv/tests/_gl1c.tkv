@@ -1,0 +1,99 @@
+# PROBE _gl1c — A/B dung dung khoi step() cua production (request #4, 4A)
+#   A: r1 = f32_copy_to_buf(gl, pgl, n)  + adamw_step(ppl, pml, pvl, pgl, ...)   (dang chay)
+#   B: adamw_step_glm(ppl, pml, pvl, gl, ...)                                    (ung vien)
+#   C: f32_list_add(a, b, n) don le — nhom confound cua pb2
+#   D: chi r1 copy — doanh so 496MB cua phep copy
+# Xen ke 5 vong, best-of; GL1_CHURN=1 -> gc_collect() truoc moi vong.
+# Chay:
+#   /d/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_gl1c.tkv out/gl1c.exe main
+#   ./out/gl1c.exe
+import tv.training.tensor
+
+
+def main() -> 'i32':
+    n = 124439808
+    lr = 0.0025
+    b1 = 0.9
+    b2 = 0.999
+    eps = 0.00000001
+    wd = 0.0
+    bc1 = 0.1
+    bc2s = 0.001
+
+    p = alloc_bytes(n * 4)
+    m = alloc_bytes(n * 4)
+    v = alloc_bytes(n * 4)
+    pgl = alloc_bytes(n * 4)
+    rz1 = f32_zero(p, n)
+    rz2 = f32_zero(m, n)
+    rz3 = f32_zero(v, n)
+    rz4 = f32_zero(pgl, n)
+    gt = t_zeros([n])
+    gl = gt.data
+    at = t_zeros([n])
+    al = at.data
+    bt = t_zeros([n])
+    bl = bt.data
+    i = 0
+    while i < n:
+        al[i] = 0.001
+        bl[i] = 0.002
+        i = i + 1
+
+    # warmup ca 2 duong + list_add 1 lan
+    w1 = f32_copy_to_buf(gl, pgl, n)
+    w2 = adamw_step(p, m, v, pgl, n, lr, b1, b2, eps, wd, bc1, bc2s)
+    w3 = adamw_step_glm(p, m, v, gl, n, lr, b1, b2, eps, wd, bc1, bc2s)
+    w4 = f32_list_add(al, bl, n)
+
+    bestA = 1000000000.0
+    bestB = 1000000000.0
+    bestC = 1000000000.0
+    bestD = 1000000000.0
+    gc0 = gc_counts()
+    ch = os_getenv("GL1_CHURN")
+    r = 0
+    while r < 5:
+        if ch != "":
+            gc1 = gc_counts()
+        # A: dung nhu production
+        t0 = now_ms()
+        ra1 = f32_copy_to_buf(gl, pgl, n)
+        ra2 = adamw_step(p, m, v, pgl, n, lr, b1, b2, eps, wd, bc1, bc2s)
+        t1 = now_ms()
+        # B: ung vien
+        rb1 = adamw_step_glm(p, m, v, gl, n, lr, b1, b2, eps, wd, bc1, bc2s)
+        t2 = now_ms()
+        # C: f32_list_add don le
+        rc1 = f32_list_add(al, bl, n)
+        t3 = now_ms()
+        # D: chi r1 copy
+        rd1 = f32_copy_to_buf(gl, pgl, n)
+        t4 = now_ms()
+        dA = t1 - t0
+        dB = t2 - t1
+        dC = t3 - t2
+        dD = t4 - t3
+        if dA < bestA:
+            bestA = dA
+        if dB < bestB:
+            bestB = dB
+        if dC < bestC:
+            bestC = dC
+        if dD < bestD:
+            bestD = dD
+        r = r + 1
+    gc2 = gc_counts()
+    print("GL1C gc_counts before=" + str(gc0) + " after=" + str(gc2))
+    print("GL1C n=" + str(n) + " churn=" + ch)
+    print("GL1C A prod r1+adamw_step = " + str(bestA) + " ms")
+    print("GL1C B adamw_step_glm     = " + str(bestB) + " ms")
+    print("GL1C B-A                  = " + str(bestB - bestA) + " ms")
+    print("GL1C C f32_list_add       = " + str(bestC) + " ms")
+    print("GL1C D r1 copy alone      = " + str(bestD) + " ms")
+    fb1 = free_bytes(p)
+    fb2 = free_bytes(m)
+    fb3 = free_bytes(v)
+    fb4 = free_bytes(pgl)
+    print("GL1C done")
+    return 0

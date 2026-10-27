@@ -1,0 +1,256 @@
+# -*- coding: utf-8 -*-
+"""A/B DO THAT (YEU CAU #3 - native data plane): 3 builtin vs vong interpreted.
+Best-of-3 (ms), dung dung kich thuoc trong don (38.6M / 124M phan tu).
+Chi lam so cho e_handoff - KHONG phai gate.
+
+PHA D (YEU CAU #4 §B1, 2026-10-27): case 148-slice copy-back hinh dang
+THAT cua gpt2_unflatten (124,439,808 phan tu / 148 tensor GPT-2 124M) —
+deu doi voi so bench_dp da co, de hai ben dung chung mot con so.
+"""
+import tv.training.tensor
+
+def _mk(n: "i64", seed: "i32") -> "list[f32]":
+    out: "list[f32]" = []
+    i = 0
+    while i < n:
+        out.append(f32(((i * 7 + seed) % 51) * 0.0625 - 1.5625))
+        i = i + 1
+    return out
+
+
+def main() -> "i32":
+    # ================= PHA A: f32_list_add (38.6M - §2.1) ==================
+    n = 38600000
+    a = _mk(n, 1)
+    ar = _mk(n, 1)
+    b = _mk(n, 2)
+    i = 0
+    while i < n:
+        ar[i] = ar[i] + b[i]
+        i = i + 1
+    r = f32_list_add(a, b, n)
+    bad = 0
+    i = 0
+    while i < n:
+        if a[i] != ar[i]:
+            bad = bad + 1
+        i = i + 1
+    print("ADD_bit_bad=" + str(bad) + " status=" + str(r))
+
+    bi: "f64" = 999999999.0
+    k = 0
+    while k < 3:
+        t0 = now_ms()
+        i = 0
+        while i < n:
+            ar[i] = ar[i] + b[i]
+            i = i + 1
+        t1 = now_ms()
+        d = t1 - t0
+        if d < bi:
+            bi = d
+        k = k + 1
+    bn: "f64" = 999999999.0
+    k = 0
+    while k < 3:
+        t0 = now_ms()
+        r = f32_list_add(a, b, n)
+        t1 = now_ms()
+        d = t1 - t0
+        if d < bn:
+            bn = d
+        k = k + 1
+    print("ADD n=" + str(n) + " interpreted_ms=" + str(int(bi)) + " native_ms=" + str(int(bn)))
+
+    a = _mk(0, 1)
+    ar = _mk(0, 1)
+    b = _mk(0, 1)
+
+    # ================ PHA B: f32_list_copy (38.6M - §2.2) ==================
+    src = _mk(n, 3)
+    dsti = _mk(n, 4)
+    dstn = _mk(n, 4)
+    i = 0
+    while i < n:
+        dsti[i] = src[i]
+        i = i + 1
+    r = f32_list_copy(dstn, src, n)
+    bad = 0
+    i = 0
+    while i < n:
+        if dsti[i] != dstn[i]:
+            bad = bad + 1
+        i = i + 1
+    print("COPY_bit_bad=" + str(bad) + " status=" + str(r))
+
+    ci: "f64" = 999999999.0
+    k = 0
+    while k < 3:
+        t0 = now_ms()
+        i = 0
+        while i < n:
+            dsti[i] = src[i]
+            i = i + 1
+        t1 = now_ms()
+        d = t1 - t0
+        if d < ci:
+            ci = d
+        k = k + 1
+    cn: "f64" = 999999999.0
+    k = 0
+    while k < 3:
+        t0 = now_ms()
+        r = f32_list_copy(dstn, src, n)
+        t1 = now_ms()
+        d = t1 - t0
+        if d < cn:
+            cn = d
+        k = k + 1
+    print("COPY n=" + str(n) + " interpreted_ms=" + str(int(ci)) + " native_ms=" + str(int(cn)))
+
+    src = _mk(0, 3)
+    dsti = _mk(0, 4)
+    dstn = _mk(0, 4)
+
+    # ============= PHA C: f32_grad_norm (124M - §2.3) ======================
+    n2 = 124000000
+    g = _mk(n2, 5)
+    s: "f64" = 0.0
+    i = 0
+    while i < n2:
+        s = s + g[i] * g[i]
+        i = i + 1
+    ref = sqrt(s)
+    gn = f32_grad_norm(g, n2)
+    df = gn - ref
+    if df < 0.0:
+        df = -df
+    print("GN_ref=" + str(ref) + " native=" + str(gn) + " absdiff=" + str(df))
+
+    gi: "f64" = 999999999.0
+    s2: "f64" = 0.0
+    k = 0
+    while k < 3:
+        t0 = now_ms()
+        s2 = 0.0
+        i = 0
+        while i < n2:
+            s2 = s2 + g[i] * g[i]
+            i = i + 1
+        t1 = now_ms()
+        dd = t1 - t0
+        if dd < gi:
+            gi = dd
+        k = k + 1
+    gn2: "f64" = 999999999.0
+    k = 0
+    while k < 3:
+        t0 = now_ms()
+        gn3 = f32_grad_norm(g, n2)
+        t1 = now_ms()
+        dd = t1 - t0
+        if dd < gn2:
+            gn2 = dd
+        k = k + 1
+    print("GN n=" + str(n2) + " interpreted_ms=" + str(int(gi)) + " native_ms=" + str(int(gn2)))
+    g = _mk(0, 5)
+
+    # ======== PHA D: 148-slice copy-back (YEU CAU #4 §B1) ====================
+    # Hinh dang gpt2_unflatten: 148 tensor, tong 124,439,808 phan tu.
+    #   interpreted : d[j] = flat[off + j]   (vong copy tung phan tu)
+    #   native      : f32buf_wrap(buf + off*4, sz) + f32_copy_from_buf
+    sizes: "list[i64]" = []
+    sizes.append(38597376)
+    sizes.append(786432)
+    sizes.append(768)
+    sizes.append(768)
+    li = 0
+    while li < 12:
+        sizes.append(768)
+        sizes.append(768)
+        sizes.append(1769472)
+        sizes.append(2304)
+        sizes.append(589824)
+        sizes.append(768)
+        sizes.append(768)
+        sizes.append(768)
+        sizes.append(2359296)
+        sizes.append(3072)
+        sizes.append(2359296)
+        sizes.append(768)
+        li = li + 1
+    total: "i64" = 0
+    for i in range(len(sizes)):
+        total = total + sizes[i]
+    print("SLICE ntensor=" + str(len(sizes)) + " total=" + str(total))
+
+    ft = t_zeros([total])
+    flat = ft.data
+    ts: "list[Tensor]" = []
+    for i in range(len(sizes)):
+        tz = t_zeros([sizes[i]])
+        ts.append(tz)
+    nb = alloc_bytes(total * 4)
+    rcs = f32_copy_to_buf(flat, nb, total)
+
+    # duong interpreted (hinh dang production gpt2_unflatten)
+    ti: "f64" = 999999999.0
+    k = 0
+    while k < 3:
+        t0 = now_ms()
+        off = 0
+        for i in range(len(sizes)):
+            tz = ts[i]
+            dz = tz.data
+            sz = sizes[i]
+            j = 0
+            while j < sz:
+                dz[j] = flat[off + j]
+                j = j + 1
+            off = off + sz
+        t1 = now_ms()
+        dd = t1 - t0
+        if dd < ti:
+            ti = dd
+        k = k + 1
+
+    # duong native 148-slice
+    tn: "f64" = 999999999.0
+    k = 0
+    while k < 3:
+        t0 = now_ms()
+        off = 0
+        for i in range(len(sizes)):
+            sz = sizes[i]
+            pab = nb + off * 4
+            sl = f32buf_wrap(pab, sz)
+            tb = ts[i]
+            d2 = tb.data
+            rcc = f32_copy_from_buf(sl, d2, sz)
+            off = off + sz
+        t1 = now_ms()
+        dd = t1 - t0
+        if dd < tn:
+            tn = dd
+        k = k + 1
+
+    # dung sai tren mau (khong quet toan bo 124M - qua cham cho bench)
+    bad = 0
+    off = 0
+    for i in range(len(sizes)):
+        sz = sizes[i]
+        tz = ts[i]
+        dz = tz.data
+        if dz[0] != flat[off]:
+            bad = bad + 1
+        if sz > 1:
+            if dz[sz - 1] != flat[off + sz - 1]:
+                bad = bad + 1
+        if sz > 1000:
+            if dz[123] != flat[off + 123]:
+                bad = bad + 1
+        off = off + sz
+    print("SLICE interpreted_ms=" + str(int(ti)) + " native_ms=" + str(int(tn)) +
+          " speedup=" + str(int(ti / tn)) + "x sample_bad=" + str(bad))
+    fb = free_bytes(nb)
+    return 0

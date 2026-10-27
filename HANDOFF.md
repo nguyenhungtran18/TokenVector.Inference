@@ -2744,3 +2744,70 @@ cần bind local trước (nên ghi rõ trong REFERENCE để khỏi bisect).
 
 **Trạng thái git:** sửa 12 file `*.tkv` (5 gpt2_ref + 4 trainer + 3 gpt2_train — sync
 toàn bộ mirror), thêm probe `_hb0/_hb0_neg/_hb0_oor/_f32v/_lc0` + HANDOFF §0.53.
+
+**⚠ ĐÍNH CHỈNH (cùng ngày, sau probe `_gl1` — `docs/COMPILER_TEAM_REQUEST4.md`):**
+
+1. **«unflatten buffer-slice = 0% → DROP» là kết luận ĐO SAI.** Bench
+   `simd_bench_124m_seq` dùng bản copy inline `_step124` (`d[j]=opt.p[off+j]`) —
+   **không gọi `gpt2_unflatten`** → pb3 vs pb4 gần như cùng binary, «0%» tất yếu.
+   Số đo lại `_gl1` [2] (148 tensor thật, 124,439,808 ptu): interpreted **4453 ms**
+   vs native-slice `f32buf_wrap` **94 ms (47×, sample_bad=0)** → wire CÓ lợi (nhưng
+   JIT-shape nhạy: cj8 inline đo 875 ms). **Trạng thái code giữ nguyên chưa wire**
+   — sẽ sửa bench gọi đúng đường production rồi A/B lại trước khi chốt.
+2. **«glm +3.2 s do marshal 496 MB» chỉ là giả thuyết — probe không lặp lại.**
+   `_gl1` [1c] gọi trực tiếp n=124,439,808 xen kẽ: `adamw_step=297 ms | glm=282 ms`
+   (bitdiff 0/1024 — nhanh hơn thật sự). Tín hiệu +1.9 s chỉ xuất hiện trong bench
+   full-step (heap 8–9 GB, sau FWD+BWD) → nghi pin managed array 496 MB dưới áp lực
+   GC. **Vẫn drop theo bench** (chưa có số liệu chứng minh sửa được), gửi compiler
+   `request #4` điều tra — đừng đưa «nghi marshal» vào kết luận chính thức.
+
+### 0.54 REPLY #4 + C1 CODEGEN VÀO COMPILER — ĐO LẠI, CHƯA ĂN PRODUCTION (2026-10-27)
+
+**Compiler giao 2 biên bản trong ngày:**
+
+1. **Reply #4** (`2026-10-27-adamw-glm-and-copyback-reply-4.md`, 12:18):
+   - **`adamw_step_glm` +1.9s KHÔNG tái lập được** — cả 3 giả thuyết (pin 496MB dưới
+     áp lực GC / hidden alloc / đổi timing GC) bị bác bằng số đo: 3 điều kiện kể cả
+     81 lần gen2 GC đồng thời, glm vẫn **nhanh hơn 78–110 ms**; IL wrapper sạch
+     (0 alloc, 5 reflection/µs). Tín hiệu bench +1.5–3.2s **không scale với `steps`**
+     (steps=2 đổi dấu) và bị RAM máy 12GB chi phối (cùng cấu hình 21s ↔ 105s khi
+     free RAM 9.7GB ↔ 3.4GB). → **Khuyến nghị: giữ nguyên đường `r1 copy +
+     adamw_step` đang chạy** (variance thấp hơn: 1594 vs 3750 ms), KHÔNG gắn nhãn
+     «glm chỉ dùng khi RAM dư dả».
+   - **Đính chính copy-back:** số thật shape production 148-slice = **4937 ms
+     interpreted → 63 ms native (78×)**; «844ms» → khoảng **875–4937 ms** (nhạy
+     JIT-shape), native **63–94 ms**. «A/B 0% → drop unflatten» của repo bị xác nhận
+     là **đo sai chỗ** (bench inline `_step124`, không gọi `gpt2_unflatten`) — số 0%
+     loại khỏi budget Phase C-F.
+2. **Phase C1 baseline + thiết kế** (`2026-10-27-phase-c1-baseline-and-design.md`,
+   13:10): root-cause IL = **5–6 nhánh + 2 `callvirt` dispatch/phần tử** trong vòng
+   `list[f32]`; hợp đồng OOB đo thật (`_oob_probe`: đúng type/message/paramName,
+   không ném khi vòng không chạy); phát hiện bộ vectorize P6 **đã có sẵn** chỉ chặn
+   ở `_p6_is_f32buf` → C1 = mở matcher cho `list[f32]`.
+
+**C1 implement + self-host:** sửa `control_flow.tkv` (+250 dòng: `_p6_is_list_f32`,
+`_p6_preheader_list` validate OOB trước vòng, hoist `_items` 1 lần vào local
+`float32[] __p6a*`), `vector4_type.tkv` (+151: `v_load4a`/`v_store4a` = `ldelema`+
+`ldobj`/`stobj`, index không `conv.ovf.i4` khi preheader đã chứng minh), `file_io.tkv`
+(đăng ký `v_store4a`). `vong_c1.log`: **IL_IDENTICAL**, `tkvc-tv.exe` 17:09.
+
+**Kiểm chứng phía repo (không tin reply):**
+
+| kiểm | kết quả |
+|---|---|
+| Gate compiler mới | **gpt2_full 33/33 + trainer 15/15 (kèm resume) + simd_matmul 20/20 — xanh** |
+| `_f32p` acceptance (4 shape ≥2×) | ❌ **vẫn 1.09×/1.0×/1.0×** — shape harness là C1-c (`out[dst]`, `cd[bc]` counter riêng), matcher chỉ nhận index == iv |
+| Bắn tỉa IL `bseq_c1` vs `bseq_pb5` | chỉ **1 loop nổ** (`mlp_loss_grad` — hàm demo MLP, 0 loop GPT-2); gpt2_full = 0; trainer_tests = 4 (3× `_copy_into` + `mlp_loss_grad`) |
+| A/B xen kẽ seq8 best-of-3 | pb5 (trước C1) **5797 ms** vs c1 **5781 ms** = **−0.3% (noise)**, loss EXACT `10.572291→7.0119185`, RAM ~6.5GB |
+
+**Kết luận:** C1 **đúng lever, chạy đúng hợp đồng, không regress** — nhưng pattern
+quá hẹp (`a[iv] = vecexpr`, thân đúng 2 câu, const-fill bị `loads==0` từ chối) nên
+**chưa loop hot nào của GPT-2 khớp**. Vòng production đang mắc: offset index
+(`d[j]=opt.p[off+j]` copy-back, `flat[off+j]` unflatten, `gflat[o_wte+k]`), const-fill
+(`zero_grad`), thân nhiều câu (block_bwd), counter riêng (C1-c).
+
+**Bước tiếp — request #6:** mở rộng C1 theo thứ tự gain/độ khó: **(a) C1-b offset
+loop-invariant** `a[off+iv]` (ăn luôn copy-back + unflatten ≈ 875ms–4.4s interpreted
+đo được ở §0.53), **(b) const-fill** `a[iv]=c`, **(c) C1-c counter riêng** (chính shape
+của `_f32p` acceptance) — kèm số đo trên làm bằng chứng. Repo-side không cần đổi gì:
+gate xanh, loss EXACT, cấu hình bench giữ nguyên.

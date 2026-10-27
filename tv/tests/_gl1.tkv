@@ -1,0 +1,206 @@
+# PROBE _gl1 — REPRO compiler request #4 (HANDOFF §0.53)
+#   [1] adamw_step_glm vs adamw_step: timing n=1M + n=124M, bitdiff n=1024
+#       (cung input, xen kẽ 3 vong, best-of; warmup 1 lan truoc)
+#   [2] gpt2_unflatten 148 tensor GPT-2 124M: interpreted vs buffer-slice native
+#       (f32buf_wrap + f32_copy_from_buf — hinh dang that cua wire pb4)
+# Moi timer trong main (bug #8: now_ms() trong local ham doc SAI).
+# Chay:
+#   /d/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_gl1.tkv out/gl1.exe main
+#   ./out/gl1.exe
+import tv.training.tensor
+
+def main() -> 'i32':
+    lr = 0.0025
+    b1 = 0.9
+    b2 = 0.999
+    eps = 0.00000001
+    wd = 0.0
+    bc1 = 0.1
+    bc2s = 0.001
+
+    # ==== [1b] BIT-EXACT n=1024 (gia tri khac 0, truong hop nho) ==============
+    n2 = 1024
+    p2 = alloc_bytes(n2 * 4)
+    m2 = alloc_bytes(n2 * 4)
+    v2 = alloc_bytes(n2 * 4)
+    g2b = alloc_bytes(n2 * 4)
+    g2t = t_zeros([n2])
+    g2 = g2t.data
+    i = 0
+    while i < n2:
+        g2[i] = float((i % 13) + 1) * 0.0001
+        i = i + 1
+    # duong A: adamw_step (g qua buffer)
+    rz0 = f32_zero(p2, n2)
+    rz1 = f32_zero(m2, n2)
+    rz2 = f32_zero(v2, n2)
+    rc0 = f32_copy_to_buf(g2, g2b, n2)
+    ra = adamw_step(p2, m2, v2, g2b, n2, lr, b1, b2, eps, wd, bc1, bc2s)
+    pat = t_zeros([n2])
+    pa = pat.data
+    rc1 = f32_copy_from_buf(p2, pa, n2)
+    # duong B: adamw_step_glm (g la list) — reset trang thai
+    rz3 = f32_zero(p2, n2)
+    rz4 = f32_zero(m2, n2)
+    rz5 = f32_zero(v2, n2)
+    rb = adamw_step_glm(p2, m2, v2, g2, n2, lr, b1, b2, eps, wd, bc1, bc2s)
+    pbt = t_zeros([n2])
+    pb = pbt.data
+    rc2 = f32_copy_from_buf(p2, pb, n2)
+    bad = 0
+    for k in range(n2):
+        if pa[k] != pb[k]:
+            bad = bad + 1
+    print("GL1 [1b] bitdiff adamw_step vs glm: " + str(bad) + "/" + str(n2))
+
+    # ==== [1a] TIMING n=1,048,576 =============================================
+    n1 = 1048576
+    p1 = alloc_bytes(n1 * 4)
+    m1 = alloc_bytes(n1 * 4)
+    v1 = alloc_bytes(n1 * 4)
+    g1b = alloc_bytes(n1 * 4)
+    rz6 = f32_zero(p1, n1)
+    rz7 = f32_zero(m1, n1)
+    rz8 = f32_zero(v1, n1)
+    rz9 = f32_zero(g1b, n1)
+    g1t = t_zeros([n1])
+    g1 = g1t.data
+    i = 0
+    while i < n1:
+        g1[i] = 0.001
+        i = i + 1
+    rc3 = f32_copy_to_buf(g1, g1b, n1)
+    wa = adamw_step(p1, m1, v1, g1b, n1, lr, b1, b2, eps, wd, bc1, bc2s)
+    wb = adamw_step_glm(p1, m1, v1, g1, n1, lr, b1, b2, eps, wd, bc1, bc2s)
+    bestA = 1000000000.0
+    bestB = 1000000000.0
+    r = 0
+    while r < 3:
+        t0 = now_ms()
+        ra1 = adamw_step(p1, m1, v1, g1b, n1, lr, b1, b2, eps, wd, bc1, bc2s)
+        t1 = now_ms()
+        rb1 = adamw_step_glm(p1, m1, v1, g1, n1, lr, b1, b2, eps, wd, bc1, bc2s)
+        t2 = now_ms()
+        dA = t1 - t0
+        dB = t2 - t1
+        if dA < bestA:
+            bestA = dA
+        if dB < bestB:
+            bestB = dB
+        r = r + 1
+    print("GL1 [1a] n=1048576 adamw_step=" + str(bestA) + " ms | glm=" + str(bestB) + " ms")
+
+    # ==== [1c] TIMING n=124,439,808 (khong fill — gia tri khong anh huong) ====
+    n3 = 124439808
+    p3 = alloc_bytes(n3 * 4)
+    m3 = alloc_bytes(n3 * 4)
+    v3 = alloc_bytes(n3 * 4)
+    g3b = alloc_bytes(n3 * 4)
+    rz10 = f32_zero(p3, n3)
+    rz11 = f32_zero(m3, n3)
+    rz12 = f32_zero(v3, n3)
+    rz13 = f32_zero(g3b, n3)
+    g3t = t_zeros([n3])
+    g3 = g3t.data
+    rc4 = f32_copy_to_buf(g3, g3b, n3)
+    wc = adamw_step(p3, m3, v3, g3b, n3, lr, b1, b2, eps, wd, bc1, bc2s)
+    wd2 = adamw_step_glm(p3, m3, v3, g3, n3, lr, b1, b2, eps, wd, bc1, bc2s)
+    bestC = 1000000000.0
+    bestD = 1000000000.0
+    r = 0
+    while r < 3:
+        t0 = now_ms()
+        ra2 = adamw_step(p3, m3, v3, g3b, n3, lr, b1, b2, eps, wd, bc1, bc2s)
+        t1 = now_ms()
+        rb2 = adamw_step_glm(p3, m3, v3, g3, n3, lr, b1, b2, eps, wd, bc1, bc2s)
+        t2 = now_ms()
+        dA = t1 - t0
+        dB = t2 - t1
+        if dA < bestC:
+            bestC = dA
+        if dB < bestD:
+            bestD = dB
+        r = r + 1
+    print("GL1 [1c] n=124439808 adamw_step=" + str(bestC) + " ms | glm=" + str(bestD) + " ms")
+    # free truoc khi vao phan [2] (RAM safety)
+    fb1 = free_bytes(p3)
+    fb2 = free_bytes(m3)
+    fb3 = free_bytes(v3)
+    fb4 = free_bytes(g3b)
+
+    # ==== [2] UNFLATTEN 148 tensor (layout GPT-2 124M) ========================
+    sizes = []
+    sizes.append(38597376)
+    sizes.append(786432)
+    sizes.append(768)
+    sizes.append(768)
+    li = 0
+    while li < 12:
+        sizes.append(768)
+        sizes.append(768)
+        sizes.append(1769472)
+        sizes.append(2304)
+        sizes.append(589824)
+        sizes.append(768)
+        sizes.append(768)
+        sizes.append(768)
+        sizes.append(2359296)
+        sizes.append(3072)
+        sizes.append(2359296)
+        sizes.append(768)
+        li = li + 1
+    total = 0
+    for i in range(len(sizes)):
+        total = total + sizes[i]
+    print("GL1 [2] ntensor=" + str(len(sizes)) + " total=" + str(total))
+
+    ft = t_zeros([total])
+    flat = ft.data
+    ts: "list[Tensor]" = []
+    for i in range(len(sizes)):
+        tz = t_zeros([sizes[i]])
+        ts.append(tz)
+
+    # duong A: interpreted (hinh dang gpt2_unflatten production)
+    ta0 = now_ms()
+    off = 0
+    for i in range(len(sizes)):
+        t = ts[i]
+        d = t.data
+        sz = sizes[i]
+        j = 0
+        while j < sz:
+            d[j] = flat[off + j]
+            j = j + 1
+        off = off + sz
+    ta1 = now_ms()
+    tx0 = ts[0]
+    d0 = tx0.data
+    vA0 = d0[12345]
+    tx1 = ts[147]
+    d1 = tx1.data
+    vA1 = d1[700]
+
+    # duong B: buffer slice (pb4) — flat->buf ngoai timer (production dung opt.pp da sync)
+    nb = alloc_bytes(total * 4)
+    rc5 = f32_copy_to_buf(flat, nb, total)
+    tb0 = now_ms()
+    off = 0
+    for i in range(len(sizes)):
+        sz = sizes[i]
+        pab = nb + off * 4
+        sl = f32buf_wrap(pab, sz)
+        tb = ts[i]
+        d2 = tb.data
+        rc6 = f32_copy_from_buf(sl, d2, sz)
+        off = off + sz
+    tb1 = now_ms()
+    bad2 = 0
+    if d0[12345] != vA0:
+        bad2 = bad2 + 1
+    if d1[700] != vA1:
+        bad2 = bad2 + 1
+    print("GL1 [2] unflatten interpreted=" + str(ta1 - ta0) + " ms | native-slice=" + str(tb1 - tb0) + " ms | sample_bad=" + str(bad2))
+    fb5 = free_bytes(nb)
+    print("GL1 done")
+    return 0
