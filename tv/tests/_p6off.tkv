@@ -1,0 +1,152 @@
+# PROBE _p6off (2026-10-28) — OFFSET A/B 3 ARM (YEU CAU #7)
+# ----------------------------------------------------------------------------
+# Hinh 148-slice copy giong bench_dp PHA D (63,007,488 ptu), 3 bien the CUNG
+# phep toan, chi khac O form than vi P6 khop hay tu choi:
+#   U (old)     : 3 cau `t = flat[o+jj]; dz[jj] = t; jj = jj+1` + local HOAN TOAN
+#                 khieu (o/jj TkvInt) -> P6 TU CHOI + day du ceremony = proxy
+#                 trung thay "codegen cu" (pb5-era): interpreted + TkvInt
+#   V (untyped) : 2 cau `dz[j] = flat[off+j]; j = j+1`, off typed / j khieu
+#                 -> hinh production hien tai (_step124 copy-back): vector nung
+#                    nhung trong than con TkvInt ceremony (FromI64/AddSlow/ToI32)
+#   T (typed)   : 2 cau giong V nhung `off: "i64"`, `j: "i64"`
+#                 -> thanh goc typed (chi so i64 hoa) — _p6kv do duoc 78ms
+#
+# Muc dich:
+#   - baseline hom nay: U/V/T (bang chung cho #7)
+#   - sau Y1/Y2 (bo ceremony): cho doi V ~ T (T/V ~ 1.0) va U/T lon nhat co the
+# Best-of-3 xen kẽ (now_ms phan giai ~15.6ms -> batch du lon).
+#
+# Chay:
+#   /d/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_p6off.tkv out/_p6off.exe main
+#   ./out/_p6off.exe
+
+def _mk(n: "i64", seed: "i32") -> "list[f32]":
+    out: "list[f32]" = []
+    i = 0
+    while i < n:
+        out.append(f32(((i * 7 + seed) % 51) * 0.0625 - 1.5625))
+        i = i + 1
+    return out
+
+# ---- U: 3 cau + toan bo local khieu -> P6 tu choi + TkvInt ceremony ----
+def _arm_u(flat: "list[f32]", dz: "list[f32]", sz: "i64", off: "i64") -> "i64":
+    o = off        # local khieu (TkvInt)
+    jj = 0         # local khieu (TkvInt)
+    while jj < sz:
+        t = flat[o + jj]
+        dz[jj] = t
+        jj = jj + 1
+    return 0
+
+# ---- V: 2 cau, khieu — hinh production (_step124 copy-back) ----
+def _arm_v(flat: "list[f32]", dz: "list[f32]", sz: "i64", off: "i64") -> "i64":
+    j = 0
+    while j < sz:
+        dz[j] = flat[off + j]
+        j = j + 1
+    return 0
+
+# ---- T: 2 cau, typed i64 ----
+def _arm_t(flat: "list[f32]", dz: "list[f32]", sz: "i64", offt: "i64") -> "i64":
+    jt: "i64" = 0
+    while jt < sz:
+        dz[jt] = flat[offt + jt]
+        jt = jt + 1
+    return 0
+
+def main() -> "i32":
+    # 148-slice hinh bench_dp: 38.6M + 2304 + ... = 63,007,488 ptu
+    sizes: "list[i64]" = []
+    sizes.append(38597376)
+    sizes.append(786432)
+    i = 0
+    while i < 10:
+        sizes.append(768)
+        sizes.append(1769472)
+        sizes.append(2304)
+        sizes.append(589824)
+        i = i + 1
+    total: "i64" = 0
+    for i in range(len(sizes)):
+        total = total + sizes[i]
+
+    flat = _mk(total, 1)
+    z0: "list[f32]" = []
+    z1: "list[f32]" = []
+    z2: "list[f32]" = []
+    i = 0
+    while i < total:
+        z0.append(0.0)
+        z1.append(0.0)
+        z2.append(0.0)
+        i = i + 1
+
+    # warmup 4 arm
+    w0 = _arm_u(flat, z0, 768, 0)
+    w1 = _arm_v(flat, z1, 768, 0)
+    w2 = _arm_t(flat, z2, 768, 0)
+
+    bestU = 999999999.0
+    bestV = 999999999.0
+    bestT = 999999999.0
+    k = 0
+    while k < 3:
+        # xen kẽ thu tu U-V-T / V-T-U / T-U-V de khong arm nao uu thei nhiet
+        o0 = k % 3
+        m = 0
+        while m < 3:
+            a = (o0 + m) % 3
+            t0 = now_ms()
+            if a == 0:
+                off = 0
+                q = 0
+                while q < len(sizes):
+                    sz = sizes[q]
+                    r0 = _arm_u(flat, z0, sz, off)
+                    off = off + sz
+                    q = q + 1
+                t1 = now_ms()
+                if t1 - t0 < bestU:
+                    bestU = t1 - t0
+            if a == 1:
+                off = 0
+                q = 0
+                while q < len(sizes):
+                    sz = sizes[q]
+                    r1 = _arm_v(flat, z1, sz, off)
+                    off = off + sz
+                    q = q + 1
+                t1 = now_ms()
+                if t1 - t0 < bestV:
+                    bestV = t1 - t0
+            if a == 2:
+                offt: "i64" = 0
+                q = 0
+                while q < len(sizes):
+                    sz = sizes[q]
+                    r2 = _arm_t(flat, z2, sz, offt)
+                    offt = offt + sz
+                    q = q + 1
+                t1 = now_ms()
+                if t1 - t0 < bestT:
+                    bestT = t1 - t0
+            m = m + 1
+        k = k + 1
+
+    # kiem 3 arm cung ket qua (bit)
+    bad = 0
+    i = 0
+    while i < total:
+        if z0[i] != z2[i]:
+            bad = bad + 1
+        if z1[i] != z2[i]:
+            bad = bad + 1
+        i = i + 1
+
+    print("OFF total=" + str(total) + " reps=3")
+    print("OFF U_old=" + str(int(bestU)) + " ms  V_prod=" + str(int(bestV))
+          + " ms  T_typed=" + str(int(bestT)) + " ms")
+    print("OFF V/U=" + str(bestU / bestV) + "x  T/U=" + str(bestU / bestT)
+          + "x  T/V=" + str(bestV / bestT) + "x")
+    print("OFF bit_bad=" + str(bad) + " (0 = 3 arm cung ket qua)")
+    return 0

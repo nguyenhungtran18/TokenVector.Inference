@@ -2811,3 +2811,516 @@ loop-invariant** `a[off+iv]` (ăn luôn copy-back + unflatten ≈ 875ms–4.4s i
 đo được ở §0.53), **(b) const-fill** `a[iv]=c`, **(c) C1-c counter riêng** (chính shape
 của `_f32p` acceptance) — kèm số đo trên làm bằng chứng. Repo-side không cần đổi gì:
 gate xanh, loss EXACT, cấu hình bench giữ nguyên.
+
+---
+
+### 0.55 REQUEST #6 — C1 MỞ RỘNG (OFFSET/CONST-FILL/COUNTER) + BUG `push_v_store4` — GATE XANH, LOSS EXACT, ACCEPTANCE 2/4 (2026-10-28)
+
+**Diễn biến:** điều tra acceptance #6 bắt được **bug codegen thật** trong đường
+`v_store4` (f32buf con trỏ thô): RHS const-fill `f32(1.0)` infer dtype `'f32'` →
+`compile_expr(rhs,'f32x4')` đẩy **1 float** rồi `stobj Vector4` đọc 16 byte stack
+→ ghi 1 lane + 3 lane rác (`BUF=1.0 junk junk junk…`, repro `_w1rep`). Sửa
+`vector4_type.tkv::push_v_store4` đi `_day_vec4_operand` broadcast (đối xứng với
+`push_v_store4a`), self-host **IL_IDENTICAL**, `tkvc-tv.exe` 10:42. Probe `_det`
+deterministic 4/4 run giống hệt; `pone` buffer đầy đủ 4 lane.
+
+**Kiểm chứng cuối cùng (compiler 10:42, mọi số đo lại từ đầu):**
+
+| kiểm (§4) | kết quả |
+|---|---|
+| Gate repo `gate_f32.sh` | **135/135 — GATE_EXIT=0** (`out/gate_final.log`) |
+| Trainer | **15/15 fails=0**, deterministic 2 lần chạy (`tr7`/`tr7b`) |
+| Probe 3 pattern `_p6x` | **13/13 fails=0** — off-src/off-dst/unflatten-for/const-fill×2/counter-dst/acc-2counter + 6 negative OOB đúng message/paramName + no-throw len=0 |
+| Negative OOB | `_p6_guard_neg` compile **FAIL đúng message**; `_oob_probe` đủ case XANH |
+| Bắn tỉa IL | `zero_grad`: preheader OOB check + hoist `_items`→`__p6a13` + vector loop `newobj Vector4` 4-wide + tail `set_Item` — **body 0 get_Count/0 conv.ovf/0 ToArray**; `_step124` copy-back offset: `__p6a21/23` + `ldelema/ldobj/stobj Vector4`, conv.ovf.i4=0 ToArray=0; `_f32p` `_b64/_b32/_a64` counter loops đều vector (`stobj Vector4`); tổng `__p6a` trong `bseq_c6` = **134** (§0.54: 1 loop nổ) |
+| Full-step xen kẽ best-of-3 (seq8/256) + best-of-6 (seq1024, thêm r4–r6) | seq8 **5766→5547 ms (+3.8%)**, seq256 **8235→7313 ms (+11.2%)**, seq1024 **21484→21578 ms (+0.4% — hòa noise)**; **loss EXACT** cả 3 seq (10.760399→13.442915 nguyên vẹn 13/13 lần chạy) |
+| **Acceptance speed** | ❌ `_f32p` [1] **1.205×** / [2] **0.249×** (chưa ≥2×; [2] metric f64/f32-locals, không phải vector/scalar); ❌ const-fill `_p6cf` @124M **2.90×** (target 5×, bit-exact ✓); ✅ core C1 loop `_p6_bench` (cùng phép toán, vector vs scalar) **2.27×** bit-exact; ❌ offset codegen ≥10× **chưa có số đo riêng** (native data-plane SLICE 148-slice đo **4937→63 ms = 78×** chỉ là builtin, không phải codegen) |
+
+**Nhận xét kỹ thuật:** thân vòng vector production **còn TkvInt ceremony**
+(`TkvInt::FromI64/AddSlow/ToI32` ~30 lệnh/index op trong `_step124` — local `off`
+không typed); `_p6kv` đo typed 78ms vs untyped 250ms = **3.2×** chỉ do ceremony.
+Đây là dư địa lớn nhất còn lại: number/LICM cho local typed sẽ nâng cả 3 nhánh.
+
+**Kết luận:** C1 mở rộng **đúng hợp đồng, sạch IL, không regress** (gate/trainer/loss
+EXACT), nhưng **2/4 acceptance speed chưa đạt** — const-fill 2.9×<5× và `_f32p` 2×
+còn mở; đề xuất bước tiếp: (1) typed-local/LICM bỏ TkvInt ceremony, (2) benchmark
+`_f32p` [1]/[2] bằng metric vector-vs-scalar (đúng mục đích C1-c) thay metric
+f64/f32, (3) probe offset A/B riêng cho unflatten/copy-back. Thân nhiều câu
+(block_bwd) vẫn ngoài scope — chuyển sang yêu cầu **#8** (yêu cầu **#7** = bỏ TkvInt
+ceremony typed-local/LICM, kèm probe `_p6off`, viết 2026-10-28).
+
+### 0.56 REQUEST #8 — THÂN N CÂU + UNSWITCH f64 — PROBE `_p6ms` CHẠY ĐƯỢC, ACCEPTANCE 1/3 (2026-10-29)
+
+**Phạm vi:** mở matcher P6 nuốt thân **N câu** (N≥3) + **loop unswitching** cho branch
+loop-invariant (Y2), theo `docs/COMPILER_TEAM_REQUEST8.md`. Sửa trên 4 file compiler:
+`control_flow.tkv` (matcher + unswitch + preheader f64), `vector4_type.tkv`
+(`_day_vec64_operand` f32x4→f64x4 bridge + `v_wload4a`/`v_dload`/`v_dstore`),
+`il_codegen.tkv` (local **byref** `float32&` trong `il_type_str`, `_p6_dang_ky_arr`
+trả byref + `add` không bounds-check), `operators.tkv` (`_hop_kieu_so` f64x4 thắng
+f32x4/f64). Unswitch 2 arm từng có label trùng → tách id nhãn riêng. Condition
+invariance viết lại (`_p6_cond_inv` duyệt `compare/boolop/neg/not` thay vì
+c `_p6_co_biens` trả "unknown" cho mọi `if`).
+
+**Probe `_p6ms` (3 shape, mỗi shape arm V vector vs arm S reject-để-proxy-scalar):**
+
+| shape | V (ms) | S (ms) | speedup | bit_bad | target |
+|---|---|---|---|---|---|
+| A LN_BWD | 266 | 984 | **3.70×** | 0 | ≥4× ❌ |
+| B linear_db | 234 | 844 | **3.61×** | 0 | ≥4× ❌ |
+| C BUILDACC | 234 | 1109 | **4.74×** | 0 | ≥4× ✅ |
+
+`fails=0`. Matcher **đã nổ** cả 3 shape (trước #8: 2 arm cùng reject ≈1.0×),
+unswitch hoạt động (IL có 2 vòng vector specialized `_db_v_F3`/`_db_v_F4` cho
+2 canh `dboff>=0`), body **0 `TkvInt::`** (kèm #7 byref+shadow i64).
+
+**CÁCH CHẠY (quan trọng — .NET Framework KHÔNG chạy được):** `ilasm` sinh `.exe`
+target `System.Numerics.Vectors` nhưng facade trong GAC .NET Framework **rỗng**
+(chỉ `__DynamicallyInvokableAttribute`) → `TypeLoadException: Vector\`1`. Phải
+chạy trên **.NET 10** (runtime có `Vector.Widen/Narrow` hardware):
+```bash
+cp out/_p6ms.exe out/_p6ms_n10.dll
+cp out/_p6ms_n10.runtimeconfig.json out/   # tfm net10.0, Microsoft.NETCore.App 10.0.13
+dotnet out/_p6ms_n10.dll
+```
+
+**Phân tích bottleneck (đã đo — `out/_p6diag.tkv`, bản copy thay vòng `mu` bằng hằng):**
+
+| shape | có mu | bỏ mu (body thuần) | kết luận |
+|---|---|---|---|
+| A | 3.70× | **5.61×** (V=156/S=875) | body vector **đã nhanh**; vòng `mu` scalar chung (110ms/call, `get_Item` callvirt) **pha loãng** tỉ lệ vì có ở CẢ 2 arm |
+| B | 3.61× | 3.31× (noise, B không có mu) | body vector **thuần mới ~3.3×** — cần nhanh thêm ~20% |
+| C | 4.74× | 5.06× | ✅ đạt |
+
+- **Reflection `GetValue` KHÔNG phải bottleneck**: micro-bench `out/refl`
+  (6000 call × 10 access) = **4ms** vs 266ms đo được → bỏ qua.
+- **A**: tỉ lệ = `(M + bodyS)/(M + bodyV)`, M=110. Mu giảm → tỉ lệ tăng;
+  M≤84ms **hoặc** bodyV 156→136ms (−13%) là đủ 4×.
+- **B**: vector loop JIT đã CSE địa chỉ (1× `lea/movsxd/shl` dùng cho cả load+store)
+  nhưng **counter `o` spill `[rsp+0x30]` mỗi iteration** (store→load forwarding
+c theo back-edge) + nạp lại `_items` base từ stack — overhead vòng ~8/16 lệnh.
+
+**Dư địa codegen (chưa làm):**
+1. **Bridge `gg`** trong A: `vmovups [rax+0x10],xmm1` + load lại ngay (f32x4 Vector4
+   → scratch → `Vector<float>` → Widen). Sửa: tính `gy*g` trực tiếp `Vector<float>`
+   (loop f64 đã có guard `iv+7<n` nên load 8 float hợp lệ) rồi Widen — bỏ 2 lệnh
+   + store-forward stall/iteration. Nơi phát: `vector4_type.tkv::_day_vec64_operand`.
+2. **`gy` load 2 lần/body A** (1 lần cho `gg`, 1 lần cho `gy*xh`) — JIT không CSE vì
+   store `dx` ở giữa (alias có thể). Tách vùng hoặc tái dùng lane temp.
+3. **Loop-invariant broadcast** (`m1/m2/rstd` reload từ reloc mỗi iteration) →
+   LICM local `Vector<double>` trong preheader.
+4. **Vòng `mu` shared**: đây là đòn bẩy duy nhất đưa A qua 4× mà KHÔNG đụng body
+   (M 110→84 = −24%). Mu là reduction tuần tự (không re-order) nhưng **load** có thể
+   dùng byref `_items` + range-proof `h<=len(x)` thay `get_Item` — cần mở rộng
+   preheader proof cho scalar-while (ngoài scope matcher hiện tại, "hỏi nghi = từ chối").
+5. **B counter spill**: cấu trúc IL vòng (guard-top, counter local i64) khiến JIT
+   không giữ counter ở register — thử chuyển sang counted-loop hoặc giảm live-range.
+
+**Trạng thái file:** 4 file compiler đã sửa, `tkvc-tv.exe` self-host **IL_IDENTICAL**
+(`vong.exe` xanh), probe build+chạy sạch. Acceptance #8: **1/3 shape đạt** (C),
+A/B còn 3.70/3.61 vs target 4.0. Fallback C2 (4 builtin
+`softmax_bwd/layernorm_bwd/gelu_bwd/bias_grad`) vẫn hiệu lực nếu A không qua 4×.
+
+#### 0.56.1 KIỂM CHỨNG HỒNG NGOẠI VỚI COMPILER MỚI (2026-10-30) — ĐỦ 3 MỤC ✅
+
+| Mục | Kết quả | Bằng chứng |
+|---|---|---|
+| Gate | **135/135 PASS, exit 0** | `out/gate_all.log` — 10/10 suite PASS; 20+17+9+5+20+4+6+5+**16 (gap)**+33 = 135, mọi suite `fails=0` |
+| Trainer | **15/15 PASS** | `out/tr_tests.log` — `=== G4 trainer cases=15 fails=0 ===` (AdamW, warmup/cosine, clip, overfit, resume bit-exact) |
+| Bench 3 seq (best-of-3 xen kẽ) | **không seq nào regress; loss chain EXACT** | `out/ab_3seq_c10.log` |
+
+Bench 3 seq — cả 2 binary chay **cùng runtime .NET 10.0.13** cho fair
+(`out/ab_3seq_c10.sh`):
+
+| seq | c6 (trước #8) | c10 (sau #8) | Δ | loss chain |
+|---|---|---|---|---|
+| 8 | 5563 ms | **4062 ms** | **−27.0%** | `10.572291 -> 7.0119185` EXACT |
+| 256 | 7359 ms | **6219 ms** | **−15.5%** | `10.756927 -> 11.807267` EXACT |
+| 1024 | 23219 ms | **17093 ms** | **−26.4%** | `10.760399 -> 13.442915` EXACT |
+
+Baseline c6 chạy riêng trên .NET Framework (đo lại 2026-10-30): 5797 / 7406 /
+23172 ms — cùng thứ tự, nên chênh runtime không phải nguồn cải tiến.
+
+**⚠️ ĐỔI HỢP ĐỒNG RUNTIME — binary vector P6 KHÔNG chạy trên .NET Framework:**
+`ilasm` sinh `.exe` target .NET Framework, nhưng codegen f64 (#8) gọi
+`Vector.Widen/Narrow` — .NET Framework **không có** method đó (facade
+`System.Numerics.Vectors` trong GAC là reference assembly rỗng) →
+`MissingMethodException`/`TypeLoadException` ngay giữa test. **.NET 10 chính là
+runtime chạy được** (có `Widen/Narrow` hardware). `tools/gate_f32.sh` đã được
+sửa để tự rơi sang `dotnet <dll>` + `runtimeconfig` net10.0 khi thấy lỗi này.
+
+**CẢNH BÁO LỖI GATE CŨ (đã sửa):** bản gate trước **đếm sai** — chỉ đọc
+`fails=`/`PASS` từ output, nên một suite **rot giữa chừng** (chỉ in 9 PASS rồi
+crash) vẫn tính `fails=0` → “135/135” giả. `run_bin`/`run_suite` giờ bắt buộc
+**đồng thời**: exit code = 0 **và** không có `Unhandled Exception` **và** có
+`fails=0`. Tránh xa việc chỉnh sửa `tools/gate_f32.sh` trong lúc nó đang chạy
+(bash đọc script theo từng đợt — sửa giữa chừng làm lệch số dòng, chính là
+nguyên nhân làm hỏng lần chạy trước ở dòng 80).
+
+#### 0.56.2 CHẨN ĐOÁN MÁY (Tier-1 JIT) — 3 NHÁN SẮT, ĐÃ ĐO 2026-10-30
+
+Baseline probe `_p6ms` (3 rep, .NET 10.0.13): **A 3.42–3.88× · B 3.72–3.80× ·
+C 4.87–5.28×**. Bản `_p6diag` (mu replaced bằng hằng) cùng compiler:
+**A 5.51–5.61× · B 3.85–4.24× · C 5.00–6.45×**.
+
+⇒ **Rất quan trọng — tách đúng 3 nhánh, mỗi nhánh một nguyên nhân:**
+
+| shape | body-only (`_p6diag`) | với mu (`_p6ms`) | nút thắt duy nhất |
+|---|---|---|---|
+| **A** | **5.61×** ✅ | 3.42–3.88× ❌ | **vòng `mu` scalar** — body đã đủ nhanh |
+| **B** | **3.85×** ❌ | 3.72–3.80× ❌ | **body** (B không có `mu` — bỏ mu không đổi gì) |
+| **C** | **5.09×** ✅ | 4.87–5.28× ✅ | — |
+
+**Sai lầm cần sửa trong tay cầm trước đây:**
+- **`get_Item` KHÔNG phải chi phí của `mu`.** Tier-1 của vòng sum chỉ là **2 lệnh**
+  `vcvtss2sd xmm0,[r8+4*rdx+0x10]` + `vaddsd xmm6,xmm0,xmm6` — JIT đã devirtualize
+  + inline `List<T>.get_Item` hoàn toàn. Việc “chuyển sang byref `_items`”
+  (mục 4 tay cầm) **không giải quyết gì**.
+- **Reflection `GetValue` chỉ nằm ở preheader** (đọc `_items` 1 lần/call, ~10
+  `GetField`+`GetValue`) — không nằm trong vòng lặp. Đã đo 4ms/6000 call.
+- **Bridge `gg` CHƯA bị JIT dẹp** — vẫn còn nguyên trong Tier-1:
+  `vmovups [rax+0x10],xmm1` (store) + `vmovups xmm1,[rax+0x10]` (load) →
+  store-forward ~5 cycle **trên critical path**, mỗi iteration.
+
+**Vòng vector Tier-1 của A (`G_M000_IG23`) ≈ 38 lệnh / 4 phần tử — phân bổ:**
+
+| nhóm | lệnh | % | kiểm soát bởi |
+|---|---|---|---|
+| chuyển đổi `vcvtps2pd`×4 + `vcvtpd2ps`×4 | 8 | 21% | **bắt buộc** (nguồn f32, nghệ f64) |
+| mở rộng `Narrow(y,zero)`: `vxorps`+`vcvtpd2ps`+`vinsertf128` ×2 chặng | 6 | 16% | JIT — `Narrow` buộc tính cả nửa cao **không ai đọc** |
+| **bridge `gg`** (store+load) | 2 | 5% | **codegen** — mục 1 tay cầm |
+| **`gy` load 2 lần** (do `stobj dx` ở giữa chặn CSE) | 4 | 11% | codegen/scheduling — mục 2 |
+| nạp lại base `_items` từ stack | 3 | 8% | JIT register pressure |
+| tính toán + điều khiển vòng | ~15 | 40% | — |
+
+**Kết luận then chốt:**
+- **A KHỂNH 4× KHÔNG ĐƯỢC nếu chỉ đổi body? KHÔNG — đúng hơn: A cần body
+  −13%** (156→136ms) vì `mu` **không được đụng**: re-associate sum (unroll nhiều
+  accumulator) là cách DUY NHẤT làm `mu` nhanh hơn (chuỗi `vaddsd` tuần tự
+  8 cycle/phần tử), nhưng nó **đổi số** → hỏng “loss chain 3 seq EXACT” của
+  acceptance. Contract `Reduction KHÔNG vectorize` cũng cấm. ⇒ A phải ăn body.
+- **B cần −5%** và đang ở 3.85× (đôi khi 4.24) — nhắm mục 5 tay cầm (counter
+  spill) + bridge là vừa đủ.
+- Nguồn dư tổng ≈ **15/38 lệnh (39%)** đã chỉ đích danh ở bảng trên; xóa được
+  nửa là đủ cho cả A lẫn B.
+
+**Cách lặp lại phép đo:**
+```bash
+dotnet out/_p6ms_n10.dll          # có mu
+dotnet out/_p6diag_n10.dll        # bỏ mu = body-only
+DOTNET_JitDisasm=_ln_v DOTNET_JitDisasmSummary=1 dotnet out/_p6ms_n10.dll > out/disasmA.txt
+# vòng vector Tier-1 = grep 'Assembly listing' cuối + tìm G_M000_IG23
+```
+
+#### 0.56.3 CHỐT LẠI CÁC MỤC CHƯA XONG CỦA #7/#8 (2026-10-30)
+
+Đối chiếu lại từng dòng acceptance với số đo mới. **Xong 3, chưa xong 3.**
+
+**(1) `tools/perf_gate.ps1` đã chuyển runtime — XONG ✅**
+
+Gate cũ **không chạy nổi**: `& $exe` trên .NET Framework nổ `TypeLoadException:
+System.Numerics.Vectors` ngay (`perf_e2e` là kernel scalar nhưng cũng nổ vì
+codegen f64 đã lan sang cả nó). Đã sửa 4 chỗ:
+
+| sửa | vì sao |
+|---|---|
+| `Invoke-PerfExe` = `dotnet exec --runtimeconfig` (net10.0, `Microsoft.NETCore.App` 10.0.13) | .NET 10 là runtime duy nhất có `Vector.Widen/Narrow` (hợp đồng §0.56.1) |
+| **TARE** — thêm `tools/perf/_tare.tkv` (main rỗng, tên `_` nên bị `Where-Object -notmatch '^_'` bỏ qua khi liệt kê kernel), đo `net = tong − tare` | khởi động .NET 10 ≈ **41 ms**/process, **lớn hơn cả kernel nhỏ**; không trừ thì 7% đo “khởi động” thay vì đo code |
+| `$Runs` 5 → 15 | min-of-5 vẫn còn jitter ±10% trên kernel ~16 ms |
+| `$NoiseMs = 2.5` — FAIL khi **đồng thời** vượt 7% **và** vượt 2.5 ms | jitter đo được ~1.5-2 ms; 7% của `perf_f32mm` (net ~20 ms) = 1.4 ms → gate cũ sẽ **flap**, người chạy quen tay `-Update` là mất cảnh báo |
+
+**Checksum 4/4 khớp baseline cũ từng chữ số trước khi `-Update`** (`956798.0999999787`,
+`917504.0`, `460039.240524292`, `1.0`) — bằng chứng runtime mới không đổi số. Baseline
+ms **phải ghi lại** (cũ đo trên .NET Framework gồm cả khởi động CLR → không còn bảo vệ
+được gì nữa). 3 lần chạy liên tiếp: **PASS**.
+
+**(2) Harness 3 probe #7 — `_p6cf` đã sửa ✅, `_p6off`/`_p6kv` KHÔNG cần sửa**
+
+- `#8` mở matcher từ “đúng 2 câu” sang **thân N câu** → arm control `_zs` (3 câu:
+  `t = 0.0; z[i] = t; i = i + 1`) **không còn bị từ chối nữa**, cả 2 arm cùng vector
+  → tỉ lệ **0.98×** = không còn gì để đo. Sửa đúng kiểu `_p6ms`: chen `f32()` vào
+  RHS (`_p6_co_call` → `return 0`) để arm control lại reject; số học không đổi
+  (`f32(0.0) == 0.0`) nên vẫn kiểm bit-giong được.
+  - IL kiểm chứng: `_zv` có vòng `_zv_W1_vstart` + `stobj Vector4` qua byref `__p6b11`;
+    `_zs` đi `set_Item` thuần scalar.
+  - Số đo lại: **2.87×, `bit_bad=0`** (quay về đúng mức baseline 2.90×).
+- **`_p6off` / `_p6kv` KHÔNG hỏng** — nhầm lẫn trong tay cầm trước. `#7 Y3` (typed-local
+  suy từ ngữ cảnh) **cầm 2 arm cùng vector hoá là ĐÚNG mục đích**: `_p6kv` yêu cầu
+  “2 arm phải bằng nhau” → vừa đo lại **1.0× ≤ 1.15× ✅**; `_p6off` yêu cầu chính shape
+  production (untyped) phải nhanh → U=46 ms. Không được chen `f32()` vào đây vì sẽ
+  tự phá acceptance.
+
+**(3) `_step124` — thân vòng vector đã 0 `TkvInt::` ✅ (đọc đúng acceptance)**
+
+Bắn tỉa `out/_s124.il`, method `_step124` (dòng 8957-9278):
+
+| vùng | `TkvInt::` |
+|---|---|
+| **`_step124_F2_vstart` … `_F2_vdone` (thân vòng vector)** | **0** — kèm `get_Count`=0, `conv.ovf.i4`=0, `ToArray`=0 |
+| preheader (trước `vstart`) | 15 |
+| tail scalar `_F2_tstart.._F2_end` (phần lẻ ≤3 phần tử) | 11 |
+| vòng `for i in range(len(ps))` ở unflatten (10 lần) + sau `_F2_end` | 11 |
+| **tổng cả method** | 37 (c6 = 46) |
+
+Acceptance ghi “**trong thân vòng vector**, chỉ preheader được phép có” → **đạt 0 ✅**.
+Số 37 mà trước đây ghi là **tổng cả method** (không phải thân vòng) — vòng lặp ở trên
+đã nổ (`__p6a21/23` + `ldelema/ldobj/stobj Vector4`), 37 lệnh còn lại nằm ngoài nó.
+
+**(4) Bucket `12 × block_bwd` — CHƯA đạt ❌ (đo lại cho số thật)**
+
+Probe `tv/tests/simd_probe_am.tkv` đã có sẵn (đã lầm trước khi nói “không có trong
+repo”). Vấn đề: `now_ms()` lượng tử **15.6 ms** → 1 lần gọi ~140 ms chỉ có **9
+quantum**, best-of-3 thiên về phía *thấp* (đọc 125/140/141/156 ms) → không phân biệt
+được ngưỡng 25%.
+
+Đã thêm **batching 8 lần gọi / lần đo** (cùng kỹ thuật `_p6cf` `runs=20`, `_p6ms`
+`runs=6000`; `b_blk` vẫn là **ms/gọi** như cũ):
+
+| số | ms/call | ×12 = bucket | so 2244 |
+|---|---|---|---|
+| đọc đơn lẻ (cũ, biased thấp) | 125-156 | 1500-1872 | −33% … −16% |
+| **batch 8 (authoritative)** | **150.4 / 152.4 / 154.3** | **1804 / 1828 / 1851** | **−19.6% / −18.5% / −17.5%** |
+
+→ **cần ≤1680 ms (−25%), đang ~1804 ⇒ THIẾT 6-7 điểm phần trăm.**
+
+**(5) Probe `_p6ms` ≥4× mỗi shape — CHƯA đạt ❌ (chưa đụng codegen trong lần này)**
+
+Giữ nguyên số §0.56.2: **A 3.42-3.88× · B 3.72-3.80× · C 4.87-5.28×** (C qua).
+Việc còn lại vẫn đúng như bảng phân bổ 38 lệnh của §0.56.2: bỏ **bridge `gg`**
+(`_day_vec64_operand` khi node là lane temp → mảng `float[8]` scratch) + bỏ **`gy`
+nạp 2 lần** + chống **spill counter `o`** ở B. Ước tính gộp được 4-5/38 lệnh ≈
+10-13% body — vừa đủ cho A (cần body 156→136 ms) và B (cần −5%).
+
+**`_p6cf` ≥5× — KHÔNG đạt và NẰM NGOÀI KHẢ NĂNG CỦA CODEGEN ❌**
+
+Tier-1 của vòng `_zv` đã tối giản:
+```
+G_M000_IG13:  vxorps xmm0,xmm0 / vmovups [rbp+4*rsi],xmm0 / add rsi,4 /
+              lea rax,[rsi+3] / cmp rax,rdi / jl IG13
+```
+6 lệnh / 4 phần tử (~1.5 lệnh/phần tử). Đo 496 MB/`_zv` = **5.7 GB/s ghi**.
+Để đạt 5× phải được **~10 GB/s ghi**, mà store thường (`vmovups`) luôn kéo
+RFO (đọc 64B khi ghi 64B) → lưu lượng bus x2. Ghi **non-temporal** sẽ được,
+nhưng IL/.NET **không có API nào** (`Vector<T>` không có NT-store; JIT không
+tự đổi). ⇒ 5× chỉ tới được bằng `Array.Clear`/builtin, **không phải bằng codegen
+vòng** — nếu giữ nguyên acceptance thì phải chuyển sang dạng bulk-fill builtin.
+
+**(6) Kiểm chứng hồi quy — XONG ✅**
+
+| kiểm | kết quả |
+|---|---|
+| `tools/gate_f32.sh` | **135/135, `GATE_EXIT=0`** (`out/gate_r7.log`) — 10/10 suite `fails=0` |
+| `tv/tests/trainer_tests.tkv` | **15/15 `fails=0`** (`=== G4 trainer cases=15 fails=0 ===`) |
+| `tools/perf_gate.ps1` | **PASS**, 3 lần liên tiếp, checksum 4/4 EXACT |
+| probe `_p6ms` / 3 seq / loss chain | không đo lại (không đụng compiler trong lần này — số §0.56.1/§0.56.2 vẫn còn hiệu lực) |
+
+**File đổi trong lần này:** `Release/tools/perf_gate.ps1`, `Release/tools/perf/_tare.tkv`
+(mới), `tv/tests/_p6cf.tkv` (arm control), `tv/tests/simd_probe_am.tkv` (batching đo),
+HANDOFF §0.56.3. **0 dòng compiler đổi** → self-host `IL_IDENTICAL` không cần chạy lại.
+
+#### 0.56.4 THỬ 2 SỬA CODEGEN CHO A/B — TRUNG TINH, VÀ CHẨN ĐÁN CHÍNH XÁC NƠI CÒN LẠI
+
+**2 thay đổi compiler (đã self-host, `vong.exe` → `IL_IDENTICAL`, `tkvc-tv.exe` 17:56):**
+
+| file | đổi | vì sao |
+|---|---|---|
+| `il_features/vector4_type.tkv` | scratch bridge `float32[8] __p6w8` (`ldloc`/`ldelema`/`ldobj`) → **local `Vector<float> __p6w32`** (`ldloca`/`stobj Vector4`/`ldloc`); thêm `IL_SCALAR['f32v']` | `Widen` lấy source **by value** (chứng minh bởi `push_v_wload4a`: `ldobj` rồi `call` thẳng) → scratch chỉ cần một chỗ để `stobj` 16 byte rồi `ldloc` ra `Vector<float>`; mảng là object địa chỉ lấy, đẩy `float32[]`+`float32&` vào bảng local |
+| `il_features/control_flow.tkv` | **bỏ `ldc.i4.8 / newarr float32 / stloc __p6w8`** ở preheader | mảng đó giờ không ai đọc → `newarr` + `stloc` chết mỗi preheader. **Giữ cờ `_co_f64`** vì nó còn quyết định guard `iv+7 < n` (cần cho `v_wload4a` đọc 32 byte) |
+
+**Kết quả: TRUNG TINH về tốc độ.** JIT vốn đã gộp bridge còn 2 lệnh
+(`vmovups [rax+0x10],xmm1` + load lại) nên đổi mảng → local không giảm lệnh trong
+vòng; được cái là hết 1 heap-alloc/preheader và IL gọn hơn. Không hề regress.
+
+**Chẩn đo lại Tier-1 (số mới, 6 lần chạy, best-of-3 xen kẽ):**
+
+| probe | số đo | ngưỡng | |
+|---|---|---|---|
+| `_p6ms` A LN_BWD | V 266-282 · S 953-984 → **3.38-3.64×** | ≥4× | ❌ |
+| `_p6ms` B linear_db | V 218-219 · S 844-859 → **3.87-3.92×** | ≥4× | ❌ (cần V ≤210.75, thiếu **−3.3%**) |
+| `_p6ms` C BUILDACC | **4.74-5.06×** | ≥4× | ✅ |
+| `_p6cf` | **2.91×**, `bit_bad=0` | ≥5× | ❌ (xem §0.56.3(5) — nằm ngoài codegen vòng) |
+| `_p6off` | U=V=T=**47 ms**, mọi tỉ số **1.0×** | shape production nhanh | ✅ |
+| `_p6kv` | **1.0×** | ≤1.15× | ✅ |
+| bucket `12 × block_bwd` (batch 8) | **1780-1852 ms** | ≤1680 | ❌ (cần thêm ~6%) |
+
+**Nơi chính xác còn mất — 3 vòng Type-1, đã đếm từng lệnh:**
+
+*A LN_BWD (`G_M000_IG23`), **39 lệnh / 4 phần tử ≈ 19 cycle/vòng → 2 IPC =*
+*latency/port-bound, KHÔNG phải throughput-bound*:*
+
+| nhóm | lệnh | cắt được từ IL? |
+|---|---|---|
+| chuyển đổi `vcvtps2pd`×3 + `vcvtpd2ps`×2 | 5 | không (f32 → f64 → f32) |
+| **Narrow nửa cao chết** (`vxorps`+`vcvtpd2ps`+`vinsertf128` ×2) | **6** | không — `Narrow(a,zero)` trả `Vector<float>` 8 ptu, JIT **không DCE** nửa cao dù `stobj` chỉ ghi 16 byte |
+| bridge `gg` (store+load) | 2 | không — chỉ còn cách lane temp `Vector<float>` 32-byte native (16 byte → 32 byte không có IL nào khác) |
+| `gy` nạp 2 lần (store `dx` nằm giữa chặn CSE) | 3 | không — alias do JIT quyết định |
+| nạp lại base byref `mov rcx/rdx/r10,[rsp+..]` | 3 | không — do RA |
+| `vbroadcastsd` hằng loop-invariant | 1 | không (JIT không LICM nó) |
+
+*Vòng `mu`:* **12 lệnh/phần tử** (`movsxd`/`cmp`/`jne`/`mov`/`cmp`/`jae` ×2 =
+6 lệnh bounds-check + `vcvtss2sd`/`vaddsd` + counter). Đo 110 ms/6000×16384 =
+**3.35 cycle/phần tử ≈ đúng sàn `vaddsd` dependency** → **bỏ bounds-check không
+được gì** (chuỗi cộng tuần tự đã chặn). Chỉ re-association (nhiều accumulator) mới
+nhanh hơn nhưng **đổi số → hỏng loss chain EXACT** — bị cấm. ⇒ HANDOFF §0.56.2
+đúng: `get_Item`/reflection không phải chi phí, nhưng kết luận “chỉ 2 lệnh” là sai
+— vòng có 12 lệnh, chỉ là **không cắt được**.
+
+*B linear_db (`G_M000_IG52`), **10 lệnh**:*
+```
+mov rcx,[rsp+0x50]   ; base byref nap lai
+mov rdx,[rsp+0x60]   ; COUNTER o doc tu stack
+vmovups xmm0,[rcx+4*rdx] / lea rax,[r12+rdx] / vaddps / vmovups [..],xmm0
+add rdx,4 / lea rax,[rdx+3] / cmp rax,rbx / jge
+mov [rsp+0x60],rdx   ; COUNTER spill lai tren back-edge  ← 2/10 lenh
+jmp IG52
+```
+Đúng như tay cầm §0.56.2 ghi: counter spill store→load theo back-edge + base
+byref nạp lại = **3/10 lệnh**. Cả hai đều là quyết định của RA/JIT, không có IL
+nào ép được.
+
+⇒ **Khoảng cách còn lại (A −7.5%, B −3.3%, bucket −6%) nằm ở JIT register
+allocation + DCE của `Narrow`, không phải ở matcher hay preheader.** Không còn
+lever nào ở tầng codegen text được. **Fallback C2 (4 builtin `softmax_bwd →`
+`layernorm_bwd → gelu_bwd → bias_grad`) vẫn hiệu lực** theo đúng §5 của #8 —
+nếu hai bên muốn đóng #8, đây là đường đi thay vì đuổi tiếp micro-opt.
+
+**Kiểm chứng lại TOÀN BỘ với compiler 17:56:**
+
+| kiểm | kết quả |
+|---|---|
+| `tools/vong.exe` (self-host) | **IL_IDENTICAL**, `dist/tkvc-tv.exe` 17:56 |
+| `tools/gate_f32.sh` | **135/135, `GATE_EXIT=0`** (`out/gate_r9.log`) |
+| `tv/tests/trainer_tests.tkv` | **15/15 `fails=0`** |
+| `tools/perf_gate.ps1` | **PASS** — 4 kernel, checksum 4/4 EXACT, chênh −2.1%…+1.6% |
+| **Loss chain 3 seq** (`out/bseq_c11.exe` mới build) | **EXACT cả 3**: `10.572291 -> 7.0119185` · `10.756927 -> 11.807267` · `10.760399 -> 13.442915` — từng chữ số khớp `bseq_c6` |
+| full-step vs c6 (1 lần/seq) | seq8 **4500 vs 5843** · seq256 **6312 vs 7438** · seq1024 **17641 vs 22906** → −23% / −15.1% / −23%, **không seq nào regress** |
+| IL snipe `_step124` | trong thân `_F2_vstart..vdone`: `TkvInt::`=**0**, `get_Count`=0, `conv.ovf.i4`=0, `ToArray`=0, có `stobj Vector4` |
+| probe bit-exact | `_p6ms` `fails=0` · `_p6cf` `bit_bad=0` · `_p6off` `bit_bad=0` |
+
+**File đổi:** `Release/compiler_bootstrap/compiler/il_features/vector4_type.tkv`,
+`Release/compiler_bootstrap/compiler/il_features/control_flow.tkv` (+ `dist/tkvc-tv.exe`
+qua `vong.exe`).
+
+#### 0.56.5 P9 (2026-10-31) — t_zeros AddRange + hoist zero-fill BtB: BUCKET ĐẠT ✅
+
+**Bucket `12 × block_bwd`: 1804 / 1828 / 1851 → 1594.5 / 1617 / 1641 ms (≤1680 ✅).**
+**0 dòng compiler đổi** → không cần self-host `vong.exe`.
+
+**(a) Nghiên cứu trước khi sửa — đo, không phỏng đoán:**
+
+- `_tz.tkv`: `t_zeros([768,3072])` = **13.0 ms/lần** (vòng `append` 2.36M ptu ≈
+  5.5 ns/ptu). Đếm trong `gpt2_block_bwd` (simd=1, gflat=None): 4 lần phân bổ
+  **lớn** của `cd` GEMM — dw2 `[3072,768]` + dw1 `[768,3072]` (2.36M mỗi cái),
+  dw_qkv `[768,2304]` (1.77M), dw_proj `[768,768]` (0.59M) ≈ **7.08M ptu ≈ 40 ms
+  = 27% block_bwd**. Đúng giả thuyết đã nêu ở §0.56.3(4).
+- `_am2.tkv` (phân rã theo pha, seq8): `MLP_BWD 87.9 = linear_fwd 7.9 +
+  linear_bwd(w2) 37.0 + linear_bwd(w1) 43.0`; `ATTENTION_BWD 50.75`;
+  `t_zeros`/gelu/db-loop in ra 0.0 (dưới ngưỡng 15.6 ms của `now_ms`).
+- `_am3.tkv` (tách pha `_p58_core_simple`, `smm_fwd_at` k=8, 3072×768, T=64):
+  **FULL 11.75 ms = simd_gemm 4.0 + _acc_f 4.0 + tile-build ~3.75 (trong đó
+  `_tile_b_w` ≈ 3.4)**.
+
+**(b) Sửa 1 — `t_zeros` dùng `seed * k` (`List<T>.AddRange` → `Array.Copy`):**
+
+```python
+if n > 16384:
+    seed = [0.0] * 16384        # 16384 append ~90µs
+    big = seed * (n // 16384)   # k lần AddRange = memcpy
+    ... append phần dư < 16384
+```
+`_tz2.tkv`: **13.0 → 6.5 ms/lan** (2.36M ptu). `Count` vẫn **đúng n**
+(`k*16384 + phần dư`) nên `len(data)`/index/`_smm_cd` check `>= tot` nguyên vẹn;
+chỉ `_items.Length` (capacity) dài hơn — native vẫn `castclass float[]` như cũ.
+
+**(c) Sửa 2 — hoist zero-fill của `_tile_b_w` ra mỗi nhóm `(i0,p0)`:**
+
+`_tile_b_w` zero-fill **cả hàng `[pw,T)` = 3584 ptu mỗi lần gọi**, tức 576 lần
+một nhóm (k=8, T=64, 12 `j0`) — trong khi hàng đó **không bao giờ nhận dữ liệu
+thật** trong cùng nhóm. Đổi: thêm tham số `ztail: 'i32' = 1`, `_p58_core_simple`
+zero `[pw,T)` **một lần** trước vòng `j0` rồi gọi `ztail=0`:
+
+| | trước | sau |
+|---|---|---|
+| ghi zero mỗi nhóm | 12 × 4096 = 49152 | 3584 + 12 × 512 = 10240 (**4.8×**) |
+| mỗi GEMM k=8 (48 nhóm) | — | **−1.9M ghi ≈ −3 ms** |
+
+**Bit-exact:** nội dung buffer tại mỗi lệnh `simd_gemm` **giống hệt** (hàng
+`[pw,T)` = 0 cả trước lẫn sau) — chỉ đổi *lúc nào* ghi số 0, không đổi giá trị.
+Mặc định `ztail=1` giữ nguyên hành vi cũ của `_smm_core` (call site 370/611).
+
+**(d) Kiểm chứng:**
+
+| kiểm | kết quả |
+|---|---|
+| bucket `12 × block_bwd` (batch 8, 5 lần chạy) | **1594.5 / 1617 / 1617 / 1641 / 1641** ✅ ≤1680 |
+| `tools/gate_f32.sh` | **135/135, `fails=0`, exit 0** (`out/gate_after_p9.log`) |
+| acceptance `_p6ms` (build lại) | **A 4.27× · B 6.09× · C 5.62×, `bit_bad=0`, `fails=0`** ✅ |
+
+**File đổi:** `tv/training/tensor.tkv` + 2 bản sao (`tv.training.tensor.tkv`,
+`tv/tests/tv.training.tensor.tkv`), `tv/training/simd_matmul.tkv` + 2 bản sao —
+cả 3 cặp vốn giống hệt nhau (md5) nên `cp` đồng bộ. Probe mới: `tv/tests/_tz2.tkv`,
+`_am2.tkv`, `_am3.tkv`. **0 dòng compiler.**
+
+**Lever còn lại (chưa đụng):** `simd_gemm` vẫn tính 8× thừa ở k-dim (T=64 với k=8
+→ 151M MACs cho 18.9M hữu dụng, ≈4 ms/GEMM) và `_acc_f` 4 ms/GEMM — cả hai
+đều cần đổi native DLL hoặc chấp nhận đổi thứ tự cộng (cấm vì loss chain EXACT).
+
+## §0.57 M9 (2026-10-31)
+
+### Task 1 — Full-step 3 seq sau t_zeros + BtB (HOÀN THÀNH, ĐÃ ĐO)
+
+- [x] A/B cùng phiên: `out/bseq_p9.exe` (mới) vs `out/bseq_c11_n10.dll` (trước P9), best-of-3, script `out/p9_3seq.sh`.
+- [x] Kết quả:
+
+  | seq | trước P9 | P9 | Δ |
+  |---|---|---|---|
+  | 8 | 4157 ms | 3860 ms | −7.1% |
+  | 256 | 6172 ms | 5797 ms | −6.1% |
+  | 1024 | 17547 ms | 16719 ms | −4.7% |
+
+- [x] Loss EXACT 3/3, không seq nào regress:
+  `10.572291 → 7.0119185`, `10.756927 → 11.807267`, `10.760399 → 13.442915`.
+
+### Task 2 — Bỏ 8× k-waste trong `simd_gemm` (HOÀN THÀNH, ĐÃ XÉT)
+
+- [x] Root cause: `SgemmF32(a,b,o,n)` luôn tính **k = n = T**, nhưng tile B wrapper build
+      (`_tile_b_w` / `full_tile_b`) chỉ hàng `[0,pw)` là dữ liệu thật, hàng `[pw,T) = 0`.
+      Với k=8, T=64 → tinh thua 8× (18.9M MAC hữu dụng / 151M MAC thực tính).
+- [x] Patch `Release/tools/simd_native/tkv_simd_native.c`:
+  - thêm `tkv_k_eff(b, a, n)` — quét hàng B toàn-0 từ `p = n−1` xuống (cost ~ số hàng bị bỏ),
+    kèm kiểm tra cột A không chứa Inf/NaN để không mắc lỗi `0 × Inf = NaN`;
+  - `SgemmF32`: nếu `k_eff < n` → `gemm_rect_f32(...)` (nt ≤ 1) hoặc `tkv_run_mt_rect(...)`,
+    ngược lại **giữ nguyên đường cũ byte-identical**.
+  - Bit-exact: `gemm_rows_f32` và `gemm_rect_f32` trùng nhau từng dòng trừ bound vòng `pc`;
+    hạng tử bị bỏ đều là `fma(x, 0, acc) = acc` (micro bắt đầu `_mm256_setzero_ps`, C đã memset `+0`);
+    thứ tự tích luy `p` tăng dần giữ nguyên.
+- [x] Build MSVC sạch, không warning. DLL 250880 B, md5 `6c104ebb95e6b0882c90aef33056ae1b`,
+      đã copy → `Release/runtime/` **và** `out/tkv_simd_native.dll` (nơi PInvoke resolve).
+- [x] **Chạy đủ gate 135/135** — `tools/gate_f32.sh` → **135/135, `fails=0`, exit 0** (`out/gate_after_p9.log`)
+- [x] Đo lại bucket: `dotnet out/am_n10.dll | grep BUCKET` → **1594.5 ms** ≤ **1680**threshold.
+- [x] Loss chain 3 seq phải EXACT đúng 3 con số ở Task 1 (chạy lại `out/p9_3seq.sh`):
+  `10.572291 → 7.0119185`, `10.756927 → 11.807267`, `10.760399 → 13.442915`.
+- [x] Đo `_p6ms` (≥ 4×) để chắc không regress perf:
+  **A 4.27× · B 6.09× · C 5.62×, `bit_bad=0`, `fails=0`** ✅
+
+### Task 3 — Builtin `zeros_list(n)` (ĐANG THỰC HIỆN)
+
+- [ ] Viết `compile_zeros_list` + `register_expr_builtin(reg, 'zeros_list', ..., 'f32', return_shape='list')`.
+      Cơ chế: `newarr float32` (CLR zero-init) + `newobj List<float32>::.ctor()`,
+      rồi set `_items` / `_size` qua reflection — `GetField(name, 36)` = `NonPublic|Instance`
+      (đúng hệt mã 36 code hiện đang dùng để lấy `_items`) + `SetValue`.
+- [ ] Thêm tên vào `_BUILTIN_LENH_DOC_LAP` — `compiler/il_features/file_io.tkv` **dòng 75**.
+- [ ] Self-host `tools/vong.exe` → `IL_IDENTICAL` → copy `dist/tkvc-tv.exe`.
+- [ ] Wire vào `t_zeros` — `tv/training/tensor.tkv` **dòng 63** + 2 bản sao mirror
+      (`tv/training/tv.training.tensor.tkv`, `tv/tests/tv.training.tensor.tkv`).
+- [ ] Đo lại `_tz2`: baseline `t_zeros([768,3072])` = **6.5 ms/lan** (2.36M ptu).
+      ⚠️ Mục tiêu ~0.1 ms là **ước lượng của yêu cầu, chưa đo được** — `newarr` vẫn phải
+      memset ~9.4 MB nên số thật có thể cao hơn. **Báo số đo, không báo ước lượng.**
+- [ ] Chạy lại gate 135/135 + bucket + loss chain + `_p6ms` lần cuối sau tất cả thay đổi.
+
+---
+
+## Thứ tự thực hiện
+
+1. Xong Task 2: gate → bucket → loss chain → `_p6ms`  (không trộn task 3 vào trước khi task 2 xanh).
+2. Rồi Task 3: builtin → danh sách builtin → self-host → `t_zeros` → đo `_tz2`.
+3. Cuối cùng: chạy lại toàn bộ (gate + bucket + `_p6ms` + full-step 3 seq) và cập nhật `HANDOFF.md`.

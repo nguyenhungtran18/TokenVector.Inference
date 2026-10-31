@@ -1,0 +1,83 @@
+# -*- coding: utf-8 -*-
+"""Kiem so tanh TkvInt (local khieu) vs i64 (local co kieu) trong vong vector
+P6 — copy 148-slice giong bench_dp PHA D, de biet co dang chi so i64 hoa duoc
+khong (y/cau #6: SLICE 3.3x < 10x — nguon nghi: ceremony TkvInt trong than).
+
+Chay:
+  /d/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_p6kv.tkv out/_p6kv.exe main
+  ./out/_p6kv.exe
+"""
+
+
+def _mk(n: "i64", seed: "i32") -> "list[f32]":
+    out: "list[f32]" = []
+    i = 0
+    while i < n:
+        out.append(f32(((i * 7 + seed) % 51) * 0.0625 - 1.5625))
+        i = i + 1
+    return out
+
+
+def main() -> "i32":
+    sizes: "list[i64]" = []
+    sizes.append(38597376)
+    sizes.append(786432)
+    li = 0
+    while li < 10:
+        sizes.append(768)
+        sizes.append(1769472)
+        sizes.append(2304)
+        sizes.append(589824)
+        li = li + 1
+    total: "i64" = 0
+    for i in range(len(sizes)):
+        total = total + sizes[i]
+    flat = _mk(total, 1)
+    zs: "list[list[f32]]" = []
+    i = 0
+    while i < len(sizes):
+        zs.append(_mk(sizes[i], 2))
+        i = i + 1
+
+    # ---- [1] khieu (TkvInt) — hinh bench_dp nguyen ban ----
+    bestu = 999999999.0
+    k = 0
+    while k < 3:
+        t0 = now_ms()
+        off = 0
+        for i in range(len(sizes)):
+            dz = zs[i]
+            sz = sizes[i]
+            j = 0
+            while j < sz:
+                dz[j] = flat[off + j]
+                j = j + 1
+            off = off + sz
+        t1 = now_ms()
+        if t1 - t0 < bestu:
+            bestu = t1 - t0
+        k = k + 1
+
+    # ---- [2] co kieu i64 — cung logic ----
+    bestt = 999999999.0
+    k = 0
+    while k < 3:
+        t0 = now_ms()
+        offt: "i64" = 0
+        for i in range(len(sizes)):
+            dz = zs[i]
+            sz = sizes[i]
+            jt: "i64" = 0
+            while jt < sz:
+                dz[jt] = flat[offt + jt]
+                jt = jt + 1
+            offt = offt + sz
+        t1 = now_ms()
+        if t1 - t0 < bestt:
+            bestt = t1 - t0
+        k = k + 1
+
+    print("SLICE untyped_ms=" + str(int(bestu)) + " typed_ms=" + str(int(bestt)) +
+          " ratio=" + str(bestu / bestt) + "x total=" + str(total))
+    print("_p6kv done fails=0")
+    return 0

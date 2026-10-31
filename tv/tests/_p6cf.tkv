@@ -1,0 +1,111 @@
+# PROBE _p6cf (2026-10-28) — ACCEPTANCE #6(b): const-fill >= 5x
+#
+#   _zv : `z[i] = 0.0` + `i = i + 1`  (DUNG 2 cau) -> P6 khop const-fill (b)
+#         -> vong vector ghi 4 ptu/buoc + duoi scalar
+#   _zs : cung so hoc, nhung chen mot goi `f32()` -> matcher PHAI tu choi
+#         -> duong scalar = proxy "codegen cu" de do speedup
+#
+# 2026-10-30: truoc do `_zs` chi can 3 cau (them `t = 0.0`) la tu tu choi vi
+# matcher cu chi nuoc than 2 cau. YEU CAU #8 mo matcher than N cau -> 3 cau
+# nay VAN khop, ca 2 arm deu vector va ty so rot xuong 0.98x (do khong con
+# gi de do). Dung dung CACH ma `_p6ms` da dung: chen `f32()` (co call trong
+# RHS -> `_p6_co_call` = 1 -> reject) de arm control lai tu chối. So hoc
+# khong doi (f32(0.0) == 0.0) nen van kiem bit-giong duoc.
+#
+# Cung phep toan, cung ket qua (bit-giong), chi khac O P6. Best-of xen ke
+# nhu `_p6_bench` (now_ms co do phan giai ~15.6 ms nen phai chay batch).
+#
+# Chay:
+#   /d/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_p6cf.tkv out/_p6cf.exe main
+#   ./out/_p6cf.exe
+
+
+def _zv(z: "list[f32]", n: "i32") -> "i32":
+    i = 0
+    while i < n:
+        z[i] = 0.0
+        i = i + 1
+    return 0
+
+
+def _zs(z: "list[f32]", n: "i32") -> "i32":
+    t: "f32" = 0.0
+    i = 0
+    while i < n:
+        # `f32()` = cam ong CHIU TU CHOI (xem ghi chu dau file). Bo no di thi
+        # #8 khop ca vong nay va ty so `scalar/vector` ve ~1.0x.
+        t = f32(0.0)
+        z[i] = t
+        i = i + 1
+    return 0
+
+
+def main() -> "i32":
+    n = 124000001          # dung quy moc doc nêu (124M), so le khong chia 4
+    zv: "list[f32]" = []
+    zs: "list[f32]" = []
+    i = 0
+    while i < n:
+        zv.append(7.0)
+        zs.append(7.0)
+        i = i + 1
+
+    # warmup
+    w1 = _zv(zv, n)
+    w2 = _zs(zs, n)
+
+    reps = 3
+    runs = 20
+    bestV = 999999999.0
+    bestS = 999999999.0
+    k = 0
+    while k < reps:
+        if k % 2 == 0:
+            t0 = now_ms()
+            q = 0
+            while q < runs:
+                x2 = _zs(zs, n)
+                q = q + 1
+            t1 = now_ms()
+            q = 0
+            while q < runs:
+                x1 = _zv(zv, n)
+                q = q + 1
+            t2 = now_ms()
+            dS = t1 - t0
+            dV = t2 - t1
+        else:
+            t0 = now_ms()
+            q = 0
+            while q < runs:
+                x1 = _zv(zv, n)
+                q = q + 1
+            t1 = now_ms()
+            q = 0
+            while q < runs:
+                x2 = _zs(zs, n)
+                q = q + 1
+            t2 = now_ms()
+            dV = t1 - t0
+            dS = t2 - t1
+        if dV < bestV:
+            bestV = dV
+        if dS < bestS:
+            bestS = dS
+        k = k + 1
+
+    # kiem ket qua bit-giong
+    bad = 0
+    i = 0
+    while i < n:
+        if zv[i] != zs[i]:
+            bad = bad + 1
+        if zv[i] != 0.0:
+            bad = bad + 1
+        i = i + 1
+
+    print("CF n=" + str(n) + " reps=" + str(reps) + " runs=" + str(runs))
+    print("CF vector=" + str(bestV) + " ms   scalar=" + str(bestS) + " ms")
+    print("CF speedup=" + str(bestS / bestV) + "x")
+    print("CF bit_bad=" + str(bad) + " (0 = 2 duong ra cung ket qua)")
+    return 0
