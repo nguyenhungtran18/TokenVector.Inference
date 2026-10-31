@@ -3324,3 +3324,124 @@ cả 3 cặp vốn giống hệt nhau (md5) nên `cp` đồng bộ. Probe mới:
 1. Xong Task 2: gate → bucket → loss chain → `_p6ms`  (không trộn task 3 vào trước khi task 2 xanh).
 2. Rồi Task 3: builtin → danh sách builtin → self-host → `t_zeros` → đo `_tz2`.
 3. Cuối cùng: chạy lại toàn bộ (gate + bucket + `_p6ms` + full-step 3 seq) và cập nhật `HANDOFF.md`.
+
+---
+
+## §0.58 BENCHMARK LẠI SAU KHI COMPILER SỬA THEO REQUEST — ĐẠT TOÀN BỘ NGƯỠNG, TỈ LỆ VS TORCH 4.07-4.62× (2026-10-31)
+
+**Chất liệu đo:** compiler `D:/TokenVector/Release/dist/tkvc-tv.exe` build **31/10 09:19**
+(`control_flow.tkv` sửa 31/10 09:05 — bản fix mới nhất của compiler team), DLL native
+`runtime/tkv_simd_native.dll` 31/10 14:38 (patch k-waste Task 2). **Toàn bộ probe/bench
+được build lại bằng compiler đó lúc 18:57-18:58** rồi mới đo — không dùng binary cũ:
+
+| artifact | nguồn | md5 (`*_n10.dll`) |
+|---|---|---|
+| `out/_p6ms_n10.dll` | `tv/tests/_p6ms.tkv` | `60681b2ae9db92b683f90fa2fb2bb01c` |
+| `out/am_n10.dll` (bucket) | `tv/tests/simd_probe_am.tkv` | `f267fd1097d669f120cab3fc688ffe03` |
+| `out/bseq_p9_n10.dll` (full-step) | `tv/tests/simd_bench_124m_seq.tkv` | `30e8fc5b406b99f69b8fc5510a55fa18` |
+
+Chạy tuần tự khi máy idle, `.tkv` trên **.NET 10.0.13** (`dotnet *_n10.dll`) như mọi lần
+đo trước. Kỷ luật: đo trước, báo số đo, không ước lượng.
+
+### 1. Gate + trainer (đúng kiến — lần chạy 16:25 bị đứt đã chạy lại trọn)
+
+- **Gate 135/135 PASS, `TOTAL fails=0`, exit 0** — 10/10 suite (`out/gate_req.log`):
+  simd_matmul 20 · gpt2 17 · gpt2_scope 9 · gpt2_train 5 · grad 20 · parity 4 · pack 6 ·
+  inplace 5 · gap · gpt2_full 33.
+- **Trainer 15/15 `fails=0`** (`out/tr_req.log`) — AdamW, warmup/cosine, clip, overfit
+  `eval_loss=0.014949893`, resume bit-exact.
+
+### 2. Probe `_p6ms` — 3/3 shape ≥ 4× (ngưỡng request #8 §4) ✅
+
+3 rep riêng lẻ, `bit_bad=0` + `fails=0` ở cả 9 lần chạy (`out/p6ms_req_r1..3.log`):
+
+| shape | rep1 | rep2 | rep3 | best | ngưỡng | số cũ §0.56 |
+|---|---|---|---|---|---|---|
+| A LN_BWD (V 234/219/218 ms, S 984/968/968) | 4.21× | 4.42× | **4.44×** | **4.44×** | ≥4× ✅ | 3.70× ❌ |
+| B linear_db (V 141/141/156, S 844/844/844) | **5.99×** | **5.99×** | 5.41× | **5.99×** | ≥4× ✅ | 3.61× ❌ |
+| C BUILDACC (V 203/219/187, S 1109/1109/1125) | 5.46× | 5.06× | **6.02×** | **6.02×** | ≥4× ✅ | 4.74× |
+
+→ **Acceptance #8 phần speedup: 3/3 đạt** (lần trước 1/3 — chỉ C qua).
+
+### 3. Bucket `12 × block_bwd` — 1569/1570.5 ms ≤ 1680 ✅
+
+2 rep (`out/am_req_r1.log`, `out/am_req_r2.log`): `BLOCK_BWD` 130.75 / 130.875 ms/gọi
+(batch 8) → **BUCKET 1569.0 / 1570.5 ms** vs baseline 2244 = **−29.6%**, vượt ngưỡng
+dưới 1680 của request #8 §4.
+
+### 4. Full-step 3 seq best-of-3 — không seq nào regress, loss EXACT 9/9 ✅
+
+`out/p9_3seq.sh out/bseq_p9_n10.dll req` → `out/req_3seq.summary`:
+
+| seq | 3 lần (ms) | best | trước P9 (4157/6172/17547) | P9 (3860/5797/16719) |
+|---|---|---|---|---|
+| 8 | 4015 / 3859 / **3829** | **3829 ms** | **−7.9%** | −0.8% |
+| 256 | 5860 / **5672** / 5766 | **5672 ms** | **−8.1%** | −2.2% |
+| 1024 | **16375** / 16954 / 16547 | **16375 ms** | **−6.7%** | −2.1% |
+
+- **Loss EXACT từng chữ số cả 9 lượt chạy:** `10.572291 → 7.0119185` /
+  `10.756927 → 11.807267` / `10.760399 → 13.442915` — reduction không đổi thứ tự.
+- Không seq regress so với cả 2 baseline (P9 và trước P9).
+
+### 5. Bắn tỉa IL (`out/am.il`, compiler 31/10) — matcher nổ production, 1 mục còn nợ
+
+| method | `ldelema` | `stobj` (Vector4/f32) | local `__p6a*` | `TkvInt::` trong body |
+|---|---|---|---|---|
+| `gpt2_layernorm_bwd` (3195 dòng) | 35 | 32 | 16 cặp `__p6a/__p6b` | **0** ✅ |
+| `gpt2_linear_bwd` (1194 dòng) | 7 | 6 | — | **0** ✅ |
+| `gpt2_mlp_bwd` | 7 | 6 | 21 | **0** ✅ |
+| `gpt2_attention_bwd` | 21 | 18 | 63 | **0** ✅ |
+| `gpt2_block_bwd` | 11 | 8 | 33 | **48** ❌ |
+
+`gpt2_layernorm_bwd` còn có lane `f64x4` (`Vector`1<float64>`) + `Vector128<float32>`
+(AVX intrinsic) trong locals → unswitch/Y2 đã chạy. **Còn nợ:** `gpt2_block_bwd` vẫn còn
+**48 lệnh `TkvInt::`** (ceremony của request #7 chưa hết ở method này) — mục tiêu "0
+`TkvInt::` trong thân" của #7/#8 chưa trọn vẹn, dù mọi ngưỡng số đo đã qua.
+
+### 6. So với số PyTorch ĐÃ CÓ (không rerun — theo yêu cầu)
+
+Baseline torch **không đo lại**: `out/ab_tkv_torch_20261024.log` (best-of-3 xen kẽ,
+torch 2.14.0+cpu **14 luồng**, từng tái lập đúng 0.934/1.404/3.542 s) =
+**934.2 / 1394.1 / 3546.7 ms**; torch 1T seq8 1322.7 ms; tier E `out/bench_torch_e.log`
+(median n=3, §0.52).
+
+| seq | tkv hôm nay | torch 14T | **tỉ lệ** | torch 1T | tier E torch TOTAL 14T | tỉ lệ vs tier E |
+|---|---|---|---|---|---|---|
+| 8 | 3829 | 934.2 | **4.10×** | 1322.7 → 2.90× | 1189.9 | 3.22× |
+| 256 | 5672 | 1394.1 | **4.07×** | ~1.5 s → ~3.8× | 1563.1 | 3.63× |
+| 1024 | 16375 | 3546.7 | **4.62×** | — | 3936.4 | 4.16× |
+
+**Tiến trình tỉ lệ tkv/torch (cùng baseline):**
+
+| mốc | seq8 | seq256 | seq1024 | nguồn |
+|---|---|---|---|---|
+| 2026-10-20 P5.3 | 23.8× | 29.4× | 43.5× | §7.1 |
+| 2026-10-22 P6 GĐ10 | 13.4× | 12.3× | 10.4× | §0.30 |
+| 2026-10-24 A/B thật torch↔tkv | 13.2× | 12.1× | 10.3× | §0.45 |
+| 2026-10-26 M6b | 7.7× | 6.9× | 6.1× | `PLAN_TO_PARITY` §0 |
+| 2026-10-27 Phase B `f32_list_add` | 6.4× | 6.0× | 5.75× | §0.53 |
+| 2026-10-30 #7+#8 (c10) | 4.35× | 4.46× | 4.82× | §0.56.1 |
+| 2026-10-31 P9 | 4.13× | 4.16× | 4.71× | §0.57 |
+| **2026-10-31 sau compiler fix** | **4.10×** | **4.07×** | **4.62×** | §0.58 này |
+
+- vs baseline `PLAN_TO_PARITY` (7187/9609/21641): **−46.7% / −41.0% / −24.5%**.
+- **Đúng đường ray plan:** mục tiêu Phase **+B** (4200/6500/17000) **đã qua cả 3 seq**;
+  đang giữa Phase **+C** (2800/4500/12000 — còn 26-37%), chưa tới D (1500/2600/7000)
+  hay win ≤1× (934/1394/3547).
+- **Bucket vs torch tier E:** `12 × block_bwd = 1569 ms` @seq8 so với **toàn bộ bwd
+của torch = 333.1 ms** → riêng bucket này **4.71× torch bwd**; `opt.step` torch
+**658-743 ms cố định mọi seq** (bandwidth-bound) — tkv chưa tách lại phần opt hôm nay.
+- **Gap 4.1× không nằm ở kernel:** pha GEMM đã parity từ §0.41 (552-588 GFLOP/s pad ≈
+torch useful, S4/S5 207/211 ms thắng torch 254/240); A4 (§0.52) đo cả bước train
+**ratio 1.37** trong khi torch 14T → còn lại là wrapper/glue/elementwise **đơn luồng**.
+
+**⚠️ Cảnh báo phương pháp:** (1) số torch là best-of **24/10** (tier E **26/10**) —
+`PLAN_TO_PARITY` Phase F vẫn bắt bench lại torch **xen kẽ fresh** trước khi tuyên bố
+gì gần 1×; (2) `_p6ms` là A/B nội bộ vector↔scalar **không có số torch tương ứng**;
+(3) `gpt2_block_bwd` còn 48 `TkvInt::` — nếu muốn khép mục 5 của #7/#8 thì cần
+request follow-up, không tự sửa matcher phía repo.
+
+**Trạng thái git:** **0 dòng `.tkv` code train đổi** trong lần đo này (chỉ build lại +
+chạy) → không cần gate vì wire; log nằm trong `out/` (gitignore). Việc ghi tài liệu =
+§0.58 này. Task 3 (`zeros_list`) **chưa đụng tới** — compiler chưa có builtin này
+(`grep zeros_list` trong `dist/tkvc-tv.il` = 0 hit, xác minh 31/10).
