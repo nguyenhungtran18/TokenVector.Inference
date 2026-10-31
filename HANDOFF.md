@@ -3445,3 +3445,119 @@ request follow-up, không tự sửa matcher phía repo.
 chạy) → không cần gate vì wire; log nằm trong `out/` (gitignore). Việc ghi tài liệu =
 §0.58 này. Task 3 (`zeros_list`) **chưa đụng tới** — compiler chưa có builtin này
 (`grep zeros_list` trong `dist/tkvc-tv.il` = 0 hit, xác minh 31/10).
+
+---
+
+## §0.59 H1 — BẢNG BUDGET 2 PHÍA ĐO XEN KẼ CÙNG PHIÊN: TỈ LỆ THẬT 3.69-3.88×, GAP 100% LÀ THREADING + `block_bwd` (2026-10-31)
+
+Thực hiện lever **H1** của [docs/PLAN_TO_LE_1X.md](docs/PLAN_TO_LE_1X.md) — lần đo **đầu tiên
+torch và tkv chạy xen kẽ trong cùng một phiên** (Phase F của `PLAN_TO_PARITY`). Mọi số dưới
+đây **ghi ra file** (`out/h1_*.log`), không đọc từ terminal.
+
+- Compiler: `D:/TokenVector/Release/dist/tkvc-tv.exe` build 31/10 09:19; native
+  `runtime/tkv_simd_native.dll` 31/10 14:38 (patch k-waste). tkv trên **.NET 10.0.13**.
+- torch **2.14.0+cpu**, tier D/E của `tools/bench_torch.py`, `T=1` và `T=14`.
+- tkv: `out/bseq_p9_n10.dll` (build 18:58, md5 `30e8fc5b…`), best-of-3, script `out/h1_run.sh`.
+- Probe build lại bằng compiler hiện tại: `out/bd2_n10.exe` (21:25), `out/_p6ms_n10.dll`,
+  `out/am_n10.dll`.
+
+### 1. tkv — fwd/bwd/mode-1 best-of-3 (`out/h1_tkv_m0.log`, `out/h1_tkv_m1.log`)
+
+| seq | fwd | bwd | fwd+bwd | full-step | overhead (opt + copy-back) |
+|---|---|---|---|---|---|
+| 8 | 453 | 2500 | **2953** | **3844** | 891 |
+| 256 | 1125 | 3937 | **5062** | **5844** | 782 |
+| 1024 | 3641 | 11078 | **14719** | **16078** | 1359 |
+
+Loss EXACT cả 9 lượt (`10.572291→7.0119185` / `10.756927→11.807267` / `10.760399→13.442915`).
+Số này khớp §0.58 (3829/5672/16375) trong sai số nhiễu ±6% — không regress, không sửa code.
+
+### 2. torch fresh cùng phiên — tách phase 1T/14T (`out/h1_torch_e.log`, `out/h1_torch_d.log`)
+
+| seq | T | zero | fwd(+CE) | bwd | opt.step | TOTAL |
+|---|---|---|---|---|---|---|
+| 8 | 1 | 2.4 | 127.2 | 402.2 | 851.8 | **1388.0** |
+| 8 | 14 | 9.8 | 76.8 | 293.0 | 661.5 | **1042.7** |
+| 256 | 1 | 4.3 | 1214.6 | 2337.2 | 798.9 | **4354.8** |
+| 256 | 14 | 8.9 | 306.2 | 571.1 | 666.6 | **1572.7** |
+| 1024 | 1 | 26.4 | 4825.7 | 9408.7 | 818.7 | **15082.1** |
+| 1024 | 14 | 42.8 | 1077.1 | 2357.9 | 636.7 | **4148.4** |
+
+tier D (fwd+bwd / full step, median n=2): seq8 **319.1 / 1022.0**, seq256 **870.2 / 1556.2**,
+seq1024 **3448.1 / 4165.1**. Máy hôm nay **chậm hơn 24/10 ~9%** (torch full-step seq8
+1022.0 vs 934.2) — nên tỉ lệ §0.58 (4.07-4.62×) là **của baseline cũ**, số cùng phiên là
+số dưới đây.
+
+### 3. Tỉ lệ cùng phiên — và nó đến từ đâu
+
+| seq | tkv full | torch 14T | **tỉ lệ** | torch 1T | **tỉ lệ vs 1T** | threading gain của torch (1T/14T) | cần cắt |
+|---|---|---|---|---|---|---|---|
+| 8 | 3844 | 1042.7 | **3.69×** | 1388.0 | **2.77×** | 1.33× | −72.9% |
+| 256 | 5844 | 1572.7 | **3.72×** | 4354.8 | **1.34×** | 2.77× | −73.1% |
+| 1024 | 16078 | 4148.4 | **3.88×** | 15082.1 | **1.07×** | 3.64× | −74.2% |
+
+(vs tier D fresh: 3.76× / 3.76× / 3.86× — cùng kết luận.)
+
+**Đây là kết luận quan trọng nhất của H1:** ở seq 1024 — seq lớn nhất, nơi GEMM chiếm ưu thế —
+**tkv đơn luồng chỉ còn chậm 1.07× so với torch đơn luồng** (16.1 s vs 15.1 s). Nói cách khác:
+
+- **~93% khoảng 3.88× là torch dùng 14 luồng**, không phải kernel tkv chậm. torch tự nó chỉ
+  scale 3.64× trên 14 luồng ở seq1024 (hiệu suất 26%), 2.77× ở seq256, **1.33×** ở seq8.
+- Ở seq nhỏ, tkv mất thêm vì **chi phí cố định 38.6M phần tử** (lm-head/embed) không co theo seq.
+- Ở fwd+bwd thuần (bỏ optimizer) tỉ lệ xấu hơn nhiều: **7.99× / 5.77× / 4.29×** — vì
+  `opt.step` của torch **cố định 637-852 ms mọi seq** (bandwidth-bound, có lợi cho nó khi seq nhỏ),
+  còn tkv opt+copy chỉ 782-1359 ms. **Chỉ số "full step" đang che bớt phần bwd.**
+
+### 4. Bổ phần gap theo phase (từ bảng 1 & 2)
+
+| seq | gap fwd | gap bwd | gap opt+copy | tổng gap |
+|---|---|---|---|---|
+| 8 | +376 (13%) | **+2207 (79%)** | +220 (8%) | +2801 |
+| 256 | +819 (19%) | **+3366 (79%)** | +106 (2%) | +4271 |
+| 1024 | +2564 (21%) | **+8720 (73%)** | +680 (6%) | +11930 |
+
+→ **backward là 73-79% toàn bộ gap ở cả 3 seq.** Forward chỉ đáng kể ở seq1024 (nơi tkv
+thực ra **nhanh hơn torch 1T 25%**: 3641 vs 4825.7).
+
+### 5. Bên trong bwd tkv (probe, seq8 — `out/h1_bd2.log`, `out/h1_am.log`)
+
+`bwd = 2500 ms` phân rã:
+
+| thành phần | ms | % bwd | nguồn |
+|---|---|---|---|
+| `12 × gpt2_block_bwd` | **1617** (134.75/gọi) | **65%** | `AM BLOCK_BWD` batch 8 |
+| m6 lm-head (6 alloc + 3 copy_to + zero + fused + 2 copy_from + 6 free) | **344** | 14% | `BD2 [4]` |
+| `op_embed_bwd ×2` (38.6M) | **234** | 9% | `BD2 [5]` |
+| 2 vòng dense 38.6M (`dwte +=`, `gflat +=`) | ~62 | 2% | `BD2 [1][2]` (31 ms = sàn phân giải `now_ms`) |
+| còn lại (loss bwd, wpe, `layernorm_bwd`) | ~243 | 10% | suy ra |
+
+Đối chiếu: **`12 × block_bwd` = 1617 ms = 4.02× TOÀN BỘ bwd của torch 1T (402.2 ms)** —
+tức riêng bucket này đã đắt hơn cả backward torch đơn luồng 4 lần. Trong bucket, phần
+vector hoá được (`ATTENTION_BWD` 47 + `MLP_BWD` 62 = 109 ms) chỉ là 8% của 134.75;
+**~26 ms/gọi còn lại là ceremony/`TkvInt::`/copy trong `gpt2_block_bwd`** — đúng mục
+còn nợ §0.58 §5 (48 lệnh `TkvInt::`). `_p6ms` cùng phiên vẫn xanh: **A 4.14× · B 5.41× · C 4.81×**
+(`bit_bad=0`, `fails=0`) — nhưng sàn 31 ms của `now_ms` làm 3 số này **kém tin cậy hơn**
+3 rep 18:57 (§0.58: 4.44/5.99/6.02×).
+
+### 6. Hệ quả cho mục tiêu ≤1×
+
+Để ≤1× cần cắt 72.9-74.2%. Từ bảng 3, **không lever đơn lẻ nào làm được**:
+
+1. **H3 threading (14C)** là lever lớn nhất nhưng **trần của nó là ~3.6×** (chính torch chỉ
+   đạt 3.64× ở seq1024). Nếu tkv đạt y hệt hiệu suất song song của torch → 16078/3.64 =
+   **4417 ms ≈ 1.06×** — vẫn chưa ≤1×, mà đó là giả định lạc quan nhất.
+2. Vì vậy **H2 (`block_bwd` codegen) là bắt buộc song song**, không phải "hoặc": nó vừa cắt
+   1617 ms/bucket vừa **giảm mẫu số** để threading có ý nghĩa. Mục tiêu hợp lý: đưa
+   `BLOCK_BWD` 134.75 → ~45 ms/gọi (−67%, bằng `SUM_cac_vung` hiện tại) → bwd seq8
+   2500 → ~1400.
+3. Ở **seq8/256** còn phải diệt **578 ms chi phí cố định** (m6 344 + `op_embed_bwd` 234) —
+   đây là lever **H4 (pack/scratch cache)**: hiện mỗi bước vẫn alloc + copy 38.6M×4 B
+   nhiều lần. Đó là lý do seq8 chỉ đạt 3.69× trong khi fwd+bwd thuần là 7.99×.
+
+**Thứ tự thực thi đã đổi so với `PLAN_TO_LE_1X.md` ban đầu:** H2 trước H3 (H2 là điều kiện
+để H3 có trần đủ), H4 chen vào giữa cho seq nhỏ. Chi tiết cập nhật ở
+[docs/PLAN_TO_LE_1X.md](docs/PLAN_TO_LE_1X.md) §H1.
+
+**Trạng thái:** 0 dòng code `.tkv`/C đổi trong lần đo này — chỉ build lại probe + chạy.
+Log: `out/h1_tkv_m0.log`, `out/h1_tkv_m1.log`, `out/h1_torch_e.log`, `out/h1_torch_d.log`,
+`out/h1_bd2.log`, `out/h1_p6ms.log`, `out/h1_am.log`.

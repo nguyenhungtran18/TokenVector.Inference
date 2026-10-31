@@ -52,6 +52,19 @@ Quy tắc giữ nguyên cho mọi mục dưới đây:
 
 ---
 
+## ✅ H1 — Bảng budget 2 phía xen kẽ torch fresh  (HOÀN THÀNH 31/10 — HANDOFF §0.59)
+
+- [x] tkv: `simd_bench_124m_seq` mode 0 (fwd/bwd) + mode 1 (full step), best-of-3, 3 seq,
+      binary `out/bseq_p9_n10.dll` (`out/h1_run.sh tkv`).
+- [x] torch: `bench_torch.py e` + `d` tại 3 seq, **T=1 và T=14**, cùng phiên (`out/h1_run.sh torch`).
+- [x] Probe: `_bd2` rebuild bằng compiler 31/10 09:19 (`out/bd2_n10.exe`) + `_p6ms` + `simd_probe_am`.
+- [x] Kết quả chốt: tỉ lệ cùng phiên **3.69× / 3.72× / 3.88×**; gap = **bwd 73-79%**;
+      `12 × block_bwd` 1617 ms = 65% bwd; fixed-cost 38.6M (m6 344 + embed 234) = 578 ms;
+      tkv đơn luồng **1.07×** torch đơn luồng tại seq1024 ⇒ 93% khoảng cách là threading của torch.
+- [x] Kill criterion: 2 vòng dense 38.6M (~62 ms, 2.5%) + wpe loop (dưới sàn `now_ms`) **loại khỏi plan**.
+
+---
+
 ## ⬜ Task 3 — Builtin `zeros_list(n)`
 
 - [x] Thí nghiệm IL thật (`out/_zl.il`, `ilasm.exe` → chạy `dotnet`):
@@ -74,6 +87,8 @@ Quy tắc giữ nguyên cho mọi mục dưới đây:
 
 ## Thứ tự thực hiện
 
-1. Xong Task 2: gate → bucket → loss chain → `_p6ms`  (không trộn task 3 vào trước khi task 2 xanh).
-2. Rồi Task 3: builtin → danh sách builtin → self-host → `t_zeros` → đo `_tz2`.
-3. Cuối cùng: chạy lại toàn bộ (gate + bucket + `_p6ms` + full-step 3 seq) và cập nhật `HANDOFF.md`.
+1. Xong Task 2: gate → bucket → loss chain → `_p6ms`  (không trộn task 3 vào trước khi task 2 xanh). ✅
+2. H1 (budget 2 phía) ✅ → tiếp **H4a/H4b** (scratch m6 + bỏ copy 154 MB) → **H2** (request
+   compiler: 48 `TkvInt::` trong `gpt2_block_bwd`) → **H3** (threading 14C) → H5 peel.
+3. Rồi Task 3: builtin → danh sách builtin → self-host → `t_zeros` → đo `_tz2`.
+4. Cuối cùng: chạy lại toàn bộ (gate + bucket + `_p6ms` + full-step 3 seq xen kẽ torch) và cập nhật `HANDOFF.md`.
