@@ -4202,3 +4202,85 @@ thay vòng copy-back bằng builtin `f32_list_copy` (125 → ~30 ms) ≈ **−35
 công sức. Theo số đo thì A1 (7.7 s) và A2 (3.0 s) mới đáng làm, và cả hai đều cần **probe
 chia nhỏ hơn nữa** (gelu_bwd / bias_grad / residual / softmax_bwd / copy trong `mlp_bwd` và
 `attention_bwd`; và `op_embed_bwd` + lm-head) — chưa làm trong §0.65.
+
+## §0.66 ĐO TỪNG OP TRONG `mlp_bwd` — KẾT LUẬN "NON-GEMM LÀ NÚT THẮT" Ở §0.65 SAI
+
+§0.65 suy tỷ lệ GEMM/non-GEMM **từ đếm layer** (410 GF) rồi kết luận non-GEMM 82%. Con số
+410 GF đó **thiếu**: mỗi `mlp_bwd` có 5 GEMM chứ không phải 4, `gpt2_linear_bwd` làm 2 GEMM,
+và lm-head có cả fwd lẫn bwd. Probe `tv/tests/_mb1024.tkv` đo trực tiếp từng op nên không
+còn phải suy.
+
+### 1. `mlp_bwd` tại seq1024 — đường production `simd==1`, có fallback `smm_fwd_at`
+
+| op | 1 luồng | 14 luồng | loại |
+|---|---:|---:|---|
+| `gpt2_linear` (fwd, 4.83 GF) | 125 | 31 | GEMM |
+| `_gelu_fwd_par` (3.1M) | 16 | 31* | non-GEMM |
+| `smm_dot` → dx2 (4.83 GF) | 141 | 31 | GEMM |
+| `op_gelu_erf_bwd` (3.1M) | 31 | 16* | non-GEMM |
+| `smm_fwd_at` → dw2 (4.83 GF) | 156 | 63 | GEMM |
+| vòng `db2` trên gflat (786K) | <16 | <16 | non-GEMM |
+| `gpt2_linear_bwd` (dx + dw1 = 9.66 GF) | 297 | 109 | GEMM |
+| **Σ đo được** | **766** | **281** | |
+| `gpt2_mlp_bwd` (đo trực tiếp) | **782** | **281** | |
+| **GEMM** | **719 (91.9%)** | **234 (83.3%)** | |
+| **non-GEMM** | **63 (8.1%)** | **47 (16.7%)** | |
+
+\* hai số 31/16 ở 14 luồng nằm trong 2 quantum của `now_ms()` (15.6 ms) — coi là nhiễu.
+
+**Hai điều phải ghi rõ:**
+- `linear_dw_fused` **trả rc != 0** tại đây vì `m = seq = 1024 > 256` (guard `-10`), nên
+  production rơi về `smm_fwd_at`. Lần đo đầu tôi chỉ gọi `linear_dw_fused` nên thấy **0.0 ms**
+  và thiếu một GEMM 4.83 GF. Probe đã sửa để mô phỏng đúng fallback.
+- `mlp_bwd` scale chỉ **2.78×** (782 → 281) dù riêng GEMM scale **3.07×** (719 → 234) và
+  `gm.exe` đo standalone scale **4.52×**. Trong vòng lặp thật, GEMM mất ~1/3 mức scale.
+
+### 2. Tính lại tỷ lệ GEMM của cả bước (sửa §0.65 mục 3)
+
+`mlp_bwd` 24.2 GF/block (5 GEMM). `attention_bwd` ~11.2 GF/block (dx_qkv 3.62 + dw_qkv 3.62 +
+2 GEMM score 1.6 + 2 GEMM proj 2.4). Fwd 17.7 GF/block, lm-head fwd+bwd 158 GF:
+
+| | GF | 1 luồng (34.3 s) | 14 luồng (16.7 s) |
+|---|---:|---|---|
+| tổng GEMM | **≈ 814** | 814/33.6 = **24.2 s = 71%** | /3.1 = **7.8 s = 47%** |
+| non-GEMM | — | **≈ 10.1 s = 29%** | **≈ 8.9 s = 53%** |
+
+⇒ §0.65 viết "14 luồng non-GEMM 82%" là **sai**; đúng là **53%**. Nhưng kết luận định tính
+vẫn giữ: ở cấu hình đích non-GEMM là **phần lớn hơn**, và 8.9 s đó đã gấp **2.2× toàn bộ
+4105 ms của torch**.
+
+### 3. Chỗ nào trong non-GEMM (đo được, không suy)
+
+| mục | cơ sở đo | 1 luồng | 14 luồng |
+|---|---|---:|---:|
+| ceremony trong `block_bwd` | 156 ms/block × 12 | 1.9 s | **1.9 s** (không scale) |
+| `attention_bwd` non-GEMM | 578 − ~333 (GEMM 11.2 GF) | ~2.9 s | ~2.9 s |
+| `gelu_fwd` + `gelu_bwd` | 47 ms/block × 12 | 0.6 s | ~0.6 s |
+| `layernorm_bwd` ×2 | 47 ms/block × 12 | 0.6 s | ~0.6 s |
+| `opt.step` + copy-back + loss | §0.65 mục 7 | 1.1 s | **1.1 s** |
+| còn lại | phần dư | ~3.0 s | ~1.9 s |
+
+`attention_bwd` non-GEMM (~2.9 s) và **ceremony 156 ms/block** (1.9 s) là hai mục lớn nhất.
+Ceremony = phần `block_bwd` trừ 3 vùng đo được: residual add, copy gradient vào `gflat`, và
+các `t_zeros` — **chưa có phép đo nào bên trong**, cần probe riêng trước khi cắt.
+
+### 4. Ưu tiên sửa lại lần cuối (14 luồng, bước 16.7 s)
+
+| # | mục | s | % | trần nếu sửa |
+|---|---:|---:|---|
+| **A** | `attention_bwd` non-GEMM | 2.9 | 17% | ? (chưa biết thành phần) |
+| **B** | GEMM: 46% đỉnh **và** scale 3.1× thay vì 4.5× | 7.8 | 47% | −2.4 s nếu đạt cả hai |
+| **C** | ceremony 156 ms/block | 1.9 | 11% | ? |
+| D | `opt.step` + copy-back | 1.1 | 7% | −0.35 s |
+| E | gelu + layernorm | 1.2 | 7% | ~−0.5 s nếu thread hoá |
+
+**B là lever lớn nhất có trần đã biết.** Trong đó phần scale (3.1× → 4.5×) rẻ hơn nhiều so
+với việc viết lại kernel: cùng một `gm.exe` standalone đạt 4.52×, nên vấn đề scale nằm ở
+**cách gọi trong vòng lặp** (kích thước tile/`tkv_min_n`/`tkv_ncols` theo `n` của từng GEMM
+trong block), không phải trong kernel.
+
+### 5. Probe
+
+`tv/tests/_mb1024.tkv` → `out/mb1024.exe`: 7 op của `mlp_bwd` + đối chiếu hàm thật, chạy
+được ở mọi seq (`_seq_cfg.txt`), in cả GEMM/non-GEMM. Lệnh:
+`TKV_GEMM_THREADS=1 dotnet out/mb1024.exe` (không đặt env = 14 luồng auto).

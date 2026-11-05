@@ -1,0 +1,169 @@
+# PROBE MB1024 — chia `gpt2_mlp_bwd` (797 ms @seq1024) thanh tung op
+# ------------------------------------------------------------------
+# HANDOFF §0.65 ket luan tu `mlp_bwd` 797 ms va `attention_bwd` 578 ms. Nhung ty le
+# GEMM/non-GEMM o do la SUY RA tu dem layer — va da suyt sai mot lan. Probe nay do
+# TRUC TIEP tung op trong duong production `simd==1` (giong het gpt2_mlp_bwd):
+#
+#   1 gpt2_linear(x,w1,b1)                GEMM fwd 1024x3072x768
+#   2 _gelu_fwd_par                       3.1M ptu
+#   3 smm_dot(gout,w2)                    GEMM dx2
+#   4 op_gelu_erf_bwd                     3.1M ptu
+#   5 linear_dw_fused                     native dw2
+#   6 vong db2 tren gflat                 n*h = 786K phep cong .tkv
+#   7 gpt2_linear_bwd(x,w1,d_inner)       2 GEMM (dx + dw1) + bias
+#   = gpt2_mlp_bwd (doi chieu)
+#
+# Chay (tu goc repo): TKV_GEMM_THREADS=1 dotnet out/mb1024.exe
+import tv.training.gpt2_ref124
+import tv.training.trainer
+import tv.training.simd_matmul
+
+def _mn(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+def main() -> 'i32':
+    seq = 1024
+    cfg = read_file("tv/tests/_seq_cfg.txt")
+    cl = cfg.split("\n")
+    for i in range(len(cl)):
+        if len(cl[i]) > 0:
+            v = int(float(cl[i]))
+            if v > 0:
+                seq = v
+            break
+
+    h = HiddenSize
+    ih = 4 * h
+    print("MB seq=" + str(seq) + " h=" + str(h) + " ih=" + str(ih))
+
+    ps = gpt2_init(7)
+    ids = []
+    pos = []
+    for i in range(seq):
+        ids.append((i * 37 + 11) % VocabSize)
+        pos.append(i)
+
+    x0 = gpt2_embed(ids, pos, ps[0], ps[1])
+    x = x0
+    for i in range(NLayers):
+        b = 4 + i * 12
+        x = gpt2_block(x, ps[b + 0], ps[b + 1], ps[b + 2], ps[b + 3],
+                       ps[b + 4], ps[b + 5], ps[b + 6], ps[b + 7],
+                       ps[b + 8], ps[b + 9], ps[b + 10], ps[b + 11], 1)
+
+    li = 6
+    base = 4 + li * 12
+    xi = x
+    a = gpt2_layernorm(xi, ps[base + 0], ps[base + 1])
+    gout = t_zeros([seq, h])
+    gd = gout.data
+    for i in range(seq * h):
+        gd[i] = 0.1
+
+    # gflat 1 block (goff >= 0 = duong production)
+    numel = []
+    numel.append(h)
+    numel.append(h)
+    numel.append(3 * h * h)
+    numel.append(3 * h)
+    numel.append(h * h)
+    numel.append(h)
+    numel.append(h)
+    numel.append(h)
+    numel.append(4 * h * h)
+    numel.append(4 * h)
+    numel.append(4 * h * h)
+    numel.append(h)
+    offs12 = []
+    accf = 0
+    for j in range(12):
+        offs12.append(accf)
+        accf = accf + numel[j]
+    gflatb = t_zeros([accf])
+    o_w1 = offs12[8]
+    o_b1 = offs12[9]
+    o_w2 = offs12[10]
+    o_b2 = offs12[11]
+
+    # phan tu chuan bi (khong do)
+    inner = gpt2_linear(x, ps[base + 8], ps[base + 9], seq, h, ih, 1)
+    act = t_zeros([seq * ih])
+    _gelu_fwd_par(inner.data, act.data, seq * ih, 1)
+    dx2 = smm_dot(gout, ps[base + 10], seq, ih, h)
+    d_inner = t_new(dx2.data, [seq, ih])
+    dw2 = t_zeros([0])
+
+    b_lin = 1.0e9
+    b_gf = 1.0e9
+    b_dx2 = 1.0e9
+    b_gb = 1.0e9
+    b_dw = 1.0e9
+    b_db = 1.0e9
+    b_lb = 1.0e9
+    b_all = 1.0e9
+
+    k = 0
+    while k < 2:
+        t0 = now_ms()
+        in2 = gpt2_linear(x, ps[base + 8], ps[base + 9], seq, h, ih, 1)
+        t1 = now_ms()
+        a2 = t_zeros([seq * ih])
+        r_gf = _gelu_fwd_par(in2.data, a2.data, seq * ih, 1)
+        t2 = now_ms()
+        d2 = smm_dot(gout, ps[base + 10], seq, ih, h)
+        t3 = now_ms()
+        rb = op_gelu_erf_bwd(in2, d2)
+        t4 = now_ms()
+        _a1: "list[f32]" = a2.data
+        _g1: "list[f32]" = gout.data
+        _f1: "list[f32]" = gflatb.data
+        l10 = linear_dw_fused(_a1, _g1, _f1, o_w2, seq, ih, h)
+        dw2x = t_zeros([0])
+        if l10 != 0:
+            # production: rc != 0 -> fallback smm_fwd_at (GEMM nay phai duoc tinh)
+            dw2x = smm_fwd_at(a2, gout, ih, h, seq)
+        t5 = now_ms()
+        # vong db2 dung nguyen van gpt2_mlp_bwd (goff path)
+        i2 = 0
+        while i2 < seq:
+            bse = i2 * h
+            oo = 0
+            while oo < h:
+                gflatb.data[o_b2 + oo] = gflatb.data[o_b2 + oo] + gout.data[bse + oo]
+                oo = oo + 1
+            i2 = i2 + 1
+        t6 = now_ms()
+        di = t_new(d2.data, [seq, ih])
+        r1 = gpt2_linear_bwd(x, ps[base + 8], di, seq, h, ih, 1, gflatb.data, o_w1, o_b1)
+        t7 = now_ms()
+        rmb = gpt2_mlp_bwd(a, ps[base + 8], ps[base + 9],
+                           ps[base + 10], ps[base + 11], seq, gout, 1,
+                           gflatb.data, o_w1, o_b1, o_w2, o_b2)
+        t8 = now_ms()
+        b_lin = _mn(b_lin, t1 - t0)
+        b_gf = _mn(b_gf, t2 - t1)
+        b_dx2 = _mn(b_dx2, t3 - t2)
+        b_gb = _mn(b_gb, t4 - t3)
+        b_dw = _mn(b_dw, t5 - t4)
+        b_db = _mn(b_db, t6 - t5)
+        b_lb = _mn(b_lb, t7 - t6)
+        b_all = _mn(b_all, t8 - t7)
+        k = k + 1
+
+    print("MB lin_fwd        = " + str(b_lin) + " ms")
+    print("MB gelu_fwd       = " + str(b_gf) + " ms")
+    print("MB smm_dot(dx2)   = " + str(b_dx2) + " ms")
+    print("MB gelu_bwd       = " + str(b_gb) + " ms")
+    print("MB linear_dw_fused= " + str(b_dw) + " ms")
+    print("MB db2_loop       = " + str(b_db) + " ms")
+    print("MB lin_bwd        = " + str(b_lb) + " ms")
+    tot = b_lin + b_gf + b_dx2 + b_gb + b_dw + b_db + b_lb
+    print("MB SUM_7_op       = " + str(tot) + " ms")
+    print("MB mlp_bwd (that) = " + str(b_all) + " ms")
+    print("MB leftover       = " + str(b_all - tot) + " ms (alloc t_zeros + goi ham)")
+    gemm = b_lin + b_dx2 + b_dw + b_lb
+    print("MB GEMM           = " + str(gemm) + " ms  (" + str(gemm * 100.0 / b_all) + "%)")
+    print("MB NON-GEMM       = " + str(b_all - gemm) + " ms  (" + str((b_all - gemm) * 100.0 / b_all) + "%)")
+    return 0
