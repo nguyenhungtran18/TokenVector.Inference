@@ -4516,3 +4516,44 @@ phải 91 như k=256.
 Thay đổi thử ở native **đã revert** (`tkv_simd_native.c.bak_r11` giữ bản gốc; DLL đã build
 lại từ nguồn gốc, attention trở lại 328 ms). **Không có thay đổi production nào trong
 §0.70.** Tệp mới: `tv/tests/_g64.tkv`, `tv/tests/_k64n.tkv`.
+
+## §0.71 THỬ `T = 256` CHO ĐƯỜNG TILED: BIT-EXACT NHƯNG FULL STEP CHẬM ĐI (revert)
+
+Theo hướng 1 của §0.70, sửa `_smm_core` / `_smm_core_pd` (`tv/training/simd_matmul.tkv` + 2 mirror)
+để `k` nhỏ dùng `T = 256` thay vì `T = 64` (16 tile thay vì 256 tile):
+
+```python
+if T < 256:
+    if m >= 256:
+        if n >= 256:
+            T = 256
+```
+
+| phép đo | trước | sau |
+|---|---:|---:|
+| `smm_dot` k=64, n=1024 (`_k64n.tkv`) | 13.0 ms | **10.5 ms** (1.24×) |
+| bit so với native | 140 374 ptu lệch | **bit_bad = 0** (trùng native) |
+| **`loss` full step seq1024** | 13.442915 | **13.442915 — EXACT ✓** |
+| **full step (14 luồng)** | 16 672 ms | **18 532 ms — CHẬM 11%** |
+
+⇒ **Revert.** `T=256` đúng là bit-exact và nhanh hơn cho *riêng* shape k=64, nhưng nó áp cho **mọi**
+GEMM `k < 256` có `m,n ≥ 256`, và ở đó `simd_gemm(256)` vượt ngưỡng `MIN_N=96` nên mỗi tile lại
+đánh thức pool 14 luồng — tổng thể thành regression.
+
+Đây là kết quả âm tính **có giá trị**: nó chứng minh (a) thứ tự tích luỹ `p` giữ được khi đổi `T`
+(nên bit-exact không phải rào cản của hướng tiling), và (b) nút chặn thật là **chi phí dispatch
+của mỗi `simd_gemm`**, đúng như §0.68 — chỉ khác là nó nằm trong đường tiled chứ không ở lock.
+
+### Kết luận mục 1 (sau 5 thí nghiệm)
+
+| thí nghiệm | kết quả |
+|---|---|
+| bỏ `g_gemm_lock` | không đổi (328→312) |
+| `MIN_N` × 3 | không đổi hoặc tệ hơn |
+| `GEMM_THREADS` × 4 | sàn 328, không đổi |
+| native thay tiled cho k=64 | 2.5× nhanh nhưng lệch 5.6e-9 → không nhận |
+| `T=256` | bit-exact, nhanh cho k=64, **chậm toàn cục** → revert |
+
+⇒ Mục 1 chỉ còn **một** đường: native làm cho đường rect `k < 256` **bit-giống** đường tiled
+(hoặc chốt lại hợp đồng chấp nhận ULP). Đây là `docs/COMPILER_TEAM_REQUEST11.md` §8.4 ASK A'.
+Toàn bộ source production đã về nguyên trạng; `git status` sạch cho 3 mirror.
