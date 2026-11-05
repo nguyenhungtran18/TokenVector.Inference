@@ -4453,3 +4453,66 @@ Ba kết luận:
    vẫn giữ nguyên, chỉ đổi chỗ thực hiện: native, không phải repo.
 
 Số đúng để dùng từ nay: **attention 328 ms/block → 3936 ms/bước (27%)**; block 610 ms → 7320 ms.
+
+## §0.70 GỐC RỄ THẬT: `_smm_core` RẼ NHÁNH THEO `k` — k<256 ĐI ĐƯỜNG TILED `.tkv` (13.8 GFLOP/s)
+
+§0.68 và §0.69 đều sai nguyên nhân. Chuỗi loại trừ:
+
+| thí nghiệm | kết quả | kết luận |
+|---|---|---|
+| bỏ `g_gemm_lock` bằng `TryAcquire` + chạy thẳng khi pool bận (sửa thật, đã revert) | attention 328 → **312 ms** | **lock không phải nguyên nhân** |
+| `TKV_GEMM_MIN_N` 96/1100/2100 | 328 / 610 / 610 | ngưỡng không phải lever |
+| `TKV_GEMM_THREADS` 4/7/10/14 | 359/343/328/344 | số luồng không phải lever |
+| **quét `k` ở `n=1024`** (`_g64.tkv`) | k=64: 9.75 ms · k=128: 11.75 · **k=256: 5.875** · k=512: 9.75 · k=768: 11.625 | **k=256 NHANH HƠN k=64** dù 4× khối lượng ⇒ có bậc thang ở k=256 |
+
+### Nguyên nhân (đọc code sau khi số đo chỉ đúng chỗ)
+
+`tv/training/simd_matmul.tkv`, `_smm_core`:
+
+```
+if k >= 256:            -> _smm_full (m<=256) hoac _smm_pk  [NATIVE]
+else:                   -> duong TILED .tkv               [CHAM]
+```
+
+Đường tiled cấp `Ct`, `AtB`, `BtB` (mỗi cái `T*T`), rồi lặp
+`ceil(m/T) × ceil(n/T) × ceil(k/T)` tile, mỗi tile gọi `_tile_a_w` + `_tile_b_w` +
+`simd_gemm` + `_acc_f` **trong .tkv**. Với `m=n=1024, k=64`: `T=64` ⇒ **256 tile** ⇒
+~256 × (2 lần copy 4096 ptu + 1 simd_gemm + 1 `_acc_f` 4096 ptu) ≈ vài ms overhead
+**cho 134 MFLOP**. Đó chính là "chi phí cố định ~5.5 ms" ở §0.68 — không phải lock,
+không phải dispatch, mà là **một implementation khác**.
+
+`k = hd = 64` đúng là shape của 72 GEMM trong `gpt2_attention_bwd` ⇒ cả `attention_bwd`
+chạy trên đường chậm. Đây là lời giải thích cuối cùng cho: 13.8 GFLOP/s (k=64) so với
+155.9 GFLOP/s (shape lớn, `k=768` đi native).
+
+### Đã thử đưa k=64 sang native: nhanh 2.5× nhưng KHÔNG bit-exact
+
+`tv/tests/_k64n.tkv` gọi thẳng `_smm_full(a,b,n,n,64,64,1)` trên cùng dữ liệu:
+
+| đường | ms/lời gọi | GFLOP/s |
+|---|---:|---:|
+| tiled `.tkv` (hiện tại) | 13.0 | 10.3 |
+| native `_smm_full` | **5.17** | **26.0** |
+| **bit_bad** | **140 374 / 1 048 576 ptu**, maxdiff **5.59e-9** | |
+
+⇒ **Không hạ ngưỡng `k >= 256` được** nếu giữ hợp đồng bit-exact (cùng loại vi phạm đã
+khiến YÊU CẦU #10 từ chối `k%256 != 0`). Native cũng chỉ đạt 26 GFLOP/s cho k=64, không
+phải 91 như k=256.
+
+### Hướng đúng (rẻ nhất trước)
+
+1. **Tăng `T` cho trường hợp `k` nhỏ** (repo-side, 1 chỗ trong `_smm_core`): hiện
+   `T = min(_tilek(k), roundup64(min(m,n)))` nên `k=64` ép `T=64` ⇒ 256 tile. Nếu cho
+   `T = 128` thì còn **64 tile** và số p-tile vẫn là 1 ⇒ thứ tự tích lũy `p` **không đổi**
+   ⇒ nhiều khả năng bit-exact (phần `At` ngoài `pw` là 0, cộng 0.0 là chính xác). Chưa làm
+   — cần gate 135/135 + loss EXACT để chứng minh.
+2. **Native: làm đường rect cho `k < 256` bit-giống đường tiled** (hoặc chấp nhận ULP và
+   cập nhật hợp đồng). Chỉ khi đó mới hạ được ngưỡng; lợi ích 2.5× trên 72 lời gọi/block,
+   tức `attention_bwd` 328 → ~150 ms và **mọi GEMM k<256 khác trong mô hình**.
+3. Cache 3 scratch `n×n` theo worker (nhánh `n ≥ 128`) — nhánh `n < 128` đã làm từ #10 C.2.
+
+### Trạng thái code
+
+Thay đổi thử ở native **đã revert** (`tkv_simd_native.c.bak_r11` giữ bản gốc; DLL đã build
+lại từ nguồn gốc, attention trở lại 328 ms). **Không có thay đổi production nào trong
+§0.70.** Tệp mới: `tv/tests/_g64.tkv`, `tv/tests/_k64n.tkv`.

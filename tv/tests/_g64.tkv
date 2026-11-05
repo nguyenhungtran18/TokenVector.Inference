@@ -1,0 +1,88 @@
+# PROBE G64 — toc do THUC cua dung shape GEMM trong attention_bwd:
+#   smm_dot(a[n,hd], b[n,hd], n, n, hd)  ->  [n,n], k = hd = 64
+# ----------------------------------------------------------------------
+# HANDOFF §0.68 gia dinh 81% thoi gian cua 72 loi goi la "overhead dispatch".
+# Probe nay kiem gia dinh do: neu ban than shape k=64 chi dat ~30 GFLOP/s thi
+# 4.6 ms/lời goi la DUNG toc do kernel, khong phai overhead — va huong sua phai
+# la batched GEMM / kernel cho k nho, khong phai bo lock.
+#
+# Chay: dotnet out/g64.exe            (auto 14 luong)
+#       TKV_GEMM_THREADS=1 dotnet out/g64.exe
+import tv.training.gpt2_ref124
+import tv.training.simd_matmul
+
+def _mn(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+def main() -> 'i32':
+    n = 1024
+    hd = HeadDim
+    reps = 8
+    a = t_zeros([n, hd])
+    b = t_zeros([n, hd])
+    ad = a.data
+    bd = b.data
+    i = 0
+    while i < n * hd:
+        ad[i] = float(i % 17) * 0.01 - 0.08
+        bd[i] = float(i % 13) * 0.01 - 0.06
+        i = i + 1
+
+    # warm
+    c0 = smm_dot(a, b, n, n, hd)
+
+    best = 1.0e9
+    k = 0
+    while k < 3:
+        t0 = now_ms()
+        i = 0
+        while i < reps:
+            c = smm_dot(a, b, n, n, hd)
+            i = i + 1
+        t1 = now_ms()
+        if t1 - t0 < best:
+            best = t1 - t0
+        k = k + 1
+
+    per = best / float(reps)
+    fl = 2.0 * float(n) * float(n) * float(hd)
+    print("G64 k=" + str(hd) + "  moi loi=" + str(per) + " ms  "
+          + str(fl * float(reps) / best / 1000000.0) + " GFLOP/s")
+
+    # Quet k: cung n=1024 nhung k = 64/128/256/512/768.
+    # Muc dich: neu GFLOP/s nhay vot khi k >= 256 thi nguyen nhan la duong k nho
+    # cua runtime (khong phai "khoi luong qua nho de chia luong"), va huong sua
+    # la repo-side (chon builtin khac / gom head), khong phai viet kernel moi.
+    ks = []
+    ks.append(128)
+    ks.append(256)
+    ks.append(512)
+    ks.append(768)
+    j = 0
+    while j < len(ks):
+        kk = ks[j]
+        a2 = t_zeros([n, kk])
+        b2 = t_zeros([n, kk])
+        c2 = smm_dot(a2, b2, n, n, kk)
+        bb = 1.0e9
+        r = 0
+        while r < 3:
+            t0 = now_ms()
+            i = 0
+            while i < reps:
+                c3 = smm_dot(a2, b2, n, n, kk)
+                i = i + 1
+            t1 = now_ms()
+            if t1 - t0 < bb:
+                bb = t1 - t0
+            r = r + 1
+        p2 = bb / float(reps)
+        f2 = 2.0 * float(n) * float(n) * float(kk)
+        print("G64 k=" + str(kk) + "  moi loi=" + str(p2) + " ms  "
+              + str(f2 * float(reps) / bb / 1000000.0) + " GFLOP/s")
+        j = j + 1
+
+    print("G64 72 loi goi k=64 = " + str(per * 72.0) + " ms (tuan tu)")
+    return 0

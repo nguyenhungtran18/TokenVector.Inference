@@ -125,3 +125,63 @@ Nếu 12 worker thật sự chạy song song 72 GEMM đó trên 7 core: 288 ms/1
 **Lưu ý cho người muốn chứng minh trực tiếp:** probe `thread_spawn` + `smm_dot` với `Tensor`
 truyền qua job **không biên dịch được** (`InvalidProgramException` — job chỉ nên mang
 `list[f32]`/số, Tensor phải tạo bên trong worker; và `thread_join` phải gán vào biến).
+
+---
+
+## 8. ĐÍNH CHÍNH (2026-11-05, sau khi đo thêm): KHÔNG phải lock, mà là chi phí cố định mỗi lời gọi
+
+Mục 2 ở trên (và HANDOFF §0.68) quy tội cho `g_gemm_lock`. **Đã thử sửa và số đo bác bỏ.**
+
+### 8.1 Thí nghiệm 1 — bỏ lock (làm thật, đã revert)
+
+Sửa `tkv_run_mt` / `tkv_run_mt_rect` / `tkv_run_aux` sang `TryAcquireSRWLockExclusive`; nếu pool
+bận thì thread gọi **chạy thẳng kernel cho cả vùng** (`gemm_rect_f32(a,lda,b,ldb,c,ldc,m,n,k,
+0,m,0,n,…)`), an toàn vì buffer panel B là `__declspec(thread)` và nhánh đó không chạm
+`g_job`/`g_start`/`g_done`.
+
+Kết quả `ATTENTION_BWD` (seq1024, 14 luồng): **328 → 312 ms**. Trong nhiễu.
+
+⇒ **Lock không phải nguyên nhân.** (Đã revert source + rebuild về nguyên trạng.)
+
+### 8.2 Thí nghiệm 2 — quét `k` ở `n = 1024` (`tv/tests/_g64.tkv`, 14 luồng)
+
+Cùng `smm_dot(a[n,k], b[n,k], n, n, k)` ⇒ `[n,n]`:
+
+| k | ms / lời gọi | GFLOP/s |
+|---:|---:|---:|
+| 64 (đúng shape attention) | 9.75 | **13.8** |
+| 128 | 11.75 | 22.8 |
+| **256** | **5.875** | **91.4** |
+| 512 | 9.75 | 110.1 |
+| 768 | 11.625 | 138.5 |
+
+**k=256 nhanh hơn k=64 về thời gian tuyệt đối** dù khối lượng gấp 4 lần. Hồi quy
+`(11.625−5.875)/(768−256) = 0.0112 ms/k` ⇒ **chi phí cố định ≈ 3.0–5.5 ms mỗi lời gọi**, độc lập
+với `k`. Với `k = 64`, công việc thật chỉ **0.86 ms** ⇒ 85% thời gian là chi phí cố định.
+
+Đây mới là con số đúng: **72 lời gọi × ~9.75 ms = 702 ms tuần tự**; đo được 328 ms vì 12 worker
+chạy song song ~2.1×. Muốn `attention_bwd` xuống ~120 ms thì phải **diệt chi phí cố định**, không
+phải diệt lock.
+
+### 8.3 Chi phí cố định nằm ở đâu — 4 nghi phạm, xếp theo khả năng
+
+| # | nghi phạm | bằng chứng / cách kiểm |
+|---|---|---|
+| 1 | `memset` C `n×n = 4 MB` trong `gemm_rect_f32` **+** epilogue đọc–sửa–ghi C (thêm 8 MB) mỗi lời gọi | 12 MB/lời gọi; nếu đúng thì giảm bằng cách bỏ memset khi caller đã zero |
+| 2 | cấp phát + zero `n×n` tạm trong wrapper `.tkv` (`Smat`, `gDp`, `gDs` = 4 MB mỗi cái, mỗi head) | thử cache scratch theo worker như nhánh `n < 128` đã làm |
+| 3 | `tkv_k_eff()` — quét **O(n²)** (`for p from n-1`, mỗi p đọc cả hàng `b` **và** cột `a`) ⇒ ~2M lượt đọc bất kể `k` | đây là hàm duy nhất trong code có chi phí đúng dạng "hằng số theo k, tỉ lệ n²"; đo bằng cách gọi `SgemmF32` vuông với dữ liệu không có hàng 0 cuối |
+| 4 | dispatch pool + chia lưới (đã loại phần lớn bằng 8.1) | — |
+
+Nghi phạm 3 khớp chính xác hình dạng số đo (hằng số theo `k`, `n²`): 2×1M lượt đọc ở ~2.5 ns =
+5 ms. **Đề nghị kiểm nó trước** — nếu đúng, chỉ cần một cờ "k đã biết, bỏ k_eff" cho đường rect
+là xong, và nó cũng tăng tốc mọi GEMM của mô hình.
+
+### 8.4 Đề nghị sửa lại (thay mục 3/4)
+
+- **ASK A'**: cho `smm_dot`/`smm_fwd` đường rect **bỏ `tkv_k_eff`** (hoặc chỉ gọi khi caller báo
+  `k` chưa chắc). Đây là thay đổi vài dòng, không đổi chữ ký `.tkv`, và nếu đúng là thủ phạm thì
+  tiết kiệm ~3–5 ms cho **mỗi** lời gọi GEMM rect trong toàn bộ mô hình.
+- **ASK B'** (repo-side, không cần native): cache 3 scratch `n×n` theo worker trong
+  `gpt2_attention_bwd` nhánh `n ≥ 128` (nhánh `n < 128` đã làm đúng việc này từ YÊU CẦU #10 C.2).
+- **ASK C'**: batched GEMM theo head (như mục 4) vẫn có giá trị, nhưng **không còn là ưu tiên 1**
+  vì chi phí cố định mới là thứ chi phối.
