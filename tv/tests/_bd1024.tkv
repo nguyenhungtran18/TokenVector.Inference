@@ -70,7 +70,43 @@ def main() -> 'i32':
     for i in range(seq * h):
         dd[i] = 0.1
 
-    a = gpt2_layernorm(xi, ps[base + 0], ps[base + 1])
+    # forward_saved de lay save_r/save_a/save_m — production LUON truyen 3 tensor nay
+    # (gpt2_backward: saves[3+N+li], saves[3+2N+li], saves[3+3N+li]); thieu chung thi
+    # block_bwd recompute attention fwd + 2 layernorm -> do sai lon.
+    l1g = []
+    l1b = []
+    wq = []
+    bq = []
+    wp = []
+    bp = []
+    l2g = []
+    l2b = []
+    w1 = []
+    b1 = []
+    w2 = []
+    b2 = []
+    for i in range(NLayers):
+        bb = 4 + i * 12
+        l1g.append(ps[bb + 0])
+        l1b.append(ps[bb + 1])
+        wq.append(ps[bb + 2])
+        bq.append(ps[bb + 3])
+        wp.append(ps[bb + 4])
+        bp.append(ps[bb + 5])
+        l2g.append(ps[bb + 6])
+        l2b.append(ps[bb + 7])
+        w1.append(ps[bb + 8])
+        b1.append(ps[bb + 9])
+        w2.append(ps[bb + 10])
+        b2.append(ps[bb + 11])
+    sc5 = t_zeros([seq * VocabSize])
+    sv = gpt2_forward_saved(ids, pos, ps[0], ps[1], l1g, l1b, wq, bq, wp, bp,
+                            l2g, l2b, w1, b1, w2, b2, ps[2], ps[3], 1, sc5.data)
+    xi = sv[3 + li]
+    s_r = sv[3 + NLayers + li]
+    s_a = sv[3 + 2 * NLayers + li]
+    s_m = sv[3 + 3 * NLayers + li]
+    a = s_a
 
     # gflat cua 1 block (goff >= 0 = duong production cua trainer)
     numel = []
@@ -102,20 +138,26 @@ def main() -> 'i32':
     k = 0
     while k < 2:
         t2 = now_ms()
-        rl1 = gpt2_layernorm_bwd(xi, ps[base + 0], ps[base + 1], gy)
-        rl2 = gpt2_layernorm_bwd(xi, ps[base + 6], ps[base + 7], gy)
+        rl1 = gpt2_layernorm_bwd(xi, ps[base + 0], ps[base + 1], gy,
+                                 gflatb.data, offs12[0], offs12[1])
+        rl2 = gpt2_layernorm_bwd(xi, ps[base + 6], ps[base + 7], gy,
+                                 gflatb.data, offs12[6], offs12[7])
         t3 = now_ms()
+        # DUONG PRODUCTION: phai truyen gflat + offsets, neu khong thi mlp/attention
+        # di nhanh khac (tra Tensor / copy) va phep tru "ceremony" se sai.
         rb = gpt2_attention_bwd(a, ps[base + 2], ps[base + 3],
-                                ps[base + 4], ps[base + 5], seq, gy, 1)
+                                ps[base + 4], ps[base + 5], seq, gy, 1,
+                                gflatb.data, offs12[2], offs12[3], offs12[4], offs12[5])
         t4 = now_ms()
         rm = gpt2_mlp_bwd(a, ps[base + 8], ps[base + 9],
-                          ps[base + 10], ps[base + 11], seq, gy, 1)
+                          ps[base + 10], ps[base + 11], seq, gy, 1,
+                          gflatb.data, offs12[8], offs12[9], offs12[10], offs12[11])
         t5 = now_ms()
         blk = gpt2_block_bwd(xi, ps[base + 0], ps[base + 1], ps[base + 2],
                              ps[base + 3], ps[base + 4], ps[base + 5],
                              ps[base + 6], ps[base + 7], ps[base + 8],
                              ps[base + 9], ps[base + 10], ps[base + 11],
-                             gy, 1, gflatb.data, offs12)
+                             gy, 1, gflatb.data, offs12, s_r, s_a, s_m)
         t6 = now_ms()
         b_ln = _mn(b_ln, t3 - t2)
         b_att = _mn(b_att, t4 - t3)

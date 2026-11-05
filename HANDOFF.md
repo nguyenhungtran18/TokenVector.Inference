@@ -4284,3 +4284,67 @@ trong block), không phải trong kernel.
 `tv/tests/_mb1024.tkv` → `out/mb1024.exe`: 7 op của `mlp_bwd` + đối chiếu hàm thật, chạy
 được ở mọi seq (`_seq_cfg.txt`), in cả GEMM/non-GEMM. Lệnh:
 `TKV_GEMM_THREADS=1 dotnet out/mb1024.exe` (không đặt env = 14 luồng auto).
+
+## §0.67 SỬA LẦN HAI: `block_bwd` PRODUCTION = 1421 ms, CEREMONY ≈ 0 — THAY §0.65/§0.66
+
+Hai bản trước đo `block_bwd` trên **đường sai**, nên mọi số của block phải thay:
+
+1. **§0.65** gọi `gpt2_mlp_bwd` / `gpt2_attention_bwd` / `gpt2_layernorm_bwd` **không có
+   `gflat` + offsets** ⇒ đo nhánh trả-Tensor, không phải nhánh production ghi vào `gflat`.
+2. **§0.66** gọi `gpt2_block_bwd` **không có `save_r/save_a/save_m`** ⇒ block tự tính lại
+   `gpt2_attention` fwd + 2 lần `gpt2_layernorm` fwd (production luôn truyền 3 tensor này từ
+   `saves[3+N+li]`, `saves[3+2N+li]`, `saves[3+3N+li]`). Đó là nguồn của "156 ms ceremony".
+
+Probe `_bd1024` đã sửa cả hai (dùng `gpt2_forward_saved` + truyền đủ 3 saves + `gflat`).
+
+### 1. Số đúng — seq1024, 1 luồng, production
+
+| vùng | ms | % của block |
+|---|---:|---:|
+| `gpt2_mlp_bwd` (có gflat) | **781** | **55.0%** |
+| `gpt2_attention_bwd` (có gflat) | **625** | **44.0%** |
+| `gpt2_layernorm_bwd` ×2 | 31 | 2.2% |
+| Σ 3 vùng | 1437 | |
+| **`gpt2_block_bwd` (production)** | **1421** | |
+| ceremony (block − Σ) | **≈ −16 (nhiễu) ⇒ 0** | **0%** |
+| **12 × block** | **17052** | |
+
+**Ceremony không tồn tại.** Ba vòng `n*h = 786 432` phần tử + 2 `t_zeros` đo riêng
+(`_cer1024.tkv`) đều **dưới 1 quantum 15.6 ms**, tức < 16 ms cho cả 3 vòng. Mục "C: ceremony
+1.9 s" trong §0.66 là **sản phẩm của phép đo sai đường** — huỷ bỏ, không có gì để cắt ở đó.
+
+### 2. Sổ cái đúng của 1 bước (seq1024, 1 luồng, tổng 34.3 s)
+
+| mục | ms | % | GEMM bên trong |
+|---|---:|---:|---|
+| fwd 12 block (+loss riêng 109) | 8844 | 26% | 212 GF ⇒ ~6300 (71%) |
+| bwd 12 block | **17052** | 50% | mlp 92% + attn ~53% ⇒ ~12600 |
+| ├ `mlp_bwd` | 9372 | 27% | 92% (đo trực tiếp, §0.66) |
+| ├ `attention_bwd` | **7500** | **22%** | ~53% ⇒ non-GEMM **~3500** |
+| └ `layernorm_bwd` | 372 | 1% | 0 |
+| **lm-head + `op_embed_bwd`** | **7230** | **21%** | 158 GF ⇒ ~4700, non-GEMM **~2530** |
+| `opt.step` + copy-back + loss | 1218 | 3.5% | 0 |
+
+⇒ tổng GEMM ≈ **23.6 s = 69%** khớp với §0.66 mục 2 (71%). Ở 14 luồng, GEMM scale ~3.1× ⇒
+GEMM ≈ 7.6 s, non-GEMM ≈ 9.1 s (55%).
+
+### 3. Hai mục non-GEMM lớn nhất (đo được, không còn mục nào bị đếm sai)
+
+| # | mục | 1 luồng | 14 luồng | ghi chú |
+|---|---|---:|---:|---|
+| **A** | `attention_bwd` non-GEMM | ~3.5 s | **~3.5 s** (không scale) | 44% của block |
+| **B** | lm-head + `op_embed_bwd` non-GEMM | ~2.5 s | ~2.5 s | 21% của bước |
+| C | GEMM ở 46% đỉnh + scale 3.1× | 23.6 s | 7.6 s | trần −2.4 s |
+| D | `opt.step` + copy-back | 1.1 s | 1.1 s | trần −0.35 s |
+
+**A là mục lớn nhất chưa ai mở.** `attention_bwd` 625 ms/block chỉ có ~333 ms là GEMM (11.2 GF ở
+33.6 GFLOP/s); ~292 ms còn lại × 12 = 3.5 s là softmax_bwd / mask / transpose / vòng head —
+**chưa có probe bên trong**, và đây là việc tiếp theo.
+
+### 4. Bài học phương pháp (ghi lại để không lặp)
+
+Hai lần liên tiếp, số đo "đúng định dạng" nhưng **sai đường gọi** đã tạo ra một nút thắt
+không tồn tại (ceremony 1.9 s) và một tỷ lệ sai (non-GEMM 82%). Quy tắc từ nay: **trước khi
+tin một phép đo vùng, phải đối chiếu tổng các vùng với hàm bao và kiểm rằng mọi tham số
+(`gflat`, `offs`, `save_*`) trùng với call site production** — sai số dư ở đây chính là dấu
+hiệu đường gọi lệch, không phải "overhead".
