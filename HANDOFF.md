@@ -4348,3 +4348,78 @@ không tồn tại (ceremony 1.9 s) và một tỷ lệ sai (non-GEMM 82%). Quy 
 tin một phép đo vùng, phải đối chiếu tổng các vùng với hàm bao và kiểm rằng mọi tham số
 (`gflat`, `offs`, `save_*`) trùng với call site production** — sai số dư ở đây chính là dấu
 hiệu đường gọi lệch, không phải "overhead".
+
+## §0.68 NÚT THẮT SỐ 1 Ở CẤU HÌNH ĐÍCH: `attention_bwd` = 4116 ms, 74 GEMM SIÊU NHỎ/BLOCK
+
+Số đo §0.67 (đường production, có `gflat` + saves) ở cả 2 cấu hình:
+
+| vùng / block | 1 luồng | 14 luồng | scale |
+|---|---:|---:|---:|
+| `mlp_bwd` | 781 | 250 | **3.12×** |
+| `attention_bwd` | 594–609 | **343** | **1.75×** ← kém nhất |
+| `layernorm_bwd` ×2 | 31 | 32 | 1.0× |
+| **`block_bwd`** | 1421 | **641** | 2.22× |
+| **12 × block** | 17052 | **7692** | |
+
+Sổ cái 14 luồng (bước 14.3 s, khớp `mode 2`):
+
+| mục | ms | % |
+|---|---:|---:|
+| **`attention_bwd` × 12** | **4116** | **29%** ← lớn nhất |
+| `mlp_bwd` × 12 | 3000 | 21% |
+| fwd × 12 block | 3000 | 21% |
+| lm-head + `op_embed_bwd` | 2464 | 17% |
+| `opt.step` + copy-back + loss | 1125 | 8% |
+| `layernorm_bwd` × 24 | 384 | 3% |
+
+### Nguyên nhân đo được, không suy đoán
+
+`attention_bwd` tại `n = 1024` đi nhánh 12 worker (`n >= 128`), mỗi head một worker. Trong
+mỗi head có **6 lời gọi GEMM**: `S = Q·Kᵀ`, `ctx = P·V`, `dp = dctx·V`, `dq = ds·K`,
+`dkT = Qᵀ·ds`, `dvT = dctxᵀ·P`; cộng `gpt2_linear` (qkv) + `smm_dot` (dctxT) ở đầu hàm
+⇒ **≈ 74 lời gọi GEMM cho một `attention_bwd`**, mỗi lời gọi là `1024×1024×64` = 134 MFLOP.
+
+| | số |
+|---|---|
+| công việc GEMM thực của 1 block | 11.2 GF |
+| ở 156 GFLOP/s (14 luồng, đo standalone) | 0.86 ms / lời gọi |
+| **thời gian thực tế ở 14 luồng** | **4.6 ms / lời gọi** |
+| ⇒ phần dôi ra | **81%** |
+
+Hai nguyên nhân cộng lại:
+1. **`g_gemm_lock` serialize toàn bộ**: 12 worker gọi GEMM đồng thời nhưng phải xếp hàng
+   trên một lock toàn cục + một mảng `g_job` toàn cục (`tkv_run_mt_rect` giữ lock suốt
+   thời gian tính).
+2. **Mỗi lời gọi quá nhỏ cho 14 luồng**: 134 MFLOP không đủ bù chi phí `SetEvent` /
+   `WaitForMultipleObjects` / chia lưới.
+
+Đo phụ trợ: `exp()` 22.2 ns ⇒ softmax causal 6.3M exp = 140 ms ở 1 luồng, tức **không** phải
+thủ phạm (và 12 worker đã làm song song). Vòng cộng 6.3M phần tử **< 15.6 ms** (2.5 ns/ptu)
+⇒ loop `.tkv` không chậm; toàn bộ vấn đề là **chi phí mỗi lời gọi GEMM**.
+
+### Trần lợi nhuận
+
+Nếu loại bỏ 81% overhead đó: `attention_bwd` 343 → ~80–120 ms/block ⇒ **4116 → ~1200 ms**, tức
+**−2.9 s = −20% bước**, đưa 14.3 s xuống ~11.4 s. Đây là lever lớn nhất từng đo được trong
+toàn bộ §0.64–§0.68, và nó **không** đòi viết lại kernel — chỉ cần bỏ rào serialize.
+
+Hai cách, đều phía native (chi tiết ở `docs/COMPILER_TEAM_REQUEST11.md`):
+- **(a) job slot theo thread** thay cho `g_job`/`g_gemm_lock` toàn cục → 12 worker chạy GEMM
+  của mình song song thật; hoặc
+- **(b) builtin GEMM theo lô** `smm_dot_batch(B, …)`: 12 head × cùng shape → 6 lời gọi thay
+  vì 72, mỗi lời gọi đủ lớn để 14 luồng có nghĩa.
+
+Cách (a) rẻ hơn và không đổi chữ ký `.tkv` nào.
+
+### Cập nhật bảng ưu tiên (14 luồng, bước 14.3 s)
+
+| # | mục | ms | % | hành động |
+|---|---:|---:|---|
+| **1** | overhead 74 GEMM nhỏ trong `attention_bwd` | **2920** | **20%** | REQUEST #11 (a) hoặc (b) |
+| 2 | GEMM 46% đỉnh + scale 3.1× | 7600 | 53% | kernel asm (team native) |
+| 3 | lm-head + `op_embed_bwd` | 2464 | 17% | chưa có probe bên trong |
+| 4 | `opt.step` + copy-back | 1125 | 8% | −350 ms (thread `adamw_step` + builtin copy) |
+| 5 | ceremony / `layernorm_bwd` | 384 | 3% | **không có gì để cắt** (đã đo, §0.67) |
+
+**Ưu tiên 1 vì nó vừa lớn nhất vừa không cần viết kernel.** Nó cũng giải thích vì sao
+`block_bwd` chỉ scale 2.22× trong khi `mlp_bwd` scale 3.12× và GEMM standalone scale 4.52×.
