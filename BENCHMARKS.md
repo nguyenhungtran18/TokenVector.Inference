@@ -60,3 +60,64 @@ When you run the suite, append a dated table here with:
 Until a fresh run is recorded, leave result cells empty rather than copying historical
 figures. Same rule for the hardcoded ORT/Torch constants in the source: they are
 literals in the file, not measurements from this machine.
+
+
+## 4. Kết quả H4 (2026-11-04) — TokenVector vs PyTorch (best-of-3)
+
+Máy: Windows, .NET 10, PyTorch 2.14.0+cpu (14 thread). TokenVector: `out/bseq_h4c.exe` (H4a+H4c), loss exact.
+
+| seq | TKV full step (ms) | Torch T=1 (ms) | Torch T=14 (ms) | TKV/Torch T=1 | TKV/Torch T=14 |
+|---|---:|---:|---:|---:|---:|
+| 8 | 3750 | 1405.4 | 1069.9 | 2.67× | 3.50× |
+| 256 | 5734 | 4373.5 | 1604.4 | 1.31× | 3.57× |
+| 1024 | 16203 | 15164.3 | 4140.0 | 1.07× | 3.91× |
+
+Ghi chú:
+- H4a: hoist 6 buffer m6 lên cấp step (bỏ alloc/free mỗi bước).
+- H4c: op_embed_bwd dùng counting sort thay bubble sort.
+- Gate 135/135 + grad_tests PASS.
+- H3 threading: 8T nhanh nhất (15625 ms seq1024) nhưng loss lệch 13.442913–13.442917 (rủi ro exactness).
+- H4b/H2: chờ compiler/native team (`docs/COMPILER_TEAM_REQUEST9.md`).
+
+
+## 5. Cách đo (TokenVector vs PyTorch)
+
+### 5.1 TokenVector (bseq)
+
+Compiler: `D:\TokenVector\Release\dist\tkvc-tv.exe`
+Build:
+```powershell
+& "D:\TokenVector\Release\dist\tkvc-tv.exe" tv/tests/simd_bench_124m_seq.tkv out/bseq_h4c.exe main
+```
+Runtime config: tạo `out/bseq_h4c.runtimeconfig.json` (net10.0) nếu thiếu.
+
+Chạy 1 cấu hình:
+```powershell
+Set-Content -Path tv/tests/_seq_cfg.txt -Value "1024`n1`n1"   # seq / mode(0=fwd+bwd,1=full step) / steps
+dotnet out/bseq_h4c.exe
+```
+Best-of-3: lặp 3 lần, lấy min. Log pattern: `BSEQ full-step simd seq=... ms=...`.
+
+### 5.1b Kiểm nền tảng máy trước khi đo (2026-11-05)
+
+Trước mọi kết luận "torch nhanh hơn vì ISA", chạy 2 probe này:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/simd_native/run_cpuid.ps1    # AVX2/AVX-512, XCR0
+powershell -ExecutionPolicy Bypass -File tools/simd_native/run_avx512.ps1   # 0xC000001D = không dùng được
+```
+
+Máy hiện tại: **AVX2 + FMA, KHÔNG AVX-512** (`AVX512F=0`, `/arch:AVX512` → illegal instruction),
+14 logical = **7 core vật lý + SMT**. Đỉnh đo được: **75.5 GFLOP/s 1 luồng**, **~515 GFLOP/s 14 luồng**
+(torch 76.2/476.6; numpy OpenBLAS 75.7). tkv GEMM đạt 34.5 GFLOP/s (46% đỉnh) ở 1 luồng và scale 4.52×.
+Micro-kernel: `tools/simd_native/bench_micro.c` (4 biến thể, có kiểm bit-exact bằng `memcmp`).
+
+### 5.2 PyTorch
+
+```powershell
+python tools/bench_torch.py e <seq>      # phase breakdown T=1 và T=14
+python tools/bench_torch.py d <seq>      # fwd+bwd và full step
+```
+So sánh apple-to-apple:
+- TKV mode 0 (fwd+bwd) ↔ Torch `fwd(+CE)+bwd`.
+- TKV mode 1 (full step) ↔ Torch `TOTAL`.

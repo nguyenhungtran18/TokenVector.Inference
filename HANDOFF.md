@@ -3561,3 +3561,514 @@ còn nợ §0.58 §5 (48 lệnh `TkvInt::`). `_p6ms` cùng phiên vẫn xanh: **
 **Trạng thái:** 0 dòng code `.tkv`/C đổi trong lần đo này — chỉ build lại probe + chạy.
 Log: `out/h1_tkv_m0.log`, `out/h1_tkv_m1.log`, `out/h1_torch_e.log`, `out/h1_torch_d.log`,
 `out/h1_bd2.log`, `out/h1_p6ms.log`, `out/h1_am.log`.
+
+---
+
+## §0.60 REQUEST #9 — H2 `block_bwd` HẾT `TkvInt::` (48→0) + H4b ZERO-COPY FUSED: FULL-STEP −3.6/−5.1/−3.8%, LOSS EXACT (2026-11-01)
+
+Chuyển từ compiler team: [Release/docs/e_handoff/2026-11-01-request9-h2-block-bwd-va-h4b-zero-copy.md]
+(`D:/TokenVector/Release/docs/e_handoff/`). Compiler `tkvc-tv.exe` self-host 01/11 (`IL_IDENTICAL`),
+native DLL **không đổi** (tái dùng entry `lmhead_bwd_fused`).
+
+### 1. Đã làm
+
+| mục | đổi | bằng chứng IL |
+|---|---|---|
+| **A.1** dọn `TkvInt::` `gpt2_block_bwd` | `o_l1g…o_b2: "i64" = -1`, `o_* = offs[k]`, `n/h: "i64"` | **48 → 0** lệnh trong cả method; 4 vòng vector vẫn nổ (8 `_vstart`) |
+| **A.3** bỏ double-load `gy` | `gpt2_layernorm_bwd`: local lane `gyv: "f32" = gy.data[base+j]` dùng cho `gg` + 3 chỗ còn lại | 4 vòng vector (`F6/F7/F9/F10`), 0 `TkvInt::`, bit-exact |
+| **B** zero-copy fused | compiler: builtin `lmhead_bwd_fused_list(list[f32]×5, ids, B,S,E,V,scale)` + wrapper IL pin `_items`; repo: `gpt2_backward` m6 gọi thẳng `.data` | `gpt2_backward`: `F32CopyTo` 3 → **0**, `F32CopyFrom` 2 → **0**, `LmheadBwdListM` 0 → 1 |
+
+**Vì sao 48 lệnh đó không nằm trong vòng:** 24 lệnh = 12 × (`FromI64`+`Neg`) cho `o_* = -1`;
+12 lệnh = `FromI64` khi gán `offs[k]`; 12 lệnh = `ToI64` ở biên `range(n*h)` của 4 vòng.
+Tất cả ở preheader — thân vòng đã 0 từ #8. Đây là lý do **bucket không đổi** (xem §2).
+
+### 2. Số đo (best-of-3 xen kẽ từng lượt, cùng phiên, `.NET 10.0.13`)
+
+`out/r9_ab3.sh`: `out/bseq_p9_n10.dll` (trước #9) ↔ `out/r9_bseq_n10.dll` (sau #9):
+
+| seq | trước #9 | sau #9 | Δ | loss chain |
+|---|---|---|---|---|
+| 8 | 3875 | **3735** | **−3.6%** | `10.572291 -> 7.0119185` EXACT |
+| 256 | 5828 | **5531** | **−5.1%** | `10.756927 -> 11.807267` EXACT |
+| 1024 | 16515 | **15891** | **−3.8%** | `10.760399 -> 13.442915` EXACT |
+
+Torch **fresh cùng phiên** (tier E, `T=14`, `out/r9_torch_e.log`): **1061.6 / 1571.7 / 4201.4 ms**
+→ tỉ lệ **3.52× / 3.52× / 3.78×** (so 1T: 1366.1 / 4350.3 / 15038.0 → 2.73× / 1.27× / 1.06×).
+
+Bucket `12 × block_bwd` (`simd_probe_am`, batch 8): **`BLOCK_BWD` 130.875 ms/call → 1570.5 ms**
+(`ATTENTION_BWD` 47 + `MLP_BWD` 78 = **125 ms = 95% bucket**; glue `block_bwd` chỉ ~6 ms).
+
+### 3. Kiểm chứng
+
+| kiểm | kết quả |
+|---|---|
+| `tools/gate_f32.sh` | **135/135, `TOTAL fails=0`, exit 0** (`out/r9_gate.log`) |
+| Trainer | **15/15 `fails=0`** (resume bit-exact) |
+| Probe `_p6ms` (2 rep) | **A 4.44/4.12× · B 5.98/6.09× · C 5.47/5.06×**, `bit_bad=0`, `fails=0` |
+| Loss chain 9 lượt | **EXACT 9/9** |
+| Self-host compiler | **IL_IDENTICAL** |
+
+### 4. Hai mục CỦA REQUEST KHÔNG LÀM — đo trước, báo số
+
+- **A.2 hoist vòng `mu` sang byref `_items`:** vòng `mu` bị chặn bởi **chuỗi `vaddsd` tuần tự
+  (3.35 cycle/ptu)**, không phải `get_Item`; bỏ bounds-check chỉ bỏ 6 lệnh **ngoài critical path**
+  ⇒ 0 gain. Muốn nhanh hơn phải re-associate = đổi thứ tự cộng = **cấm** (loss EXACT).
+- **LICM `m1/m2/rstd`:** còn **1 `vbroadcastsd`/vòng**, và A đã 4.12–4.44× (ngưỡng ≥4×).
+- ⇒ **Bucket 130.875 ms/call không phải ceremony.** Muốn cắt 67% như request phải cắt trong
+  `gpt2_attention_bwd` (47) + `gpt2_mlp_bwd` (78) — đề xuất request #10 kèm phân rã pha như `_am3`.
+
+### 5. Trạng thái git
+
+`tv/training/gpt2_ref.tkv` + 4 mirror (`tv/training/tv.training.gpt2_ref*.tkv`,
+`tv/tests/tv.training.gpt2_ref*.tkv`): 5 file, +138/−214. Probe/log mới trong `out/` (gitignore):
+`r9_bseq*`, `r9_am*`, `r9_bd2*`, `r9_p6ms*`, `r9_torch_e.log`, `r9_ab3.log`, `r9_gate.log`.
+
+---
+
+## §0.61 REQUEST #10 — ASK A `linear_dw_fused` TRUE-K GHI THẲNG `gflat`: BUCKET 1570→960 ms (−39%), SEQ8 −17.9%, LOSS EXACT (2026-11-01)
+
+Chuyển từ compiler team: [Release/docs/e_handoff/2026-11-01-request10-linear-dw-fused-true-k.md]
+(`D:/TokenVector/Release/docs/e_handoff/`). Compiler `tkvc-tv.exe` self-host 01/11 (`IL_IDENTICAL`);
+native DLL **có đổi** — thêm TU mới `tkv_linear_dw.c` (`/fp:precise`) + entry `LinearDwFused`.
+
+### 1. Đã làm (Ask A — builtin `linear_dw_fused`)
+
+```tkv
+linear_dw_fused(x, gy, gdw, gdw_off, n, in_d, out_d) -> i32
+```
+`x`/`gy`/`gdw` = `list[f32]` (`Tensor.data`) — pin `_items` **tại chỗ, không copy**;
+`gdw[gdw_off + i*out_d + c] += Σ_p x[p*in_d + i]·gy[p*out_d + c]`. `rc != 0` → **fallback**
+đường `.tkv` cũ (`-1/-2/-5/-6` shape/biên, `-7` `out_d % 16` / `in_d % 4` lệch, **`-8` `n > 64`**).
+
+**Wire:** `gpt2_linear_bwd` + `gpt2_mlp_bwd` (`dw2`) gọi thẳng **khi `goff/o_w2 ≥ 0`**
+(đường train thật luôn truyền `gflat`); bỏ `smm_fwd_at` + vong copy `dw → gflat`.
+`goff < 0` giữ nguyên 100% (dw phải trả Tensor).
+
+**Vì sao nhanh:** `dw` là GEMM contraction **`k = n = 8`**, nhưng `smm_fwd_at` vẫn build tile
+`T×T = 64×64` bằng **code interpreted** cho từng ô (`dw2` = 576 ô × 12K ghi = **7.1M phep ghi
+interpreted**) rồi mới `simd_gemm`. O `LinearDwFused` **tile biến mất**. Đo trong C (best-of-5):
+`dw2` 6.0 → **1.0 ms** (6.0×) · `dwqkv` 4.4 → **0.85** (5.3×) · `dw1` 6.2 → **1.5 ms** (4.2×).
+
+### 2. Bit-exact — 2 cạm bẫy đã gặp (đọc trước khi sửa kernel)
+
+Chuỗi `.tkv` cần tái hiện **nguyên vẹn**:
+`dw = 0 + Ct(p0=0) + Ct(p0=T) + …` (cộng dồn vào Tensor dw **từ 0**) rồi
+`gflat[goff+k] = gflat[goff+k] + dw[k]` (**một** phep cong). Với mỗi `Ct`, `micro_f32` (4×16)
+**không gộp cột** — mỗi *lane* = một cột, vòng `p` **tăng dần FMA**; `tkv_k_eff` rút `k` xuống
+đúng `n` khi `n < 64`.
+
+- **Cạm bẫy 1 — `/fp:fast` tái liên kết.** MSVC đổi thứ tự `acc = acc + blk` **và gộp cả
+  `load(gdw)` vào cây FMA** → kết quả **phụ thuộc giá trị đích** (cùng input: lần 1 `3c1d4954`,
+  lần 2 cộng thêm `3c1d4958`). `#pragma float_control(precise, on)` **bị bỏ qua** trong `/fp:fast`.
+  Giải pháp: tách `tkv_linear_dw.c` thành **TU riêng `/fp:precise`**; kernel cũ giữ `/fp:fast`.
+- **Cạm bẫy 2 — cộng p-tile thẳng vào `gdw`.** `gdw += acc` **sau mỗi p-tile** khác chuỗi `.tkv`
+  khi `n > 64`. Sửa: gộp p-tile vào **một** giá trị trong thanh ghi, `gdw += v` đúng **một lần**.
+  Hệ quả tất yếu: **`n > 64` → `rc = -8`** (fallback). Mọi shape thật GPT-2 đều `k = n = 8`.
+
+**Chứng minh:** probe mới `tv/tests/_am5.tkv` — `gflat` **điền sẵn giá trị ≠ 0** (mô phỏng gradient
+đang chạy), so `smm_fwd_at` + copy vs `linear_dw_fused`: **`bit_bad=0` trên 4 shape thật**
+(`dw2` 3072×768 · `dw1` 768×3072 · `dwqkv` 768×2304 · `dx2` 2304×768); `n=128/200` → `rc=-8`;
+`out_d=40` → `rc=-7` → fallback. IL: `TkvSimd::LinearDwFusedM(List<f32>×3, goff, n, in_d, out_d)`
+pin `_items` (`ldelema float32` + `float32& pinned`), kiểm độ dài **trước** khi pin; 2 call site
+đúng 2 method production (`gpt2_linear_bwd`, `gpt2_mlp_bwd`). *Lưu ý IL: `off` là reserved token
+→ phải đặt tên `goff`.*
+
+### 3. Số đo
+
+**Bucket — nhưng PHẢI đo biến thể CÓ `gflat`:** probe `simd_probe_am` gọi `gpt2_block_bwd`
+**không truyền `gflat`** → `goff = -1` → `dw` trả Tensor → native **không chạy**. Probe đã mở
+thêm biến thể `BLOCK_BWD_FLAT` (truyền `gflat` + `offs`):
+
+| biến thể | trước #10 | sau #10 |
+|---|---|---|
+| `BLOCK_BWD` không `gflat` (`goff=-1`) | 130.875 | 134.875 (không đổi — native không chạy) |
+| **`BLOCK_BWD_FLAT` (production, `goff>=0`)** | 130.875 | **80.0 ms** ✅ (ngưỡng ≤80) |
+| **Bucket 12 ×** | 1570.5 ms | **960.0 ms** ✅ (ngưỡng ≤960, **−39%**) |
+
+**Full-step 3 seq (best-of-3 xen kẽ từng lượt, cùng phiên, .NET 10.0.13)** —
+`out/r10_ab3.sh`: `r9_bseq` (sau #9) ↔ `r10_bseq` (sau #10):
+
+| seq | sau #9 | sau #10 | Δ | loss |
+|---|---|---|---|---|
+| 8 | 3656 | **3000** | **−17.9%** | EXACT |
+| 256 | 5516 | **5500** | −0.3% | EXACT |
+| 1024 | 15219 | **15375** | +1.0% (nhiễu) | EXACT |
+
+Torch **fresh cùng phiên** (tier E, `T=14`, `out/r10_torch_e.log`): **1000.1 / 1570.8 / 4130.7 ms**
+→ tỉ lệ **3.00× / 3.50× / 3.72×** (so #9: 3.52× / 3.52× / 3.78× — seq8 cải thiện rõ).
+
+*Gain gần như chỉ ở **seq8** — nơi `dw` (k=8, output 2.36M) chiếm tỉ trọng lớn. Ở seq1024,
+`dw` là `O(n·h·h)` còn GEMM lớn (`k ≥ 256`, đã packed native) mới chủ đạo → `linear_dw_fused`
+gần như vô hại.*
+
+### 4. Kiểm chứng
+
+| kiểm | kết quả |
+|---|---|
+| `tools/gate_f32.sh` | **135/135, `TOTAL fails=0`, exit 0** |
+| Trainer | **15/15 `fails=0`** (resume bit-exact) |
+| Probe `_p6ms` (2 rep) | **A 4.49× · B 5.51× · C 5.14×**, `bit_bad=0`, `fails=0` |
+| Loss chain 9 lượt | **EXACT 9/9** |
+| Self-host compiler | **IL_IDENTICAL** |
+
+### 5. Ask B / Ask C — CHƯA LÀM (báo số)
+
+- **Ask B `linear_bwd_fused` (dx+dw+db):** chưa làm. Còn `dx = smm_dot(gy, w, n, in_d, out_d)`
+  **12.69 ms (w1) / 5.81 ms (qkv)**. Hợp đồng `smm_dot` (`trans_b=1`) **khác** `dw` → đề nghị
+  tách `linear_dx_fused` **riêng**, không nhét chung (giữ hợp đồng đã bit-exact).
+- **Ask C:** `dw_proj` (5.75 ms) đi `smm_fwd` (`trans_a=0`) — `LinearDwFused` **chưa cover**;
+  12 head block (4.39 ms) + 5 `t_zeros`/head là **repo-side** (cache scratch), ngoài phạm vi compiler.
+- **Gợi ý:** (1) mở `trans_a=0` trong `LinearDwFused` (mở `dw_proj`); (2) `n > 64` chỉ khả thi
+  nếu chấp nhận không bit-exact hoặc sinh vào scratch rồi cộng 1 lần; (3) `linear_dx_fused` riêng.
+
+### 6. Trạng thái git
+
+Compiler: `simd_feature.tkv` + `file_io.tkv` (builtin), `tkv_linear_dw.c` (mới) + `build.ps1`
+(2 TU), `test_dw.c`/`test_dbg*.c` (test bit-check). Repo: `tv/training/gpt2_ref.tkv` +
+`tv/training/tv.training.gpt2_ref124.tkv` + `tv/tests/tv.training.gpt2_ref124.tkv` (3 file
+production; 2 bản `gpt2_ref` dotted là bản cũ **không** có `smm_fwd_at` — giữ nguyên).
+Probe mới `tv/tests/_am5.tkv`; `simd_probe_am.tkv` + biến thể `BLOCK_BWD_FLAT`.
+Log trong `out/` (gitignore): `r10_ab_*`, `r10_torch_e.log`, `r10_gate.log`.
+
+---
+
+## §0.62 REQUEST #10 ASK C.1 — `dw_proj` BỎ `smm_transpose`, DÙNG `trans_a=1`: BUCKET 960→844.5 ms (2026-11-01)
+
+Tiếp §0.61. Chi tiết: `Release/docs/e_handoff/2026-11-01-request10-linear-dw-fused-true-k.md` **§7**.
+**Không đổi native, không đổi compiler** — đây là thay đổi `.tkv` thuần (3 file production).
+
+### 1. Phát hiện thay đổi hướng làm
+
+Request #10 (Ask C.1) đề nghị **mở `trans_a=0`** trong `LinearDwFused` để cover `dw_proj`.
+Đọc code thật thì **không cần**: `dw_proj` hiện làm
+
+```tkv
+ctxTt = smm_transpose(ctxT, n, h)     # ctxT da luu [n hang][h cot] -> ctxTt la [h][n]
+dwG   = smm_fwd(ctxTt, gout, h, h, n) # trans_a = 0
+```
+
+`ctxT` **đã** lưu `[n hang][h cot]` — chính là layout `trans_a=1` mà builtin hiện có đọc thẳng
+qua `_tile_a_at_w`. Vậy chỉ cần **bỏ phép transpose trung gian** và truyền `ctxT` thẳng vào
+`linear_dw_fused`. Đây đúng mẫu **P5.4** đã làm với `gpt2_linear_bwd` (đã `maxdiff 0.0`).
+Chỉ mở `trans_a=0` thì phải thêm tham số + nhánh kernel mới **và vẫn phải bỏ transpose** —
+làm hai lần không ích gì.
+
+### 2. Bẫy bit-exact — fallback KHÔNG được là `smm_fwd_at`
+
+Probe `_am5._check_proj` (so `smm_fwd_at(ctxT)` vs `smm_fwd(smm_transpose(ctxT))`):
+
+| n | `smm_fwd_at` vs đường cũ | `linear_dw_fused` vs đường cũ |
+|---|---|---|
+| **8** | **`bad=0`** ✅ | **`bad=0`** ✅ |
+| 256 | **`bad=274384`** ❌ | `rc=-8` → fallback |
+| 1024 | lệch | `rc=-8` → fallback |
+
+**Lý do:** `_smm_core` (`smm_fwd`) với `k ≥ 256` đi **packed native** (`_smm_pk`), còn
+`_p58_core` (`smm_fwd_at`) **luôn** đi tile → **hai thứ tự cộng khác nhau**. ⇒ Khi native từ chối
+(`n > 64`), fallback **phải là đường cũ nguyên vẹn** (`smm_transpose` + `smm_fwd`),
+**không được** thay bằng `smm_fwd_at` — nếu không mất loss EXACT ở seq256/1024.
+
+### 3. Wire (3 file production)
+
+```tkv
+dwG = t_zeros([0])
+l10p = -1
+if o_proj >= 0:
+    _ct10 = ctxT.data ; _go10 = gout.data ; _gf10 = gflat
+    l10p = linear_dw_fused(_ct10, _go10, _gf10, o_proj, n, h, h)
+if l10p != 0:
+    ctxTt = smm_transpose(ctxT, n, h)      # fallback NGUYEN VEN
+    dwG = smm_fwd(ctxTt, gout, h, h, n)
+```
+Vòng copy `dwG → gflat` bọc trong `if l10p != 0:` (native đã ghi thẳng khi `rc = 0`).
+`gpt2_attention_bwd` giờ có **4 call site** `LinearDwFusedM` (dwqkv, dw1, dw2, **dw_proj**).
+
+### 4. Số đo (cùng phiên, best-of-3 xen kẽ)
+
+| mục | sau #10 Ask A | **sau Ask C.1** | Δ |
+|---|---|---|---|
+| `BLOCK_BWD_FLAT` (production) | 80.0 ms | **70.375 ms** | **−12.0%** |
+| Bucket `12 × block_bwd` | 960.0 ms | **844.5 ms** | −12.0% |
+| full-step seq8 | 3000 | **2922** | **−2.6%** |
+| full-step seq256 | 5531 | 5594 | +1.1% (nhiễu) |
+| full-step seq1024 | 16282 | **15969** | −1.9% |
+
+Loss **EXACT 6/6** (`10.572291→7.0119185` · `10.756927→11.807267` · `10.760399→13.442915`).
+Torch fresh cùng phiên (tier E `T=14`, `out/r11_torch_e.log`): **1060.8 / 1622.9 / 4209.6 ms**
+→ tỉ lệ **2.75× / 3.45× / 3.79×**.
+
+**Tích luỹ baseline H1 → nay:**
+
+| mục | H1 baseline | #10 Ask A | **Ask C.1** |
+|---|---|---|---|
+| Bucket `12 × block_bwd` | 2244 ms | 960.0 | **844.5 (−62.4%)** |
+| full-step seq8 | 4141 | 3000 | **2922 (−29.4%)** |
+| full-step seq256 | 6015 | 5531 | 5594 |
+| full-step seq1024 | 16094 | 16282 | 15969 |
+
+### 5. Kiểm chứng
+
+| kiểm | kết quả |
+|---|---|
+| `tools/gate_f32.sh` | **135/135, `TOTAL fails=0`, exit 0** |
+| Trainer | **15/15 `fails=0`** |
+| Probe `_am5` | Ask A `bit_bad=0`; Ask C.1 seq8 `smm_fwd_at_bad=0 native_bad=0` |
+| Probe `_p6ms` | **A 4.21× · B 5.40× · C 5.06×**, `bit_bad=0`, `fails=0` |
+| Self-host | **IL_IDENTICAL** |
+
+### 6. Còn lại (Ask B + Ask C.2) — chưa làm, báo số
+
+- **Ask B `linear_bwd_fused`:** còn `dx = smm_dot(gy, w, n, in_d, out_d)` **12.69 ms (w1) /
+  5.81 ms (qkv)**. Hợp đồng `smm_dot` (`trans_b=1`) khác `dw` → đề nghị **tách riêng**
+  `linear_dx_fused`, không nhét chung.
+- **Ask C.2 12 head block** (4.39 ms, 5 `t_zeros`/head): **repo-side** (cache scratch), ngoài
+  phạm vi compiler.
+- **`n > 64`:** chỉ khả thi nếu chấp nhận không bit-exact, hoặc sinh `dw` vào scratch rồi cộng
+  1 lần (2 pass, vẫn nhanh hơn interpreted nhiều) — mở được seq256/1024 nhưng seq8 mới là nơi
+  có gain.
+
+---
+
+## §0.63 REQUEST #10 ASK B `linear_dx_fused` + ASK C.2 CACHE SCRATCH 12 HEAD: SEQ8 −25.8% TRONG PHIÊN, LOSS EXACT (2026-11-02)
+
+Tiếp §0.61/§0.62. Hai mục cuối của #10 (§6 «Còn lại») nay đã làm.
+
+### 1. Ask B — builtin `linear_dx_fused` (native, cùng TU với static helper)
+
+`dx = smm_dot(gy, w, m, n, k)` trong `gpt2_linear_bwd` → `_smm_full` → `SgemmFull` →
+`SgemmF32` tính **đủ 256 hàng** nhưng chỉ hàng `< m` được `_acc_f` cộng vào `dx` —
+**248/256 hàng thừa = 32× phép nhân** ở seq8 (`m=8`).
+
+- **Native `LinearDxFused`** đặt trong **cùng translation unit** `tkv_simd_native.c`,
+  gọi thẳng `full_tile_a` / `full_tile_b` / `tkv_k_eff` / `gemm_rect_f32` / `gemm_rows_f32`
+  với `i1 = m` → **bit-exact mang tính cấu trúc** (chỉ bỏ hàng mà `_acc_f` không đọc),
+  **không nhân bản code** → không có «hai nguồn sự thật» cho hợp đồng bit-exact.
+- **Builtin wiring** (đúng mẫu `linear_dw_fused`): `LinearDxFusedNative` (pinvoke) +
+  IL wrapper `LinearDxFusedM` + `compile_linear_dx_fused` + `register_expr_builtin`
+  trong `simd_feature.tkv`, + `'linear_dx_fused'` vào `_BUILTIN_LENH_DOC_LAP` (`file_io.tkv`).
+- **Hợp đồng từ chối (caller fallback `smm_dot` nguyên vẹn):** `-9 k<256` (không qua
+  `_smm_full`) · `-10 m>256` (đi `_smm_pk`) · `-11 m%4` (i-tail scalar) ·
+  **`-12 k%256`** (xem §2).
+
+**Bẫy bit-exact tìm ra bằng đo (không phải suy luận):** probe `_am6` bắt `k=300`
+(`m=200, n=96`) **lech 1264 ptu**. Tách 2 yếu tố bị confound:
+
+| arm | kết quả | kết luận |
+|---|---|---|
+| `k300-onlyA` (m=8, k=300 — p-tile le, 1 block mc) | **0** | p-tile le một mình **không** lỗi |
+| `m200-onlyB` (m=200, k=768 — nhieu block mc, p day) | **0** | nhieu block mc mot minh **khong** loi |
+| `k300-both` (m=200, n=96, k=300) | **1264** | **CA HAI cung nhau moi lech** |
+
+→ Thêm guard **`-12` khi `k % 256 != 0`** (p-tile cuối luôn đầy ⇒ luôn đi
+`gemm_rows_f32`, không bao giờ vào nhánh lệch). **Sản phẩm không bị ảnh hưởng:**
+`out_d` thật luôn ∈ {768, 2304, 3072} = bội của 256. *Không chứng minh được ⇒ không nhận*
+— đúng hợp đồng của request.
+
+**Speedup kernel (test_dx.c, best-of-5, native vs `SgemmFull`):**
+
+| shape | ref | native | x |
+|---|---|---|---|
+| m=8, n=768, k=3072 | 13.60 ms | 8.64 ms | **1.58×** |
+| m=8, n=3072, k=768 | 9.34 ms | 5.67 ms | **1.65×** |
+| m=8, n=768, k=2304 | 7.63 ms | 4.68 ms | **1.63×** |
+| m=8, n=768, k=768 | 2.56 ms | 1.57 ms | **1.63×** |
+| m=256 (không bỏ được hàng) | 15.35 ms | 15.70 ms | 0.98× (gọi thẳng `SgemmF32`, parity) |
+
+### 2. Ask C.2 — cache 5 scratch của 12 head (repo-side, thuần `.tkv`)
+
+Trong `gpt2_attention_bwd` nhánh `n < 128` (chính là seq8): mỗi head cấp
+`gQ/gK/gV/gDc` (n×hd) + `gDs` (n×n) = **5 `t_zeros` × 12 head = 60 cấp phát/lần gọi**.
+
+**Hoist ra trước vòng `for head`** — an toàn vì mỗi head **ghi đầy đủ trước khi đọc**:
+- `gQ/gK/gV/gDc`: vòng `t2 × d` ghi hết `n*hd`;
+- `gDs`: mỗi hàng `t2` ghi `u = 0..t2` rồi `0.0` cho `t2+1..n-1` → đủ `n*n`.
+
+→ không đổi **1 phép tính nào** ⇒ bit-exact. Áp cho **cả 5 mirror**
+(`tv/training/gpt2_ref.tkv` + `tv/training/tv.training.gpt2_ref{,124}.tkv` +
+`tv/tests/tv.training.gpt2_ref{,124}.tkv`).
+
+**Lưu ý phạm vi:** chỉ nhánh `n < 128`. Nhánh worker (`n ≥ 128`) mỗi worker
+đã nhận **đúng 1 head** (`hlo..hhi` = 1 head) nên hoisting ở đó là no-op.
+
+### 3. Số đo (cùng phiên 2026-11-02, best-of-3 xen kẽ, .NET 10.0.13)
+
+**A/B 1 — `bseq_h4c` (trước #10 B/C.2) vs `bseq_dx` (có B):**
+
+| seq | h4c | dx | Δ |
+|---|---|---|---|
+| 8 | 3687 | **2734** | **−25.9%** |
+| 256 | 5547 | 5359 | −3.4% |
+| 1024 | 15688 | 15828 | +0.9% (nhiễu) |
+
+**A/B 2 — `bseq_dx` vs `bseq_c2` (có B + C.2), seq8:** dx 2953 → **c2 2859 (−3.2%)**.
+
+**Số chốt (build đầy đủ A+B+C.2, best-of-3):**
+
+| seq | full-step | torch 14T (cùng phiên) | tỉ lệ |
+|---|---|---|---|
+| 8 | **2735** | 1079.6 | **2.53×** |
+| 256 | **5531** | 1598.8 | 3.46× |
+| 1024 | **16500** | 4105.2 | 4.02× |
+
+Torch tier E `T=1/14` cùng phiên: 1371.7/1079.6 · 4364.8/1598.8 · 15180.8/4105.2 ms.
+
+**Giải thích tại sao seq256/1024 đứng yên — đúng như thiết kế:**
+- seq1024: `m=1024 > 256` → native từ chối (`-10`) → fallback `smm_dot` → **không đổi**;
+  và `n=1024 ≥ 128` → đi worker → C.2 không áp dụng.
+- seq256: `m=256 = T` → không bỏ được hàng nào → gọi thẳng `SgemmF32` (parity, x0.98).
+- seq8: `m=8` → bỏ 248/256 hàng → **đây là nơi có gain**.
+
+**Lũy tích H1 → nay (số khác phiên, chỉ để nhìn hướng):** seq8 4141 → **2735 (−34.0%)**,
+seq256 6015 → 5531 (−8.0%), seq1024 16094 → 16500 (+2.5%, trong dải nhiễu).
+
+### 4. Loss EXACT
+
+Mọi lần chạy (cả A/B lẫn số chốt) in đúng 3 chuỗi chuẩn, không đổi 1 chữ số:
+
+```
+seq=8     loss=10.572291 -> 7.0119185
+seq=256   loss=10.756927 -> 11.807267
+seq=1024  loss=10.760399 -> 13.442915
+```
+
+### 5. Kiểm chứng
+
+| kiểm | kết quả |
+|---|---|
+| `tools/gate_f32.sh` | **135/135, `TOTAL fails=0`, exit 0** — chạy 2 lần (sau Ask B, sau C.2) |
+| Trainer | **15/15 `fails=0`** — chạy 2 lần |
+| Self-host `tools/vong.exe` | **IL_IDENTICAL** — 2 lần |
+| Probe `_am6.tkv` (mới) | **`TOTAL bit_bad=0`**; 4 nhánh từ chối `-9/-10/-11/-12` đúng rc |
+| `test_dx.c` (mới) | **`ALL BIT-EXACT`** — 10 shape + 4 reject |
+
+### 6. Vấn đề đã ghi nhận (không thuộc thay đổi này)
+
+Self-host thỉnh thoảng **NRE/AV ngắt quãng** khi biên dịch gop 133 file
+(`Unhandled Exception ... at TKVApp._fp_walk → fpw_try → _fp_walk`, và đôi khi
+`0xC0000005`), tỉ lệ ~1/3 lần chạy, **cùng binary + cùng nguồn**. Đã chụp stack
+bằng cách tạm thời `raise` lại exception trong `dich_mot` (đã hoàn nguyên).
+Chưa khoanh được thủ phạm — tái hiện được cả trước lẫn sau thay đổi này, nên **không
+phải regression của #10**, nhưng cần điều tra riêng (nghiện thứ tự duyệt container
+có hash ngẫu nhiên per-process).
+
+
+## §0.64 ĐO LẠI NỀN TẢNG: KHÔNG CÓ AVX-512, GEMM 59% ĐỈNH NHƯNG CHỈ CHIẾM 25%, NÚT THẮT LÀ ĐƯỜNG NON-GEMM (2026-11-05)
+
+Số đo trong **cùng một phiên**, không trộn số cũ. Mục đích: chốt lại nền tảng trước khi
+tiếp tục H4a/H4b và tránh tối ưu sai chỗ (lịch sử §0.59 và plan P3 đều đã đặt cược sai
+một lần vì suy luận thay vì đo).
+
+### 1. Máy: chỉ AVX2, KHÔNG có AVX-512 — giả thuyết "thiếu AVX-512" đã chết
+
+| kiểm | kết quả |
+|---|---|
+| `tools/simd_native/test_cpuid.c` | `GenuineIntel`, `OSXSAVE=1 AVX=1 FMA=1`, `XCR0=0x7`, `AVX2=1`, **`AVX512F=0 DQ=0 BW=0 VL=0`** |
+| `tools/simd_native/test_avx512.c` build `/arch:AVX512` | chạy → **`0xC000001D` (STATUS_ILLEGAL_INSTRUCTION)** |
+| `nproc` / `os.cpu_count()` | **14** / 28 → tiến trình bị giới hạn 14 logical = **7 core vật lý + SMT** |
+
+⇒ Mọi kế hoạch dựa trên "dùng AVX-512 như torch" đều vô hiệu. ISA đã khai thác hết.
+
+### 2. Trần thật của máy (2 BLAS độc lập, cùng shape m=1024 n=3072 k=768 = 4.83 GFLOP)
+
+| công cụ | 1 luồng | 14 luồng | scale |
+|---|---|---|---|
+| torch `F.linear` (MKL) | 63.4 ms = **76.2 GFLOP/s** | 10.1 ms = **476.6 GFLOP/s** | 6.25× |
+| numpy `a@b` (OpenBLAS, `X86_V3` = AVX2) | 63.8 ms = **75.7 GFLOP/s** | — | — |
+| 3 shape mlp (A/B/C) | 367.2 ms | 65.3 ms | 5.62× |
+
+⇒ đỉnh 1 luồng ≈ **75.5 GFLOP/s** = 32 flop/cycle @ ~2.36 GHz (đúng AVX2 FMA 2×256-bit).
+14 luồng ≈ **515 GFLOP/s**, và torch 14T đạt 476–519 = **92–100% đỉnh**. Không còn "phép thuật"
+nào của torch để đuổi theo: nó chỉ chạy đúng đỉnh máy.
+
+### 3. GEMM của tkv: 59% đỉnh, và các biến thể "đúng sách" đều KHÔNG nhanh hơn
+
+`out/gm.exe` (đường production `smm_dot`/`smm_fwd`), sweep số luồng:
+
+| TKV_GEMM_THREADS | A (ms / GFLOP/s) | MLP3 (ms) | scale |
+|---|---|---|---|
+| 1 | 140 / 34.5 | 422 | 1.00× |
+| 2 | 78 / 61.9 | 250 | 1.79× |
+| 4 | 46 / 105.0 | 170 | 3.04× |
+| 7 | 31 / **155.9** | 140 | 4.52× |
+| 14 | 31 / 155.9 | 140 | 4.52× |
+| 28 | 31 / 155.9 | 125 | 4.52× |
+
+- 1 luồng: **34.5 / 75.5 = 46%** đỉnh; bản tốt nhất trong bench là 44.3 = **59%**.
+- Thread: **4.52× trên 7 core vật lý = 65% hiệu suất**; 7T = 14T = 28T (SMT không thêm gì,
+  đúng như `tkv_nthreads` dự đoán).
+
+**Sweep `GEMM_KC`** (`out/kc_sweep.ps1`, chỉ để đo tốc độ — đổi KC làm đổi thứ tự tích lũy k
+nên KHÔNG bit-exact): 64→38.7, 128→43.9, 192→38.7, **256→44.3**, 384→44.3, 512→34.5 GFLOP/s.
+⇒ giảm số lần quét C chỉ được **+15%**, không phải 2×.
+
+**Viết lại micro-kernel** (`tools/simd_native/bench_micro.c`, đúng shape, `memcmp` xác nhận
+bit-exact với bản production):
+
+| biến thể | shape lớn | shape C nhỏ (64×64×65536) |
+|---|---|---|
+| V0 4×16 production | **43.9** | 33.6 |
+| V5 5×16 (10 accumulator) | 31.2 | 29.8 |
+| V6 6×16 (12 accumulator) | 39.6 | 35.8 |
+| V7 4×16 tăng con trỏ (bỏ `imul` per-p) | 43.1 | 33.6 |
+
+Ghi chú: `dumpbin` cho thấy MSVC sinh `movsxd`/`imul` **cho từng bước p** (tranh port 5 với
+`vbroadcastss`) — nhưng V7 sửa đúng chỗ đó cũng **không nhanh hơn**. Giả thuyết "8 chuỗi
+accumulator < latency FMA 5" cũng **sai**: tăng lên 10/12 chuỗi lại chậm hơn (spill).
+⇒ **Không có lever 2× nào trong micro-kernel ở mức chi phí hợp lý.** Trần thực tế ~1.5×
+(46% → 59% đã là bản tốt nhất đo được).
+
+### 4. Nhưng GEMM chỉ là 25% — nút thắt thật là đường non-GEMM
+
+Full step seq1024 cùng DLL, ép số luồng:
+
+| TKV_GEMM_THREADS | 1 | 2 | 4 | 7 | 14 |
+|---|---|---|---|---|---|
+| full step (ms) | **38484** | 24000 | 19203 | 17609 | **16688** |
+| scale | 1.00× | 1.60× | 2.00× | 2.19× | **2.31×** |
+
+- torch cùng phiên: 15180 (1T) → 4105 (14T) = **3.70×**.
+- ⇒ **1 luồng tkv chậm 2.53×** (38.5s vs 15.2s) và **scale chỉ 2.31× so với 3.70×**.
+
+Ước lượng khối lượng GEMM ở seq1024 (từ `_gm` + đếm layer, **đây là ước lượng, không phải
+số đo trực tiếp**): mlp 12 layer × ~4×4.8 GF ≈ 230 GF; attention+qkv+proj ≈ 180 GF; tổng
+≈ 410 GF. Ở 34.5 GFLOP/s ⇒ ≈ **11.9s trong 38.5s = 31%**. Phần còn lại ≈ **26.5s là non-GEMM**.
+Đối chiếu torch: 410 GF ở 76 GFLOP/s = 5.4s, còn **9.8s là non-GEMM**.
+⇒ **đường non-GEMM của tkv chậm 2.7× so với torch, và nó chiếm ~69% thời gian 1 luồng.**
+
+Hệ quả định lượng: nếu đưa GEMM từ 46% lên 100% đỉnh (bất khả thi, và đã chứng minh không
+có đường) thì full step 1 luồng chỉ còn 38.5 − 6.5 = 32s; ở 14 luồng impact còn nhỏ hơn
+(GEMM ~17% thời gian) ⇒ **tối ưu GEMM tối đa ~10% end-to-end. Đã đóng hướng này.**
+
+### 5. Phát hiện phụ, phải sửa trước khi tuyên bố "EXACT": loss đổi theo số luồng
+
+Cùng binary, cùng dữ liệu, chỉ đổi `TKV_GEMM_THREADS`:
+
+```
+1T  -> loss=10.760399 -> 13.442917
+7T  -> loss=10.760399 -> 13.442922
+14T -> loss=10.760399 -> 13.442913
+```
+
+⇒ threading **không deterministic** (đã thấy dấu vết ở §0.63 mục H3 nhưng nay xác nhận có
+hệ thống). "Loss EXACT" hiện chỉ đúng **trong cùng một số luồng**. Trước khi so sánh với
+PyTorch trên máy khác phải chốt số luồng hoặc tìm điểm cộng không tất định.
+
+### 6. Ưu tiên mới (thay P3/P5 cũ)
+
+| # | lever | cơ sở đo | trần lợi |
+|---|---|---|---|
+| **A** | **đường non-GEMM** (`.tkv` elementwise + `TkvInt::`, copy) | 26.5s vs torch 9.8s ở 1 luồng | **tới 2.7×** — lớn nhất |
+| **B** | thread scaling 2.31× → 3.70× | bảng §4 | 1.6× |
+| C | determinism theo số luồng | §5 | bắt buộc trước khi so máy khác |
+| D | GEMM kernel 46% → 59% | §3 | 1.1× end-to-end; **hoãn** |
+
+### 7. Tệp sinh ra trong lần đo này
+
+`tools/simd_native/test_cpuid.c` + `run_cpuid.ps1` · `test_avx512.c` + `run_avx512.ps1` ·
+`test_peak.c` + `run_peak.ps1` (lưu ý: MSVC unroll 32 + spill nên bench này **không** đại
+diện, chỉ giữ làm bằng chứng) · `bench_micro.c` + `run_bench_micro.ps1` (4 biến thể +
+chế độ PEAK + kiểm bit-exact) · `out/kc_sweep.ps1`.
+
+**Không có dòng code production nào bị đổi** trong §0.64: các biến thể kernel đều không
+nhanh hơn, nên sửa sẽ là regression. Gate 135/135 và trainer 15/15 vì vậy vẫn giữ nguyên
+giá trị từ §0.63.
