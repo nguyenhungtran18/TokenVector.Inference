@@ -95,6 +95,39 @@ def main() -> 'i32':
             b_zero = t3 - t2
         k = k + 1
 
+    # ---- tách bên TRONG opt.step(): grad_norm / copy_to_buf / adamw_step / copy_from_buf
+    gl: "list[f32]" = opt.g
+    pl: "list[f32]" = opt.p
+    b_gn = 1.0e9
+    b_c2b = 1.0e9
+    b_aws = 1.0e9
+    b_cfb = 1.0e9
+    k2 = 0
+    while k2 < 3:
+        ta = now_ms()
+        gn = opt.grad_norm()
+        tb = now_ms()
+        r2b = f32_copy_to_buf(gl, opt.pg, n)
+        tc = now_ms()
+        stw = adamw_step(opt.pp, opt.pm, opt.pv, opt.pg, n,
+                         0.0001, 0.9, 0.999, 0.00000001, 0.0001, 0.1, 0.0316228)
+        td = now_ms()
+        r3b = f32_copy_from_buf(opt.pp, pl, n)
+        te = now_ms()
+        if tb - ta < b_gn:
+            b_gn = tb - ta
+        if tc - tb < b_c2b:
+            b_c2b = tc - tb
+        if td - tc < b_aws:
+            b_aws = td - tc
+        if te - td < b_cfb:
+            b_cfb = te - td
+        k2 = k2 + 1
+    print("TL   grad_norm()   = " + str(b_gn) + " ms  (threaded 12 worker)")
+    print("TL   copy_to_buf   = " + str(b_c2b) + " ms  (496 MB)")
+    print("TL   adamw_step    = " + str(b_aws) + " ms  (native)")
+    print("TL   copy_from_buf = " + str(b_cfb) + " ms  (496 MB)")
+    print("TL   TONG_tach     = " + str(b_gn + b_c2b + b_aws + b_cfb) + " ms")
     print("TL opt.step()      = " + str(b_step) + " ms")
     print("TL copy_back 124M  = " + str(b_copy) + " ms")
     print("TL zero_grad       = " + str(b_zero) + " ms")

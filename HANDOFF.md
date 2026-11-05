@@ -4178,3 +4178,27 @@ bản sạch thì phải giữ nguyên tệp ở working tree này.
 **Độ ổn định (đo lại 3 lần, cùng phiên):** full step 14 luồng auto = 15593 / 17422 / 16672 ms
 ⇒ dùng **16672 (median)**, dải ±6%. Con số 14125 ms của một lần chạy `bseq_p2` là may mắn,
 không dùng. Tỷ lệ trong §0.65 mục 5 vì vậy giữ nguyên (bước ≈ 14.3–16.7 s, các % đổi < 2 điểm).
+
+### 7. Bên trong `opt.step()` — dự báo ở §0.65 mục 5 quá lạc quan, sửa lại
+
+`out/tail1024.exe` (probe `_tail1024.tkv`), N = 124 439 808, best-of-3:
+
+| phần | ms | ghi chú |
+|---|---:|---|
+| `grad_norm()` | 140 | **đã** thread 12 worker (`_norm_groups`) — không còn đáng cắt |
+| `f32_copy_to_buf` (496 MB) | 78 | native |
+| **`adamw_step` (native)** | **313** | **đơn luồng**, 2.5 ns/ptu |
+| `f32_copy_from_buf` (496 MB) | 78 | native |
+| **Σ đo được** | **609** | `opt.step()` đo trực tiếp = 687 |
+| copy-back `d[j]=opt.p[..]` | 125 | vòng lặp `.tkv` từng phần tử |
+| `zero_grad` | 78 | chạy thread song song với fwd nên **không** tính vào bước |
+
+**Sửa dự báo:** §0.65 mục 5 viết "cắt được −0.9 s = 6%". Sai. Cụm opt+copy+loss thực tế là
+**1.12 s**, nhưng phần cắt được chỉ là: thread hoá `adamw_step` (313 → ~60 ms nếu 7 luồng) +
+thay vòng copy-back bằng builtin `f32_list_copy` (125 → ~30 ms) ≈ **−350 ms = 2.4%** của bước
+14.3 s. `grad_norm` và 2 lần `copy_*_buf` đã native/threaded, không còn gì để lấy.
+
+⇒ **B tụt xuống 2.4%, không còn là "việc rẻ nhất chắc thắng" về mặt lợi ích** — chỉ còn rẻ về
+công sức. Theo số đo thì A1 (7.7 s) và A2 (3.0 s) mới đáng làm, và cả hai đều cần **probe
+chia nhỏ hơn nữa** (gelu_bwd / bias_grad / residual / softmax_bwd / copy trong `mlp_bwd` và
+`attention_bwd`; và `op_embed_bwd` + lm-head) — chưa làm trong §0.65.
