@@ -4423,3 +4423,33 @@ Cách (a) rẻ hơn và không đổi chữ ký `.tkv` nào.
 
 **Ưu tiên 1 vì nó vừa lớn nhất vừa không cần viết kernel.** Nó cũng giải thích vì sao
 `block_bwd` chỉ scale 2.22× trong khi `mlp_bwd` scale 3.12× và GEMM standalone scale 4.52×.
+
+## §0.69 MỤC 1 ĐÓNG: KNOB ĐÃ CẠN, `attention_bwd` KẸT Ở 328 ms — PHẢI SỬA NATIVE
+
+Sau khi tìm ra thủ phạm ở §0.68 (72 GEMM `1024×1024×64`), đã thử *tất cả* knob có sẵn trước khi
+đề nghị sửa native. Số là `ATTENTION_BWD` của một block (production, có `gflat` + saves):
+
+| cấu hình | attention | mlp | block |
+|---|---:|---:|---:|
+| `TKV_GEMM_MIN_N=96` + auto (14) | **328** | 250 | 610 |
+| `MIN_N=1100` (mọi GEMM ≤1024 thành 1 luồng) | 610 | 734 | 1375 |
+| `MIN_N=2100` | 610 | 781 | 1422 |
+| `GEMM_THREADS=4` | 359 | 313 | 719 |
+| `GEMM_THREADS=7` | 343 | 282 | 656 |
+| `GEMM_THREADS=10` | **328** | 265 | 625 |
+| `GEMM_THREADS=14` | 344 | 281 | 641 |
+
+Ba kết luận:
+
+1. **Ngưỡng `MIN_N` không phải lever.** Nâng ngưỡng làm 72 GEMM nhỏ thành 1 luồng ⇒ attention
+   **610 ms (gần gấp đôi)**. Nghĩa là threading *có* giúp các lời gọi nhỏ; vấn đề là nó giúp
+   **ít** (594 → 328 = 1.8× trong khi cần 4.5×), không phải "threading vô dụng".
+2. **Số luồng cũng không phải lever.** 4/7/10/14 cho 359/343/328/344 — sàn ~328, chênh trong
+   nhiễu. Oversubscribe 12 worker × 14 thread **không** phải nguyên nhân chính (nếu là, T=4 sẽ
+   thắng rõ).
+3. ⇒ Cái còn lại đúng là **chi phí cố định mỗi lời gọi GEMM** (dispatch pool + chia lưới +
+   `g_gemm_lock`), thứ mà không knob `.tkv` nào chạm tới. **Mục 1 đóng ở đây**, đường đi là
+   `docs/COMPILER_TEAM_REQUEST11.md` (job slot theo thread, hoặc batched GEMM). Trần −2.9 s
+   vẫn giữ nguyên, chỉ đổi chỗ thực hiện: native, không phải repo.
+
+Số đúng để dùng từ nay: **attention 328 ms/block → 3936 ms/bước (27%)**; block 610 ms → 7320 ms.
