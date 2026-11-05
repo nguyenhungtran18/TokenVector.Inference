@@ -97,3 +97,31 @@ Tiêu chí đạt: `ATTENTION_BWD` ≤ 150 ms ở 14 luồng, `BLOCK_BWD` ≤ 40
 - Không đổi tile `GEMM_MC/NC/KC` cho shape lớn — đã sweep (HANDOFF §0.65 mục 4), tiling hiện
   tại tối ưu, NC lớn còn chậm hơn.
 - Không viết lại micro-kernel cho mục này — 4 biến thể đã thử đều không nhanh hơn 4×16.
+
+---
+
+## 7. Kiểm chứng bằng số học từ 2 phép đo độc lập
+
+Không cần tin vào việc "đọc code thấy có lock": tách `attention_bwd` theo khối lượng đo được.
+
+Một block có 2 GEMM lớn + 72 GEMM nhỏ:
+
+| thành phần | GF | ở 1 luồng (33.6 GFLOP/s) | ở 14 luồng (155.9) |
+|---|---:|---:|---:|
+| `gpt2_linear` qkv (`1024×2304×768`) | 3.62 | 108 ms | 23 ms |
+| `smm_dot` dctxT (`1024×768×768`) | 1.21 | 36 ms | 8 ms |
+| 72 GEMM nhỏ `1024×1024×64` (6 × 12 head) | 9.66 | 288 ms | **?** |
+| Σ GEMM | 14.5 | 432 ms | |
+| **`attention_bwd` đo được** | | **594 ms** | **343 ms** |
+
+- 1 luồng: 432 ms GEMM + **162 ms** non-GEMM = 594 ✓
+- 14 luồng: 2 GEMM lớn = 31 ms; 343 − 31 − (162 ms non-GEMM, đã song song sẵn nên ~40 ms)
+  ⇒ **còn ~270–310 ms cho 72 GEMM nhỏ ⇒ 3.8–4.3 ms/lời gọi**, trong khi công việc chỉ
+  0.86 ms ⇒ **đúng như dự đoán 78–82% overhead, và không hề giảm khi tăng số luồng.**
+
+Nếu 12 worker thật sự chạy song song 72 GEMM đó trên 7 core: 288 ms/1 luồng ÷ ~6 = **48 ms**.
+Đó là toàn bộ chênh lệch giữa 343 ms và ~90 ms.
+
+**Lưu ý cho người muốn chứng minh trực tiếp:** probe `thread_spawn` + `smm_dot` với `Tensor`
+truyền qua job **không biên dịch được** (`InvalidProgramException` — job chỉ nên mang
+`list[f32]`/số, Tensor phải tạo bên trong worker; và `thread_join` phải gán vào biến).
