@@ -4072,3 +4072,109 @@ chế độ PEAK + kiểm bit-exact) · `out/kc_sweep.ps1`.
 **Không có dòng code production nào bị đổi** trong §0.64: các biến thể kernel đều không
 nhanh hơn, nên sửa sẽ là regression. Gate 135/135 và trainer 15/15 vì vậy vẫn giữ nguyên
 giá trị từ §0.63.
+
+## §0.65 PHÂN RÃ 1 BƯỚC PRODUCTION Ở SEQ1024 (1T và 14T) — ĐÍNH CHÍNH §0.64
+
+§0.64 kết luận "GEMM chỉ ~31%, non-GEMM 69%" bằng **ước lượng**. Nay đo trực tiếp bằng
+`mode 2` mới của `tv/tests/simd_bench_124m_seq.tkv` (5 pha y hệt `mode 1`: cùng `sc4/sc5/m6`,
+cùng `gflat`; mọi `now_ms()` đặt trong `main` để tránh bug #8) ⇒ **ước lượng đó sai**.
+Bản ghi này thay thế các tỷ lệ ở §0.64 mục 4.
+
+### 1. Năm pha của 1 bước, seq1024 (best-of-2 mỗi pha)
+
+| pha | 1 luồng | 14 luồng | scale |
+|---|---:|---:|---:|
+| `gpt2_forward_saved` (fwd) | 8844 | **3000** | 2.95× |
+| `gpt2_loss` | 109 | 78 | 1.40× |
+| `gpt2_backward` (bwd) | 24282 | **10156** | 2.39× |
+| `opt.step()` | 984 | **937** | **1.05×** |
+| copy-back `d[j]=opt.p[..]` (124 439 808 phần tử) | 125 | 110 | 1.14× |
+| **TỔNG** | **34344** | **14281** | 2.40× |
+
+Đối chiếu full-step mode 1 cùng phiên: 38484 (1T) / 16688 (14T) — chênh 12–14% vì mode 2
+lấy **min riêng từng pha** (lạc quan) còn mode 1 là một lần gọi. Dùng mode 1 khi so với
+torch; dùng mode 2 khi cần biết **tỷ lệ**.
+
+**Phát hiện 1: `opt.step()` KHÔNG scale chút nào** (984 → 937 ms, 1.05×). Nó là 937 ms cố
+định trong một bước 14.3 s = **6.6%**, cộng copy-back + loss = **1.12 s = 7.9%** dù đã có 14
+luồng. torch gộp optimizer vào bước của nó gần như miễn phí.
+
+### 2. Bên trong bwd: block_bwd chia 4 vùng (probe `tv/tests/_bd1024.tkv`, seq1024, 1 luồng)
+
+Một `gpt2_block_bwd` production (có `gflat`) = **1578 ms**:
+
+| vùng | ms | % |
+|---|---:|---:|
+| `gpt2_mlp_bwd` | 797 | **50.5%** |
+| `gpt2_attention_bwd` | 578 | **36.6%** |
+| `gpt2_layernorm_bwd` ×2 | 47 | 3.0% |
+| còn lại (residual/copy/ceremony) | 156 | 9.9% |
+| **Σ 12 block** | **18936** | |
+
+Bên ngoài block: `bwd` 24282 − 18936 = **5346 ms** cho lm-head + `op_embed_bwd`
+(1 luồng). Đó là 16% của bước và **lớn hơn cả `attention_bwd` của một block ×12**.
+
+### 3. Tỷ lệ GEMM / non-GEMM (suy ra từ khối lượng, KHÔNG đo trực tiếp — đã ghi rõ)
+
+Khối lượng phép nhân 1 bước seq1024 ≈ 410 GF (đếm layer). Ở GEMM 46% đỉnh = 34.5 GFLOP/s (1T):
+
+| | 1 luồng | 14 luồng |
+|---|---:|---:|
+| GEMM (410 GF) | ≈ 11.9 s = **35%** | ≈ 11.9/4.52 = **2.6 s = 18%** |
+| non-GEMM (phần dư) | ≈ 22.4 s = **65%** | ≈ 11.7 s = **82%** |
+
+⇒ §0.64 viết "GEMM ~31%" cho 1 luồng: gần đúng. Nhưng kết luận quan trọng hơn nằm ở cột
+14 luồng: **ở cấu hình đích, non-GEMM là 82% thời gian**. Và non-GEMM 11.7 s một mình đã
+gấp **2.9× toàn bộ 4105 ms của torch 14T**.
+
+### 4. Thử thêm hai hướng GEMM: đều không có lợi (đóng lại)
+
+- **Sweep MC/NC** (`out/mc_sweep.ps1`; đổi MC/NC **không** đổi thứ tự tích lũy k nên vẫn
+  bit-exact): `(64,64)` 34.5 · `(128,64)` 34.5 · `(192,64)` 34.5 · `(64,124)` **23.8** ·
+  `(128,124)` 22.2 · `(128,124,KC256)` 16.3 · `(192,124,KC256)` 16.3 GFLOP/s. ⇒ tiling hiện
+  tại đã tối ưu; NC lớn làm **giảm** mạnh.
+- **4 biến thể micro-kernel** (§0.64 mục 3): không cái nào nhanh hơn 4×16 production.
+
+⇒ Không còn tham số nào để vặn. Muốn 2× GEMM phải viết micro-kernel **chất lượng asm**
+(kiểu BLIS 6×16) — việc của team native, không phải tinh chỉnh. Và trần của nó ở 14 luồng
+chỉ là **−2.6 s / 14.3 s = 1.22×**, không đủ để bắt torch.
+
+### 5. Ưu tiên chốt lại bằng số (14 luồng, seq1024, bước 14.3 s)
+
+| # | mục | ms | % bước | scale hiện tại | ghi chú |
+|---|---:|---:|---:|---|
+| **A1** | non-GEMM trong `mlp_bwd` + `attention_bwd` (12 block) | **≈ 7.7 s** | **54%** | không scale | 641 ms/block (237 + 201 + 156 + 47) |
+| **A2** | lm-head + `op_embed_bwd` ngoài block | ≈ 3.0 s | 21% | chưa đo riêng | 5346 ms ở 1T |
+| **B** | `opt.step()` + copy-back + loss | **1.12 s** | 7.9% | **1.05×** | cắt được gần hết |
+| C | GEMM | 2.6 s | 18% | 4.52× | trần 1.22× |
+
+**Việc rẻ nhất, chắc chắn thắng: B.** 1.12 s không scale, nằm gọn trong 2 vòng lặp `.tkv`
+(`opt.step()` là native nhưng đơn luồng; copy-back là 124M phép gán `.tkv`) ⇒ thread hoá
+optimizer + dùng builtin copy khối thay vòng lặp từng phần tử. Kỳ vọng −0.9 s/bước = **6%**.
+
+Việc lớn nhất là **A1**: cần một probe chia 641 ms/block thành từng op (gelu_bwd, bias_grad,
+residual add, softmax_bwd, copy) rồi vector hoá/thread hoá từng cái — chưa làm.
+
+### 6. Probe mới (tái lập được)
+
+`tv/tests/_bd1024.tkv` → `out/bd1024.exe` (4 vùng `block_bwd` tại seq bất kỳ, đọc seq từ
+`_seq_cfg.txt`) · `tv/tests/_tail1024.tkv` → `out/tail1024.exe` (opt.step / copy-back /
+zero_grad trên 124M) · `mode 2` của `simd_bench_124m_seq.tkv` → `out/bseq_p2.exe`
+(5 pha production). Lệnh:
+
+```
+TKV_GEMM_THREADS=1 dotnet out/bd1024.exe
+TKV_GEMM_THREADS=1 dotnet out/bseq_p2.exe     # _seq_cfg.txt = "1024\n2\n1"
+```
+
+Vẫn **không đổi code production** (`.tkv` chỉ thêm mode 2 vào tệp bench).
+
+**Ghi chú trạng thái git:** `mode 2` nằm trong `tv/tests/simd_bench_124m_seq.tkv`, nhưng tệp
+này **đã có sẵn thay đổi chưa commit từ phiên trước** (phần nối `m6_*` vào `_f124_bwd` /
+`_step124`). Để không commit thay đổi của phiên khác, tệp này **không được commit** trong
+§0.65 — nó vẫn nằm trong working tree và `out/bseq_p2.exe` build được từ đó. Muốn tái lập từ
+bản sạch thì phải giữ nguyên tệp ở working tree này.
+
+**Độ ổn định (đo lại 3 lần, cùng phiên):** full step 14 luồng auto = 15593 / 17422 / 16672 ms
+⇒ dùng **16672 (median)**, dải ±6%. Con số 14125 ms của một lần chạy `bseq_p2` là may mắn,
+không dùng. Tỷ lệ trong §0.65 mục 5 vì vậy giữ nguyên (bước ≈ 14.3–16.7 s, các % đổi < 2 điểm).

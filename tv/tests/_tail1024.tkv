@@ -1,0 +1,102 @@
+# PROBE TAIL — tach phan duoi cua 1 buoc train (HANDOFF §0.64 muc A)
+# ---------------------------------------------------------------
+# `_step124` co 3 phan KHONG phai GEMM va nam ngoai fwd/bwd:
+#   opt.step()                — AdamW tren 124M tham so
+#   copy-back loop            — `d[j] = opt.p[off+j]` cho tung phan tu 124M
+#   zero_grad                 — chay thread song song voi fwd nen chi do rieng
+#
+# Do bang cach do: o seq1024 1 luong, full step 38484 ms va fwd+bwd 34235 ms
+# (mode 0 cua simd_bench_124m_seq) -> duoi = 4249 ms = 11% buoc. Probe nay chia
+# 4249 do thanh tung phan de biet cat o dau.
+#
+# KHONG can gradient that: so phep tinh cua AdamW va copy-back khong phu thuoc
+# gia tri, nen chi can dung so phan tu. Khong goi fwd/bwd -> chay nhanh.
+#
+# Chay (tu goc repo): TKV_GEMM_THREADS=1 dotnet out/tail1024.exe
+import tv.training.gpt2_ref124
+import tv.training.trainer
+import tv.training.simd_matmul
+
+def _n_param(ps: 'list[Tensor]') -> 'i64':
+    n = 0
+    for i in range(len(ps)):
+        t = ps[i]
+        d = t.data
+        n = n + len(d)
+    return n
+
+def _groups(ps: 'list[Tensor]') -> 'list[i64]':
+    out = []
+    for i in range(len(ps)):
+        t = ps[i]
+        d = t.data
+        out.append(len(d))
+    return out
+
+def _mk_opt(n: 'i64', groups: 'list[i64]', total: 'i64') -> "AdamW":
+    return new_adamw_g(n, groups, 2, total, 0.05, 0.0025, 0.9, 0.999,
+                       0.00000001, 0.0, 1.0)
+
+def _prepare(opt: "AdamW", ps: 'list[Tensor]') -> 'i32':
+    off = 0
+    for i in range(len(ps)):
+        t = ps[i]
+        d = t.data
+        for j in range(len(d)):
+            opt.p[off + j] = d[j]
+        off = off + len(d)
+    return 0
+
+def _copy_back(opt: "AdamW", ps: 'list[Tensor]') -> 'i32':
+    off = 0
+    for i in range(len(ps)):
+        t = ps[i]
+        d = t.data
+        for j in range(len(d)):
+            d[j] = opt.p[off + j]
+        off = off + len(d)
+    return 0
+
+def _zero_grad(gl: "list[f32]") -> 'i32':
+    for i in range(len(gl)):
+        gl[i] = 0.0
+    return 0
+
+def main() -> 'i32':
+    ps = gpt2_init(7)
+    n = _n_param(ps)
+    groups = _groups(ps)
+    print("TL n_param = " + str(n) + " tensors=" + str(len(ps)))
+    opt = _mk_opt(n, groups, 1000)
+    _prepare(opt, ps)
+
+    # warm
+    opt.step()
+    _copy_back(opt, ps)
+    _zero_grad(opt.g)
+
+    b_step = 1.0e9
+    b_copy = 1.0e9
+    b_zero = 1.0e9
+    k = 0
+    while k < 3:
+        t0 = now_ms()
+        opt.step()
+        t1 = now_ms()
+        _copy_back(opt, ps)
+        t2 = now_ms()
+        _zero_grad(opt.g)
+        t3 = now_ms()
+        if t1 - t0 < b_step:
+            b_step = t1 - t0
+        if t2 - t1 < b_copy:
+            b_copy = t2 - t1
+        if t3 - t2 < b_zero:
+            b_zero = t3 - t2
+        k = k + 1
+
+    print("TL opt.step()      = " + str(b_step) + " ms")
+    print("TL copy_back 124M  = " + str(b_copy) + " ms")
+    print("TL zero_grad       = " + str(b_zero) + " ms")
+    print("TL TONG_duoi       = " + str(b_step + b_copy + b_zero) + " ms")
+    return 0

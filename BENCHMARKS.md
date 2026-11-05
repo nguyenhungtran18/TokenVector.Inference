@@ -112,6 +112,29 @@ Máy hiện tại: **AVX2 + FMA, KHÔNG AVX-512** (`AVX512F=0`, `/arch:AVX512` �
 (torch 76.2/476.6; numpy OpenBLAS 75.7). tkv GEMM đạt 34.5 GFLOP/s (46% đỉnh) ở 1 luồng và scale 4.52×.
 Micro-kernel: `tools/simd_native/bench_micro.c` (4 biến thể, có kiểm bit-exact bằng `memcmp`).
 
+### 5.1c Phân rã 1 bước theo pha, seq1024 (2026-11-05)
+
+`mode 2` của `tv/tests/simd_bench_124m_seq.tkv` — cùng đường production với `mode 1`
+(`sc4/sc5/m6/gflat`), đo riêng 5 pha, best-of-2 mỗi pha:
+
+| pha | 1 luồng | 14 luồng | scale |
+|---|---:|---:|---:|
+| forward_saved | 8844 | 3000 | 2.95× |
+| gpt2_loss | 109 | 78 | 1.40× |
+| backward | 24282 | 10156 | 2.39× |
+| `opt.step()` | 984 | **937** | **1.05×** |
+| copy-back 124.4M | 125 | 110 | 1.14× |
+
+**`opt.step()` không scale** — 937 ms cố định = 6.6% bước 14 luồng. Cả cụm opt+copy+loss
+= 1.12 s = 7.9% dù đã 14 luồng.
+
+`gpt2_block_bwd` (1 luồng, seq1024) = 1578 ms: **mlp_bwd 797 (50.5%) · attention_bwd 578
+(36.6%) · layernorm_bwd ×2 47 (3.0%) · còn lại 156 (9.9%)**. Σ12 block = 18936 ms; lm-head +
+`op_embed_bwd` ngoài block = 5346 ms.
+
+Tỷ lệ GEMM/non-GEMM (suy ra từ 410 GF): 1 luồng ≈ 35/65, **14 luồng ≈ 18/82** — ở cấu hình
+đích non-GEMM là nút thắt. Probe: `out/bd1024.exe`, `out/tail1024.exe`, `out/bseq_p2.exe`.
+
 ### 5.2 PyTorch
 
 ```powershell
