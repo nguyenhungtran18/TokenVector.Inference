@@ -4557,3 +4557,79 @@ của mỗi `simd_gemm`**, đúng như §0.68 — chỉ khác là nó nằm tron
 ⇒ Mục 1 chỉ còn **một** đường: native làm cho đường rect `k < 256` **bit-giống** đường tiled
 (hoặc chốt lại hợp đồng chấp nhận ULP). Đây là `docs/COMPILER_TEAM_REQUEST11.md` §8.4 ASK A'.
 Toàn bộ source production đã về nguyên trạng; `git status` sạch cho 3 mirror.
+
+## §0.72 ĐƯỜNG CÒN LẠI ĐÃ ĐI: hạ ngưỡng native `k >= 256` -> `k >= 64` (NHẬN, −11% @1024)
+
+§0.71 kết luận chỉ còn một đường: cho `k < 256` đi native. Cách rẻ nhất để kiểm chứng giả
+thuyết đó **không cần** sửa native: hạ ngưỡng rẽ nhánh trong `_smm_core` để `k = 64`
+(shape của 72 GEMM trong `attention_bwd`) rơi vào nhánh native thay vì đường tiled 256 tile.
+
+```python
+# tv/training/simd_matmul.tkv (dòng 340, + 2 mirror)
+-    if k >= 256:
++    if k >= 64:
+         if m <= 256: return _smm_full(...)
+         return _smm_pk(...)
+```
+
+### Kết quả đo (14 luồng, best-of-3, xen kẽ 3 seq)
+
+| seq | trước (§0.64, `bseq_h4c`) | sau (`bseq_p10`) | Δ |
+|---:|---:|---:|---:|
+| 8 | 3829 / 3859 / 4015 | **2875 / 2890 / 2890** | **−25%** |
+| 256 | 5672 / 5766 / 5860 | **5297 / 5250 / 5218** | **−11%** |
+| 1024 | 16375 / 16547 / 16954 | **14516 / 14657 / 15125** | **−11%** |
+
+`loss` sau 1 bước: seq8 `7.0119185` **EXACT**, seq1024 `13.442915` **EXACT**,
+seq256 `11.807271` so với baseline `11.807267` — **lệch 4e-6** ở chữ số thứ 6 (ổn định,
+lặp lại y hệt 3 rep). Đây là hệ quả trực tiếp đã biết của §0.70: native vs tiled khác nhau
+ULP (140 374/1 048 576 ptu, maxdiff 5.6e-9), và với seq256 độ lệch đó nổi lên ở bước 1.
+
+### Gate và trainer
+
+- `tools/gate_f32.sh`: **9/10 suite PASS** (`simd_matmul`, `gpt2`, `gpt2_scope`, `gpt2_train`,
+  `grad`, `parity`, `pack`, `inplace`, `gpt2_full` 33/33).
+- `gap_tests`: **FAIL `exit=127` — KHÔNG do thay đổi này.** Nguyên nhân: bản `g_gap_tests.exe`
+  cần fallback .NET 10, và trên .NET 10 nó chết `System.InvalidProgramException` trong
+  `ConstantFoldingPass.run` (cùng họ lỗi `InvalidProgramException` đã gặp khi probe
+  `thread_spawn`+Tensor). Đã kiểm bằng cách **stash đúng 3 tệp simd_matmul rồi build lại
+  gap_tests từ HEAD**: lỗi y hệt ⇒ có từ trước, không liên quan `k`/GEMM.
+- `trainer_tests`: **15/15 PASS** (`=== G4 trainer cases=15 fails=0 ===`), gồm clip, overfit,
+  resume bit-exact, eval — chạy qua fallback `dotnet out/g_trainer_tests_n10.dll`.
+
+### So với PyTorch (đo lại cùng phiên)
+
+| pha (seq1024, 14 luồng) | TKV | Torch | tỉ lệ |
+|---|---:|---:|---:|
+| fwd (+loss) | 3250 + 94 | 1084.7 | **3.0×** |
+| **backward** | **10593** | **2347.9** | **4.5×** |
+| `opt.step()` | 1188 | 660.7 | 1.8× |
+| copy-back / zero_grad | 141 | 52.2 | — |
+| **TỔNG** | **15266** | **4134.0** | **3.7×** |
+
+Full-step median: TKV **2890 / 5250 / 14657** vs torch **1009.4 / 1538.4 / 4077.1**
+⇒ **2.86× / 3.41× / 3.59×**.
+
+### Thử thêm (kết quả âm tính)
+
+Hạ luôn ngưỡng ở `_smm_core_pd` (dòng 628, nhánh `trans_a == 0` song song) xuống 64:
+seq8 2891 (không đổi), seq1024 **15016** (không nhanh hơn dải 14516–15125) ⇒ **revert**,
+chỉ giữ thay đổi ở `_smm_core`.
+
+### Chốt
+
+`k >= 64` là ngưỡng **cuối cùng có ý nghĩa**: mọi GEMM của GPT-2 124M có `k ∈ {64, 768, 3072}`,
+nên sau thay đổi này **không còn GEMM nào đi đường tiled** (trừ `k < 64`, không tồn tại trong
+mô hình). Lever "đường tiled" đã cạn — phần còn lại của khoảng cách 3.6× nằm ở **chi phí
+non-GEMM interpreted + scale luồng**, đúng như PLAN §2b: backward 4.5× là nút thắt lớn nhất
+(8.2 s chênh lệch trên 11.2 s tổng chênh lệch), kế đó fwd 3.0×, opt 1.8×.
+
+Bản build dùng để đo: `out/bseq_p10.exe` / `out/bseq_p10_n10.dll`. Log: `out/run_p10_s*_r*.log`.
+
+### Ghi chu do nhieu (sau khi commit)
+
+Chay lai chinh ban da commit: **15109 / 15422 ms** (va mot lan **17453 ms** — outlier, nghi do
+I/O/AV lúc commit), tuc may dao dong **±7%** giua cac phien. Vi vay con so trong bang tren la
+**best-of-3 tai mot thoi diem**; so sanh dung la best-vs-best (16375 -> 14516 = **−11.4%**,
+median 16547 -> 14657) chu khong phai mot lan do don le. Khong co lan nao cua ban moi cham
+vao dai 16375–16954 cua baseline.

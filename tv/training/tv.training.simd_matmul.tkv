@@ -337,7 +337,7 @@ def _smm_pk(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64',
 def _smm_core(a: "Tensor", b: "Tensor", m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32', sc: "list[f32]" = None) -> "Tensor":
     # M4 wire: k du lon -> packed native (xem ghi chu M4 WIRED ben tren)
     # M6b wire: packed + m nho -> simd_gemm_full (xem ghi chu M6b WIRED)
-    if k >= 256:
+    if k >= 64:
         if m <= 256:
             return _smm_full(a, b, m, n, k, ndim, trans_b, sc)
         return _smm_pk(a, b, m, n, k, ndim, trans_b, sc)

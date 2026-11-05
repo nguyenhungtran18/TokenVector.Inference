@@ -144,3 +144,37 @@ python tools/bench_torch.py d <seq>      # fwd+bwd và full step
 So sánh apple-to-apple:
 - TKV mode 0 (fwd+bwd) ↔ Torch `fwd(+CE)+bwd`.
 - TKV mode 1 (full step) ↔ Torch `TOTAL`.
+
+
+## 6. Kết quả P10 (2026-11-05) — hạ ngưỡng native `k >= 64`, TKV vs PyTorch
+
+Thay đổi: `_smm_core` rẽ native ở `k >= 64` thay vì `k >= 256` (`tv/training/simd_matmul.tkv`
++ 2 mirror). Mọi GEMM `k = 64` (attention bwd) rời đường tiled 256 tile sang native packed.
+
+| seq | TKV trước (ms) | **TKV sau (ms)** | Torch T=14 (ms) | TKV/Torch | Δ TKV |
+|---:|---:|---:|---:|---:|---:|
+| 8 | 3829 | **2875** | 1009.4 | 2.85× | **−25%** |
+| 256 | 5672 | **5218** | 1538.4 | 3.39× | **−8%** |
+| 1024 | 16375 | **14516** | 4077.1 | 3.56× | **−11%** |
+
+(best-of-3, 14 luồng; `loss` = 7.0119185 / 11.807271 / 13.442915 — seq8 + seq1024 EXACT,
+seq256 lệch 4e-6 do native vs tiled khác ULP, xem HANDOFF §0.72.)
+
+Phân rã seq1024 (mode 2) sau thay đổi, so với torch cùng pha:
+
+| pha | TKV | Torch T=14 | tỉ lệ |
+|---|---:|---:|---:|
+| fwd + loss | 3344 | 1084.7 | 3.08× |
+| backward | 10593 | 2347.9 | **4.51×** |
+| opt.step | 1188 | 660.7 | 1.80× |
+| copy-back / zero_grad | 141 | 52.2 | 2.70× |
+| tổng | 15266 | 4134.0 | 3.69× |
+
+⇒ Nút thắt còn lại là **backward** (4.5×) — chiếm 8.2 s trong 11.2 s chênh lệch; muốn
+xuống ≤ torch phải cắt được vùng non-GEMM interpreted của `gpt2_block_bwd` (xem HANDOFF §5.1c
+cũ: mlp_bwd 50.5% · attention_bwd 36.6%) hoặc nâng scale luồng 2.3× → 3.7×.
+
+Gate: 9/10 suite PASS; `gap_tests` hỏng `InvalidProgramException` trên fallback .NET 10 —
+đã xác nhận có từ trước (stash thay đổi rồi build lại từ HEAD vẫn lỗi). Trainer 15/15 PASS.
+
+Build đo: `dotnet out/bseq_p10_n10.dll` với `tv/tests/_seq_cfg.txt` = `<seq> / 1 / 1`.

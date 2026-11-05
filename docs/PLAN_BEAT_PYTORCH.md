@@ -60,6 +60,31 @@ C determinism theo so luong > D kernel GEMM (hoan)**.
 Canh bao: loss doi theo so luong (13.442917 / 13.442922 / 13.442913 o 1T/7T/14T) — phai
 chot so luong hoac sua diem cong khong tat dinh truoc khi so voi PyTorch tren may khac.
 
+## 2c. Trang thai 2026-11-05 (HANDOFF §0.72) — da lam xong duong "native cho k nho"
+
+Ha nguong `_smm_core` tu `k >= 256` xuong **`k >= 64`** (3 tep simd_matmul). Moi GEMM cua
+GPT-2 124M co `k ∈ {64, 768, 3072}` nen **khong con GEMM nao di duong tiled 256 tile**.
+
+| seq | truoc | sau | torch T=14 | ti le |
+|---:|---:|---:|---:|---:|
+| 8 | 3829 | **2875** | 1009.4 | 2.85x |
+| 256 | 5672 | **5218** | 1538.4 | 3.39x |
+| 1024 | 16375 | **14516** | 4077.1 | 3.56x |
+
+Gate 9/10 (gap_tests hong `InvalidProgramException` tren .NET 10 — co tu truoc, da chung minh
+bang stash), trainer 15/15, loss seq8/seq1024 EXACT, seq256 lech 4e-6 (ULP native vs tiled).
+
+**Bang so moi (seq1024, 14 luong):** fwd 3344 (3.08x) · **bwd 10593 (4.51x)** · opt 1188 (1.80x)
+· copyback 141 · tong 15266 vs torch 4134.
+
+### Thu tu lever moi (thay the P2/P3 o tren)
+1. **BWD non-GEMM** — 8.2 s trong 11.2 s chenh lech. `gpt2_block_bwd` 1 luong: mlp_bwd 50.5%
+   · attention_bwd 36.6% · layernorm 3.0%. Can native `layernorm_bwd`/`gelu_bwd`/`softmax_bwd`/
+   `bias_grad` (compiler team, REQUEST #9/#11) hoac cat vong `.tkv` bang cac op native da co.
+2. **Thread scale 2.3x vs 3.7x** — song song cap op trong bwd (hien chi GEMM song song).
+3. **opt.step 1.8x** — 1.19 s khong scale (r1 copy 498 MB + adamw + r3 copy-back).
+4. GEMM kernel: **hoan** (da dat 46% dinh 1 luong, 4 biên the micro-kernel khong cai nao hon).
+
 ## 3. Win condition
 - seq8 < 1042.7 ms
 - seq256 < 1572.7 ms
