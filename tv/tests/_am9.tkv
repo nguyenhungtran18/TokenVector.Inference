@@ -1,0 +1,138 @@
+# PROBE AM9 — BIT-CHECK `attention_bwd_fused` (YEU CAU #14)
+#
+#  Fused path = 1 call native cho TOAN BO attention_bwd cua 1 head
+#  (6 GEMM + softmax_causal_fwd/bwd + writeback packed). Probe so sanh
+#  BYTE-FOR-BYTE voi ban interpreted (giong worker .tkv: smm_dot/...).
+#
+#  Yeu cau: rc == 0 va bit_bad == 0 moi ca. rc != 0 -> kernel tu choi
+#  (caller fallback duong cu — probe in "TU CHOI" de phat hien).
+#
+#  Chay:
+#    D:\TokenVector\Release\dist\tkvc-tv.exe tv/tests/_am9.tkv out/am9.exe main
+#    copy out/am9.exe -> out/am9_n10.dll + runtimeconfig
+#    dotnet out/am9_n10.dll
+import tv.training.tensor
+import tv.training.simd_matmul
+
+
+def _seed(xs: 'list[f32]', n: 'i64', s: 'i64') -> 'i64':
+    st = s
+    i = 0
+    while i < n:
+        st = (st * 1103515245 + 12345) % 2147483648
+        v = float((st / 256) % 65536) / 65536.0
+        xs[i] = v * 2.0 - 1.0
+        i = i + 1
+    return st
+
+
+# ---------- ref: toan bo 1 head theo dung worker .tkv (khong fused) ----------
+def _ref_head(qkvl: "list[f32]", dctxl: "list[f32]",
+              ctxo: "list[f32]", dqo: "list[f32]",
+              n: 'i64', h: 'i64', hd: 'i64', head: 'i64', inv: 'f64') -> 'i64':
+    ho = head * hd
+    gQ = t_zeros([n, hd])
+    gK = t_zeros([n, hd])
+    gV = t_zeros([n, hd])
+    gDc = t_zeros([n, hd])
+    for t2 in range(n):
+        s0 = t2 * 3 * h + ho
+        c0 = t2 * h + ho
+        for d in range(hd):
+            gQ.data[t2 * hd + d] = qkvl[s0 + d]
+            gK.data[t2 * hd + d] = qkvl[s0 + h + d]
+            gV.data[t2 * hd + d] = qkvl[s0 + 2 * h + d]
+            gDc.data[t2 * hd + d] = dctxl[c0 + d]
+    Smat = smm_dot(gQ, gK, n, n, hd)
+    slf = Smat.data
+    l13 = softmax_causal_fwd(slf, n, inv)
+    if l13 != 0:
+        print("AM9 ref: softmax_causal_fwd rc=" + str(l13))
+        return -1
+    gCtx = smm_fwd(Smat, gV, n, hd, n)
+    gDp = smm_dot(gDc, gV, n, n, hd)
+    dpl = gDp.data
+    pl = Smat.data
+    dcl = gDc.data
+    cl = gCtx.data
+    l12 = softmax_causal_bwd(dpl, pl, dcl, cl, n, hd)
+    if l12 != 0:
+        print("AM9 ref: softmax_causal_bwd rc=" + str(l12))
+        return -1
+    gDs = gDp
+    gDq = smm_fwd(gDs, gK, n, hd, n)
+    gDkT = smm_fwd_at(gQ, gDs, hd, n, n)
+    gDvT = smm_fwd_at(gDc, Smat, hd, n, n)
+    for t2 in range(n):
+        d0 = t2 * hd
+        p0 = t2 * 3 * hd
+        for d in range(hd):
+            ctxo[d0 + d] = gCtx.data[d0 + d]
+            dqo[p0 + d] = gDq.data[d0 + d] * inv
+            dqo[p0 + hd + d] = gDkT.data[d * n + t2] * inv
+            dqo[p0 + 2 * hd + d] = gDvT.data[d * n + t2]
+    return 0
+
+
+def _t(n: 'i64', head: 'i64', tag: 'str') -> 'i64':
+    h = 768
+    hd = 64
+    qkv = t_zeros([n * 3 * h])
+    dctx = t_zeros([n * h])
+    _s = _seed(qkv.data, n * 3 * h, 1000 + n + head)
+    _s = _seed(dctx.data, n * h, 2000 + n + head)
+    inv = 1.0 / sqrt(float(hd))
+    ctxo1 = t_zeros([n * hd])
+    dqo1 = t_zeros([n * 3 * hd])
+    ctxo2 = t_zeros([n * hd])
+    dqo2 = t_zeros([n * 3 * hd])
+    rc1 = _ref_head(qkv.data, dctx.data, ctxo1.data, dqo1.data, n, h, hd, head, inv)
+    if rc1 != 0:
+        print("AM9 " + tag + " REF FAIL rc=" + str(rc1))
+        return 0
+    ql = qkv.data
+    dcl = dctx.data
+    cel = ctxo2.data
+    dql = dqo2.data
+    rc = attention_bwd_fused(ql, dcl, cel, dql, n, h, hd, head, inv)
+    if rc != 0:
+        print("AM9 " + tag + " rc=" + str(rc) + " -> KERNEL TU CHOI")
+        return 0
+    bad = 0
+    first = -1
+    i = 0
+    while i < n * hd:
+        if ctxo1.data[i] != ctxo2.data[i]:
+            bad = bad + 1
+            if first < 0:
+                first = i
+        i = i + 1
+    i = 0
+    while i < 3 * n * hd:
+        if dqo1.data[i] != dqo2.data[i]:
+            bad = bad + 1
+            if first < 0:
+                first = 1000000 + i
+        i = i + 1
+    print("AM9 " + tag + " n=" + str(n) + " head=" + str(head) + " rc=" + str(rc) + " bit_bad=" + str(bad) + " first=" + str(first))
+    return bad
+
+
+def main() -> 'i32':
+    print("AM9 — bit-check attention_bwd_fused vs .tkv interpreted")
+    bad = 0
+    # m <= 256 (SgemmFull path), boundary 256/257, tail khong tron 64
+    bad = bad + _t(64, 0, "n64h0")
+    bad = bad + _t(64, 11, "n64h11")
+    bad = bad + _t(65, 3, "n65h3")
+    bad = bad + _t(100, 5, "n100h5")
+    bad = bad + _t(128, 0, "n128h0")
+    bad = bad + _t(200, 7, "n200h7")
+    bad = bad + _t(256, 0, "n256h0")
+    bad = bad + _t(256, 11, "n256h11")
+    # m > 256 (packed path)
+    bad = bad + _t(300, 0, "n300h0")
+    bad = bad + _t(1024, 0, "n1024h0")
+    bad = bad + _t(1024, 11, "n1024h11")
+    print("AM9 TOTAL bit_bad=" + str(bad) + " (0 = BIT-EXACT)")
+    return 0

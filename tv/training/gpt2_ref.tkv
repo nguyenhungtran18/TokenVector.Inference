@@ -1050,11 +1050,121 @@ def _attn_hb_zlist(sz: 'i64') -> "list[f32]":
     tt = t_zeros([sz])
     return tt.data
 
+def _attn_hb_one_ref(j: "_AtnJob", head: 'i64') -> 'i64':
+    # FALLBACK NGUYEN VAN (YEU CAU #14): moi head = mot lan goi, giu nguyen
+    # tung vong / tung GEMM / thu tu tich luy nhu truoc (BIT-EXACT).
+    h = HiddenSize
+    hd = HeadDim
+    n = j.n
+    inv = j.inv
+    ho = head * hd
+    gQ = t_zeros([n, hd])
+    gK = t_zeros([n, hd])
+    gV = t_zeros([n, hd])
+    gDc = t_zeros([n, hd])
+    for t2 in range(n):
+        s0 = t2 * 3 * h + ho
+        c0 = t2 * h + ho
+        for d in range(hd):
+            gQ.data[t2 * hd + d] = j.qkvl[s0 + d]
+            gK.data[t2 * hd + d] = j.qkvl[s0 + h + d]
+            gV.data[t2 * hd + d] = j.qkvl[s0 + 2 * h + d]
+            gDc.data[t2 * hd + d] = j.dctxl[c0 + d]
+    # P = softmax causal (cach tinh giong draft forward)
+    Smat = smm_dot(gQ, gK, n, n, hd)
+    # YEU CAU #13 (2026-11-06): native `softmax_causal_fwd` gop 4 vong
+    # (scale+max / exp+tong / normalize / zero-fill) — _am8 bit_bad=0.
+    # rc != 0 -> 4 vong interpreted NGUYEN VAN ben duoi (fallback).
+    slf = Smat.data
+    l13 = softmax_causal_fwd(slf, n, inv)
+    if l13 != 0:
+        for t2 in range(n):
+            b0 = t2 * n
+            m0 = Smat.data[b0] * inv
+            Smat.data[b0] = m0
+            mxv = m0
+            for u in range(1, t2 + 1):
+                m0 = Smat.data[b0 + u] * inv
+                Smat.data[b0 + u] = m0
+                if m0 > mxv:
+                    mxv = m0
+            totv = 0.0
+            for u in range(t2 + 1):
+                e = exp(Smat.data[b0 + u] - mxv)
+                Smat.data[b0 + u] = e
+                totv = totv + e
+            ivv = 1.0 / totv
+            for u in range(t2 + 1):
+                Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
+            for u in range(t2 + 1, n):
+                Smat.data[b0 + u] = 0.0
+            
+# ctx_head[t,:] = sum_u P[t,u]*V[u,:] — can cho dot + dw_proj
+    gCtx = smm_fwd(Smat, gV, n, hd, n)
+    # P6 GĐ5 (probe BN): ghi PACKED theo head [t2*hd+d] — buffer rieng
+    # n*hd/worker (truoc do n*h voi 11/12 phan bi zero-fill lan merge)
+    for t2 in range(n):
+        d0 = t2 * hd
+        for d in range(hd):
+            j.ctx_out[d0 + d] = gCtx.data[d0 + d]
+    # dp[t,u] = sum_d dctx[t,d] * V[u,d]  -> smm_dot
+    gDp = smm_dot(gDc, gV, n, n, hd)
+    # ds[t,u] = P[t,u] * (dp[t,u] - dot[t]); u > t = 0
+    # YEU CAU #12 Ask A3 (2026-11-05): native `softmax_causal_bwd` ghi
+    # IN-PLACE vao gDp (dotv tich f64, causal mask giu nguyen) -> bo cap
+    # phat gDs n*n + vong interpreted. rc != 0 -> duong cu NGUYEN VAN.
+    dpl = gDp.data
+
+    pl = Smat.data
+
+    dcl = gDc.data
+
+    cl = gCtx.data
+
+    l12b = softmax_causal_bwd(dpl, pl, dcl, cl, n, hd)
+    gDs = gDp
+    if l12b != 0:
+        gDs = t_zeros([n, n])
+        for t2 in range(n):
+            b0 = t2 * n
+            d0 = t2 * hd
+            dotv = 0.0
+            for d in range(hd):
+                dotv = dotv + gDc.data[d0 + d] * gCtx.data[d0 + d]
+            for u in range(t2 + 1):
+                gDs.data[b0 + u] = Smat.data[b0 + u] * (gDp.data[b0 + u] - dotv)
+            for u in range(t2 + 1, n):
+                gDs.data[b0 + u] = 0.0
+    # dq[t,d] = inv * sum_u ds[t,u] * K[u,d]
+    gDq = smm_fwd(gDs, gK, n, hd, n)
+    # P5.4 (2026-10-20, do PROBE AR): BO 2 transpose n x n (1M phan
+    # tu/head — 672 ms/layer @seq1024 = 16% attention_bwd). Tinh dk/dv
+    # bang chuyen vi NHO cua Q/dctx (n x hd = 65K) roi doc STRIDED khi
+    # writeback:
+    #   dkT[d,u] = sum_t Q[t,d] * ds[t,u]    = (Q^T . ds)[d,u]
+    #   dvT[d,u] = sum_t dctx[t,d] * P[t,u]  = (dctx^T . P)[d,u]
+    # Cung tich lep theo t TANG DAN (p-tile ascending) -> BIT-EXACT.
+    # P6 GĐ6: smm_fwd_at (T=64<96 — worker van an toan nhu smm_fwd
+    # truoc do; bit-exact nhu linear_bwd) — bo 2 transpose nho
+    gDkT = smm_fwd_at(gQ, gDs, hd, n, n)
+    gDvT = smm_fwd_at(gDc, Smat, hd, n, n)
+    # dong bo vao dqkv — vi tri (t, head, d) la duy nhat -> '=' duoc
+    for t2 in range(n):
+        d0 = t2 * hd
+        p0 = t2 * 3 * hd
+        for d in range(hd):
+            j.dq_out[p0 + d] = gDq.data[d0 + d] * inv
+            # gDkT/gDvT luu [d hang][t cot] -> doc strided [d*n + t2]
+            j.dq_out[p0 + hd + d] = gDkT.data[d * n + t2] * inv
+            j.dq_out[p0 + 2 * hd + d] = gDvT.data[d * n + t2]
+    return 0
+
+
 def _attn_hb_one(j: "_AtnJob") -> 'i64':
     # worker: head-range [hlo, hhi) doc qkv/dctx read-only, ghi rieng
-    # P6 GĐ2: cham NHeads — ban nho (NHeads=4) van driver spawn 12 nhom
-    # [k,k+1); head >= NHeads se ghi ngoai hang (gio han chua trigger gate
-    # vi gate nho deu n < 128, nhung OOB neu chay) -> thoat som.
+    # YEU CAU #14 (2026-11-06): attention_bwd_fused gop 6 GEMM + softmax
+    # fwd/bwd + writeback packed thanh 1 lenh goi native; rc != 0 ->
+    # fallback _attn_hb_one_ref (kernel tu choi shape / list thieu).
     if j.hlo >= NHeads:
         return 0
     h = HiddenSize
@@ -1062,107 +1172,15 @@ def _attn_hb_one(j: "_AtnJob") -> 'i64':
     n = j.n
     inv = j.inv
     for head in range(j.hlo, j.hhi):
-        ho = head * hd
-        gQ = t_zeros([n, hd])
-        gK = t_zeros([n, hd])
-        gV = t_zeros([n, hd])
-        gDc = t_zeros([n, hd])
-        for t2 in range(n):
-            s0 = t2 * 3 * h + ho
-            c0 = t2 * h + ho
-            for d in range(hd):
-                gQ.data[t2 * hd + d] = j.qkvl[s0 + d]
-                gK.data[t2 * hd + d] = j.qkvl[s0 + h + d]
-                gV.data[t2 * hd + d] = j.qkvl[s0 + 2 * h + d]
-                gDc.data[t2 * hd + d] = j.dctxl[c0 + d]
-        # P = softmax causal (cach tinh giong draft forward)
-        Smat = smm_dot(gQ, gK, n, n, hd)
-        # YEU CAU #13 (2026-11-06): native `softmax_causal_fwd` gop 4 vong
-        # (scale+max / exp+tong / normalize / zero-fill) — _am8 bit_bad=0.
-        # rc != 0 -> 4 vong interpreted NGUYEN VAN ben duoi (fallback).
-        slf = Smat.data
-        l13 = softmax_causal_fwd(slf, n, inv)
-        if l13 != 0:
-            for t2 in range(n):
-                b0 = t2 * n
-                m0 = Smat.data[b0] * inv
-                Smat.data[b0] = m0
-                mxv = m0
-                for u in range(1, t2 + 1):
-                    m0 = Smat.data[b0 + u] * inv
-                    Smat.data[b0 + u] = m0
-                    if m0 > mxv:
-                        mxv = m0
-                totv = 0.0
-                for u in range(t2 + 1):
-                    e = exp(Smat.data[b0 + u] - mxv)
-                    Smat.data[b0 + u] = e
-                    totv = totv + e
-                ivv = 1.0 / totv
-                for u in range(t2 + 1):
-                    Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
-                for u in range(t2 + 1, n):
-                    Smat.data[b0 + u] = 0.0
-            
-# ctx_head[t,:] = sum_u P[t,u]*V[u,:] — can cho dot + dw_proj
-        gCtx = smm_fwd(Smat, gV, n, hd, n)
-        # P6 GĐ5 (probe BN): ghi PACKED theo head [t2*hd+d] — buffer rieng
-        # n*hd/worker (truoc do n*h voi 11/12 phan bi zero-fill lan merge)
-        for t2 in range(n):
-            d0 = t2 * hd
-            for d in range(hd):
-                j.ctx_out[d0 + d] = gCtx.data[d0 + d]
-        # dp[t,u] = sum_d dctx[t,d] * V[u,d]  -> smm_dot
-        gDp = smm_dot(gDc, gV, n, n, hd)
-        # ds[t,u] = P[t,u] * (dp[t,u] - dot[t]); u > t = 0
-        # YEU CAU #12 Ask A3 (2026-11-05): native `softmax_causal_bwd` ghi
-        # IN-PLACE vao gDp (dotv tich f64, causal mask giu nguyen) -> bo cap
-        # phat gDs n*n + vong interpreted. rc != 0 -> duong cu NGUYEN VAN.
-        dpl = gDp.data
-
-        pl = Smat.data
-
-        dcl = gDc.data
-
-        cl = gCtx.data
-
-        l12b = softmax_causal_bwd(dpl, pl, dcl, cl, n, hd)
-        gDs = gDp
-        if l12b != 0:
-            gDs = t_zeros([n, n])
-            for t2 in range(n):
-                b0 = t2 * n
-                d0 = t2 * hd
-                dotv = 0.0
-                for d in range(hd):
-                    dotv = dotv + gDc.data[d0 + d] * gCtx.data[d0 + d]
-                for u in range(t2 + 1):
-                    gDs.data[b0 + u] = Smat.data[b0 + u] * (gDp.data[b0 + u] - dotv)
-                for u in range(t2 + 1, n):
-                    gDs.data[b0 + u] = 0.0
-        # dq[t,d] = inv * sum_u ds[t,u] * K[u,d]
-        gDq = smm_fwd(gDs, gK, n, hd, n)
-        # P5.4 (2026-10-20, do PROBE AR): BO 2 transpose n x n (1M phan
-        # tu/head — 672 ms/layer @seq1024 = 16% attention_bwd). Tinh dk/dv
-        # bang chuyen vi NHO cua Q/dctx (n x hd = 65K) roi doc STRIDED khi
-        # writeback:
-        #   dkT[d,u] = sum_t Q[t,d] * ds[t,u]    = (Q^T . ds)[d,u]
-        #   dvT[d,u] = sum_t dctx[t,d] * P[t,u]  = (dctx^T . P)[d,u]
-        # Cung tich lep theo t TANG DAN (p-tile ascending) -> BIT-EXACT.
-        # P6 GĐ6: smm_fwd_at (T=64<96 — worker van an toan nhu smm_fwd
-        # truoc do; bit-exact nhu linear_bwd) — bo 2 transpose nho
-        gDkT = smm_fwd_at(gQ, gDs, hd, n, n)
-        gDvT = smm_fwd_at(gDc, Smat, hd, n, n)
-        # dong bo vao dqkv — vi tri (t, head, d) la duy nhat -> '=' duoc
-        for t2 in range(n):
-            d0 = t2 * hd
-            p0 = t2 * 3 * hd
-            for d in range(hd):
-                j.dq_out[p0 + d] = gDq.data[d0 + d] * inv
-                # gDkT/gDvT luu [d hang][t cot] -> doc strided [d*n + t2]
-                j.dq_out[p0 + hd + d] = gDkT.data[d * n + t2] * inv
-                j.dq_out[p0 + 2 * hd + d] = gDvT.data[d * n + t2]
+        ql = j.qkvl
+        dcl = j.dctxl
+        cel = j.ctx_out
+        dql = j.dq_out
+        rc14 = attention_bwd_fused(ql, dcl, cel, dql, n, h, hd, head, inv)
+        if rc14 != 0:
+            _attn_hb_one_ref(j, head)
     return j.hhi - j.hlo
+
 
 def _attn_hb_merge(co: "list[f32]", qo: "list[f32]", ct: "list[f32]", dq: "list[f32]", n: 'i64', h: 'i64', hd: 'i64', hlo: 'i64', hhi: 'i64') -> 'i64':
     # gop output rieng PACKED (P6 GĐ5: co/[t2*hd], qo/[t2*3*hd]) vao

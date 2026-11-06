@@ -4847,3 +4847,61 @@ self-host **`IL_IDENTICAL`**.
 Kernel giữ lại (bit-exact, giảm CPU thật, fwd −3.4%) nhưng **không phải lever cho bwd**.
 Lever còn lại của bwd là bỏ overhead mỗi lời gọi GEMM (72 GEMM nhỏ/block) — việc của #14.
 Build đo: `out/bseq_p13_n10.dll`, probe `out/am8_n10.dll`, `out/at1b_n10.dll`.
+## §0.75 YEU CAU #14 — GỘP 6 GEMM/head attention_bwd THÀNH 1 NATIVE CALL (bit-exact, bwd −5..−10%)
+
+### 1. Việc làm
+
+- **Kernel `AttentionBwdFused`** (thêm vào cuối `Release/tools/simd_native/tkv_simd_native.c`, TU `/fp:fast`
+  — chung mã máy với `SgemmF32`/packed GEMM, đảm bảo cùng bits):
+  - 4 GEMM (Smat, gCtx, gDp, gDq) tái hiện đúng dispatch `_smm_core`: `k ≥ 64` →
+    `m ≤ 256` → `SgemmFull(T=256, mode=0)`; `m > 256` → `packed_create/SgemmPacked(T=256)`
+    (bits khác nhau giữa 2 đường → phải chia đúng như .tkv);
+  - 2 GEMM trans-A (gDkT, gDvT) port `_tile_a_at_w`/`_tile_b_w` + `SgemmF32` + tích lũy
+    p0 TĂNG DẦN (đúng thứ tự `_p58_core_simple`);
+  - softmax_causal_fwd/bwd gọi đúng entry đã kiểm chứng (§0.73/§0.74);
+  - writeback packed/head (`dq/dk × inv`, `dv` raw) giống các vòng .tkv.
+- **Compiler wiring** (`il_features/simd_feature.tkv`): pinvoke + wrapper `AttentionBwdFusedM`
+  (4 list qua reflection/pin; thiếu list → rc=−5, **không ném**) + `compile_attention_bwd_fused`
+  + đăng ký builtin + `_BUILTIN_LENH_DOC_LAP` (file_io.tkv). Thay cả pinvoke/wrapper nửa chừng
+  của phiên trước (sai signature, thiếu tham số — đã bỏ).
+- **Sửa opcode IL dạng ngắn sai**: `ldarg.4→ldarg.s 4`, `ldloc.4/stloc.4→…s …`, `ldc.i8.0→ldc.i8 0`.
+- **Production** (`gpt2_ref.tkv`): `_attn_hb_one` gọi `attention_bwd_fused` (1 call/head = 12 call/layer
+  thay cho 6 GEMM × 72 pinvoke/layer + hàng nghìn `simd_gemm` list-reflection cho 2 GEMM trans-A);
+  rc != 0 → `_attn_hb_one_ref` (fallback nguyên văn, cùng thân hàm cũ). 5 mirror đồng bộ
+  (`tv.training.gpt2_ref{,124}.tkv`, `tv/tests/...`); **bản nhỏ 256/64/4heads/HeadDim=16**
+  kernel từ chối (hd≠64 → rc=−13) → luôn fallback, bit-exact giữ nguyên.
+
+### 2. Bit-exact (`tv/tests/_am9.tkv`, ref = đúng các bước worker .tkv)
+
+**11/11 PASS, `bit_bad=0`, rc=0** ở n = 64, 65, 100, 128, 200, 256, 300, 1024
+(cả 2 đường: m≤256→SgemmFull; m>256→packed; đuôi không chia hết 64; head 0/11…).
+
+### 3. Số đo (máy này, best-of-3; nền = §0.73/§0.74)
+
+| seq / mode | kết quả | nền |
+|---|---|---|
+| 1024 mode 0 (fwd/bwd) | 3344–3625 / **9484–10125** | 3531–3782 / 9735–10157 (§0.74), 10593 (§0.72) |
+| 1024 mode 2 (bwd/opt/copyback) | bwd 9750–10125, opt 969–1172, copyback 156 | bwd ~9750–9820, opt 860–1172 |
+| 1024 mode 1 (full step) | 14344 / 14079 / 14672 (loss `10.760399 → 13.442915` **EXACT**) | 15266 (§0.72), 14516/14657 best |
+| 8 mode 0 | 531 fwd / **1312** bwd / 1843 | ~2780 (§0.73) |
+| 256 mode 0 | 1079 fwd / **3234** bwd / 4313, loss `10.756927` EXACT | — |
+
+**Loss EXACT cả 3 seq** (10.572291 / 10.756927 / 10.760399).
+
+### 4. Gate / trainer / self-host
+
+- Gate **9/10** — chỉ `gap_tests` fail (`InvalidProgramException` trong `ConstantFoldingPass.run`) —
+  **pre-existing** đã chứng minh từ §0.72/§0.73 (stash build lại vẫn fail) — không liên quan #12/#13/#14.
+  *(WSL không thấy `dotnet` → gate in fail giả; wrapper tạm `out/wslbin/dotnet` → 9/10 PASS.)*
+- `trainer_tests` **15/15**; self-host `vong.exe` → **IL_IDENTICAL**.
+- DLL mới đã copy vào `Release\runtime\` và `out\tkv_simd_native.dll`.
+
+### 5. Chốt
+
+- Tiêu chí #14 ("cắt 72 GEMM/block"): **đạt về cấu trúc** (864→144 lời gọi native/layer,
+  2 GEMM trans-A không còn pinvoke/list-reflection trong vòng lẻ p-tile); loss EXACT + gate giữ nguyên.
+- Bwd vẫn **> 9000 ms** (best 9484) — bị chặn bởi thời gian GEMM thật + tranh chấp luồng 12 worker
+  (đúng kết luận §0.74: chỉ cắt overhead, không rút critical path). Lever còn lại: GEMM scale/threading
+  hoặc giảm số GEMM (không nằm trong #14).
+- `n < 128` (nhánh sequential của `gpt2_attention_bwd`) **chưa wire** — giữ đường cũ nguyên văn.
+- Chưa commit (sẽ commit riêng #14 ở cả 2 repo sau khi ghi xong mục này).
