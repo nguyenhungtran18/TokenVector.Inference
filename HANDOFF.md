@@ -5068,3 +5068,34 @@ opt.step best ~906 ms (torch ~660 ms — gap ~246 ms; gain từ lazy p ~78 ms wa
 - opt.step ~906 ms best — chưa đạt 660 ms (gain từ Ask C modest ~78 ms; bottleneck là adamw computation + r3 copy bandwidth).
 - Lever còn lại: GEMM scale/threading, giảm số GEMM — không thuộc #12-#17.
 - Chưa commit #18 (lazy p + Ask C wiring) — sẽ commit rieng 2 repo.
+## §0.80 Ask D — tích hợp BLAS (scipy-openblas64, opt-in) — loss EXACT, không nhanh hơn
+
+### 1. Việc làm
+
+- `tkv_simd_native.c`: thêm `tkv_blas_load()` (lazy `LoadLibrary("libscipy_openblas64_.dll")`) + `cblas_sgemm`/`openblas_set_num_threads` (64-bit int). `SgemmF32` gọi `tkv_try_blas()` trước kernel AVX2; OpenBLAS không có/không load được → fallback native silently.
+- **BLAS CHỈ bật khi `TKV_GEMM_BLAS=1`** (mặc định = 0 = native). Lý do: BLAS không nhanh hơn ở shape production, và bật nó làm hỏng 1 case matmul gate (tol 1e-4 vs 1.39e-04).
+- Copy `libscipy_openblas64_.dll` vào `Release\runtime\`, `out\`, CWD — app .NET search CWD.
+- 2 entry point khác nhau cho "cài đặt hệ thống" vs "phân phối": nếu DLL không có → native (gate giữ nguyên).
+
+### 2. Đo (seq1024, 14 luồng, best-of-3)
+
+| metric | native (mặc định) | BLAS (TKV_GEMM_BLAS=1) |
+|---|---|---|
+| bwd (mode 0) | ~8875–9172 | ~8922 (không đổi) |
+| opt | ~906 | ~906 |
+| loss | EXACT 10.760399 | EXACT 10.760399 |
+
+**Kết luận: tích hợp BLAS không cải thiện tốc độ** — GEMM không phải điểm nghẽn (bwd 8.9 s vs torch 2.36 s; gap chủ yếu là overhead interpreted/.NET/GC, không phải GEMM math).
+
+### 3. Gate / trainer / self-host
+
+- Gate **9/10** (chỉ `gap_tests` fail `InvalidProgramException` — pre-existing từ §0.72) — BLAS opt-in off mặc định.
+- Khi bật `TKV_GEMM_BLAS=1`: thêm `simd_matmul_tests` FAIL (`train 3 buoc`, diff 1.39e-04 > tol 1e-4).
+- `trainer_tests` **15/15**; self-host **IL_IDENTICAL** (không đổi .tkv compiler).
+- DLL copy vào `Release\runtime\` và `out\` — `*.dll` trong `.gitignore`, không commit.
+
+### 4. Khuyến nghị
+
+- **Không bật BLAS theo mặc định** — không nhanh hơn, phá 1 gate case. Giữ native AVX2.
+- Nếu sau này muốn dồn thêm nhân lực MKL/BLAS, chỉ áp dụng cho GEMM khổng lồ (`TKV_GEMM_BLAS=1`).
+- Gap vs PyTorch chủ yếu nằm ở **overhead .NET interpreter** (loops, boxing, GC) — cần tối ưu mức IL/kernel, không phải GEMM.
