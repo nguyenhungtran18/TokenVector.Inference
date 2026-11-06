@@ -4905,3 +4905,49 @@ Build đo: `out/bseq_p13_n10.dll`, probe `out/am8_n10.dll`, `out/at1b_n10.dll`.
   hoặc giảm số GEMM (không nằm trong #14).
 - `n < 128` (nhánh sequential của `gpt2_attention_bwd`) **chưa wire** — giữ đường cũ nguyên văn.
 - Chưa commit (sẽ commit riêng #14 ở cả 2 repo sau khi ghi xong mục này).
+## §0.76 YEU CAU #15 — LinearDwAtFused (native trans-A GEMM + gflat add) — bwd < 9000 DAT
+
+### 1. Việc làm
+
+- Kernel `LinearDwAtFused` (append vào `tkv_simd_native.c`, TU `/fp:fast`, chung mã máy với `SgemmF32`/packed GEMM):
+  - mode 0 (P58): tái hiện `_p58_core_simple` (tile T = min(min(roundup64(k), 1024), roundup64(min(m, n))) ≥ 64; SgemmF32; p0/i0/j0 tăng dần; cd zero-fill) — thay `smm_fwd_at` cho qkv/w1/w2.
+  - mode 1 (PACKED): materialize xᵀ trong C (pure copies) + cùng dispatch `k≥64` (`m≤256 → SgemmFull(T=256, mode=0)`; `m>256 → packed T=256`) — tái hiện `smm_transpose + smm_fwd` cho proj dw.
+  - Sau GEMM, kernel cộng thẳng `cd` vào `gflat[goff+k]` (1 phep f32 add/ptu) — bỏ vòng copy interpreted.
+- Compiler wiring (`simd_feature.tkv`, `file_io.tkv`): pinvoke `LinearDwAtFusedNative` + wrapper `LinearDwAtFusedM` (3 list qua reflection/pin; thiếu list → rc=−5, không ném) + `compile_linear_dw_at_fused` + đăng ký builtin + whitelist. Sửa off-by-one (IL arg 3=gdw_off, 4=n, 5=in_d, 6=out_d, 7=mode). Self-host **IL_IDENTICAL**.
+- Wire production (3 mirror có `linear_dw_fused`): `gpt2_ref.tkv`, `tv/training/tv.training.gpt2_ref124.tkv`, `tv/tests/tv.training.gpt2_ref124.tkv`:
+  - `gpt2_linear_bwd`: sau `linear_dw_fused` rc≠0 → `linear_dw_at_fused(..., mode=0)`; `l10 != 0` → fallback `smm_fwd_at` (vòng copy tự skip vì l10==0).
+  - proj dw: sau `linear_dw_fused` rc≠0 → `linear_dw_at_fused(..., mode=1)`; `l10p != 0` → fallback `smm_transpose + smm_fwd`.
+  - mlp_bwd dw2: cùng mẫu mode 0.
+  - 2 mirror nhỏ (config 256/64) **không wire** — chúng không dùng `linear_dw_fused` (đi thẳng smm_transpose + smm_fwd native), đường dw đã native; kernel mode 1 vẫn fallback bit-exact nếu gọi.
+- Probe `tv/tests/_dw9.tkv`: **11/11 PASS, bit_bad=0, rc=0** (mode 0: n=1/8/64/100/256/300/1024 incl shape lẻ; mode 1: h=8/100/1024 incl SgemmFull path; n<64 → rc=−23).
+
+### 2. Số đo (seq1024, 14 luồng, best-of-3)
+
+| metric | #15 (p15) | #14 (p14) | §0.73 (p13) | baseline §0.72 |
+|---|---|---|---|---|
+| bwd (mode 0) | **8797 / 8828 / 8922** | 9484 / 9531 / 10093 | 9735 / 9906 / 10157 | 10593 |
+| bwd (mode 2) | 8844 / 8922 / 8969 | 9750 / 9922 / 10125 | 9672 / 9766 / 9782 | — |
+| opt (mode 2) | 922 / 1063 / 1140 | 969 / 970 / 1172 | 860 / 937 | 1188 |
+| copyback | 141 / 156 | 141 / 156 | 109 / 125 | 141 |
+| fwd (mode 0) | 3406 / 3406 / 3500 | 3344 / 3406 / 3625 | 3531 / 3578 / 3782 | 3250 |
+| full step (mode 1) | **13344** | 14079 / 14344 / 14672 | 13313 / 13437 / 13719 | 15266 |
+| seq8 (total) | 1875 | 2766 / 2797 / 3000 | 2766 / 2797 / 3000 | 2875 |
+| seq256 (total) | 3906 | 4953 / 4984 / 5015 | 4953 / 4984 / 5015 | 5297 |
+
+**bwd best = 8797 ms → < 9000 ✓** (tiêu chí §0.72 đạt). Loss EXACT cả 3 seq:
+`10.572291 / 10.756927 / 10.760399`; mode 1 `10.760399 → 13.442915`.
+
+### 3. Gate / trainer / self-host
+
+- Gate **9/10** (chỉ `gap_tests` fail `InvalidProgramException` — pre-existing từ §0.72,
+  stash build lại vẫn fail) — không liên quan #14/#15.
+- `trainer_tests` **15/15**; self-host `vong.exe` → **IL_IDENTICAL**.
+- DLL đã copy vào `Release\runtime\` và `out\tkv_simd_native.dll`.
+
+### 4. Chốt
+
+- Tiêu chí #15: **đạt** — bwd xuống dưới 9000 ms (best 8797) với kernel bit-exact
+  (probe 11/11), loss EXACT, gate giữ nguyên.
+- Lever còn lại nếu muốn bwd còn thấp hơn: `op_embed_bwd` (interpreted, ~38M element
+  zero-init + scatter-add — candidate native tiếp theo) và GEMM scale/threading.
+- Chưa commit #15 — sẽ commit riêng 2 repo ngay sau mục này.
