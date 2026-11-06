@@ -1,0 +1,85 @@
+# PROBE LNF9 — BIT-CHECK LayernormFwd (YEU CAU #19)
+#
+#  native layernorm_fwd vs gpt2_layernorm (interpreted) — bit-exact required.
+#  Chay:
+#    D:\TokenVector\Release\dist\tkvc-tv.exe tv/tests/_lnf9.tkv out/lnf9.exe main
+#    copy out/lnf9.exe -> out/lnf9_n10.dll + runtimeconfig
+#    dotnet out/lnf9_n10.dll
+import tv.training.tensor
+import tv.training.gpt2_ref
+
+EPS = 1e-06
+
+
+def _seed(xs: 'list[f32]', n: 'i64', s: 'i64') -> 'i64':
+    st = s
+    i = 0
+    while i < n:
+        st = (st * 1103515245 + 12345) % 2147483648
+        v = float((st / 256) % 65536) / 65536.0
+        xs[i] = v * 2.0 - 1.0
+        i = i + 1
+    return st
+
+
+def _ref(x: "Tensor", g: "Tensor", b: "Tensor") -> "Tensor":
+    n = _sh0(x)
+    h = _sh1(x)
+    out = t_zeros([n, h])
+    for i in range(n):
+        base = i * h
+        mu = 0.0
+        for j in range(h):
+            mu = mu + x.data[base + j]
+        mu = mu / float(h)
+        v = 0.0
+        for j in range(h):
+            d = x.data[base + j] - mu
+            v = v + d * d
+        v = v / float(h)
+        rstd = 1.0 / sqrt(v + EPS)
+        for j in range(h):
+            out.data[base + j] = (x.data[base + j] - mu) * rstd * g.data[j] + b.data[j]
+    return out
+
+
+def _t(n: 'i64', h: 'i64', tag: 'str') -> 'i64':
+    x = t_zeros([n, h])
+    g = t_zeros([h])
+    b = t_zeros([h])
+    _s = _seed(x.data, n * h, 111 + n)
+    _s = _seed(g.data, h, 222 + h)
+    _s = _seed(b.data, h, 333 + n + h)
+    ref = _ref(x, g, b)
+
+    out = t_zeros([n, h])
+    xl = x.data
+    gl = g.data
+    bl = b.data
+    ol = out.data
+    rc = layernorm_fwd(xl, gl, bl, ol, n, h)
+    if rc != 0:
+        print("LNF9 " + tag + " rc=" + str(rc))
+        return 0
+    bad = 0
+    first = -1
+    i = 0
+    while i < n * h:
+        if ref.data[i] != out.data[i]:
+            bad = bad + 1
+            if first < 0:
+                first = i
+        i = i + 1
+    print("LNF9 " + tag + " n=" + str(n) + " h=" + str(h) + " rc=" + str(rc) + " bit_bad=" + str(bad) + " first=" + str(first))
+    return bad
+
+
+def main() -> 'i32':
+    print("LNF9 — bit-check layernorm_fwd")
+    bad = 0
+    bad = bad + _t(8, 768, "n8h768")
+    bad = bad + _t(100, 64, "n100h64")
+    bad = bad + _t(1024, 768, "n1024h768")
+    bad = bad + _t(3, 5, "le")
+    print("LNF9 TOTAL bit_bad=" + str(bad) + " (0 = BIT-EXACT)")
+    return 0

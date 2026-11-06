@@ -51,6 +51,15 @@ def gpt2_layernorm(x: "Tensor", g: "Tensor", b: "Tensor") -> "Tensor":
     n = _sh0(x)
     h = _sh1(x)
     out = t_zeros([n, h])
+    # YEU CAU #19 (2026-11-06): native layernorm_fwd — mu/v acc f64,
+    # rstd f64, scale f32; rc != 0 -> fallback duong interpreted cu.
+    xl = x.data
+    gl = g.data
+    bl = b.data
+    ol = out.data
+    rc = layernorm_fwd(xl, gl, bl, ol, n, h)
+    if rc == 0:
+        return out
     for i in range(n):
         base = i * h
         mu = 0.0
@@ -1131,14 +1140,23 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
         # + db_proj[o] = sum_t gout[t,o] (thay vong scalar n*h^2)
         ctxTt = smm_transpose(ctxT, n, h)
         dwG = smm_fwd(ctxTt, gout, h, h, n)
-        for o in range(h):
-            acc = 0.0
-            for t2 in range(n):
-                acc = acc + gout.data[t2 * h + o]
-            if o_bproj >= 0:
-                gflat[o_bproj + o] = gflat[o_bproj + o] + acc
-            else:
-                db_proj.data[o] = db_proj.data[o] + acc
+        # db_proj via native bias_grad (gflat offset hoac db_proj tensor)
+        _bproj_gy = gout.data
+        _bproj_d = db_proj.data
+        _bproj_rc = -1
+        if o_bproj >= 0:
+            _bproj_rc = bias_grad(_bproj_gy, gflat, o_bproj, n, h)
+        else:
+            _bproj_rc = bias_grad(_bproj_gy, _bproj_d, 0, n, h)
+        if _bproj_rc != 0:
+            for o in range(h):
+                acc = 0.0
+                for t2 in range(n):
+                    acc = acc + gout.data[t2 * h + o]
+                if o_bproj >= 0:
+                    gflat[o_bproj + o] = gflat[o_bproj + o] + acc
+                else:
+                    db_proj.data[o] = db_proj.data[o] + acc
         for r in range(h):
             for o in range(h):
                 if o_proj >= 0:
@@ -1237,6 +1255,7 @@ def gpt2_mlp_bwd(x: "Tensor", w1: "Tensor", b1: "Tensor",
                  o_w2: "i64" = -1, o_b2: "i64" = -1) -> 'list[Tensor]':
     h = HiddenSize
     inner = gpt2_linear(x, w1, b1, n, h, 4 * h, simd)
+    a = t_zeros([n * 4 * h])
     a = t_zeros([n * 4 * h])
     for i in range(n * 4 * h):
         a.data[i] = gelu_erf(inner.data[i])

@@ -51,6 +51,15 @@ def gpt2_layernorm(x: "Tensor", g: "Tensor", b: "Tensor") -> "Tensor":
     n = _sh0(x)
     h = _sh1(x)
     out = t_zeros([n, h])
+    # YEU CAU #19 (2026-11-06): native layernorm_fwd — mu/v acc f64,
+    # rstd f64, scale f32; rc != 0 -> fallback duong interpreted cu.
+    xl = x.data
+    gl = g.data
+    bl = b.data
+    ol = out.data
+    rc = layernorm_fwd(xl, gl, bl, ol, n, h)
+    if rc == 0:
+        return out
     for i in range(n):
         base = i * h
         mu = 0.0
@@ -426,6 +435,13 @@ def _gf_zeros(n: 'i64') -> 'list[f32]':
     return out
 
 def _gf_one(j: "_GfJob") -> 'i64':
+    # YEU CAU #19: moi worker 1 doan [lo, hi) -> native gelu_erf_fwd (bit-exact,
+    # probe _gff9 bit_bad=0). rc != 0 -> fallback interpreted dung doan nay.
+    sl = j.sl
+    sg = j.seg
+    rc = gelu_erf_fwd(sl, sg, j.lo, j.hi)
+    if rc == 0:
+        return 0
     k = 0
     i = j.lo
     while i < j.hi:
@@ -1415,14 +1431,23 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
         if l10p != 0:
             ctxTt = smm_transpose(ctxT, n, h)
             dwG = smm_fwd(ctxTt, gout, h, h, n)
-        for o in range(h):
-            acc = 0.0
-            for t2 in range(n):
-                acc = acc + gout.data[t2 * h + o]
-            if o_bproj >= 0:
-                gflat[o_bproj + o] = gflat[o_bproj + o] + acc
-            else:
-                db_proj.data[o] = db_proj.data[o] + acc
+        # db_proj via native bias_grad (gflat offset hoac db_proj tensor)
+        _bproj_gy = gout.data
+        _bproj_d = db_proj.data
+        _bproj_rc = -1
+        if o_bproj >= 0:
+            _bproj_rc = bias_grad(_bproj_gy, gflat, o_bproj, n, h)
+        else:
+            _bproj_rc = bias_grad(_bproj_gy, _bproj_d, 0, n, h)
+        if _bproj_rc != 0:
+            for o in range(h):
+                acc = 0.0
+                for t2 in range(n):
+                    acc = acc + gout.data[t2 * h + o]
+                if o_bproj >= 0:
+                    gflat[o_bproj + o] = gflat[o_bproj + o] + acc
+                else:
+                    db_proj.data[o] = db_proj.data[o] + acc
         if l10p != 0:
             for r in range(h):
                 for o in range(h):

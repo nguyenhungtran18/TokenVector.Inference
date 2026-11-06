@@ -5099,3 +5099,44 @@ opt.step best ~906 ms (torch ~660 ms — gap ~246 ms; gain từ lazy p ~78 ms wa
 - **Không bật BLAS theo mặc định** — không nhanh hơn, phá 1 gate case. Giữ native AVX2.
 - Nếu sau này muốn dồn thêm nhân lực MKL/BLAS, chỉ áp dụng cho GEMM khổng lồ (`TKV_GEMM_BLAS=1`).
 - Gap vs PyTorch chủ yếu nằm ở **overhead .NET interpreter** (loops, boxing, GC) — cần tối ưu mức IL/kernel, không phải GEMM.
+## §0.81 Native `gelu_erf_fwd` per-worker segment (YEU CAU #19) — bit-exact, bwd ~8359 ms
+
+### 1. Kernel + hop dong so lieu
+
+- `GeluErfFwd(x, x_len, out, out_len, lo, hi)` trong `tkv_bwd_ops.c` (TU `/fp:precise`).
+- Bit-exact voi IL cua `gelu_erf` (doc tu `out/gff9.il`):
+  - `arg = v / (float)1.4142135623730951` — **phep chia f32** (`ldc.r4`), khong phai f64.
+  - erf: poly f64 (`t = 1/(1+0.3275911*ax)`), `exp` f64 nhung **ket qua lam tron f32**, `e*poly` f64, `sg*(1-...)` f64, cuoi cung ep f32.
+  - `out = fl32( fl32(0.5f*v) * fl32(1.0f + erf) )` — **lam tron f32 tung ve truoc khi nhan**.
+- Ban dau dung `double d = (0.5*(double)v)*(1.0+(double)ef)` -> ~25% phan tu lech 1 ULP; sua theo IL -> 0.
+
+### 2. Probe
+
+`tv/tests/_gff9.tkv` — **8/8 `bit_bad=0`**:
+prod 3.1M (amp 1.0 va 12.0), n=8, n=1, n=7, n=100k wide, segment `[100,1000)`, full `[0,1024)`.
+
+### 3. Wiring (quan trong)
+
+- **KHONG** goi native mot lan cho ca 3.1M: kernel don luong ~250 ms (do bang `_gft`), cham hon nhanh 12 worker (~40 ms) -> 12 layer x 250 ms = **+3 s** (da do: fwd 6437, bwd 11000).
+- Thay vao do: moi worker `_gf_one` goi native cho **doan cua minh** `[j.lo, j.hi)`:
+  - `sl = j.sl`, `sg = j.seg` (builtin can bien), `rc = gelu_erf_fwd(sl, sg, j.lo, j.hi)`.
+  - `rc != 0` -> fallback interpreted dung doan (`gelu_erf`) nhu cu.
+- Giu nguyen cau truc 12 worker + `_gf_mcopy`; `simd == 0` hoac `cnt < 2M` van interpreted serial (khong doi).
+
+### 4. Do (seq1024, 14 luong, cung phien)
+
+| metric | truoc §0.81 | sau §0.81 |
+|---|---|---|
+| fwd (mode 0) | 3422–3484 | 3484–3532 |
+| bwd (mode 0) | 8672–9000 | **8359–8547** |
+| seq256 mode 0 | 3906–3953 | **3844** |
+| seq8 mode 0 | 1875 | **1812** |
+| full step (mode 1) | 13328 | 14188 (nhieu) |
+| loss 3 seq | EXACT | EXACT 10.760399 / 10.756927 / 10.572291 |
+| mode 1 loss | 13.442915 | 13.442915 |
+
+### 5. Gate / trainer / self-host
+
+- Gate **9/10** (chi `gap_tests` FAIL `InvalidProgramException` — pre-existing tu §0.72).
+- `trainer_tests` **15/15** (eval loss 0.014949893, ppl 1.0150622).
+- Self-host `tools/vong.exe` -> **IL_IDENTICAL** (compiler on dinh voi builtin moi).
