@@ -918,6 +918,8 @@ def gpt2_linear_bwd(x: "Tensor", w: "Tensor", gy: "Tensor", n: 'i64', in_d: 'i64
             _y10 = gy.data
             _g10 = gflat
             l10 = linear_dw_fused(_x10, _y10, _g10, goff, n, in_d, out_d)
+            if l10 != 0:
+                l10 = linear_dw_at_fused(_x10, _y10, _g10, goff, n, in_d, out_d, 0)
         if l10 != 0:
             dw = smm_fwd_at(x, gy, in_d, out_d, n)
         db = t_zeros([out_d])
@@ -1409,6 +1411,8 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
             _go10 = gout.data
             _gf10 = gflat
             l10p = linear_dw_fused(_ct10, _go10, _gf10, o_proj, n, h, h)
+            if l10p != 0:
+                l10p = linear_dw_at_fused(_ct10, _go10, _gf10, o_proj, n, h, h, 1)
         if l10p != 0:
             ctxTt = smm_transpose(ctxT, n, h)
             dwG = smm_fwd(ctxTt, gout, h, h, n)
@@ -1573,6 +1577,8 @@ def gpt2_mlp_bwd(x: "Tensor", w1: "Tensor", b1: "Tensor",
         _gn10 = gout.data
         _gf10 = gflat
         l10m = linear_dw_fused(_a10, _gn10, _gf10, o_w2, n, ih, h)
+        if l10m != 0:
+            l10m = linear_dw_at_fused(_a10, _gn10, _gf10, o_w2, n, ih, h, 0)
     if l10m != 0:
         dw2 = smm_fwd_at(a, gout, ih, h, n)
     rj = thread_join(hb)
