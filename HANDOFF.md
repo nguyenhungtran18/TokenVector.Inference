@@ -5140,3 +5140,102 @@ prod 3.1M (amp 1.0 va 12.0), n=8, n=1, n=7, n=100k wide, segment `[100,1000)`, f
 - Gate **9/10** (chi `gap_tests` FAIL `InvalidProgramException` — pre-existing tu §0.72).
 - `trainer_tests` **15/15** (eval loss 0.014949893, ppl 1.0150622).
 - Self-host `tools/vong.exe` -> **IL_IDENTICAL** (compiler on dinh voi builtin moi).
+## §0.82 GEMM rect: chunk C theo L2 + pack song song — bwd best 7406 ms (auto 28 luồng)
+
+### 1. Việc làm (chỉ `tkv_simd_native.c`, không đổi compiler/.tkv)
+
+Profile lại phần **ngoài 12 block** của `gpt2_backward` (HANDOFF §0.81 để ngỏ head/embed) bằng
+`tv/tests/_lm1024.tkv` @seq1024:
+
+| op (ngoài block) | trước | sau |
+|---|---|---|
+| `lmhead_bwd_fused` | **1656 ms** | **812 ms** |
+| `op_embed_bwd(wte)` (V*h=38.6M) | 125 | 141 |
+| `f32_list_add dwte` (V*h) | 31 | 47 |
+| vòng `.tkv` `gwpe -> gflat` (786K) | 78 | 62 |
+
+→ **chunk ≥ 500 ms ngoài block là lm-head**, không phải GELU. Đo C trực tiếp (bench `TkvBenchRect`
+tạm thời, đã gỡ) tách được nguyên nhân:
+
+- `SgemmF32` vuông **545–586 GFLOPS** (n=768/1024) → kernel KHÔNG phải điểm nghẽn.
+- `gemm_rect_f32` shape head2 `50257x768x1024`: **69 GFLOPS** (1143 ms); cùng shape `m=4096`:
+  389 GFLOPS → lỗi ở **m lớn**, không phải K/N.
+- Nguyên nhân: `for jc { for pc { for ic } }` → tile C bị đọc+ghi lại `k/KC = 16` lần trên 154 MB
+  (2.5 GB RMW), vượt L3 35 MB.
+
+**Sửa 1 (MC2)** — `gemm_rect_f32`: gom `mc2 = 32768/nc` hàng (làm tròn theo `mc_b`) thành 1 chunk để
+tile C (~128 KB) nằm trong L2 → C chỉ ra DRAM 1 lần. Thứ tự cộng theo k **không đổi** (pc tăng dần,
+trong pc vẫn `micro_f32`) ⇒ bit-giống.
+
+**Sửa 2 (pack song song)** — `packed_create` là 1 luồng và chiếm **50–60%** thời gian 1 phep
+`smm_dot` (bench `bench_packed`: lin_bwd create=33.6 ms vs gemm=24.2 ms). Thêm `pack_rows_f32`
+(+ mode 6 của pool) chia theo hàng đích, và `tkv_run_pack` gọi pool; nhánh trans=1 dùng tile 32×32.
+Thuần copy ⇒ bit-giống. Ngưỡng: `nt > 1 && m*n >= 65536`, `m` = số hàng đích.
+
+### 2. Số đo C (TKV_GEMM_THREADS=14, best-of-3)
+
+**`run_rect_shaped` (trước → sau):**
+
+| shape | trước | sau |
+|---|---|---|
+| `1024x768x50257` (head1 dxf) | 297.1 ms / 266 GF | 296.3 / 267 |
+| `50257x768x1024` (head2 dwte) | 1143.6 / 69 | **288.3 / 274** |
+| `50257x768x128` | 126.6 / 78 | **41.5 / 238** |
+| `4096x768x1024` | 16.6 / 389 | 18.1 / 356 |
+| `1024x768x768` | 5.4 / 224 | 3.3 / 368 |
+
+**packed (create / gemm / tổng):**
+
+| shape (tb=1) | trước | sau |
+|---|---|---|
+| lin_fwd `1024x3072x768` | 18.0 / 24.3 / 43.8 | 3.1 / 14.1 / **19.1** |
+| lin_bwd `1024x768x3072` | 33.6 / 24.2 / 59.9 | 5.4 / 13.6 / **20.9** |
+| dctx `1024x768x768` | 4.4 / 6.0 / 11.3 | 1.1 / 3.0 / **4.9** |
+| dw_t `1024x3072x1024` | 24.5 / 32.0 / 58.6 | 4.1 / 19.8 / **25.5** |
+| qkv-ish `1024x3072x2304` | 112.9 / 67.0 / 185.6 | 11.3 / 62.2 / **81.5** |
+
+### 3. Đo end-to-end
+
+**A/B cùng phiên, seq1024 mode 0, 14 luồng, xen kẽ best-of-3** (đây là so sánh hợp lệ — máy hôm nay
+chậm hơn §0.81 ~10%, nên không so trực tiếp 8359):
+
+| cấu hình | fwd | bwd |
+|---|---|---|
+| gốc (không MC2, pack 1 luồng) | 3750–3922 | 9203 |
+| + MC2 | — | 8813 |
+| + MC2 + pack song song | 3453–3485 | **8141** |
+
+⇒ **-11.5% bwd** so với gốc cùng phiên. Probe block (14 luồng): `BLOCK_BWD` 594–610 → **562**;
+`MLP_BWD` 328 → 297; `lin_bwd` 109 → 78; `mlp_bwd` thật 266 → 281 (nhiễu ±30).
+
+**Mặc định auto (28 luồng HT) tốt hơn 14 luồng** — đo 2 lần mỗi bên, xen kẽ: bwd **7515/7687** vs
+8172/8203; fwd 3282/3297 vs 3453/3485. Vì vậy **số chốt dùng mặc định (không đặt env)**:
+
+| metric | §0.81 | nay (§0.82) |
+|---|---|---|
+| seq1024 mode 0 fwd | 3484–3532 | **3250** |
+| seq1024 mode 0 bwd | 8359–8547 | **7406** |
+| seq1024 mode 0 total | ~11.9 s | **10688** |
+| full step (mode 1) | 13328 | **11656** |
+| mode 2: fwd / bwd / opt / copyback | — | 2937 / 7453 / **875** / 125 |
+| seq256 mode 0 total | 3844 | **3750** |
+| seq8 mode 0 total | 1812 | **1781** |
+| loss 3 seq | EXACT | **EXACT** 10.572291 / 10.756927 / 10.760399 |
+| mode 1 loss | 13.442915 | **13.442915** |
+
+(`opt.step` 906 → 875 — AdamW không dùng pack, coi như nhiễu/mép.)
+
+### 4. Gate / trainer / self-host
+
+- Gate **9/10** — chỉ `gap_tests` FAIL `InvalidProgramException` (pre-existing từ §0.72).
+- `g_trainer_tests` **15/15**; eval loss 0.014949893, ppl 1.0150622 (không đổi).
+- Self-host `tools/vong.exe` → **IL_IDENTICAL** (không sửa file compiler nào).
+
+### 5. Chốt
+
+- Tiêu chí "bwd ≤ 9000 ms" **đạt rộng** (7406, mặc định auto).
+- Kết luận §0.80 ("GEMM không phải điểm nghẽn") **sai một phần**: GEMM kernel vuông đã nhanh, nhưng
+  **đường rect + pack** có overhead 4–8×; sửa 2 chỗ đó lấy lại ~1.1 s bwd.
+- Ứng viên ≥ 500 ms kế tiếp (đã có số): `gelu_fwd 47 + gelu_bwd 31 = ~936 ms` cho 12 layer;
+  `vòng gwpe->gflat` .tkv 62 ms; `op_embed_bwd(wte) 141 ms`; head1 `1024x768x50257` còn 267 GFLOPS
+  (7/55 cột rơi vào nhánh scalar của `micro_f32` — sửa bằng `maskload/maskstore`, vẫn bit-exact).
