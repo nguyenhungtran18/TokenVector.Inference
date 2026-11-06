@@ -4777,3 +4777,73 @@ Chưa commit gì (2 repo còn dirty từ #10/#11, không revert). DLL mới đã
 (mode 0/1/2), probe `out/am7_n10.dll`, `out/gl1c_n10.dll`, `out/gate_p12.log`.
 Lệnh tái lập:
 `printf "1024\n2\n1\n" > tv/tests/_seq_cfg.txt; TKV_GEMM_THREADS=14 dotnet out/bseq_p12_n10.dll`.
+
+## §0.74 ATTENTION NON-GEMM: đo tách + native `softmax_causal_fwd` (bit-exact, fwd −3.4%, bwd không đổi)
+
+Tiếp yêu cầu #12/#13: đo tách từng vòng non-GEMM trong `attention_bwd` rồi viết kernel cho
+phần lớn nhất. **Kết luận quan trọng: vòng lớn nhất là softmax-causal forward (249/296 ms
+non-GEMM), nhưng nó KHÔNG nằm trên critical path của bước 1024 — bwd không đổi.**
+
+### 1. Đo tách (probe mới `tv/tests/_at1.tkv`, seq1024, 1 luồng)
+
+`gpt2_attention_bwd` (1 block, không gflat) = **344 ms**; 12 head chạy song song.
+
+| vòng (12 head, tuần tự) | ms | % non-GEMM |
+|---|---:|---:|
+| pack Q/K/V/dctx (strided) | <16 | — |
+| **scale + max** | 62 | 21% |
+| **exp + tổng** | **141** | **48%** |
+| normalize | 15 | 5% |
+| zero-fill u > t | 31 | 10% |
+| writeback dq (strided) | 47 | 16% |
+| merge packed | <16 | — |
+| **Σ non-GEMM** | **296** | |
+| 6 GEMM/head × 12 (đo lô 8) | 397 | |
+
+⇒ trong 1 worker: GEMM **33.1 ms/head**, non-GEMM **24.7 ms/head** ⇒ GEMM 57%.
+`writeback` 47 ms và `pack` <16 ms là **shuffle bộ nhớ** — không đáng kernel.
+
+### 2. Kernel `softmax_causal_fwd(s, n, inv)`
+
+Gộp 4 vòng (scale+max / exp+tổng / normalize / zero-fill) thành 1 pass in-place trên
+`Smat.data`. Bit-exact nhờ giữ đúng IL: `mxv` là f64 **trước khi làm tròn f32**; `exp` đọc
+lại giá trị f32; `totv` cộng dồn f64 chưa làm tròn; nhân `s*ivv` f32×f64→f32.
+
+`rc<0` → 4 vòng `.tkv` nguyên văn (fallback). Wire **4 điểm/file × 5 mirror**
+(`_attn_f_one`, `gpt2_attention` n<128, `_attn_hb_one`, `gpt2_attention_bwd` n<128).
+
+`tv/tests/_am8.tkv`: **bit_bad=0** ở n=1, 2, 5(lẻ hd=5), 8, 127, 128, **1024**;
+`n=1024`: interp **47 ms** → native **< 15.6 ms** (1 quantum).
+
+### 3. Đo end-to-end — A/B xen kẽ cùng phiên (`bseq_p12` không kernel vs `bseq_p13` có)
+
+| | p12 | p13 | Δ best |
+|---|---|---|---|
+| fwd (3 cặp) | 3656 / 3657 / 3782 | **3578 / 3531 / 3562** | **−3.4%** |
+| bwd (3 cặp) | 10062 / 9890 / 10109 | 9735 / 9906 / 10157 | −1.6% (không ổn định) |
+| tổng | 13718 / 13547 / 13891 | 13313 / 13437 / 13719 | −1.7% |
+
+fwd **nhanh hơn ở cả 3 cặp** (đúng phần attention fwd). bwd **không đổi trong nhiễu**
+(mode 2: p13 best 9672 / median 9766 vs p12 best 9187 / median 9782).
+
+**Vì sao bwd không đổi:** 12 worker chạy song song trên 14 luồng, mỗi worker bị chi phối bởi
+6 GEMM (33 ms) + tranh chấp luồng; bỏ 24.7 ms vòng softmax khỏi một pha không rút ngắn
+critical path. Đúng như §0.69/§0.70: phần còn lại của `attention_bwd` là **chi phí mỗi lời
+gọi GEMM phía native**, không phải vòng interpreted.
+
+### 4. Không regress + gate
+
+| seq | TỔNG (mode 2, 3 run) | trước (§0.73) |
+|---:|---|---|
+| 8 | 2766 / 2797 / 3000 | 2782 / 2782 / 2812 |
+| 256 | 4953 / 4984 / 5015 | 4875 / 5030 / 5078 |
+
+`loss` mode 0: **`10.572291` / `10.756927` / `10.760399` — EXACT cả 3**.
+Gate **9/10** (`gap_tests` exit=127 pre-existing), `trainer_tests` **15/15**,
+self-host **`IL_IDENTICAL`**.
+
+### 5. Chốt
+
+Kernel giữ lại (bit-exact, giảm CPU thật, fwd −3.4%) nhưng **không phải lever cho bwd**.
+Lever còn lại của bwd là bỏ overhead mỗi lời gọi GEMM (72 GEMM nhỏ/block) — việc của #14.
+Build đo: `out/bseq_p13_n10.dll`, probe `out/am8_n10.dll`, `out/at1b_n10.dll`.

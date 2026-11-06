@@ -10,6 +10,8 @@
 #   [H..] 6 GEMM cua worker (de biet ty le GEMM/non-GEMM trong worker)
 # Moi timer dat trong main (bug #8: now_ms() trong ham local doc sai).
 # Chay: tkvc-tv.exe tv/tests/_at1.tkv out/at1.exe main ; dotnet out/at1_n10.dll
+import tv.training.gpt2_ref124
+import tv.training.tensor
 import tv.training.simd_matmul
 
 def _fill(n: 'i64', seed: 'i64') -> "list[f32]":
@@ -88,10 +90,7 @@ def main() -> 'i32':
         for head in range(nh):
             for t3 in range(n):
                 b0 = t3 * n
-                mxv = Smat.data[b0]
-                for u in range(t3 + 1):
-                    if Smat.data[b0 + u] > mxv:
-                        mxv = Smat.data[b0 + u]
+                mxv = 0.0
                 totv = 0.0
                 for u in range(t3 + 1):
                     e = exp(Smat.data[b0 + u] - mxv)
@@ -121,9 +120,9 @@ def main() -> 'i32':
                 d0 = t6 * hd
                 p0 = t6 * 3 * hd
                 for d in range(hd):
-                    dqo[p0 + d] = gDq.data[d0 + d] * inv
-                    dqo[p0 + hd + d] = gDkT.data[d * n + t6] * inv
-                    dqo[p0 + 2 * hd + d] = gDvT.data[d * n + t6]
+                    dqo.data[p0 + d] = gDq.data[d0 + d] * inv
+                    dqo.data[p0 + hd + d] = gDkT.data[d * n + t6] * inv
+                    dqo.data[p0 + 2 * hd + d] = gDvT.data[d * n + t6]
         t6m = now_ms()
         # ---------- [G] merge packed -> ctxT/dqkv ----------
         for head in range(nh):
@@ -133,10 +132,10 @@ def main() -> 'i32':
                 p0 = t7 * 3 * hd
                 r0 = t7 * 3 * h + ho
                 for d in range(hd):
-                    ctxT.data[c0 + d] = ctxo[t7 * hd + d]
-                    dqkv.data[r0 + d] = dqo[p0 + d]
-                    dqkv.data[r0 + h + d] = dqo[p0 + hd + d]
-                    dqkv.data[r0 + 2 * h + d] = dqo[p0 + 2 * hd + d]
+                    ctxT.data[c0 + d] = ctxo.data[t7 * hd + d]
+                    dqkv.data[r0 + d] = dqo.data[p0 + d]
+                    dqkv.data[r0 + h + d] = dqo.data[p0 + hd + d]
+                    dqkv.data[r0 + 2 * h + d] = dqo.data[p0 + 2 * hd + d]
         t7m = now_ms()
         # ---------- [H] 6 GEMM cua 1 head ----------
         g0 = now_ms()
@@ -203,5 +202,94 @@ def main() -> 'i32':
     print("AT1 H5 smm_fwd_at dkT x12  = " + str(gm_k * 12.0) + " ms")
     print("AT1 H6 smm_fwd_at dvT x12  = " + str(gm_v * 12.0) + " ms")
     print("AT1 SUM GEMM x12           = " + str((gm_s + gm_c + gm_d + gm_q + gm_k + gm_v) * 12.0) + " ms")
+
+    # ---------- [I] GEMM do theo LO 8 lan (vuot quantum 15.6 ms) ----------
+    bb_s = 1.0e9
+    bb_c = 1.0e9
+    bb_d = 1.0e9
+    bb_q = 1.0e9
+    bb_k = 1.0e9
+    bb_v = 1.0e9
+    rep2 = 0
+    while rep2 < 2:
+        h0 = now_ms()
+        rq1 = 0
+        while rq1 < 8:
+            x1 = smm_dot(gQ, gK, n, n, hd)
+            rq1 = rq1 + 1
+        h1 = now_ms()
+        rq2 = 0
+        while rq2 < 8:
+            x2 = smm_fwd(Smat, gV, n, hd, n)
+            rq2 = rq2 + 1
+        h2 = now_ms()
+        rq3 = 0
+        while rq3 < 8:
+            x3 = smm_dot(gDc, gV, n, n, hd)
+            rq3 = rq3 + 1
+        h3 = now_ms()
+        rq4 = 0
+        while rq4 < 8:
+            x4 = smm_fwd(gDs, gK, n, hd, n)
+            rq4 = rq4 + 1
+        h4 = now_ms()
+        rq5 = 0
+        while rq5 < 8:
+            x5 = smm_fwd_at(gQ, gDs, hd, n, n)
+            rq5 = rq5 + 1
+        h5 = now_ms()
+        rq6 = 0
+        while rq6 < 8:
+            x6 = smm_fwd_at(gDc, Smat, hd, n, n)
+            rq6 = rq6 + 1
+        h6 = now_ms()
+        if (h1 - h0) / 8.0 < bb_s:
+            bb_s = (h1 - h0) / 8.0
+        if (h2 - h1) / 8.0 < bb_c:
+            bb_c = (h2 - h1) / 8.0
+        if (h3 - h2) / 8.0 < bb_d:
+            bb_d = (h3 - h2) / 8.0
+        if (h4 - h3) / 8.0 < bb_q:
+            bb_q = (h4 - h3) / 8.0
+        if (h5 - h4) / 8.0 < bb_k:
+            bb_k = (h5 - h4) / 8.0
+        if (h6 - h5) / 8.0 < bb_v:
+            bb_v = (h6 - h5) / 8.0
+        rep2 = rep2 + 1
+    print("AT1 I1 smm_dot scores /head = " + str(bb_s) + " ms")
+    print("AT1 I2 smm_fwd ctx     /head = " + str(bb_c) + " ms")
+    print("AT1 I3 smm_dot dp      /head = " + str(bb_d) + " ms")
+    print("AT1 I4 smm_fwd dq      /head = " + str(bb_q) + " ms")
+    print("AT1 I5 smm_fwd_at dkT  /head = " + str(bb_k) + " ms")
+    print("AT1 I6 smm_fwd_at dvT  /head = " + str(bb_v) + " ms")
+    sg = bb_s + bb_c + bb_d + bb_q + bb_k + bb_v
+    print("AT1 I7 GEMM 6 cai /head    = " + str(sg) + " ms ; x12 = " + str(sg * 12.0) + " ms")
+    print("AT1 I8 non-GEMM /head      = " + str(ng / 12.0) + " ms ; ty le GEMM " + str(sg * 100.0 / (sg + ng / 12.0)) + "%")
+
+    # ---------- [J] ca attention_bwd (1 luong, khong gflat) ----------
+    xx = t_zeros([n, h])
+    wq = t_zeros([3 * h, h])
+    bq = t_zeros([3 * h])
+    wp = t_zeros([h, h])
+    bp = t_zeros([h])
+    go = t_zeros([n, h])
+    kk1 = 0
+    while kk1 < n * h:
+        xx.data[kk1] = 0.01
+        go.data[kk1] = 0.01
+        kk1 = kk1 + 1
+    kk2 = 0
+    while kk2 < 3 * h * h:
+        wq.data[kk2] = 0.01
+        kk2 = kk2 + 1
+    kk3 = 0
+    while kk3 < h * h:
+        wp.data[kk3] = 0.01
+        kk3 = kk3 + 1
+    ab0 = gpt2_attention_bwd(xx, wq, bq, wp, bp, n, go, 1)
+    j0 = now_ms()
+    ab1 = gpt2_attention_bwd(xx, wq, bq, wp, bp, n, go, 1)
+    j1 = now_ms()
+    print("AT1 J attention_bwd 1 luong = " + str(j1 - j0) + " ms (khong gflat)")
     print("AT1 done")
     return 0

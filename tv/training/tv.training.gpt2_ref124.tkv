@@ -144,26 +144,32 @@ def _attn_f_one(j: "_AtnFJob") -> 'i64':
         # Smat[t,u] = dot(Q[t,:], K[u,:]) — giong duong sequential
         Smat = smm_dot(gQ, gK, n, n, hd)
         # scale 1/sqrt(hd) + mask causal + softmax theo hang
-        for t2 in range(n):
-            b0 = t2 * n
-            m0 = Smat.data[b0] * inv
-            Smat.data[b0] = m0
-            mxv = m0
-            for u in range(1, t2 + 1):
-                m0 = Smat.data[b0 + u] * inv
-                Smat.data[b0 + u] = m0
-                if m0 > mxv:
-                    mxv = m0
-            totv = 0.0
-            for u in range(t2 + 1):
-                e = exp(Smat.data[b0 + u] - mxv)
-                Smat.data[b0 + u] = e
-                totv = totv + e
-            ivv = 1.0 / totv
-            for u in range(t2 + 1):
-                Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
-            for u in range(t2 + 1, n):
-                Smat.data[b0 + u] = 0.0
+        # YEU CAU #13 (2026-11-06): native `softmax_causal_fwd` gop 4 vong
+        # (scale+max / exp+tong / normalize / zero-fill) — _am8 bit_bad=0.
+        # rc != 0 -> 4 vong interpreted NGUYEN VAN ben duoi (fallback).
+        slf = Smat.data
+        l13 = softmax_causal_fwd(slf, n, inv)
+        if l13 != 0:
+            for t2 in range(n):
+                b0 = t2 * n
+                m0 = Smat.data[b0] * inv
+                Smat.data[b0] = m0
+                mxv = m0
+                for u in range(1, t2 + 1):
+                    m0 = Smat.data[b0 + u] * inv
+                    Smat.data[b0 + u] = m0
+                    if m0 > mxv:
+                        mxv = m0
+                totv = 0.0
+                for u in range(t2 + 1):
+                    e = exp(Smat.data[b0 + u] - mxv)
+                    Smat.data[b0 + u] = e
+                    totv = totv + e
+                ivv = 1.0 / totv
+                for u in range(t2 + 1):
+                    Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
+                for u in range(t2 + 1, n):
+                    Smat.data[b0 + u] = 0.0
         # ctx[t,:] = sum_u Smat[t,u] * V[u,:]
         gCtx = smm_fwd(Smat, gV, n, hd, n)
         # P6 GĐ5 (probe BN): ghi PACKED [t2*hd+d] — bo 11/12 zero-fill
@@ -293,26 +299,32 @@ def gpt2_attention(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
             # scale 1/sqrt(hd) + mask causal (u > t) + softmax theo hang.
             # Duong tam giac duoi dat 0 (khong dung -inf): GEMM ctx sau tinh
             # sum_u deu, vi tri u > t co he so 0 -> giong mask.
-            for t2 in range(n):
-                b0 = t2 * n
-                m0 = Smat.data[b0] * inv
-                Smat.data[b0] = m0
-                mxv = m0
-                for u in range(1, t2 + 1):
-                    m0 = Smat.data[b0 + u] * inv
-                    Smat.data[b0 + u] = m0
-                    if m0 > mxv:
-                        mxv = m0
-                totv = 0.0
-                for u in range(t2 + 1):
-                    e = exp(Smat.data[b0 + u] - mxv)
-                    Smat.data[b0 + u] = e
-                    totv = totv + e
-                ivv = 1.0 / totv
-                for u in range(t2 + 1):
-                    Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
-                for u in range(t2 + 1, n):
-                    Smat.data[b0 + u] = 0.0
+            # YEU CAU #13 (2026-11-06): native `softmax_causal_fwd` gop 4 vong
+            # (scale+max / exp+tong / normalize / zero-fill) — _am8 bit_bad=0.
+            # rc != 0 -> 4 vong interpreted NGUYEN VAN ben duoi (fallback).
+            slf = Smat.data
+            l13 = softmax_causal_fwd(slf, n, inv)
+            if l13 != 0:
+                for t2 in range(n):
+                    b0 = t2 * n
+                    m0 = Smat.data[b0] * inv
+                    Smat.data[b0] = m0
+                    mxv = m0
+                    for u in range(1, t2 + 1):
+                        m0 = Smat.data[b0 + u] * inv
+                        Smat.data[b0 + u] = m0
+                        if m0 > mxv:
+                            mxv = m0
+                    totv = 0.0
+                    for u in range(t2 + 1):
+                        e = exp(Smat.data[b0 + u] - mxv)
+                        Smat.data[b0 + u] = e
+                        totv = totv + e
+                    ivv = 1.0 / totv
+                    for u in range(t2 + 1):
+                        Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
+                    for u in range(t2 + 1, n):
+                        Smat.data[b0 + u] = 0.0
             # ctx[t,:] = sum_u Smat[t,u] * V[u,:]  (n x hd)
             gCtx = smm_fwd(Smat, gV, n, hd, n)
             for t2 in range(n):
@@ -1065,27 +1077,34 @@ def _attn_hb_one(j: "_AtnJob") -> 'i64':
                 gDc.data[t2 * hd + d] = j.dctxl[c0 + d]
         # P = softmax causal (cach tinh giong draft forward)
         Smat = smm_dot(gQ, gK, n, n, hd)
-        for t2 in range(n):
-            b0 = t2 * n
-            m0 = Smat.data[b0] * inv
-            Smat.data[b0] = m0
-            mxv = m0
-            for u in range(1, t2 + 1):
-                m0 = Smat.data[b0 + u] * inv
-                Smat.data[b0 + u] = m0
-                if m0 > mxv:
-                    mxv = m0
-            totv = 0.0
-            for u in range(t2 + 1):
-                e = exp(Smat.data[b0 + u] - mxv)
-                Smat.data[b0 + u] = e
-                totv = totv + e
-            ivv = 1.0 / totv
-            for u in range(t2 + 1):
-                Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
-            for u in range(t2 + 1, n):
-                Smat.data[b0 + u] = 0.0
-        # ctx_head[t,:] = sum_u P[t,u]*V[u,:] — can cho dot + dw_proj
+        # YEU CAU #13 (2026-11-06): native `softmax_causal_fwd` gop 4 vong
+        # (scale+max / exp+tong / normalize / zero-fill) — _am8 bit_bad=0.
+        # rc != 0 -> 4 vong interpreted NGUYEN VAN ben duoi (fallback).
+        slf = Smat.data
+        l13 = softmax_causal_fwd(slf, n, inv)
+        if l13 != 0:
+            for t2 in range(n):
+                b0 = t2 * n
+                m0 = Smat.data[b0] * inv
+                Smat.data[b0] = m0
+                mxv = m0
+                for u in range(1, t2 + 1):
+                    m0 = Smat.data[b0 + u] * inv
+                    Smat.data[b0 + u] = m0
+                    if m0 > mxv:
+                        mxv = m0
+                totv = 0.0
+                for u in range(t2 + 1):
+                    e = exp(Smat.data[b0 + u] - mxv)
+                    Smat.data[b0 + u] = e
+                    totv = totv + e
+                ivv = 1.0 / totv
+                for u in range(t2 + 1):
+                    Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
+                for u in range(t2 + 1, n):
+                    Smat.data[b0 + u] = 0.0
+            
+# ctx_head[t,:] = sum_u P[t,u]*V[u,:] — can cho dot + dw_proj
         gCtx = smm_fwd(Smat, gV, n, hd, n)
         # P6 GĐ5 (probe BN): ghi PACKED theo head [t2*hd+d] — buffer rieng
         # n*hd/worker (truoc do n*h voi 11/12 phan bi zero-fill lan merge)
@@ -1216,27 +1235,34 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                         gDc.data[t2 * hd + d] = dctxT.data[c0 + d]
                 # P = softmax causal (cach tinh giong draft forward)
                 Smat = smm_dot(gQ, gK, n, n, hd)
-                for t2 in range(n):
-                    b0 = t2 * n
-                    m0 = Smat.data[b0] * inv
-                    Smat.data[b0] = m0
-                    mxv = m0
-                    for u in range(1, t2 + 1):
-                        m0 = Smat.data[b0 + u] * inv
-                        Smat.data[b0 + u] = m0
-                        if m0 > mxv:
-                            mxv = m0
-                    totv = 0.0
-                    for u in range(t2 + 1):
-                        e = exp(Smat.data[b0 + u] - mxv)
-                        Smat.data[b0 + u] = e
-                        totv = totv + e
-                    ivv = 1.0 / totv
-                    for u in range(t2 + 1):
-                        Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
-                    for u in range(t2 + 1, n):
-                        Smat.data[b0 + u] = 0.0
-                # ctx_head[t,:] = sum_u P[t,u]*V[u,:] — can cho dot + dw_proj
+                # YEU CAU #13 (2026-11-06): native `softmax_causal_fwd` gop 4 vong
+                # (scale+max / exp+tong / normalize / zero-fill) — _am8 bit_bad=0.
+                # rc != 0 -> 4 vong interpreted NGUYEN VAN ben duoi (fallback).
+                slf = Smat.data
+                l13 = softmax_causal_fwd(slf, n, inv)
+                if l13 != 0:
+                    for t2 in range(n):
+                        b0 = t2 * n
+                        m0 = Smat.data[b0] * inv
+                        Smat.data[b0] = m0
+                        mxv = m0
+                        for u in range(1, t2 + 1):
+                            m0 = Smat.data[b0 + u] * inv
+                            Smat.data[b0 + u] = m0
+                            if m0 > mxv:
+                                mxv = m0
+                        totv = 0.0
+                        for u in range(t2 + 1):
+                            e = exp(Smat.data[b0 + u] - mxv)
+                            Smat.data[b0 + u] = e
+                            totv = totv + e
+                        ivv = 1.0 / totv
+                        for u in range(t2 + 1):
+                            Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
+                        for u in range(t2 + 1, n):
+                            Smat.data[b0 + u] = 0.0
+                    
+# ctx_head[t,:] = sum_u P[t,u]*V[u,:] — can cho dot + dw_proj
                 gCtx = smm_fwd(Smat, gV, n, hd, n)
                 for t2 in range(n):
                     d0 = t2 * hd

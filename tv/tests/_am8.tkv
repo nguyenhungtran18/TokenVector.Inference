@@ -1,0 +1,167 @@
+# PROBE AM8 — BIT-CHECK native `softmax_causal_fwd` (YÊU CẦU #13)
+#
+#   candidate: softmax_causal_fwd(s, n, inv)  — gộp 4 vòng, in-place
+#   reference: 4 vòng .tkv NGUYÊN VĂN trong _attn_hb_one / nhánh n<128:
+#       (a) scale + max   (mxv giữ f64 CHƯA làm tròn)
+#       (b) exp + tổng    (đọc lại f32, tống f64 chưa làm tròn)
+#       (c) normalize     (f32 * f64 -> f32)
+#       (d) zero-fill u > t
+#
+# Yêu cầu: bit_bad = 0 mọi ca; rc != 0 -> native từ chối (caller fallback).
+# Chạy:
+#   D:\TokenVector\Release\dist\tkvc-tv.exe tv/tests/_am8.tkv out/am8.exe main
+#   copy out/am8.exe -> out/am8_n10.dll + runtimeconfig
+#   dotnet out/am8_n10.dll
+import tv.training.gpt2_ref
+
+def _seed(xs: 'list[f32]', n: 'i64', s: 'i64') -> 'i64':
+    st = s
+    i = 0
+    while i < n:
+        st = (st * 1103515245 + 12345) % 2147483648
+        v = float((st / 256) % 65536) / 65536.0
+        xs[i] = v * 40.0 - 20.0
+        i = i + 1
+    return st
+
+def _smf(n: 'i64', hd: 'i64', tag: 'str') -> 'i64':
+    h = 768
+    s0 = t_zeros([n, n])
+    _s = _seed(s0.data, n * n, 9091 + n * 7 + hd)
+    inv = 1.0 / sqrt(float(hd))
+
+    # ---- reference: 4 vòng gốc (copy nguyên văn từ production) ----
+    ref = t_zeros([n, n])
+    i = 0
+    while i < n * n:
+        ref.data[i] = s0.data[i]
+        i = i + 1
+    t2 = 0
+    while t2 < n:
+        b0 = t2 * n
+        m0 = ref.data[b0] * inv
+        ref.data[b0] = m0
+        mxv = m0
+        u = 1
+        while u <= t2:
+            m0 = ref.data[b0 + u] * inv
+            ref.data[b0 + u] = m0
+            if m0 > mxv:
+                mxv = m0
+            u = u + 1
+        totv = 0.0
+        u = 0
+        while u <= t2:
+            e = exp(ref.data[b0 + u] - mxv)
+            ref.data[b0 + u] = e
+            totv = totv + e
+            u = u + 1
+        ivv = 1.0 / totv
+        u = 0
+        while u <= t2:
+            ref.data[b0 + u] = ref.data[b0 + u] * ivv
+            u = u + 1
+        u = t2 + 1
+        while u < n:
+            ref.data[b0 + u] = 0.0
+            u = u + 1
+        t2 = t2 + 1
+
+    # ---- candidate: native ----
+    got = t_zeros([n, n])
+    i = 0
+    while i < n * n:
+        got.data[i] = s0.data[i]
+        i = i + 1
+    gl = got.data
+    rc = softmax_causal_fwd(gl, n, inv)
+    if rc != 0:
+        print("AM8 " + tag + " n=" + str(n) + " rc=" + str(rc) + " -> NATIVE TU CHOI")
+        return 0
+    bad = 0
+    first = -1
+    i = 0
+    while i < n * n:
+        if ref.data[i] != got.data[i]:
+            bad = bad + 1
+            if first < 0:
+                first = i
+        i = i + 1
+    print("AM8 " + tag + " n=" + str(n) + " hd=" + str(hd) + " rc=" + str(rc) + " bit_bad=" + str(bad) + " first=" + str(first))
+    return bad
+
+def _time(n: 'i64', hd: 'i64') -> 'i32':
+    s0 = t_zeros([n, n])
+    _s = _seed(s0.data, n * n, 1234)
+    inv = 1.0 / sqrt(float(hd))
+    bestR = 1000000.0
+    bestN = 1000000.0
+    it = 0
+    while it < 3:
+        ref = t_zeros([n, n])
+        i = 0
+        while i < n * n:
+            ref.data[i] = s0.data[i]
+            i = i + 1
+        t0 = now_ms()
+        t2 = 0
+        while t2 < n:
+            b0 = t2 * n
+            m0 = ref.data[b0] * inv
+            ref.data[b0] = m0
+            mxv = m0
+            u = 1
+            while u <= t2:
+                m0 = ref.data[b0 + u] * inv
+                ref.data[b0 + u] = m0
+                if m0 > mxv:
+                    mxv = m0
+                u = u + 1
+            totv = 0.0
+            u = 0
+            while u <= t2:
+                e = exp(ref.data[b0 + u] - mxv)
+                ref.data[b0 + u] = e
+                totv = totv + e
+                u = u + 1
+            ivv = 1.0 / totv
+            u = 0
+            while u <= t2:
+                ref.data[b0 + u] = ref.data[b0 + u] * ivv
+                u = u + 1
+            u = t2 + 1
+            while u < n:
+                ref.data[b0 + u] = 0.0
+                u = u + 1
+            t2 = t2 + 1
+        t1 = now_ms()
+        got = t_zeros([n, n])
+        i = 0
+        while i < n * n:
+            got.data[i] = s0.data[i]
+            i = i + 1
+        gl = got.data
+        t3 = now_ms()
+        rc = softmax_causal_fwd(gl, n, inv)
+        t4 = now_ms()
+        if t1 - t0 < bestR:
+            bestR = t1 - t0
+        if t4 - t3 < bestN:
+            bestN = t4 - t3
+        it = it + 1
+    print("AM8 time n=" + str(n) + " interp=" + str(bestR) + " ms native=" + str(bestN) + " ms")
+    return 0
+
+def main() -> 'i32':
+    print("AM8 — bit-check softmax_causal_fwd (yeu cau #13)")
+    bad = 0
+    bad = bad + _smf(1, 64, "n1")
+    bad = bad + _smf(2, 64, "n2")
+    bad = bad + _smf(5, 5, "le")
+    bad = bad + _smf(8, 64, "n8")
+    bad = bad + _smf(127, 64, "n127")
+    bad = bad + _smf(128, 64, "n128")
+    bad = bad + _smf(1024, 64, "seq1024")
+    print("AM8 TOTAL bit_bad=" + str(bad) + " (0 = BIT-EXACT)")
+    _t = _time(1024, 64)
+    return 0
