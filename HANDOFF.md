@@ -4951,3 +4951,87 @@ Build đo: `out/bseq_p13_n10.dll`, probe `out/am8_n10.dll`, `out/at1b_n10.dll`.
 - Lever còn lại nếu muốn bwd còn thấp hơn: `op_embed_bwd` (interpreted, ~38M element
   zero-init + scatter-add — candidate native tiếp theo) và GEMM scale/threading.
 - Chưa commit #15 — sẽ commit riêng 2 repo ngay sau mục này.
+## §0.77 YEU CAU #16 — `embed_bwd_fused` (native scatter-add) — bwd best 8734 ms, op_embed 156→0 ms interpreted
+
+### 1. Việc làm
+
+- Kernel `EmbedBwdFused` (append vào `tkv_bwd_ops.c`, TU `/fp:precise`): scatter-add theo idx
+  (counts/starts/pos/cursor + main loop q→t→r, `gw[r*d+j] += gy[t*d+j]`), zero-fill gw
+  (`+0.0f`), out-of-range idx → rc=−7 → fallback. Bit-exact: moi ptu cong don doc lap,
+  thu tu phep cong giong .tkv.
+- Compiler wiring (`simd_feature.tkv`, `file_io.tkv`): pinvoke `EmbedBwdFusedNative` (idx int64*,
+  idx_len, rows, d, gy, gy_len, gw, gw_len) + wrapper `EmbedBwdFusedM` (List<int64> + 2 List<f32>
+  qua 2 reflection chain int64/f32) + `compile_embed_bwd_fused` (idx list[i64], rows/d int32,
+  gy/gw list[f32]) + đăng ký builtin + whitelist. Self-host **IL_IDENTICAL**.
+- Wire `op_embed_bwd` (cả 2 copy `ops.tkv`) → gọi `embed_bwd_fused(idx, rows, d, gy, gw)`;
+  rc != 0 → fallback interpreted nguyên văn. `gwte_e`/`gwpe` vẫn qua `f32_list_add` như cũ.
+- Probe `tv/tests/_eb9.tkv`: **5/5 PASS, bit_bad=0** (rows=5/100/1000/50257; d=1/3/16/64/768; n=7/1024).
+
+### 2. Số đo (seq1024, 14 luồng, best-of-3)
+
+| metric | #16 (p16) | #15 (p15) | baseline §0.72 |
+|---|---|---|---|
+| bwd (mode 0) | **8734 / 8750 / 8922** | 8797 / 8828 / 8922 | 10593 |
+| bwd (mode 2) | 8734 / 8859 | 8844 / 8922 / 8969 | — |
+| opt (mode 2) | 921 / 1062 | 969 / 970 / 1172 | 1188 |
+| copyback | 110 / 156 / 172 | 141 / 156 | 141 |
+| full step (mode 1) | **13328** (loss `10.760399 → 13.442915` **EXACT**) | 13344 | 15266 |
+| seq8 (total) | 1875 | 1875 | 2875 |
+| seq256 (total) | 3953 | 3906 | 5297 |
+
+**bwd best = 8734 ms (< 9000 ✓)**; loss EXACT cả 3 seq (10.572291 / 10.756927 / 10.760399).
+A/B xen kẽ torch cùng phiên: TKV bwd 8688–8922 vs torch fwd+bwd 3474–3543 → ratio ~3.5× (từ 4.51× baseline).
+
+### 3. Gate / trainer / self-host
+
+- Gate **9/10** (chỉ `gap_tests` fail `InvalidProgramException` — pre-existing từ §0.72).
+- `trainer_tests` **15/15**; self-host **IL_IDENTICAL**.
+- DLL copy vào `Release\runtime\` và `out\tkv_simd_native.dll`.
+
+### 4. Chốt
+
+- Tiêu chí #16: **đạt** — op_embed_bwd interpreted (~156 ms/call) → native, bit-exact, gate giữ nguyên.
+- Lever còn lại nếu muốn bwd còn thấp hơn: GEMM scale/threading (không nằm trong #14/#15/#16); **không đổi thuật toán/thứ tự tích lũy** (loss EXACT bất biến).
+- Chưa commit #16 — sẽ commit riêng 2 repo ngay sau mục này.
+## §0.78 Ask C — adamw_step_glm wired (compiler fix: _can_simd 'm5'+'dp'), opt.step best 906 ms
+
+### 1. Compiler fix
+
+- Bug: `compile_adamw_step_glm` goi `_can_simd(ctx, 'm5')` nhung `AdamwGlmM` nam trong
+  chunk 'dp' (khong phai 'm5') -> IL co call nhung method khong duoc emit -> MissingMethodException.
+- Fix: them `_can_simd(ctx, 'dp')` sau `_can_simd(ctx, 'm5')` trong compile_adamw_step_glm.
+- Self-host: IL_IDENTICAL.
+
+### 2. Wiring trainer.tkv
+
+- `step()`: khi coef == 1.0 (khong clip): bo r1 copy, goi `adamw_step_glm(ppl, pml, pvl, gl, ...)`.
+- Khi coef != 1.0: r1 + f32_addcmul + adamw_step (nhu cu).
+- r2/r3/r4/r5 giu nguyen (M5-opt).
+
+### 3. So do (seq1024, 14 luong, best-of-3)
+
+| metric | #16 (p16) | #17 (p17) | baseline §0.72 |
+|---|---|---|---|
+| bwd (mode 0) | 8734 / 8750 / 8922 | 8734 / 8922 / 8969 | 10593 |
+| opt (mode 2) | 921 / 1062 | 906 / 921 / 1062 | 1188 |
+| full step (mode 1) | 13328 | 13328 / 13968 / 20422 | 15266 |
+| seq8 (total) | 1875 | 1875 | 2875 |
+| seq256 (total) | 3953 | 3906 | 5297 |
+
+**bwd best = 8734 ms (< 9000 ✓)**; loss EXACT cả 3 seq (10.572291 / 10.756927 / 10.760399).
+opt.step best = 906 ms (torch ~660 ms — gap ~246 ms, gain tu Ask C chi ~78 ms warm;
+r1 copy warm chi 78 ms, khong phai 498 MB nhu gia thiet ban dau).
+
+### 4. Gate / trainer / self-host
+
+- Gate **9/10** (gap_tests pre-existing).
+- `trainer_tests` **15/15**; self-host **IL_IDENTICAL**.
+- DLL copy vao `Release\runtime\` va `out\tkv_simd_native.dll`.
+
+### 5. Chot
+
+- opt.step giu ~906 ms — **khong dat muc torch ~660 ms**. Gain tu Ask C chi ~78 ms
+  (r1 copy warm = 78 ms, khong phai 498 MB). Bottleneck con lai: adamw computation
+  (~375 ms @124M, do _cj8) + r3 copy (485 ms) + thread overhead.
+- De dat 660 ms can profiling + optimization sau (khong nam trong #12-#16).
+- Chua commit #17 — se commit rieng 2 repo ngay sau muc nay.
