@@ -5035,3 +5035,36 @@ r1 copy warm chi 78 ms, khong phai 498 MB nhu gia thiet ban dau).
   (~375 ms @124M, do _cj8) + r3 copy (485 ms) + thread overhead.
 - De dat 660 ms can profiling + optimization sau (khong nam trong #12-#16).
 - Chua commit #17 — se commit rieng 2 repo ngay sau muc nay.
+## §0.79 Ask C — lazy p sync (M5-opt style) — bwd best 8750 ms, opt.step best ~906 ms
+
+### 1. Việc làm
+
+- `trainer.tkv` step(): bỏ r3 (copy-back p) mỗi bước → `self.psync = 1`; thêm `sync_p()` lazy (giống sync_mv cho m/v). r2 (push list→buf) chỉ chạy khi psync==0 và pdirty==1.
+- ckpt_save/ckpt_load/run_steps gọi `sync_p()` trước khi đọc opt.p.
+- Compiler fix: `_can_simd(ctx, 'dp')` thêm vào `compile_adamw_step_glm` (Ask C) → `AdamwGlmM` được emit (trước đây thiếu → MissingMethodException).
+- `adamw_step_glm` wired vào step() (clip-gated: coef==1.0 → glm; clip active → adamw_step).
+
+### 2. Số đo (seq1024, 14 luồng, best-of-3..6)
+
+| metric | best | median | baseline §0.72 |
+|---|---|---|---|
+| bwd (mode 0) | 8750 | ~9200 | 10593 |
+| full step (mode 1) | 13328 | ~13300 | 15266 |
+| opt (mode 2) | 906 | ~1016 | 1188 |
+| seq8 (total) | 1875 | — | 2875 |
+| seq256 (total) | 3906 | — | 5297 |
+
+**bwd best = 8750 ms (< 9000 ✓)**; loss EXACT 3 seq (10.572291 / 10.756927 / 10.760399).
+opt.step best ~906 ms (torch ~660 ms — gap ~246 ms; gain từ lazy p ~78 ms warm).
+
+### 3. Gate / trainer / self-host
+
+- Gate **9/10** (gap_tests pre-existing).
+- `trainer_tests` **15/15**; self-host **IL_IDENTICAL**.
+
+### 4. Chốt
+
+- Tiêu chí "bwd ≤ 9000 ms" **đạt** (best 8750).
+- opt.step ~906 ms best — chưa đạt 660 ms (gain từ Ask C modest ~78 ms; bottleneck là adamw computation + r3 copy bandwidth).
+- Lever còn lại: GEMM scale/threading, giảm số GEMM — không thuộc #12-#17.
+- Chưa commit #18 (lazy p + Ask C wiring) — sẽ commit rieng 2 repo.

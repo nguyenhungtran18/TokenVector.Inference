@@ -139,6 +139,7 @@ class AdamW:
         self.pt = alloc_bytes(n * 4)
         self.pone = alloc_bytes(n * 4)
         self.pdirty = 1
+        self.psync = 0
         p0 = self.pp
         m0 = self.pm
         v0 = self.pv
@@ -253,9 +254,15 @@ class AdamW:
         # M5-opt (probe CJ7 bit-exact): BO r2 moi buoc - p day 1 lan luc setup
         # (pdirty=1 tu __init__; site ghi opt.p ngoai setup thi push_p()).
         # r3 van giu p list = anh chinh doc boi unflatten/bench/ckpt.
-        if self.pdirty != 0:
-            r2 = f32_copy_to_buf(pl, ppl, self.n)
-            self.pdirty = 0
+        if self.psync != 0 and self.pdirty == 0:
+            r2skip = 1
+        else:
+            r2skip = 0
+        if r2skip == 0:
+            if self.pdirty != 0:
+                r2 = f32_copy_to_buf(pl, ppl, self.n)
+                self.pdirty = 0
+            self.psync = 0
         wde = self.wd * bc1
         if coef != 1.0:
             stw = adamw_step(ppl, pml, pvl, gsrc, self.n,
@@ -263,7 +270,8 @@ class AdamW:
         else:
             stw = adamw_step_glm(ppl, pml, pvl, gl, self.n,
                                  step_size, self.b1, self.b2, self.eps, wde, bc1, bc2s)
-        r3 = f32_copy_from_buf(ppl, pl, self.n)
+        self.psync = 1
+        # r3 (copy-back) BO - p list dong bo lazy qua sync_p()
         # M5-opt: BO r4/r5 (+188ms/buoc @124M — do _cj8) — m/v song TRUC TIEP
         # o buffer; ckpt_save/test doc qua sync_mv() (lazy cap phat list).
         self.t = self.t + 1
@@ -287,6 +295,16 @@ class AdamW:
         vl: "list[f32]" = self.v
         rs1 = f32_copy_from_buf(self.pm, ml, self.n)
         rs2 = f32_copy_from_buf(self.pv, vl, self.n)
+        return 0
+
+    def sync_p(self) -> 'i64':
+        # M5-opt: p LAZY - doc p tu buffer ve list khi can (ckpt/test).
+        if self.psync != 0:
+            if len(self.p) != self.n:
+                self.p = _zeros(self.n)
+            pl: "list[f32]" = self.p
+            rs = f32_copy_from_buf(self.pp, pl, self.n)
+            self.psync = 0
         return 0
 
 # ============================================================================
@@ -873,6 +891,7 @@ def ckpt_save(path: 'str', opt: "AdamW", smp: "Sampler") -> 'i32':
     lines.append("#sec perm")
     lines.append(_ints_line(smp.perm))
     lines.append("#sec p")
+    opt.sync_p()
     lines.append(_bits_line(opt.p))
     lines.append("#sec m")
     lines.append(_bits_line(opt.m))
@@ -963,6 +982,7 @@ def ckpt_load(path: 'str', opt: "AdamW", smp: "Sampler") -> 'i32':
     smp.state = _i64tok(_line_kv(t3, "state"))
     smp.perm = _ints_of(_sec_after(lines, "perm"))
     opt.p = _bits_of(_sec_after(lines, "p"))
+    opt.psync = 0
     opt.m = _bits_of(_sec_after(lines, "m"))
     opt.v = _bits_of(_sec_after(lines, "v"))
     if len(opt.p) != opt.n or len(opt.m) != opt.n or len(opt.v) != opt.n:
@@ -998,6 +1018,7 @@ def run_steps(opt: "AdamW", xs: 'list[f32]', ys: 'list[i64]',
             x = []
             for i in range(IN_D):
                 x.append(xs[idx * IN_D + i])
+            opt.sync_p()
             l = mlp_loss_grad(opt.p, x, ys[idx], opt.g, scale)
             step_loss = step_loss + l
             j = j + 1
@@ -1042,6 +1063,7 @@ def ckpt_save(path: 'str', opt: "AdamW", smp: "Sampler") -> 'i32':
     lines.append("#sec perm")
     lines.append(_ints_line(smp.perm))
     lines.append("#sec p")
+    opt.sync_p()
     lines.append(_bits_line(opt.p))
     lines.append("#sec m")
     lines.append(_bits_line(opt.m))
@@ -1132,6 +1154,7 @@ def ckpt_load(path: 'str', opt: "AdamW", smp: "Sampler") -> 'i32':
     smp.state = _i64tok(_line_kv(t3, "state"))
     smp.perm = _ints_of(_sec_after(lines, "perm"))
     opt.p = _bits_of(_sec_after(lines, "p"))
+    opt.psync = 0
     opt.m = _bits_of(_sec_after(lines, "m"))
     opt.v = _bits_of(_sec_after(lines, "v"))
     if len(opt.p) != opt.n or len(opt.m) != opt.n or len(opt.v) != opt.n:
