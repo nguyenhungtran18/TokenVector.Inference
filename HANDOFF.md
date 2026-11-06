@@ -4633,3 +4633,147 @@ I/O/AV lúc commit), tuc may dao dong **±7%** giua cac phien. Vi vay con so tro
 **best-of-3 tai mot thoi diem**; so sanh dung la best-vs-best (16375 -> 14516 = **−11.4%**,
 median 16547 -> 14657) chu khong phai mot lan do don le. Khong co lan nao cua ban moi cham
 vao dai 16375–16954 cua baseline.
+
+## §0.73 YEU CAU #12 — 4 native kernel BWD non-GEMM: BIT-EXACT, bwd chi −7…−13%, KHONG dat ≤9000
+
+Ask A của `docs/COMPILER_TEAM_REQUEST12.md` đã làm xong và **bit-exact**, nhưng tiêu chí
+`backward ≤ 9000 ms` **không đạt**: best-of-9 là **9187 ms** (thiếu 187 ms, 2.1%). Nguyên nhân
+không phải kernel sai — mà là **tiền đề của request**: 4 op này chỉ chiếm ~0.9–1.2 s trong
+11 s chênh lệch, đúng như §0.67 đã đính chính (non-GEMM còn lại nằm ở `attention_bwd` ~3.5 s
+và lm-head + `op_embed_bwd` ~2.5 s, không phải LN/gelu/bias).
+
+### 1. Đã làm — Ask A (4 kernel, 1 pass, ghi thẳng `.data`)
+
+Native: `Release/tools/simd_native/tkv_bwd_ops.c` (TU riêng, `/fp:precise`), DLL
+`263680` bytes (từ `256000`), copy sang `out/tkv_simd_native.dll`.
+
+| builtin | thay cho | ghi chú bit |
+|---|---|---|
+| `layernorm_bwd_fused(x, gy, g, n, h, gflat, o_dg, o_db)` | `gpt2_layernorm_bwd` | `mu/v/s1/s2` f64 tuần tự; `gg = gy*g` là **f32 mul** rồi widen; `dg` f64→f32, `db` **f32+f32**; `dg/db` ghi thẳng `gflat` (không `t_zeros([h])`) |
+| `gelu_erf_bwd(x, gy, out, lo, hi)` | `op_gelu_erf_bwd` (+ segment `_ogb_one`) | `erf` Horner f64, `ax*ax` trên f32, `exp` MSVC = .NET (3001/3001) |
+| `softmax_causal_bwd(dp, P, dctx, ctx, n, hd)` | vòng softmax trong `attention_bwd` | `dotv` f32-product → f64; in-place `dp`; `u > t` = 0 |
+| `bias_grad(gy, gflat, off, n, cols)` | vòng bias trong `gpt2_linear_bwd` | AVX2 8 lane **theo cột**, `i` tuần tự → giữ nguyên thứ tự cộng |
+
+Mọi wrapper trả `rc < 0` → caller chạy **vòng `.tkv` nguyên văn** (fallback), không có nhánh
+"số gần đúng". Wiring: `simd_feature.tkv` (+325 dòng: pinvoke, wrapper, `compile_*`,
+`register_expr_builtin`) và `'...'` vào `_BUILTIN_LENH_DOC_LAP` của `file_io.tkv`; production
+`tv/training/{gpt2_ref,tv.training.gpt2_ref,tv.training.gpt2_ref124}.tkv` + 3 mirror `tests/`
+(LN 1 chỗ, bias 4 chỗ, softmax 2 chỗ) và `ops.tkv` ×2 (gelu tuần tự + `_ogb_one`).
+
+### 2. Bit-exact — `_am7.tkv` 21/21 `bit_bad=0`
+
+| nhóm | ca | rc | bit_bad |
+|---|---|---:|---:|
+| LN | n8h768, gate256 h64, seq1024 h768, lẻ n3h5, min n1h1 | 0 | **0** |
+| bias | db1 768, db2 3072, offset-qkv 2304@100, seq1024 768, cols5-tail, cols8-off3-pre, lẻ n7 c767 off17, n=0 | 0 | **0** |
+| softmax | n8, n127, seq1024, lẻ n13 hd5 | 0 | **0** |
+| gelu | full1000, segment [17,983), n7, bigseg 3.1M [1M,2M) | 0 | **0** |
+
+`AM7 TOTAL bit_bad=0`. Đo riêng: `LN n=1024 h=768` **interp 15.0 ms → native 0.0 ms** (<1 quantum).
+Ground truth giữ nguyên từ phiên trước: `_nt4` (exp 3001/3001), `_nt5` (erf/dgelu 401/401),
+`_nt` NT1/NT3 (JIT widen f64, truncate tại ranh giới typed).
+
+### 3. Gate / trainer / self-host
+
+- `tools/gate_f32.sh`: **9/10 suite PASS** — `simd_matmul`, `gpt2`, `gpt2_scope`, `gpt2_train`,
+  `grad`, `parity`, `pack`, `inplace`, `gpt2_full` 33/33 (log `out/gate_p12.log`, `GATE_EXIT=1`).
+- `gap_tests`: **FAIL `exit=82` — `InvalidProgramException` trong `ConstantFoldingPass.run`**,
+  đúng triệu chứng §0.72 đã chứng minh **có từ trước** (stash 3 tệp simd rồi build lại từ HEAD
+  vẫn fail). Phiên này **không chứng minh lại**, chỉ xác nhận cùng stack/cùng suite.
+- `trainer_tests`: **15/15 PASS** (`=== G4 trainer cases=15 fails=0 ===`).
+- Self-host `tools/vong.exe`: **`IL_IDENTICAL`** (`gop 133 file`), `dist/tkvc-tv.exe` 21:35 sau
+  lần sửa compiler cuối 21:33.
+
+### 4. Đo lại — seq1024, 14 luồng, `out/bseq_p12_n10.dll`
+
+Chín lần mode 2 (9 run, mỗi run best-of-2 sau warmup):
+
+| # | fwd | loss | bwd | opt | copyback | TỔNG |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 3359 | 109 | 10719 | 860 | 156 | 15203 |
+| 2 | 3234 | 62 | 9657 | 875 | 141 | 13969 |
+| 3 | 2969 | 78 | **9187** | **860** | 109 | **13468** |
+| 4 | 3328 | 93 | 9719 | 938 | 109 | 14187 |
+| 5 | 3375 | 94 | 9875 | 922 | 141 | 14407 |
+| 6 | 3297 | 62 | 9782 | 937 | 125 | 14203 |
+| 7 | 3328 | 93 | 9829 | 906 | 125 | 14281 |
+| 8 | 3406 | 93 | 9828 | 937 | 110 | 14374 |
+| 9 | 3328 | 110 | 9937 | 891 | 110 | 14376 |
+| **best** | 2969 | | **9187** | **860** | 109 | **13468** |
+| **median** | 3328 | | **9782** | **937** | | **14281** |
+
+Baseline §0.72 (`bseq_p10`): bwd **10593**, opt **1188**, copyback 141, TỔNG **15266**;
+full-step best/median 14516/14657.
+
+⇒ best-vs-best: bwd **−1406 ms (−13.3%)**, TỔNG **−1798 (−11.8% so 15266; −7.2% so 14516)**.
+median: bwd **−811 (−7.7%)**, TỔNG **−985 (−6.5% / −2.6%)**. Máy dao động ±7% (§0.72) nên
+**không được đọc một lần đo đơn lẻ**.
+
+Mode 1 (đúng lệnh §6 của request): **14266 / 14219 / 14078 ms**, `loss=10.760399 -> 13.442915`
+**EXACT** — best 14078 vs 14516 = **−3.0%**.
+
+### 5. Không regress seq8/seq256 (mode 2, 3 run mỗi seq)
+
+| seq | bwd | TỔNG | §0.72 | Δ best |
+|---:|---|---:|---|---:|
+| 8 | 1282 / 1282 / 1297 | 2782 / 2782 / 2812 | 2875 / 2890 / 2890 | **−3.2%** |
+| 256 | 2875 / 2984 / 3000 | 4875 / 5030 / 5078 | 5297 / 5250 / 5218 | **−8.0%** |
+| 1024 | 9187 (best) | 13468 | 14516 | **−7.2%** |
+
+`loss` mode 0 (1 bước, cả 3 seq): **`10.572291` / `10.756927` / `10.760399` — EXACT cả 3**.
+
+### 6. Torch cùng phiên (3 lần, xen kẽ với TKV)
+
+| pha | torch | TKV best | tỉ lệ |
+|---|---:|---:|---:|
+| bwd | 2359.4 / 2350.8 / 2326.8 | 9187 | **3.91×** (trước 4.51×) |
+| `opt.step` | 677.6 / 698.7 / 683.4 | 860 | **1.26×** (trước 1.80×) |
+| TỔNG | 4174.9 / 4206.1 / 4175.3 | 13468 | **3.23×** (trước 3.7×) |
+
+`opt.step` **không bị thay đổi bởi #12** — 1188 → 860 là chênh lệch đo/áp lực alloc (bớt
+`t_zeros([h])` mỗi block), **không phải** công của 4 kernel; xem §7.
+
+### 7. Ask C — `adamw_step_glm`: A/B đo được, **chưa wire**
+
+`tv/tests/_gl1c.tkv` (n = 124 439 808, idle, best-of-5):
+
+| đường | ms |
+|---|---:|
+| A `r1 = f32_copy_to_buf(gl, pgl)` + `adamw_step` (production) | **406** |
+| B `adamw_step_glm(p, m, v, gl, …)` (đọc list trực tiếp) | **312** |
+| B − A | **−94** |
+| chỉ `r1` copy | 78 |
+| `f32_list_add` đơn lẻ | 125 |
+
+**Chưa wire**, vì:
+1. Khi clip hoạt động (`coef != 1.0`) production cần `pgl` làm **input của `f32_addcmul`**
+   → `r1` là bắt buộc; `adamw_step_glm` chỉ bỏ được `r1` ở nhánh `coef == 1.0`. Ước tính
+   lợi thực trong step ≲ 78–180 ms, **không phải 400 ms** như kỳ vọng §4 của request.
+2. **Lỗi codegen chặn đo bit**: `_gl1.tkv` (probe có phép so bit) chết
+   `MissingMethodException: TkvSimd.AdamwGlmM` — IL **có call** nhưng **thiếu method**.
+   `_gl1c.tkv` (không có hàm local) thì emit đủ. Nghi thứ tự `_can_simd(ctx,'m5')` /
+   `_ensure_class_simd` khi module có hàm local. **Chưa sửa** — cần khoanh trước khi wire.
+3. Bit-exact **đúng theo cấu trúc**: `AdamwGlmM` pin `_items` rồi gọi **cùng**
+   `AdamwNative`(`AdamwStepF32`) với cùng tham số như `AdamwM`; `r1` chỉ là copy f32→f32.
+   Vẫn nên có một lần `bitdiff=0` chạy được trước khi nhận.
+
+### 8. Vì sao ≤9000 không đạt — và việc kế tiếp
+
+4 op của Ask A thay được ~**0.9–1.2 s** (LN ~0.6 s, gelu ~0.3 s, softmax ~0.2 s, bias <0.05 s),
+khớp với số đo. Phần còn lại của backward (best 9187, torch 2351 ⇒ 3.91×) nằm ở:
+- `attention_bwd` non-GEMM **~3.5 s không scale** (§0.67): 72 GEMM siêu nhỏ + các vòng
+  mask/score/proj còn interpreted — **chưa có kernel nào**, đây là lever lớn nhất;
+- lm-head + `op_embed_bwd` non-GEMM ~2.5 s;
+- GEMM scale 3.1× thay vì 4.5× (§0.68–§0.72 đã cạn knob `.tkv`).
+
+⇒ Đề nghị #13: kernel native cho `attention_bwd` non-GEMM (score bwd + proj + mask) và/hoặc
+op-level threading trong DLL (Ask B của #12 vốn "chỉ nếu A không đủ" — **A không đủ**).
+Ask C chỉ đáng làm sau khi (a) có nhánh `addcmul` đọc list, (b) sửa lỗi emit `AdamwGlmM`.
+
+### 9. Trạng thái
+
+Chưa commit gì (2 repo còn dirty từ #10/#11, không revert). DLL mới đã ở
+`Release/runtime/` và `out/tkv_simd_native.dll`. Build đo: `out/bseq_p12_n10.dll`
+(mode 0/1/2), probe `out/am7_n10.dll`, `out/gl1c_n10.dll`, `out/gate_p12.log`.
+Lệnh tái lập:
+`printf "1024\n2\n1\n" > tv/tests/_seq_cfg.txt; TKV_GEMM_THREADS=14 dotnet out/bseq_p12_n10.dll`.

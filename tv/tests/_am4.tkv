@@ -1,0 +1,523 @@
+# PROBE AM4 — phan rach ATTENTION_BWD / MLP_BWD theo PHA tai seq8
+# (nuoi request #10: bucket 1570 ms = 12 x block_bwd, trong do
+#  ATTENTION_BWD 47 + MLP_BWD 78 = 125 ms la CONG VIEC THAT, khong con
+#  ceremony. Probe nay do tung pha bang SHAPES THAT (n=8, h=768, hd=64,
+#  ih=3072) va SO KHOP voi 2 ham tong (chenh lech = pha chua do).
+# Chay: tkvc tv/tests/_am4.tkv out/am4.exe main
+#       cp out/am4.exe out/am4_n10.dll; dotnet out/am4_n10.dll
+import tv.training.gpt2_ref124
+import tv.training.trainer
+import tv.training.simd_matmul
+import tv.training.ops
+
+FIX = "tv/tests/fixtures/"
+
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+
+def load_floats(path: 'str') -> 'list[f32]':
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                vals.append(float(toks[j]))
+    return vals
+
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+
+def _mn(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+
+def main() -> 'i32':
+    ids = load_ints(FIX + "g2_ids.txt")
+    pos = load_ints(FIX + "g2_pos.txt")
+    ps = gpt2_init(7)
+    n = len(ids)
+    h = HiddenSize
+    hd = HeadDim
+    ih = 4 * h
+    nh = NHeads
+    print("AM4 n=" + str(n) + " h=" + str(h) + " hd=" + str(hd) + " ih=" + str(ih) + " nhead=" + str(nh))
+
+    x = gpt2_embed(ids, pos, ps[0], ps[1])
+    xins = []
+    for i in range(NLayers):
+        xins.append(x)
+        b = 4 + i * 12
+        x = gpt2_block(x, ps[b + 0], ps[b + 1], ps[b + 2], ps[b + 3],
+                       ps[b + 4], ps[b + 5], ps[b + 6], ps[b + 7],
+                       ps[b + 8], ps[b + 9], ps[b + 10], ps[b + 11], 1)
+
+    li = 6
+    base = 4 + li * 12
+    xi = xins[li]
+    gy = t_zeros([n, h])
+    for i in range(n * h):
+        gy.data[i] = 0.1
+    a = gpt2_layernorm(xi, ps[base + 0], ps[base + 1])
+
+    w_qkv = ps[base + 2]
+    b_qkv = ps[base + 3]
+    w_proj = ps[base + 4]
+    b_proj = ps[base + 5]
+    w1 = ps[base + 8]
+    bb1 = ps[base + 9]
+    w2 = ps[base + 10]
+    bb2 = ps[base + 11]
+
+    # du lieu that cho cac pha
+    qkv = gpt2_linear(xi, w_qkv, b_qkv, n, h, 3 * h, 1)
+    dqkv = t_zeros([n, 3 * h])
+    for i in range(n * 3 * h):
+        dqkv.data[i] = 0.01
+    ctxT = t_zeros([n, h])
+    for i in range(n * h):
+        ctxT.data[i] = 0.02
+    gQ = t_zeros([n, hd])
+    gK = t_zeros([n, hd])
+    gV = t_zeros([n, hd])
+    gDc = t_zeros([n, hd])
+    for i in range(n * hd):
+        gQ.data[i] = 0.3
+        gK.data[i] = 0.4
+        gV.data[i] = 0.5
+        gDc.data[i] = 0.6
+    nw1 = 4000000
+    nf = nw1 + ih * h + 3 * h * h
+    a2 = t_zeros([n, ih])
+    for i in range(n * ih):
+        a2.data[i] = 0.2
+    inner = gpt2_linear(xi, w1, bb1, n, h, ih, 1)
+    r2 = gpt2_linear_bwd(a2, w2, gy, n, ih, h, 1)
+    d_inner = op_gelu_erf_bwd(inner, r2[0])
+
+    best_att = 1.0e9
+    best_mlp = 1.0e9
+    best_qkv_f = 1.0e9
+    best_dctx = 1.0e9
+    best_dwproj = 1.0e9
+    best_qkv_b = 1.0e9
+    best_dot88 = 1.0e9
+    best_fwd8_64 = 1.0e9
+    best_fwd64_8 = 1.0e9
+    best_tr = 1.0e9
+    best_tz_8h = 1.0e9
+    best_tz_8_3h = 1.0e9
+    best_tz_hh = 1.0e9
+    best_tz_8hd = 1.0e9
+    best_tz_8_8 = 1.0e9
+    best_tz_8ih = 1.0e9
+    best_lin_f = 1.0e9
+    best_gelu_f = 1.0e9
+    best_gelu_b = 1.0e9
+    best_smm_dot = 1.0e9
+    best_smm_at = 1.0e9
+    best_lb_w1 = 1.0e9
+    best_db2 = 1.0e9
+    best_dw2copy = 1.0e9
+    best_lbw1_gf = 1.0e9
+    best_dx1 = 1.0e9
+    best_dw1 = 1.0e9
+    best_lbqkv_gf = 1.0e9
+    best_dxq = 1.0e9
+    best_dwq = 1.0e9
+    best_copy_w1 = 1.0e9
+    best_copy_qkv = 1.0e9
+    acc = 0
+    k = 0
+    while k < 3:
+        # ---------- tong 2 ham ----------
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            zl = gpt2_attention_bwd(a, w_qkv, b_qkv, w_proj, b_proj, n, gy, 1)
+            z0 = zl[0]
+            acc = acc + len(z0.data)
+            q = q + 1
+        t1 = now_us()
+        best_att = _mn(best_att, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            zl = gpt2_mlp_bwd(xi, w1, bb1, w2, bb2, n, gy, 1)
+            z0 = zl[0]
+            acc = acc + len(z0.data)
+            q = q + 1
+        t1 = now_us()
+        best_mlp = _mn(best_mlp, (t1 - t0) / 16.0 / 1000.0)
+
+        # ---------- attention: pha ngoai head ----------
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            z = gpt2_linear(xi, w_qkv, b_qkv, n, h, 3 * h, 1)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_qkv_f = _mn(best_qkv_f, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            z = smm_dot(gy, w_proj, n, h, h)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_dctx = _mn(best_dctx, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 8:
+            zt = smm_transpose(ctxT, n, h)
+            zd = smm_fwd(zt, gy, h, h, n)
+            o2 = 0
+            while o2 < h:
+                s1 = 0.0
+                t2 = 0
+                while t2 < n:
+                    s1 = s1 + gy.data[t2 * h + o2]
+                    t2 = t2 + 1
+                o2 = o2 + 1
+            r2c = 0
+            while r2c < h:
+                o2 = 0
+                while o2 < h:
+                    dqkv.data[o2] = dqkv.data[o2] + zd.data[r2c * h + o2]
+                    o2 = o2 + 1
+                r2c = r2c + 1
+            acc = acc + len(zd.data)
+            q = q + 1
+        t1 = now_us()
+        best_dwproj = _mn(best_dwproj, (t1 - t0) / 8.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            zl = gpt2_linear_bwd(xi, w_qkv, dqkv, n, h, 3 * h, 1)
+            z0 = zl[0]
+            acc = acc + len(z0.data)
+            q = q + 1
+        t1 = now_us()
+        best_qkv_b = _mn(best_qkv_b, (t1 - t0) / 16.0 / 1000.0)
+
+        # ---------- attention: 1 head (nhan 12) ----------
+        t0 = now_us()
+        q = 0
+        while q < 2048:
+            z = smm_dot(gQ, gK, n, n, hd)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_dot88 = _mn(best_dot88, (t1 - t0) / 2048.0 / 1000.0)
+
+        Smat = smm_dot(gQ, gK, n, n, hd)
+        t0 = now_us()
+        q = 0
+        while q < 2048:
+            z = smm_fwd(Smat, gV, n, hd, n)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_fwd8_64 = _mn(best_fwd8_64, (t1 - t0) / 2048.0 / 1000.0)
+
+        gQt = smm_transpose(gQ, n, hd)
+        t0 = now_us()
+        q = 0
+        while q < 2048:
+            z = smm_fwd(gQt, Smat, hd, n, n)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_fwd64_8 = _mn(best_fwd64_8, (t1 - t0) / 2048.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 2048:
+            z = smm_transpose(gQ, n, hd)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_tr = _mn(best_tr, (t1 - t0) / 2048.0 / 1000.0)
+
+        # ---------- t_zeros theo shape that ----------
+        t0 = now_us()
+        q = 0
+        while q < 2048:
+            z = t_zeros([n, h])
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_tz_8h = _mn(best_tz_8h, (t1 - t0) / 2048.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 2048:
+            z = t_zeros([n, 3 * h])
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_tz_8_3h = _mn(best_tz_8_3h, (t1 - t0) / 2048.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            z = t_zeros([h, h])
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_tz_hh = _mn(best_tz_hh, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 2048:
+            z = t_zeros([n, hd])
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_tz_8hd = _mn(best_tz_8hd, (t1 - t0) / 2048.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 2048:
+            z = t_zeros([n, n])
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_tz_8_8 = _mn(best_tz_8_8, (t1 - t0) / 2048.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 2048:
+            z = t_zeros([n * ih])
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_tz_8ih = _mn(best_tz_8ih, (t1 - t0) / 2048.0 / 1000.0)
+
+        # ---------- mlp: tung pha ----------
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            z = gpt2_linear(xi, w1, bb1, n, h, ih, 1)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_lin_f = _mn(best_lin_f, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            z = _gelu_fwd_par(inner.data, a2.data, n * ih, 1)
+            acc = acc + z
+            q = q + 1
+        t1 = now_us()
+        best_gelu_f = _mn(best_gelu_f, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            z = op_gelu_erf_bwd(inner, r2[0])
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_gelu_b = _mn(best_gelu_b, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            z = smm_dot(gy, w2, n, ih, h)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_smm_dot = _mn(best_smm_dot, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            z = smm_fwd_at(a2, gy, ih, h, n)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_smm_at = _mn(best_smm_at, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            zl = gpt2_linear_bwd(xi, w1, d_inner, n, h, ih, 1)
+            z0 = zl[0]
+            acc = acc + len(z0.data)
+            q = q + 1
+        t1 = now_us()
+        best_lb_w1 = _mn(best_lb_w1, (t1 - t0) / 16.0 / 1000.0)
+
+        db2 = t_zeros([h])
+        t0 = now_us()
+        q = 0
+        while q < 512:
+            i2 = 0
+            while i2 < n:
+                b2v = i2 * h
+                o2 = 0
+                while o2 < h:
+                    db2.data[o2] = db2.data[o2] + gy.data[b2v + o2]
+                    o2 = o2 + 1
+                i2 = i2 + 1
+            q = q + 1
+        t1 = now_us()
+        best_db2 = _mn(best_db2, (t1 - t0) / 512.0 / 1000.0)
+
+        bigd = t_zeros([ih * h])
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            i2 = 0
+            while i2 < ih * h:
+                bigd.data[i2] = bigd.data[i2] + 0.0
+                i2 = i2 + 1
+            q = q + 1
+        t1 = now_us()
+        best_dw2copy = _mn(best_dw2copy, (t1 - t0) / 16.0 / 1000.0)
+
+        # ---------- linear_bwd DUNG gflat (giong production) + tau pha ----------
+        gf = t_zeros([nf]).data
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            zl = gpt2_linear_bwd(xi, w1, d_inner, n, h, ih, 1, gf, 0, nw1)
+            z0 = zl[0]
+            acc = acc + len(z0.data)
+            q = q + 1
+        t1 = now_us()
+        best_lbw1_gf = _mn(best_lbw1_gf, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            z = smm_dot(d_inner, w1, n, h, ih)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_dx1 = _mn(best_dx1, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            z = smm_fwd_at(xi, d_inner, h, ih, n)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_dw1 = _mn(best_dw1, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            zl = gpt2_linear_bwd(xi, w_qkv, dqkv, n, h, 3 * h, 1, gf, nw1, nw1 + ih * h)
+            z0 = zl[0]
+            acc = acc + len(z0.data)
+            q = q + 1
+        t1 = now_us()
+        best_lbqkv_gf = _mn(best_lbqkv_gf, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            z = smm_dot(dqkv, w_qkv, n, h, 3 * h)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_dxq = _mn(best_dxq, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            z = smm_fwd_at(xi, dqkv, h, 3 * h, n)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_us()
+        best_dwq = _mn(best_dwq, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            i2 = 0
+            while i2 < ih * h:
+                gf[nw1 + i2] = gf[nw1 + i2] + 0.0
+                i2 = i2 + 1
+            q = q + 1
+        t1 = now_us()
+        best_copy_w1 = _mn(best_copy_w1, (t1 - t0) / 16.0 / 1000.0)
+
+        t0 = now_us()
+        q = 0
+        while q < 16:
+            i2 = 0
+            while i2 < h * 3 * h:
+                gf[nw1 + ih * h + i2] = gf[nw1 + ih * h + i2] + 0.0
+                i2 = i2 + 1
+            q = q + 1
+        t1 = now_us()
+        best_copy_qkv = _mn(best_copy_qkv, (t1 - t0) / 16.0 / 1000.0)
+        k = k + 1
+
+    head_gemm = 2.0 * best_dot88 + 2.0 * best_fwd8_64 + 2.0 * best_fwd64_8
+    head_alloc = 5.0 * best_tz_8hd + best_tz_8_8
+    head_all = float(nh) * (head_gemm + head_alloc + 2.0 * best_tr)
+    att_rest = best_qkv_f + best_dctx + best_dwproj + best_qkv_b
+    att_alloc = 5.0 * best_tz_8h + best_tz_8_3h + best_tz_hh
+    mlp_sum = best_lin_f + best_gelu_f + best_gelu_b + best_smm_dot + best_smm_at + best_lb_w1 + best_db2 + best_dw2copy + 2.0 * best_tz_8ih
+
+    print("AM4 ATT_TOTAL           = " + str(best_att) + " ms")
+    print("AM4 ATT qkv_fwd         = " + str(best_qkv_f) + " ms")
+    print("AM4 ATT dctx            = " + str(best_dctx) + " ms")
+    print("AM4 ATT dwproj          = " + str(best_dwproj) + " ms")
+    print("AM4 ATT dqkv_bwd        = " + str(best_qkv_b) + " ms")
+    print("AM4 ATT t_zeros          = " + str(att_alloc) + " ms")
+    print("AM4 HEAD dot(8,8,64)    = " + str(best_dot88) + " ms")
+    print("AM4 HEAD fwd(8,64,8)    = " + str(best_fwd8_64) + " ms")
+    print("AM4 HEAD fwd(64,8,8)    = " + str(best_fwd64_8) + " ms")
+    print("AM4 HEAD transpose      = " + str(best_tr) + " ms")
+    print("AM4 HEAD t_zeros        = " + str(head_alloc) + " ms")
+    print("AM4 HEAD 12 heads       = " + str(head_all) + " ms")
+    print("AM4 ATT sum(pha)        = " + str(att_rest + att_alloc + head_all) + " ms")
+    print("AM4 MLP_TOTAL           = " + str(best_mlp) + " ms")
+    print("AM4 MLP linear_fwd      = " + str(best_lin_f) + " ms")
+    print("AM4 MLP gelu_fwd        = " + str(best_gelu_f) + " ms")
+    print("AM4 MLP gelu_bwd        = " + str(best_gelu_b) + " ms")
+    print("AM4 MLP smm_dot(dx2)    = " + str(best_smm_dot) + " ms")
+    print("AM4 MLP smm_fwd_at(dw2) = " + str(best_smm_at) + " ms")
+    print("AM4 MLP linear_bwd(w1)  = " + str(best_lb_w1) + " ms")
+    print("AM4 MLP db2 loop        = " + str(best_db2) + " ms")
+    print("AM4 MLP dw2->gflat      = " + str(best_dw2copy) + " ms")
+    print("AM4 MLP sum(pha)        = " + str(mlp_sum) + " ms")
+    print("AM4 LB w1 (gflat)       = " + str(best_lbw1_gf) + " ms")
+    print("AM4 LB w1 dx GEMM       = " + str(best_dx1) + " ms")
+    print("AM4 LB w1 dw GEMM       = " + str(best_dw1) + " ms")
+    print("AM4 LB w1 dw->gflat     = " + str(best_copy_w1) + " ms")
+    print("AM4 LB qkv (gflat)      = " + str(best_lbqkv_gf) + " ms")
+    print("AM4 LB qkv dx GEMM      = " + str(best_dxq) + " ms")
+    print("AM4 LB qkv dw GEMM      = " + str(best_dwq) + " ms")
+    print("AM4 LB qkv dw->gflat    = " + str(best_copy_qkv) + " ms")
+    print("AM4 acc=" + str(acc))
+    return 0

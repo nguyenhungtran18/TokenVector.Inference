@@ -1,0 +1,16 @@
+def _arm(x: "list[f32]", gy: "list[f32]", g: "list[f32]", dx: "list[f32]", mu: "i64", h: "i64", off_dg: "i64") -> "i64":
+    m = 0.0
+    r = 1.5
+    j = 0
+    for j in range(h):
+        xh = (x[j] - m) * r
+        gg = gy[j] * g[j]
+        dx[j] = r * (gg - 0.25 - xh * 0.5)
+    return 0
+
+def main() -> "i32":
+    a: "list[f32]" = []
+    b: "list[f32]" = []
+    c: "list[f32]" = []
+    d: "list[f32]" = []
+    return _arm(a, b, c, d, 0, 0, 0)

@@ -1,0 +1,35 @@
+# PROBE AM7A — isolate type inference for layernorm_bwd_fused args
+import tv.training.gpt2_ref
+
+def _tA(n: 'i64', h: 'i64') -> 'i64':
+    x = t_zeros([n, h])
+    gy = t_zeros([n, h])
+    g = t_zeros([h])
+    dx = t_zeros([n, h])
+    gf = t_zeros([2 * h])
+    xl = x.data
+    gyl = gy.data
+    gl = g.data
+    dxl = dx.data
+    gfl = gf.data
+    return layernorm_bwd_fused(xl, gyl, gl, dxl, gfl, n, h, 0, h)
+
+def _tB(n: 'i64', h: 'i64') -> 'i64':
+    x = t_zeros([n, h])
+    gy = t_zeros([n, h])
+    g = t_zeros([h])
+    b = t_zeros([h])
+    rf = gpt2_layernorm_bwd(x, g, b, gy)
+    dx = t_zeros([n, h])
+    gf = t_zeros([2 * h])
+    xl = x.data
+    gyl = gy.data
+    gl = g.data
+    dxl = dx.data
+    gfl = gf.data
+    return layernorm_bwd_fused(xl, gyl, gl, dxl, gfl, n, h, 0, h)
+
+def main() -> 'i32':
+    print("A=" + str(_tA(4, 8)))
+    print("B=" + str(_tB(4, 8)))
+    return 0

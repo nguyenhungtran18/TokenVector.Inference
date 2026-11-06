@@ -1,0 +1,267 @@
+# PROBE AM2 — phan rach mlp_bwd / attention_bwd tai seq8 (muc bucket <=1680ms)
+# Copy setup tu simd_probe_am (cung fixture, cung thu tu goi), roi do TUNG phan
+# cua gpt2_mlp_bwd va gpt2_attention_bwd voi SHAPES that.
+# Chay: tkvc tv/tests/_am2.tkv out/am2.exe main
+#       cp out/am2.exe out/am2_n10.dll; dotnet out/am2_n10.dll
+import tv.training.gpt2_ref124
+import tv.training.trainer
+import tv.training.simd_matmul
+import tv.training.ops
+
+FIX = "tv/tests/fixtures/"
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_floats(path: 'str') -> 'list[f32]':
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                vals.append(float(toks[j]))
+    return vals
+
+def load_ints(path: 'str') -> 'list[i64]':
+    f = load_floats(path)
+    out = []
+    for i in range(len(f)):
+        out.append(int(f[i]))
+    return out
+
+def _mn(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+def main() -> 'i32':
+    ids = load_ints(FIX + "g2_ids.txt")
+    pos = load_ints(FIX + "g2_pos.txt")
+    ps = gpt2_init(7)
+    n = len(ids)
+    h = HiddenSize
+    ih = 4 * h
+    print("AM2 n=" + str(n) + " h=" + str(h) + " ih=" + str(ih))
+
+    x = gpt2_embed(ids, pos, ps[0], ps[1])
+    xins = []
+    for i in range(NLayers):
+        xins.append(x)
+        b = 4 + i * 12
+        x = gpt2_block(x, ps[b + 0], ps[b + 1], ps[b + 2], ps[b + 3],
+                       ps[b + 4], ps[b + 5], ps[b + 6], ps[b + 7],
+                       ps[b + 8], ps[b + 9], ps[b + 10], ps[b + 11], 1)
+
+    li = 6
+    base = 4 + li * 12
+    xi = xins[li]
+    gy = t_zeros([n, h])
+    for i in range(n * h):
+        gy.data[i] = 0.1
+    a = gpt2_layernorm(xi, ps[base + 0], ps[base + 1])
+
+    w1 = ps[base + 8]
+    bb1 = ps[base + 9]
+    w2 = ps[base + 10]
+    bb2 = ps[base + 11]
+
+    # chuan bi tensor cho cac phep goi don le
+    a2 = t_zeros([n, ih])
+    for i in range(n * ih):
+        a2.data[i] = 0.2
+    inner = gpt2_linear(xi, w1, bb1, n, h, ih, 1)
+    r2 = gpt2_linear_bwd(a2, w2, gy, n, ih, h, 1)
+    d_inner = op_gelu_erf_bwd(inner, r2[0])
+    dx2 = smm_dot(gy, w2, n, ih, h)
+    dw2 = smm_fwd_at(a2, gy, ih, h, n)
+    r1 = gpt2_linear_bwd(xi, w1, d_inner, n, h, ih, 1)
+
+    b_tz8768 = 1.0e9
+    b_tz24k = 1.0e9
+    b_tz4096 = 1.0e9
+    b_lin_fwd = 1.0e9
+    b_smm_dot = 1.0e9
+    b_smm_at = 1.0e9
+    b_lb_w2 = 1.0e9
+    b_lb_w1 = 1.0e9
+    b_gelu = 1.0e9
+    b_gelub = 1.0e9
+    b_mlp = 1.0e9
+    b_att = 1.0e9
+    b_ln2 = 1.0e9
+    b_dbloop = 1.0e9
+    acc = 0
+    k = 0
+    while k < 3:
+        # --- t_zeros ---
+        t0 = now_ms()
+        q = 0
+        while q < 64:
+            z = t_zeros([n, h])
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_ms()
+        b_tz8768 = _mn(b_tz8768, (t1 - t0) / 64.0)
+
+        t0 = now_ms()
+        q = 0
+        while q < 32:
+            z = t_zeros([n * ih])
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_ms()
+        b_tz24k = _mn(b_tz24k, (t1 - t0) / 32.0)
+
+        t0 = now_ms()
+        q = 0
+        while q < 64:
+            z = t_zeros([4096])
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_ms()
+        b_tz4096 = _mn(b_tz4096, (t1 - t0) / 64.0)
+
+        # --- linear fwd ---
+        t0 = now_ms()
+        q = 0
+        while q < 8:
+            z = gpt2_linear(xi, w1, bb1, n, h, ih, 1)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_ms()
+        b_lin_fwd = _mn(b_lin_fwd, (t1 - t0) / 8.0)
+
+        # --- smm_dot / smm_fwd_at (2 GEMM cua mlp bwd simd) ---
+        t0 = now_ms()
+        q = 0
+        while q < 8:
+            z = smm_dot(gy, w2, n, ih, h)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_ms()
+        b_smm_dot = _mn(b_smm_dot, (t1 - t0) / 8.0)
+
+        t0 = now_ms()
+        q = 0
+        while q < 8:
+            z = smm_fwd_at(a2, gy, ih, h, n)
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_ms()
+        b_smm_at = _mn(b_smm_at, (t1 - t0) / 8.0)
+
+        # --- 2 linear_bwd ---
+        t0 = now_ms()
+        q = 0
+        while q < 8:
+            zl = gpt2_linear_bwd(a2, w2, gy, n, ih, h, 1)
+            z0 = zl[0]
+            acc = acc + len(z0.data)
+            q = q + 1
+        t1 = now_ms()
+        b_lb_w2 = _mn(b_lb_w2, (t1 - t0) / 8.0)
+
+        t0 = now_ms()
+        q = 0
+        while q < 8:
+            zl = gpt2_linear_bwd(xi, w1, d_inner, n, h, ih, 1)
+            z0 = zl[0]
+            acc = acc + len(z0.data)
+            q = q + 1
+        t1 = now_ms()
+        b_lb_w1 = _mn(b_lb_w1, (t1 - t0) / 8.0)
+
+        # --- gelu fwd / bwd ---
+        t0 = now_ms()
+        q = 0
+        while q < 8:
+            z = _gelu_fwd_par(inner.data, a2.data, n * ih, 1)
+            acc = acc + z
+            q = q + 1
+        t1 = now_ms()
+        b_gelu = _mn(b_gelu, (t1 - t0) / 8.0)
+
+        t0 = now_ms()
+        q = 0
+        while q < 8:
+            z = op_gelu_erf_bwd(inner, r2[0])
+            acc = acc + len(z.data)
+            q = q + 1
+        t1 = now_ms()
+        b_gelub = _mn(b_gelub, (t1 - t0) / 8.0)
+
+        # --- vong db (giong gpt2_linear_bwd dboff=-1) ---
+        db = t_zeros([h])
+        t0 = now_ms()
+        q = 0
+        while q < 8:
+            i2 = 0
+            while i2 < n:
+                base2 = i2 * h
+                o2 = 0
+                while o2 < h:
+                    db.data[o2] = db.data[o2] + gy.data[base2 + o2]
+                    o2 = o2 + 1
+                i2 = i2 + 1
+            q = q + 1
+        t1 = now_ms()
+        b_dbloop = _mn(b_dbloop, (t1 - t0) / 8.0)
+
+        # --- toan bo 3 vung ---
+        t0 = now_ms()
+        q = 0
+        while q < 8:
+            zl = gpt2_mlp_bwd(xi, w1, bb1, w2, bb2, n, gy, 1)
+            z0 = zl[0]
+            acc = acc + len(z0.data)
+            q = q + 1
+        t1 = now_ms()
+        b_mlp = _mn(b_mlp, (t1 - t0) / 8.0)
+
+        t0 = now_ms()
+        q = 0
+        while q < 8:
+            zl = gpt2_attention_bwd(a, ps[base + 2], ps[base + 3],
+                                   ps[base + 4], ps[base + 5], n, gy, 1)
+            z0 = zl[0]
+            acc = acc + len(z0.data)
+            q = q + 1
+        t1 = now_ms()
+        b_att = _mn(b_att, (t1 - t0) / 8.0)
+
+        t0 = now_ms()
+        q = 0
+        while q < 8:
+            zl = gpt2_layernorm_bwd(xi, ps[base + 0], ps[base + 1], gy)
+            z0 = zl[0]
+            acc = acc + len(z0.data)
+            q = q + 1
+        t1 = now_ms()
+        b_ln2 = _mn(b_ln2, (t1 - t0) / 8.0)
+        k = k + 1
+
+    print("AM2 t_zeros([8,768])   = " + str(b_tz8768) + " ms")
+    print("AM2 t_zeros([24576])   = " + str(b_tz24k) + " ms")
+    print("AM2 t_zeros([4096])    = " + str(b_tz4096) + " ms")
+    print("AM2 linear_fwd(w1)     = " + str(b_lin_fwd) + " ms")
+    print("AM2 smm_dot(gy,w2)     = " + str(b_smm_dot) + " ms")
+    print("AM2 smm_fwd_at(a,gy)   = " + str(b_smm_at) + " ms")
+    print("AM2 linear_bwd(w2)     = " + str(b_lb_w2) + " ms")
+    print("AM2 linear_bwd(w1)     = " + str(b_lb_w1) + " ms")
+    print("AM2 gelu_fwd_par       = " + str(b_gelu) + " ms")
+    print("AM2 gelu_erf_bwd       = " + str(b_gelub) + " ms")
+    print("AM2 db_loop(n*h)       = " + str(b_dbloop) + " ms")
+    print("AM2 MLP_BWD            = " + str(b_mlp) + " ms")
+    print("AM2 ATTENTION_BWD      = " + str(b_att) + " ms")
+    print("AM2 LN_BWD             = " + str(b_ln2) + " ms")
+    print("AM2 SUM_mlp_parts      = " + str(b_lin_fwd + b_smm_dot + b_smm_at + b_lb_w2 + b_lb_w1 + b_gelu + b_gelub + b_dbloop) + " ms")
+    print("AM2 acc=" + str(acc))
+    return 0

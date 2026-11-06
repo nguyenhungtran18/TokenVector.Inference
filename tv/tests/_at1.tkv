@@ -1,0 +1,207 @@
+# PROBE AT1 — tach tung vong NON-GEMM trong attention_bwd @seq1024 (1 head x 12)
+# Muc dich (yeu cau: do tach truoc khi viet kernel):
+#   [A] pack Q/K/V/dctx (n*hd x4, doc strided tu qkv/dctx)
+#   [B] softmax causal FWD: scale+max (n^2/2)
+#   [C] exp + tong (n^2/2)          <- nghi lon nhat: 6.3M exp/block
+#   [D] normalize (n^2/2)
+#   [E] zero-fill phan > t (n^2/2)
+#   [F] writeback dq_out (3*n*hd, doc strided gDkT/gDvT)
+#   [G] merge packed -> ctxT/dqkv
+#   [H..] 6 GEMM cua worker (de biet ty le GEMM/non-GEMM trong worker)
+# Moi timer dat trong main (bug #8: now_ms() trong ham local doc sai).
+# Chay: tkvc-tv.exe tv/tests/_at1.tkv out/at1.exe main ; dotnet out/at1_n10.dll
+import tv.training.simd_matmul
+
+def _fill(n: 'i64', seed: 'i64') -> "list[f32]":
+    out = []
+    for i in range(n):
+        out.append(float((i * 37 + seed) % 101) * 0.01 - 0.5)
+    return out
+
+def main() -> 'i32':
+    n = 1024
+    h = 768
+    hd = 64
+    nh = 12
+    inv = 1.0 / sqrt(float(hd))
+
+    qkv = _fill(n * 3 * h, 11)
+    dctx = _fill(n * h, 23)
+
+    gQ = t_zeros([n, hd])
+    gK = t_zeros([n, hd])
+    gV = t_zeros([n, hd])
+    gDc = t_zeros([n, hd])
+    Smat = t_zeros([n, n])
+    gDs = t_zeros([n, n])
+    gDq = t_zeros([n, hd])
+    gDkT = t_zeros([hd, n])
+    gDvT = t_zeros([hd, n])
+    ctxT = t_zeros([n, h])
+    dqkv = t_zeros([n, 3 * h])
+    ctxo = t_zeros([n * hd])
+    dqo = t_zeros([n * 3 * hd])
+
+    bA = 1.0e9
+    bB = 1.0e9
+    bC = 1.0e9
+    bD = 1.0e9
+    bE = 1.0e9
+    bF = 1.0e9
+    bG = 1.0e9
+    gm_s = 1.0e9
+    gm_c = 1.0e9
+    gm_d = 1.0e9
+    gm_q = 1.0e9
+    gm_k = 1.0e9
+    gm_v = 1.0e9
+    tot = 1.0e9
+    rep = 0
+    while rep < 3:
+        # ---------- [A] pack 12 head ----------
+        t0 = now_ms()
+        for head in range(nh):
+            ho = head * hd
+            for t2 in range(n):
+                s0 = t2 * 3 * h + ho
+                c0 = t2 * h + ho
+                for d in range(hd):
+                    gQ.data[t2 * hd + d] = qkv[s0 + d]
+                    gK.data[t2 * hd + d] = qkv[s0 + h + d]
+                    gV.data[t2 * hd + d] = qkv[s0 + 2 * h + d]
+                    gDc.data[t2 * hd + d] = dctx[c0 + d]
+        t1 = now_ms()
+        # ---------- [B] scale + max (12 head) ----------
+        for head in range(nh):
+            for t2 in range(n):
+                b0 = t2 * n
+                m0 = Smat.data[b0] * inv
+                Smat.data[b0] = m0
+                mxv = m0
+                for u in range(1, t2 + 1):
+                    m0 = Smat.data[b0 + u] * inv
+                    Smat.data[b0 + u] = m0
+                    if m0 > mxv:
+                        mxv = m0
+        t2m = now_ms()
+        # ---------- [C] exp + tong ----------
+        for head in range(nh):
+            for t3 in range(n):
+                b0 = t3 * n
+                mxv = Smat.data[b0]
+                for u in range(t3 + 1):
+                    if Smat.data[b0 + u] > mxv:
+                        mxv = Smat.data[b0 + u]
+                totv = 0.0
+                for u in range(t3 + 1):
+                    e = exp(Smat.data[b0 + u] - mxv)
+                    Smat.data[b0 + u] = e
+                    totv = totv + e
+        t3m = now_ms()
+        # ---------- [D] normalize ----------
+        for head in range(nh):
+            for t4 in range(n):
+                b0 = t4 * n
+                totv = 1.0
+                ivv = 1.0 / totv
+                for u in range(t4 + 1):
+                    Smat.data[b0 + u] = Smat.data[b0 + u] * ivv
+        t4m = now_ms()
+        # ---------- [E] zero-fill u > t ----------
+        for head in range(nh):
+            for t5 in range(n):
+                b0 = t5 * n
+                for u in range(t5 + 1, n):
+                    Smat.data[b0 + u] = 0.0
+        t5m = now_ms()
+        # ---------- [F] writeback 3*n*hd (strided) ----------
+        for head in range(nh):
+            ho = head * hd
+            for t6 in range(n):
+                d0 = t6 * hd
+                p0 = t6 * 3 * hd
+                for d in range(hd):
+                    dqo[p0 + d] = gDq.data[d0 + d] * inv
+                    dqo[p0 + hd + d] = gDkT.data[d * n + t6] * inv
+                    dqo[p0 + 2 * hd + d] = gDvT.data[d * n + t6]
+        t6m = now_ms()
+        # ---------- [G] merge packed -> ctxT/dqkv ----------
+        for head in range(nh):
+            ho = head * hd
+            for t7 in range(n):
+                c0 = t7 * h + ho
+                p0 = t7 * 3 * hd
+                r0 = t7 * 3 * h + ho
+                for d in range(hd):
+                    ctxT.data[c0 + d] = ctxo[t7 * hd + d]
+                    dqkv.data[r0 + d] = dqo[p0 + d]
+                    dqkv.data[r0 + h + d] = dqo[p0 + hd + d]
+                    dqkv.data[r0 + 2 * h + d] = dqo[p0 + 2 * hd + d]
+        t7m = now_ms()
+        # ---------- [H] 6 GEMM cua 1 head ----------
+        g0 = now_ms()
+        s1 = smm_dot(gQ, gK, n, n, hd)
+        g1 = now_ms()
+        c1 = smm_fwd(Smat, gV, n, hd, n)
+        g2 = now_ms()
+        p1 = smm_dot(gDc, gV, n, n, hd)
+        g3 = now_ms()
+        q1 = smm_fwd(gDs, gK, n, hd, n)
+        g4 = now_ms()
+        k1 = smm_fwd_at(gQ, gDs, hd, n, n)
+        g5 = now_ms()
+        v1 = smm_fwd_at(gDc, Smat, hd, n, n)
+        g6 = now_ms()
+        d_s = g1 - g0
+        d_c = g2 - g1
+        d_d = g3 - g2
+        d_q = g4 - g3
+        d_k = g5 - g4
+        d_v = g6 - g5
+        if t1 - t0 < bA:
+            bA = t1 - t0
+        if t2m - t1 < bB:
+            bB = t2m - t1
+        if t3m - t2m < bC:
+            bC = t3m - t2m
+        if t4m - t3m < bD:
+            bD = t4m - t3m
+        if t5m - t4m < bE:
+            bE = t5m - t4m
+        if t6m - t5m < bF:
+            bF = t6m - t5m
+        if t7m - t6m < bG:
+            bG = t7m - t6m
+        if d_s < gm_s:
+            gm_s = d_s
+        if d_c < gm_c:
+            gm_c = d_c
+        if d_d < gm_d:
+            gm_d = d_d
+        if d_q < gm_q:
+            gm_q = d_q
+        if d_k < gm_k:
+            gm_k = d_k
+        if d_v < gm_v:
+            gm_v = d_v
+        rep = rep + 1
+
+    ng = bA + bB + bC + bD + bE + bF + bG
+    print("AT1 n=" + str(n) + " h=" + str(h) + " hd=" + str(hd) + " heads=" + str(nh))
+    print("AT1 A pack QKV/dctx (12h)  = " + str(bA) + " ms")
+    print("AT1 B scale+max            = " + str(bB) + " ms")
+    print("AT1 C exp+tong             = " + str(bC) + " ms")
+    print("AT1 D normalize            = " + str(bD) + " ms")
+    print("AT1 E zero-fill            = " + str(bE) + " ms")
+    print("AT1 F writeback (strided)  = " + str(bF) + " ms")
+    print("AT1 G merge packed         = " + str(bG) + " ms")
+    print("AT1 SUM non-GEMM (12h)     = " + str(ng) + " ms")
+    print("AT1 H1 smm_dot scores x12  = " + str(gm_s * 12.0) + " ms (1 head " + str(gm_s) + ")")
+    print("AT1 H2 smm_fwd ctx x12     = " + str(gm_c * 12.0) + " ms")
+    print("AT1 H3 smm_dot dp x12      = " + str(gm_d * 12.0) + " ms")
+    print("AT1 H4 smm_fwd dq x12      = " + str(gm_q * 12.0) + " ms")
+    print("AT1 H5 smm_fwd_at dkT x12  = " + str(gm_k * 12.0) + " ms")
+    print("AT1 H6 smm_fwd_at dvT x12  = " + str(gm_v * 12.0) + " ms")
+    print("AT1 SUM GEMM x12           = " + str((gm_s + gm_c + gm_d + gm_q + gm_k + gm_v) * 12.0) + " ms")
+    print("AT1 done")
+    return 0

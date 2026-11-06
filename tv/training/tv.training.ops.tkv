@@ -215,6 +215,22 @@ def _ogb_zeros(n: 'i64') -> 'list[f32]':
     return out
 
 def _ogb_one(j: "_OpGbJob") -> 'i64':
+    # YEU CAU #12 Ask A2 (2026-11-05): native `gelu_erf_bwd` tren doan [lo, hi)
+    # (out[i-lo] = gy[i]*dgelu) — TU /fp:precise, probe _nt5: 401/401 bit-giong.
+    # rc != 0 -> vong interpreted NGUYEN VAN.
+    xl = j.xl
+
+    gyl = j.gyl
+
+    segl = j.seg
+
+    lo = j.lo
+
+    hi = j.hi
+
+    l12g = gelu_erf_bwd(xl, gyl, segl, lo, hi)
+    if l12g == 0:
+        return 0
     s = 1.4142135623730951
     k = 0
     i = j.lo
@@ -235,6 +251,18 @@ def op_gelu_erf_bwd(x: "Tensor", gy: "Tensor") -> "Tensor":
     n = len(x.data)
     g = t_zeros([n])
     if n < 2000000:
+        # YEU CAU #12 Ask A2: native `gelu_erf_bwd` 1 entry (erf + exp f64
+        # giong IL, JIT ep f64->f32 nhu probe _nt5) -> bo vong interpreted.
+        # rc != 0 -> vong cu NGUYEN VAN.
+        xl = x.data
+
+        gyl = gy.data
+
+        gl = g.data
+
+        l12g = gelu_erf_bwd(xl, gyl, gl, 0, n)
+        if l12g == 0:
+            return g
         s = 1.4142135623730951
         for i in range(n):
             v = x.data[i]
@@ -482,15 +510,26 @@ def op_embed_bwd(w: "Tensor", idx: 'list[i64]', d: 'i64', gy: "Tensor") -> "Tens
     n = len(idx)
     rows = len(w.data) // d
     gw = t_zeros([rows * d])
+    counts = []
+    for r in range(rows):
+        counts.append(0)
+    for t in range(n):
+        counts[idx[t]] = counts[idx[t]] + 1
+    starts = []
+    s = 0
+    for r in range(rows):
+        starts.append(s)
+        s = s + counts[r]
     pos = []
     for t in range(n):
-        pos.append(t)
-    for a in range(n):
-        for b in range(a + 1, n):
-            if idx[pos[b]] < idx[pos[a]]:
-                tmp = pos[a]
-                pos[a] = pos[b]
-                pos[b] = tmp
+        pos.append(0)
+    cursor = []
+    for r in range(rows):
+        cursor.append(starts[r])
+    for t in range(n):
+        r = idx[t]
+        pos[cursor[r]] = t
+        cursor[r] = cursor[r] + 1
     for q in range(n):
         t = pos[q]
         r = idx[t]

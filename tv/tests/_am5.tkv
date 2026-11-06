@@ -1,0 +1,209 @@
+# PROBE AM5 — BIT-CHECK native `linear_dw_fused` vs duong .tkv hien tai
+# (YEU CAU #10 Ask A): dw = smm_fwd_at(x, gy, in_d, out_d, n) roi
+# gflat[goff + k] += dw.data[k].
+# Kiem: (a) cung bit tren 6 shape that + shape le (native phai tu choi, rc != 0);
+#       (b) thoi gian best-of-3 cho 3 shape that.
+# Chay: tkvc tv/tests/_am5.tkv out/am5.exe main
+#       cp out/am5.exe out/am5_n10.dll; cp out/_am.runtimeconfig.json out/am5_n10.runtimeconfig.json
+#       dotnet out/am5_n10.dll
+import tv.training.simd_matmul
+import tv.training.ops
+
+
+def _seed(xs: 'list[f32]', n: 'i64', s: 'i64') -> 'i64':
+    # LCG 1103515245 + 12345 (giong test_dw.c cua native) -> f32 trong [-1,1)
+    st = s
+    i = 0
+    while i < n:
+        st = (st * 1103515245 + 12345) % 2147483648
+        v = float((st / 256) % 65536) / 65536.0
+        xs[i] = (v * 2.0 - 1.0) / 1.0
+        i = i + 1
+    return st
+
+
+def _check(k: 'i64', in_d: 'i64', out_d: 'i64', goff: 'i64', tag: 'str') -> 'i64':
+    nx = k * in_d
+    ny = k * out_d
+    nd = in_d * out_d
+    x = t_zeros([k, in_d])
+    gy = t_zeros([k, out_d])
+    s = _seed(x.data, nx, 12345 + k)
+    s = _seed(gy.data, ny, 777 + in_d)
+    # gflat CO SAN gia tri khac 0 (giong gradient dang chay that)
+    ga = t_zeros([goff + nd + 37])
+    s = _seed(ga.data, goff + nd + 37, 4242 + out_d)
+    gb = t_zeros([goff + nd + 37])
+    i = 0
+    while i < goff + nd + 37:
+        gb.data[i] = ga.data[i]
+        i = i + 1
+
+    pre = 0
+    i = 0
+    while i < goff + nd + 37:
+        if ga.data[i] != gb.data[i]:
+            pre = pre + 1
+        i = i + 1
+    print("AM5 pre-copy-diff " + tag + " = " + str(pre) + "  len=" + str(len(ga.data)) + "/" + str(len(gb.data)) + " ga0=" + str(ga.data[0]) + " gb0=" + str(gb.data[0]))
+
+    # ---- ref: duong production hien tai ----
+    dw = smm_fwd_at(x, gy, in_d, out_d, k)
+    i = 0
+    while i < nd:
+        ga.data[goff + i] = ga.data[goff + i] + dw.data[i]
+        i = i + 1
+
+    # ---- new: 1 entry native (bien list[f32] — builtin doi tham so la BIEN) ----
+    xd = x.data
+    yd = gy.data
+    gd = gb.data
+    rc = linear_dw_fused(xd, yd, gd, goff, k, in_d, out_d)
+
+    if rc != 0:
+        print("AM5 " + tag + " shape k=" + str(k) + " in_d=" + str(in_d) + " out_d=" + str(out_d) + " rc=" + str(rc) + " -> NATIVE TU CHOI (caller phai fallback)")
+        return 0
+
+    bad = 0
+    first = -1
+    i = 0
+    while i < goff + nd + 37:
+        if ga.data[i] != gb.data[i]:
+            bad = bad + 1
+            if first < 0:
+                first = i
+        i = i + 1
+    print("AM5 " + tag + " k=" + str(k) + " in_d=" + str(in_d) + " out_d=" + str(out_d) + " rc=" + str(rc) + " bit_bad=" + str(bad) + " first=" + str(first))
+    return bad
+
+
+def _time(k: 'i64', in_d: 'i64', out_d: 'i64') -> 'i32':
+    nx = k * in_d
+    ny = k * out_d
+    nd = in_d * out_d
+    x = t_zeros([k, in_d])
+    gy = t_zeros([k, out_d])
+    s = _seed(x.data, nx, 12345 + k)
+    s = _seed(gy.data, ny, 777 + in_d)
+    g = t_zeros([nd])
+    s = _seed(g.data, nd, 99)
+
+    bestR = 1000000.0
+    bestN = 1000000.0
+    it = 0
+    while it < 3:
+        t0 = now_ms()
+        dw = smm_fwd_at(x, gy, in_d, out_d, k)
+        i = 0
+        while i < nd:
+            g.data[i] = g.data[i] + dw.data[i]
+            i = i + 1
+        t1 = now_ms()
+        xd = x.data
+        yd = gy.data
+        gd = g.data
+        rc = linear_dw_fused(xd, yd, gd, 0, k, in_d, out_d)
+        t2 = now_ms()
+        dR = t1 - t0
+        dN = t2 - t1
+        if dR < bestR:
+            bestR = dR
+        if dN < bestN:
+            bestN = dN
+        it = it + 1
+    print("AM5 time k=" + str(k) + " in_d=" + str(in_d) + " out_d=" + str(out_d) + " tkv=" + str(bestR) + " ms  native=" + str(bestN) + " ms  x=" + str(bestR / bestN))
+    return 0
+
+
+def _check_proj(n: 'i64', h: 'i64', o_proj: 'i64', tag: 'str') -> 'i64':
+    # dw_proj: ctxT luu [n hang][h cot] = dang A^T cho trans-A.
+    # DUONG CU (hien tai trong gpt2_attention_bwd):
+    #   ctxTt = smm_transpose(ctxT, n, h)  -> [h, n]
+    #   dwG   = smm_fwd(ctxTt, gout, h, h, n)   (trans_a = 0)
+    #   gflat[o_proj + r*h + o] += dwG.data[r*h + o]
+    # DUONG MOI: linear_dw_fused(ctxT, gout, gflat, o_proj, n, h, h) — bo
+    # smm_transpose (trans_a=1, doc truc tiep ctxT). Kiem 2 dieu: (a) smm_fwd_at
+    # ctxT co bang smm_fwd(ctxTt) KHONG, (b) native co bang duong cu KHONG.
+    nd = h * h
+    ctxT = t_zeros([n, h])
+    gout = t_zeros([n, h])
+    s = _seed(ctxT.data, n * h, 424242 + h)
+    s = _seed(gout.data, n * h, 9999 + n)
+    ga = t_zeros([o_proj + nd + 37])
+    gb = t_zeros([o_proj + nd + 37])
+    i = 0
+    while i < o_proj + nd + 37:
+        v = _seed_val(i, 1717 + n)
+        ga.data[i] = v
+        gb.data[i] = v
+        i = i + 1
+
+    # (a) .tkv trans_a=1 (smm_fwd_at) vs duong cu (transpose + smm_fwd)
+    # TINH MOT LAN — goi trong vong la O(n^2) GEMM (da loi 1 lan, chay >600s).
+    ctxTt = smm_transpose(ctxT, n, h)
+    dwG = smm_fwd(ctxTt, gout, h, h, n)
+    dwA = smm_fwd_at(ctxT, gout, h, h, n)
+    badA = 0
+    i = 0
+    while i < nd:
+        if dwA.data[i] != dwG.data[i]:
+            badA = badA + 1
+        i = i + 1
+
+    # (b) native vs duong cu (gflat da co gia tri khac 0)
+    i = 0
+    while i < nd:
+        ga.data[o_proj + i] = ga.data[o_proj + i] + dwG.data[i]
+        i = i + 1
+    ctd = ctxT.data
+    god = gout.data
+    gdd = gb.data
+    rc = linear_dw_fused(ctd, god, gdd, o_proj, n, h, h)
+    badB = 0
+    if rc != 0:
+        print("AM5 " + tag + " n=" + str(n) + " h=" + str(h) + " rc=" + str(rc) + " -> NATIVE TU CHOI (fallback)")
+    else:
+        first = -1
+        i = 0
+        while i < o_proj + nd + 37:
+            if ga.data[i] != gb.data[i]:
+                badB = badB + 1
+                if first < 0:
+                    first = i
+            i = i + 1
+        print("AM5 " + tag + " n=" + str(n) + " h=" + str(h) + " rc=" + str(rc) + " smm_fwd_at_bad=" + str(badA) + " native_bad=" + str(badB) + " first=" + str(first))
+    return badA + badB
+
+
+def _seed_val(i: 'i64', s: 'i64') -> 'f32':
+    st = (i * 1103515245 + s) % 2147483648
+    v = float((st / 256) % 65536) / 65536.0
+    return (v * 2.0 - 1.0) / 1.0
+
+
+def main() -> 'i32':
+    print("AM5 — bit-check linear_dw_fused (YEU CAU #10 Ask A)")
+    bad = 0
+    # shape that trong mlp_bwd / attention_bwd / linear_bwd (seq8)
+    bad = bad + _check(8, 3072, 768, 0, "dw2-mlp")
+    bad = bad + _check(8, 768, 3072, 1000, "dw1-linear")
+    bad = bad + _check(8, 768, 2304, 77, "dwqkv-attn")
+    bad = bad + _check(8, 2304, 768, 5, "dx2-like")
+    # k > 64: nhieu p-tile (k = 128, 200) -> nhieu lan cong don
+    bad = bad + _check(128, 768, 768, 0, "k128")
+    bad = bad + _check(200, 96, 64, 3, "k200")
+    # shape le: out_d % 16 != 0 -> native phai tra rc != 0 (fallback)
+    bad = bad + _check(8, 100, 40, 0, "le-out_d40")
+    print("AM5 TOTAL bit_bad=" + str(bad) + " (0 = BIT-EXACT)")
+    print("")
+    print("AM5 — Ask C.1: dw_proj (smm_transpose + smm_fwd) vs linear_dw_fused")
+    badp = 0
+    badp = badp + _check_proj(8, 768, 0, "dwproj-seq8")
+    badp = badp + _check_proj(256, 768, 0, "dwproj-seq256")
+    badp = badp + _check_proj(1024, 768, 0, "dwproj-seq1024")
+    print("AM5 PROJ TOTAL bit_bad=" + str(badp) + " (0 = BIT-EXACT)")
+    print("")
+    _t = _time(8, 3072, 768)
+    _t = _time(8, 768, 2304)
+    _t = _time(8, 768, 3072)
+    return 0

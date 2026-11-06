@@ -85,7 +85,23 @@ bang stash), trainer 15/15, loss seq8/seq1024 EXACT, seq256 lech 4e-6 (ULP nativ
 3. **opt.step 1.8x** — 1.19 s khong scale (r1 copy 498 MB + adamw + r3 copy-back).
 4. GEMM kernel: **hoan** (da dat 46% dinh 1 luong, 4 biên the micro-kernel khong cai nao hon).
 
+## 2d. Trang thai 2026-11-05 (sau khi review PLAN/HANDOFF)
+
+- Da revert 2 dong sai cu cua ConstantFoldingPass (`_nd_f32(list)` dung ban goc) -> gate .NET 10 khong con invalid program tren duong nay.
+- Da tach nhom GEMM k<64, GEMMs da qua native path (theo commit ff0f392).
+- Them toi uu `gpt2_block_bwd`: `dr = gout + drl2` mutate in-place, bo `t_zeros`/copy loop; `dx = drl1 + gout` mutate `drl1`, bo them 1 alloc + 1 loop. Loss EXACT seq8 (10.572291 -> 7.0119185) va seq1024 (10.760399 -> 13.442915).
+- Do lai: seq8 full-step 2937 (177?); seq1024 fwd+bwd 13813ms (may dao dong +-7%).
+
+### Lever con lai (dung PLAN 2c)
+1. BWD non-GEMM 8.2s: mlp_bwd 50.5%, attention_bwd 36.6%, LN bwd 3.0% -> can native/better .tkv loops.
+2. Thread scale 2.3x vs 3.7x (torch) -> parallel op-level bwd.
+3. opt.step 1.8x (r1 copy 498MB + adamw + r3) -> chua co duong tot hon theo A/B.
+4. GEMM kernel: HOAN.
+
+Xem `docs/COMPILER_TEAM_REQUEST12.md` (2026-11-05) cho ask chi tiet ve native non-GEMM + opt.step.
+
 ## 3. Win condition
+}
 - seq8 < 1042.7 ms
 - seq256 < 1572.7 ms
 - seq1024 < 4148.4 ms

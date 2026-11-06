@@ -1,0 +1,27 @@
+# PROBE: vong P6 co n < Count (list DAI hon bien dem) co bi nem sai khong?
+# Muc dich: xac minh huong cua lenh `ble` trong _p6_preheader_list
+# (neu nguoc thi preheader nem AOOE vo logic khi n < len(list)).
+def main() -> 'i32':
+    r: "list[f32]" = []
+    a: "list[f32]" = []
+    b: "list[f32]" = []
+    i = 0
+    while i < 100:
+        r.append((0.0) / 1.0)
+        a.append((0.0) / 1.0)
+        b.append((0.0) / 1.0)
+        i = i + 1
+    n = 4
+    i = 0
+    while i < n:
+        r[i] = a[i] + b[i]
+        i = i + 1
+    bad = 0
+    j = 0
+    while j < 4:
+        if float(r[j]) != 0.0:
+            bad = bad + 1
+        j = j + 1
+    print("_p6_nlt n=4 len=100 bad=" + str(bad) + " r3=" + str(float(r[3])))
+    print("_p6_nlt done fails=" + str(bad))
+    return 0

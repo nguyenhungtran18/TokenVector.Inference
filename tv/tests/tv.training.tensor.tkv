@@ -67,6 +67,28 @@ def t_zeros(shape: 'list[i64]') -> "Tensor":
     # List[Double] -> ArgumentException; cung luc giu NGUYEN layout f32@4i ma toan
     # code managed van doc ghi (punned get/set Item token float32) — do nen gate
     # 135/135 + loss exact se xac nhan an toan.
+    # P9 (2026-10-31, probe _tz2): n > 16384 -> xay dung bang `seed * k`
+    # (List<T>.AddRange -> Array.Copy, memcpy) thay vong append tung phan tu:
+    # 2.36M ptu 13.0 -> 6.5 ms/lan = ~19ms/lan block_bwd (bucket 12x <=1680).
+    # Count van DUNG n (k*16384 + append du) nen len(data)/index nguyen ven;
+    # `_items` chi DAI hon (capacity) — native van castclass float[] dung.
+    if n > 16384:
+        seed: "list[f32]" = []
+        si = 0
+        while si < 16384:
+            seed.append(0.0)
+            si = si + 1
+        k = 0
+        m = 0
+        while m + 16384 <= n:
+            m = m + 16384
+            k = k + 1
+        big = seed * k
+        bj = m
+        while bj < n:
+            big.append(0.0)
+            bj = bj + 1
+        return Tensor(big, shape, 0)
     data: "list[f32]" = []
     for i in range(n):
         data.append(0.0)

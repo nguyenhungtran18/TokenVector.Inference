@@ -1,0 +1,292 @@
+# PROBE AM7 — BIT-CHECK 4 native kernel YEU CAU #12 Ask A
+#
+#   (1) layernorm_bwd_fused  vs gpt2_layernorm_bwd duong INTERPRETED
+#       (goi voi o_dg=-1 -> khong trigger native, doc/ghi dg/db tensor)
+#   (2) bias_grad            vs vong i-outer/o-inner GOC (copy vao day)
+#   (3) softmax_causal_bwd   vs vong t/u GOC (copy vao day), ghi in-place
+#   (4) gelu_erf_bwd         vs vong gelu GOC (op_gelu_erf_bwd da wire native
+#       -> khong dung lam ref duoc, copy vong cu vao day)
+#
+# Yeu cau: bit_bad = 0 moi ca; rc != 0 -> native tu choi (caller fallback).
+# Chay:
+#   D:\TokenVector\Release\dist\tkvc-tv.exe tv/tests/_am7.tkv out/am7.exe main
+#   copy out/am7.exe -> out/am7_n10.dll + runtimeconfig
+#   dotnet out/am7_n10.dll
+import tv.training.gpt2_ref
+import tv.training.ops
+
+
+def _seed(xs: 'list[f32]', n: 'i64', s: 'i64') -> 'i64':
+    st = s
+    i = 0
+    while i < n:
+        st = (st * 1103515245 + 12345) % 2147483648
+        v = float((st / 256) % 65536) / 65536.0
+        xs[i] = v * 2.0 - 1.0
+        i = i + 1
+    return st
+
+
+# ---------- (1) LAYERNORM ----------
+def _ln(n: 'i64', h: 'i64', tag: 'str') -> 'i64':
+    x = t_zeros([n, h])
+    gy = t_zeros([n, h])
+    g = t_zeros([h])
+    b = t_zeros([h])
+    _s = _seed(x.data, n * h, 4242 + n)
+    _s = _seed(gy.data, n * h, 777 + h)
+    _s = _seed(g.data, h, 99 + n + h)
+
+    # ref: INTERPRETED (o_dg/o_db mac dinh -1 -> l12a = -1, khong goi native)
+    rf = gpt2_layernorm_bwd(x, g, b, gy)
+    rdx = rf[0]
+    rdg = rf[1]
+    rdb = rf[2]
+
+    # native: gflat = [dg @0 | db @h], pre-zero giong production caller
+    gflat = t_zeros([h + h])
+    dxn = t_zeros([n, h])
+    dxl = dxn.data
+    gfl = gflat.data
+    xl = x.data
+    gyl = gy.data
+    gl = g.data
+    rc = layernorm_bwd_fused(xl, gyl, gl, dxl, gfl, n, h, 0, h)
+    if rc != 0:
+        print("AM7 ln " + tag + " rc=" + str(rc) + " -> NATIVE TU CHOI")
+        return 0
+    bad = 0
+    first = -1
+    i = 0
+    while i < n * h:
+        if rdx.data[i] != dxn.data[i]:
+            bad = bad + 1
+            if first < 0:
+                first = i
+        i = i + 1
+    i = 0
+    while i < h:
+        if rdg.data[i] != gflat.data[i]:
+            bad = bad + 1
+            if first < 0:
+                first = 1000000 + i
+        if rdb.data[i] != gflat.data[h + i]:
+            bad = bad + 1
+            if first < 0:
+                first = 2000000 + i
+        i = i + 1
+    print("AM7 ln " + tag + " n=" + str(n) + " h=" + str(h) + " rc=" + str(rc) + " bit_bad=" + str(bad) + " first=" + str(first))
+    return bad
+
+
+# ---------- (2) BIAS GRAD ----------
+def _bias(n: 'i64', cols: 'i64', off: 'i64', prefill: 'i32', tag: 'str') -> 'i64':
+    gy = t_zeros([n, cols])
+    _s = _seed(gy.data, n * cols, 31337 + cols)
+
+    # ref: vong goc i-outer/o-inner tren gflat[off + o]
+    g1 = t_zeros([off + cols])
+    if prefill == 1:
+        _s = _seed(g1.data, off + cols, 555 + n)
+    i = 0
+    while i < n:
+        o = 0
+        while o < cols:
+            g1.data[off + o] = g1.data[off + o] + gy.data[i * cols + o]
+            o = o + 1
+        i = i + 1
+
+    g2 = t_zeros([off + cols])
+    if prefill == 1:
+        _s = _seed(g2.data, off + cols, 555 + n)
+    gyl = gy.data
+    g2l = g2.data
+    rc = bias_grad(gyl, g2l, off, n, cols)
+    if rc != 0:
+        print("AM7 bias " + tag + " rc=" + str(rc) + " -> NATIVE TU CHOI")
+        return 0
+    bad = 0
+    first = -1
+    o = 0
+    while o < cols:
+        if g1.data[off + o] != g2.data[off + o]:
+            bad = bad + 1
+            if first < 0:
+                first = o
+        o = o + 1
+    print("AM7 bias " + tag + " n=" + str(n) + " cols=" + str(cols) + " off=" + str(off) + " pre=" + str(prefill) + " rc=" + str(rc) + " bit_bad=" + str(bad) + " first=" + str(first))
+    return bad
+
+
+# ---------- (3) SOFTMAX CAUSAL BWD ----------
+def _sm(n: 'i64', hd: 'i64', tag: 'str') -> 'i64':
+    dctx = t_zeros([n, hd])
+    ctx = t_zeros([n, hd])
+    P = t_zeros([n, n])
+    dp = t_zeros([n, n])
+    _s = _seed(dctx.data, n * hd, 11 + n)
+    _s = _seed(ctx.data, n * hd, 22 + hd)
+    _s = _seed(P.data, n * n, 33 + n + hd)
+    _s = _seed(dp.data, n * n, 44 + n * hd)
+
+    # ref: vong goc (copy dp -> gDp_ref, tinh gDs)
+    gDp = t_zeros([n, n])
+    _i = 0
+    while _i < n * n:
+        gDp.data[_i] = dp.data[_i]
+        _i = _i + 1
+    gDs = t_zeros([n, n])
+    t2 = 0
+    while t2 < n:
+        b0 = t2 * n
+        d0 = t2 * hd
+        dotv = 0.0
+        d = 0
+        while d < hd:
+            dotv = dotv + dctx.data[d0 + d] * ctx.data[d0 + d]
+            d = d + 1
+        u = 0
+        while u <= t2:
+            gDs.data[b0 + u] = P.data[b0 + u] * (gDp.data[b0 + u] - dotv)
+            u = u + 1
+        while u < n:
+            gDs.data[b0 + u] = 0.0
+            u = u + 1
+        t2 = t2 + 1
+
+    # native: copy dp -> got, ghi in-place
+    got = t_zeros([n, n])
+    _i = 0
+    while _i < n * n:
+        got.data[_i] = dp.data[_i]
+        _i = _i + 1
+    gl = got.data
+    pl = P.data
+    dl = dctx.data
+    cl = ctx.data
+    rc = softmax_causal_bwd(gl, pl, dl, cl, n, hd)
+    if rc != 0:
+        print("AM7 sm " + tag + " rc=" + str(rc) + " -> NATIVE TU CHOI")
+        return 0
+    bad = 0
+    first = -1
+    _i = 0
+    while _i < n * n:
+        if gDs.data[_i] != got.data[_i]:
+            bad = bad + 1
+            if first < 0:
+                first = _i
+        _i = _i + 1
+    print("AM7 sm " + tag + " n=" + str(n) + " hd=" + str(hd) + " rc=" + str(rc) + " bit_bad=" + str(bad) + " first=" + str(first))
+    return bad
+
+
+# ---------- (4) GELU ERF BWD ----------
+def _gelu(n: 'i64', lo: 'i64', hi: 'i64', tag: 'str') -> 'i64':
+    x = t_zeros([n])
+    gy = t_zeros([n])
+    _s = _seed(x.data, n, 606 + n)
+    _s = _seed(gy.data, n, 707 + n)
+
+    # ref: vong gelu cu (100% interpreted — op_gelu_erf_bwd da wire native)
+    cnt = hi - lo
+    ref = t_zeros([cnt])
+    s = 1.4142135623730951
+    k = 0
+    i = lo
+    while i < hi:
+        v = x.data[i]
+        dgelu = 0.5 * (1.0 + erf(v / s)) + v * 0.3989422804014327 * exp(-0.5 * v * v)
+        ref.data[k] = gy.data[i] * dgelu
+        k = k + 1
+        i = i + 1
+
+    got = t_zeros([cnt])
+    xl = x.data
+    gyl = gy.data
+    gl = got.data
+    rc = gelu_erf_bwd(xl, gyl, gl, lo, hi)
+    if rc != 0:
+        print("AM7 gelu " + tag + " rc=" + str(rc) + " -> NATIVE TU CHOI")
+        return 0
+    bad = 0
+    first = -1
+    k = 0
+    while k < cnt:
+        if ref.data[k] != got.data[k]:
+            bad = bad + 1
+            if first < 0:
+                first = k
+        k = k + 1
+    print("AM7 gelu " + tag + " n=" + str(n) + " lo=" + str(lo) + " hi=" + str(hi) + " rc=" + str(rc) + " bit_bad=" + str(bad) + " first=" + str(first))
+    return bad
+
+
+# ---------- (5) THOI GIAN ----------
+def _time(tag: 'str') -> 'i32':
+    n = 1024
+    h = 768
+    x = t_zeros([n, h])
+    gy = t_zeros([n, h])
+    g = t_zeros([h])
+    b = t_zeros([h])
+    _s = _seed(x.data, n * h, 4242)
+    _s = _seed(gy.data, n * h, 777)
+    _s = _seed(g.data, h, 99)
+    gflat = t_zeros([h + h])
+    bestR = 1000000.0
+    bestN = 1000000.0
+    it = 0
+    while it < 3:
+        t0 = now_ms()
+        rf = gpt2_layernorm_bwd(x, g, b, gy)
+        t1 = now_ms()
+        dxn = t_zeros([n, h])
+        gfl = gflat.data
+        xl = x.data
+        gyl = gy.data
+        gl = g.data
+        dxl = dxn.data
+        rc = layernorm_bwd_fused(xl, gyl, gl, dxl, gfl, n, h, 0, h)
+        t2 = now_ms()
+        if t1 - t0 < bestR:
+            bestR = t1 - t0
+        if t2 - t1 < bestN:
+            bestN = t2 - t1
+        it = it + 1
+    print("AM7 time ln n=1024 h=768 interp=" + str(bestR) + " ms native=" + str(bestN) + " ms x=" + str(bestR / bestN) + " rc=" + str(rc))
+    return 0
+
+
+def main() -> 'i32':
+    print("AM7 — bit-check 4 native kernel YEU CAU #12 Ask A")
+    bad = 0
+    # (1) LN: shape production (124M h=768) + gate nho + so le
+    bad = bad + _ln(8, 768, "n8h768")
+    bad = bad + _ln(256, 64, "gate256")
+    bad = bad + _ln(1024, 768, "seq1024")
+    bad = bad + _ln(3, 5, "le")
+    bad = bad + _ln(1, 1, "min")
+    # (2) bias: 4 linear production + cols le/tai goc AVX2 + prefill + off
+    bad = bad + _bias(8, 768, 0, 0, "db1")
+    bad = bad + _bias(8, 3072, 0, 0, "db2")
+    bad = bad + _bias(8, 2304, 100, 0, "off-qkv")
+    bad = bad + _bias(1024, 768, 0, 0, "seq1024")
+    bad = bad + _bias(8, 5, 0, 0, "cols5-tail")
+    bad = bad + _bias(8, 8, 3, 1, "cols8-off3-pre")
+    bad = bad + _bias(7, 767, 17, 1, "le-pre-off")
+    bad = bad + _bias(0, 768, 0, 0, "n0")
+    # (3) softmax: worker n>=128 (hd=64) + n<128 + so le
+    bad = bad + _sm(8, 64, "n8")
+    bad = bad + _sm(127, 64, "n127")
+    bad = bad + _sm(1024, 64, "seq1024")
+    bad = bad + _sm(13, 5, "le")
+    # (4) gelu: full + doan le (worker seg) + n nho (duong sequential)
+    bad = bad + _gelu(1000, 0, 1000, "full1000")
+    bad = bad + _gelu(1000, 17, 983, "seg")
+    bad = bad + _gelu(7, 0, 7, "n7")
+    bad = bad + _gelu(3145728, 1048576, 2097152, "bigseg")
+    print("AM7 TOTAL bit_bad=" + str(bad) + " (0 = BIT-EXACT)")
+    print("")
+    _t = _time("ln")
+    return 0

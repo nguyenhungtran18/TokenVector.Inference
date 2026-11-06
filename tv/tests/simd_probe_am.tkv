@@ -2,6 +2,14 @@
 # Canh coi: attention_bwd (dctx + head loops + dw_proj), mlp_bwd (linear fwd +
 # gelu + 2 linear_bwd simd), layernorm_bwd x2, va block_bwd toan bo doi chieu.
 # Chay: tkvc tv/tests/simd_probe_am.tkv ra.exe main (tu goc repo)
+#
+# 2026-10-30 — BATCHING cho `BLOCK_BWD` (chi do, khong doi so hoc):
+#   `now_ms()` co do phan giai ~15.6 ms. Mot lan goi `gpt2_block_bwd` tai
+#   seq8 chi ~140 ms = 9 quantum -> MOI lan do lech toi da ~11%, khong phan
+#   biet duoc nguong 25% cua acceptance #8 (2244 -> <=1680 ms = 140 ms/call).
+#   Nen thoi 8 lan goi roi chia 8 (cung ky thuat da dung cho `_p6cf` runs=20
+#   va `_p6ms` runs=6000). `b_blk` van la MS/GOI GIONG TRUOC - chi giam
+#   nhieu. Cac vong con lai giu nguyen (so cu da do bang chinh chung no).
 import tv.training.gpt2_ref124
 import tv.training.trainer
 import tv.training.simd_matmul
@@ -67,10 +75,37 @@ def main() -> 'i32':
         gy.data[i] = 0.1
     a = gpt2_layernorm(xi, ps[base + 0], ps[base + 1])
 
+    # ---- Bien the BLOCK_BWD_FLAT (2026-11-01, YEU CAU #10) ----
+    # Ban than probe goi block_bwd KHONG truyen gflat -> goff = -1 -> path
+    # dw = smm_fwd_at + copy (khong goi duoc native `linear_dw_fused`, vi khi
+    # goff < 0 dw phai TRA VE Tensor). Train that luon truyen gflat (goff >= 0)
+    # -> do rieng bien the nay de thay bucket that cua production.
+    numel = []
+    numel.append(h)
+    numel.append(h)
+    numel.append(3 * h * h)
+    numel.append(3 * h)
+    numel.append(h * h)
+    numel.append(h)
+    numel.append(h)
+    numel.append(h)
+    numel.append(4 * h * h)
+    numel.append(4 * h)
+    numel.append(4 * h * h)
+    numel.append(h)
+    offs12 = []
+    accf = 0
+    for j in range(12):
+        offs12.append(accf)
+        accf = accf + numel[j]
+    gflatb = t_zeros([accf])
+    print("AM gflat len       = " + str(len(gflatb.data)) + " (duong production, co goff)")
+
     b_ln = 1.0e9
     b_att = 1.0e9
     b_mlp = 1.0e9
     b_blk = 1.0e9
+    b_bfg = 1.0e9
     k = 0
     while k < 3:
         t0 = now_ms()
@@ -83,21 +118,41 @@ def main() -> 'i32':
         rm = gpt2_mlp_bwd(a, ps[base + 8], ps[base + 9],
                           ps[base + 10], ps[base + 11], n, gy, 1)
         t3 = now_ms()
-        blk = gpt2_block_bwd(xi, ps[base + 0], ps[base + 1], ps[base + 2],
-                             ps[base + 3], ps[base + 4], ps[base + 5],
-                             ps[base + 6], ps[base + 7], ps[base + 8],
-                             ps[base + 9], ps[base + 10], ps[base + 11],
-                             gy, 1)
+        # BATCH: 8 lan goi moi do (xem ghi chu dau file) - `nb` = so lan goi.
+        nb = 8
+        qi = 0
+        while qi < nb:
+            blk = gpt2_block_bwd(xi, ps[base + 0], ps[base + 1], ps[base + 2],
+                                 ps[base + 3], ps[base + 4], ps[base + 5],
+                                 ps[base + 6], ps[base + 7], ps[base + 8],
+                                 ps[base + 9], ps[base + 10], ps[base + 11],
+                                 gy, 1)
+            qi = qi + 1
         t4 = now_ms()
         b_ln = _mn(b_ln, t1 - t0)
         b_att = _mn(b_att, t2 - t1)
         b_mlp = _mn(b_mlp, t3 - t2)
-        b_blk = _mn(b_blk, t4 - t3)
+        b_blk = _mn(b_blk, (t4 - t3) / nb)
+        # bien the CO gflat -> goff >= 0 -> linear_dw_fused (native true-k) chay
+        t4b = now_ms()
+        qi = 0
+        while qi < nb:
+            blkg = gpt2_block_bwd(xi, ps[base + 0], ps[base + 1], ps[base + 2],
+                                  ps[base + 3], ps[base + 4], ps[base + 5],
+                                  ps[base + 6], ps[base + 7], ps[base + 8],
+                                  ps[base + 9], ps[base + 10], ps[base + 11],
+                                  gy, 1, gflatb.data, offs12)
+            qi = qi + 1
+        t5 = now_ms()
+        b_bfg = _mn(b_bfg, (t5 - t4b) / nb)
         k = k + 1
 
     print("AM LN_BWD_x2      = " + str(b_ln) + " ms")
     print("AM ATTENTION_BWD  = " + str(b_att) + " ms")
     print("AM MLP_BWD        = " + str(b_mlp) + " ms")
     print("AM SUM_cac_vung   = " + str(b_ln + b_att + b_mlp) + " ms")
-    print("AM BLOCK_BWD      = " + str(b_blk) + " ms (doi chieu)")
+    print("AM BLOCK_BWD      = " + str(b_blk) + " ms (KHONG gflat: dw tra Tensor, goff=-1)")
+    print("AM BLOCK_BWD_FLAT = " + str(b_bfg) + " ms (CO gflat: production, goff>=0)")
+    print("AM BUCKET 12 x block_bwd (flat) = " + str(b_bfg * 12.0) + " ms")
+    print("AM BUCKET 12 x block_bwd (noff) = " + str(b_blk * 12.0) + " ms (baseline 2244, muc tieu <=1680)")
     return 0

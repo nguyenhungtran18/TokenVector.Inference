@@ -1,0 +1,68 @@
+# PROBE NT — ground truth so hoc cho YEU CAU #12 (2026-11-05)
+#   NT1: tich luy `s = 0.0; s = s + xs[i]` (f64 literal + f32 doc) la f64
+#        mo rong hay bi ep f32? -> chot cach native LayernormBwdFused trung bit.
+#   NT2: exp() cua native (double) co bit-giong (float)Math.Exp((double)x) khong?
+#        -> chot gelu_erf_bwd co the di native ma van bit-exact.
+# Chay: D:\TokenVector\Release\dist\tkvc-tv.exe tv/tests/_nt.tkv out/nt.exe main
+#       cp out/nt.exe out/nt_n10.dll ; cp out/_am.runtimeconfig.json out/nt_n10.runtimeconfig.json
+#       dotnet out/nt_n10.dll > out/nt_tkv.txt
+#       (native: build tools/simd_native/test_nt.c -> out/nt_native.txt; so 2 file)
+import tv.training.tensor
+
+# --- NT1: tich luy DUNG mau production (gpt2_layernorm_bwd mu) ---
+def _acc_prod(xs: 'list[f32]', n: 'i64') -> 'f64':
+    s = 0.0
+    i = 0
+    while i < n:
+        s = s + xs[i]
+        i = i + 1
+    return s
+
+# --- NT2: exp tren f32 (mau production: exp(-ax*ax) trong erf) ---
+def _exp_tkv(v: 'f32') -> 'f32':
+    e = exp(v)
+    return e
+
+# --- NT3: phep hon loai f32 - f64 ---
+def _mix(xs: 'list[f32]') -> 'f32':
+    g = xs[0]
+    m = 0.1000000001
+    r = g - m
+    return r
+
+def main() -> 'i32':
+    t = t_zeros([3])
+    i = 0
+    while i < 3:
+        t.data[i] = 0.1
+        i = i + 1
+    xs = t.data
+    s1 = _acc_prod(xs, 3)
+    print("NT1 acc_prod=" + str(s1))
+    print("NT1 mong-doi: f64-mo-rong=0.30000000447034836 / f32=0.300000011920929")
+
+    # exp: 21 gia tri deu tren -8..8 -> lay BIT PATTERN, so voi native
+    p = alloc_bytes(8)
+    tv = t_zeros([21])
+    k = 0
+    while k < 21:
+        tv.data[k] = float(k) * 0.8 - 8.0
+        k = k + 1
+    k = 0
+    while k < 21:
+        r = _exp_tkv(tv.data[k])
+        write_f32(p, 0, r)
+        b = read_i32(p, 0)
+        print("NT2 v=" + str(tv.data[k]) + " bits=" + hex(b))
+        k = k + 1
+    free_bytes(p)
+
+    # --- NT3: phep hon loai (f32 - f64) duoc JIT mo rong hay ep f32? ---
+    # g = 0.1f (f32), m = 0.1000000001 (f64, lech 1e-10 - qua nho cho f32)
+    #   MO RONG: (double)0.1f - m = 1.3901161193847656e-09
+    #   EP F32 : 0.1f - (f32)m    = 0.1f - 0.1f      = 0.0
+    t2 = t_zeros([1])
+    t2.data[0] = 0.1
+    r3 = _mix(t2.data)
+    print("NT3 mix_r=" + str(r3) + " (mo-rong=1.3901161e-09 / ep-f32=0.0)")
+    return 0

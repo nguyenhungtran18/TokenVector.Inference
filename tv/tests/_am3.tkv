@@ -1,0 +1,129 @@
+# PROBE AM3 — phan rach _p58_core_simple (smm_fwd_at, k=8) theo PHA
+# Trang thai: bucket hien ~1663-1711ms (muc tieu <=1680) sau khi t_zeros
+# cham 2x. Can biet phan nao tien cua ~25ms con lai: tile build / simd_gemm /
+# _acc_f.
+# Chay: tkvc tv/tests/_am3.tkv out/am3.exe main -> cp -> dotnet out/am3_n10.dll
+import tv.training.tensor
+import tv.training.simd_matmul
+
+def _mn(a: 'f64', b: 'f64') -> 'f64':
+    if a < b:
+        return a
+    return b
+
+# mode 0 = day du, 1 = chi _tile_b_w, 2 = chi _tile_a_at_w,
+# 3 = chi simd_gemm, 4 = chi _acc_f. Buffer duoc cap tu NGOAI (khong do alloc).
+def _run(mode: 'i32', a: "Tensor", b: "Tensor", cd: "list[f32]",
+         Ct: "list[f32]", AtB: "list[f32]", BtB: "list[f32]",
+         m: 'i64', n: 'i64', k: 'i64', ndim: 'i64', trans_b: 'i32') -> 'i64':
+    T = _imin(_tilek(k), _roundup64(_imin(m, n)))
+    i0 = 0
+    while i0 < m:
+        ib = _imin(T, m - i0)
+        p0 = 0
+        while p0 < k:
+            pw = _imin(T, k - p0)
+            if mode == 0 or mode == 2:
+                rva = _tile_a_at_w(AtB, a.data, m, i0, ib, p0, pw, T)
+            j0 = 0
+            while j0 < n:
+                jb = _imin(T, n - j0)
+                if mode == 0 or mode == 1:
+                    rvb = _tile_b_w(BtB, b.data, ndim, p0, pw, j0, jb, T, trans_b)
+                if mode == 0 or mode == 3:
+                    simd_gemm(AtB, BtB, Ct, T)
+                if mode == 0 or mode == 4:
+                    rvc = _acc_f(cd, Ct, n, i0, ib, j0, jb, T)
+                j0 = j0 + jb
+            p0 = p0 + pw
+        i0 = i0 + ib
+    tot = len(cd)
+    return tot
+
+def main() -> 'i32':
+    m = 3072
+    n = 768
+    k = 8
+    ndim = n
+    trans_b = 0
+    T = _imin(_tilek(k), _roundup64(_imin(m, n)))
+    ad: "list[f32]" = []
+    i = 0
+    while i < k * m:
+        ad.append(0.3)
+        i = i + 1
+    bd: "list[f32]" = []
+    i = 0
+    while i < k * n:
+        bd.append(0.7)
+        i = i + 1
+    a = t_new(ad, [k, m])
+    b = t_new(bd, [k, n])
+    print("AM3 m=" + str(m) + " n=" + str(n) + " k=" + str(k) + " T=" + str(T))
+
+    cd = _smm_cd(m, n, None)
+    Ct = _zeros_list(T * T)
+    AtB = _zeros_list(T * T)
+    BtB = _zeros_list(T * T)
+
+    b0 = 1.0e9
+    b1 = 1.0e9
+    b2 = 1.0e9
+    b3 = 1.0e9
+    b4 = 1.0e9
+    acc = 0
+    rep = 0
+    while rep < 3:
+        w = 0
+        t0 = now_ms()
+        while w < 4:
+            rv = _run(0, a, b, cd, Ct, AtB, BtB, m, n, k, ndim, trans_b)
+            acc = acc + rv
+            w = w + 1
+        t1 = now_ms()
+        b0 = _mn(b0, (t1 - t0) / 4.0)
+
+        w = 0
+        t0 = now_ms()
+        while w < 4:
+            rv = _run(1, a, b, cd, Ct, AtB, BtB, m, n, k, ndim, trans_b)
+            acc = acc + rv
+            w = w + 1
+        t1 = now_ms()
+        b1 = _mn(b1, (t1 - t0) / 4.0)
+
+        w = 0
+        t0 = now_ms()
+        while w < 4:
+            rv = _run(2, a, b, cd, Ct, AtB, BtB, m, n, k, ndim, trans_b)
+            acc = acc + rv
+            w = w + 1
+        t1 = now_ms()
+        b2 = _mn(b2, (t1 - t0) / 4.0)
+
+        w = 0
+        t0 = now_ms()
+        while w < 4:
+            rv = _run(3, a, b, cd, Ct, AtB, BtB, m, n, k, ndim, trans_b)
+            acc = acc + rv
+            w = w + 1
+        t1 = now_ms()
+        b3 = _mn(b3, (t1 - t0) / 4.0)
+
+        w = 0
+        t0 = now_ms()
+        while w < 4:
+            rv = _run(4, a, b, cd, Ct, AtB, BtB, m, n, k, ndim, trans_b)
+            acc = acc + rv
+            w = w + 1
+        t1 = now_ms()
+        b4 = _mn(b4, (t1 - t0) / 4.0)
+        rep = rep + 1
+
+    print("AM3 FULL        = " + str(b0) + " ms")
+    print("AM3 tile_b_w    = " + str(b1) + " ms")
+    print("AM3 tile_a_at_w = " + str(b2) + " ms")
+    print("AM3 simd_gemm   = " + str(b3) + " ms")
+    print("AM3 _acc_f      = " + str(b4) + " ms")
+    print("AM3 sum(1..4)   = " + str(b1 + b2 + b3 + b4) + " ms   acc=" + str(acc))
+    return 0

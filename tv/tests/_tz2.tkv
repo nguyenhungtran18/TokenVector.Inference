@@ -1,0 +1,60 @@
+# _tz2 — A/B: t_zeros append (goc) vs t_zeros kieu AddRange-repeat (seed * k)
+# Muc dich: chong lai 13ms/lan cua t_zeros([768,3072]) = ~40ms/block_bwd.
+# Chay: tkvc tv/tests/_tz2.tkv out/tz2.exe main -> cp -> dotnet out/tz2_n10.dll
+import tv.training.tensor
+
+def _znew(n: 'i64') -> 'list[f32]':
+    if n > 16384:
+        seed: "list[f32]" = []
+        i = 0
+        while i < 16384:
+            seed.append(0.0)
+            i = i + 1
+        k = 0
+        m = 0
+        while m + 16384 <= n:
+            m = m + 16384
+            k = k + 1
+        big = seed * k
+        j = m
+        while j < n:
+            big.append(0.0)
+            j = j + 1
+        return big
+    data: "list[f32]" = []
+    i2 = 0
+    while i2 < n:
+        data.append(0.0)
+        i2 = i2 + 1
+    return data
+
+def main() -> 'i32':
+    N = 768 * 3072
+    best1 = 1.0e9
+    best2 = 1.0e9
+    acc = 0
+    k = 0
+    while k < 5:
+        t0 = now_ms()
+        q = 0
+        while q < 12:
+            a = t_zeros([768, 3072])
+            acc = acc + len(a.data)
+            q = q + 1
+        t1 = now_ms()
+        if t1 - t0 < best1:
+            best1 = t1 - t0
+        t0 = now_ms()
+        q = 0
+        while q < 24:
+            b = _znew(N)
+            acc = acc + len(b)
+            q = q + 1
+        t1 = now_ms()
+        if t1 - t0 < best2:
+            best2 = t1 - t0
+        k = k + 1
+    print("tz2 append   = " + str(best1 / 12.0) + " ms/lan")
+    print("tz2 addrange = " + str(best2 / 24.0) + " ms/lan")
+    print("tz2 acc=" + str(acc))
+    return 0

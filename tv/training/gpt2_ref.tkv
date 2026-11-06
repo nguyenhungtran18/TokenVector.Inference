@@ -811,39 +811,53 @@ def gpt2_layernorm_bwd(x: "Tensor", g: "Tensor", b: "Tensor", gy: "Tensor",
     dx = t_zeros([n, h])
     dg = t_zeros([h])
     db = t_zeros([h])
-    for i in range(n):
-        base = i * h
-        mu = 0.0
-        for j in range(h):
-            mu = mu + x.data[base + j]
-        mu = mu / float(h)
-        v = 0.0
-        for j in range(h):
-            d = x.data[base + j] - mu
-            v = v + d * d
-        v = v / float(h)
-        rstd = 1.0 / sqrt(v + EPS)
-        s1 = 0.0
-        s2 = 0.0
-        for j in range(h):
-            xh = (x.data[base + j] - mu) * rstd
-            gg = gy.data[base + j] * g.data[j]
-            s1 = s1 + gg
-            s2 = s2 + gg * xh
-        m1 = s1 / float(h)
-        m2 = s2 / float(h)
-        for j in range(h):
-            xh = (x.data[base + j] - mu) * rstd
-            gg = gy.data[base + j] * g.data[j]
-            dx.data[base + j] = rstd * (gg - m1 - xh * m2)
-            if o_dg >= 0:
-                gflat[o_dg + j] = gflat[o_dg + j] + gy.data[base + j] * xh
-            else:
-                dg.data[j] = dg.data[j] + gy.data[base + j] * xh
-            if o_db >= 0:
-                gflat[o_db + j] = gflat[o_db + j] + gy.data[base + j]
-            else:
-                db.data[j] = db.data[j] + gy.data[base + j]
+    # YEU CAU #12 Ask A1 (2026-11-05): native `layernorm_bwd_fused` — mu/v/
+    # rstd/s1/s2 + dx + dg/db ghi thang gflat trong 1 entry (TU /fp:precise).
+    # Bit-exact voi vong interpreted (probe _am7: bit_bad=0); rc != 0 -> fallback
+    # duong cu NGUYEN VAN (nen gate/loss khong phu thuoc native).
+    l12a = -1
+    if o_dg >= 0 and o_db >= 0:
+        xl = x.data
+        gyl = gy.data
+        gl = g.data
+        dxl = dx.data
+        gfl = gflat
+        l12a = layernorm_bwd_fused(xl, gyl, gl, dxl, gfl, n, h, o_dg, o_db)
+    if l12a != 0:
+        for i in range(n):
+            base = i * h
+            mu = 0.0
+            for j in range(h):
+                mu = mu + x.data[base + j]
+            mu = mu / float(h)
+            v = 0.0
+            for j in range(h):
+                d = x.data[base + j] - mu
+                v = v + d * d
+            v = v / float(h)
+            rstd = 1.0 / sqrt(v + EPS)
+            s1 = 0.0
+            s2 = 0.0
+            for j in range(h):
+                xh = (x.data[base + j] - mu) * rstd
+                gg = gy.data[base + j] * g.data[j]
+                s1 = s1 + gg
+                s2 = s2 + gg * xh
+            m1 = s1 / float(h)
+            m2 = s2 / float(h)
+            for j in range(h):
+                xh = (x.data[base + j] - mu) * rstd
+                gyv: "f32" = gy.data[base + j]
+                gg = gyv * g.data[j]
+                dx.data[base + j] = rstd * (gg - m1 - xh * m2)
+                if o_dg >= 0:
+                    gflat[o_dg + j] = gflat[o_dg + j] + gyv * xh
+                else:
+                    dg.data[j] = dg.data[j] + gyv * xh
+                if o_db >= 0:
+                    gflat[o_db + j] = gflat[o_db + j] + gyv
+                else:
+                    db.data[j] = db.data[j] + gyv
     if o_dg >= 0:
         dg = t_zeros([0])
     if o_db >= 0:
@@ -862,27 +876,73 @@ def gpt2_linear_bwd(x: "Tensor", w: "Tensor", gy: "Tensor", n: 'i64', in_d: 'i64
     if simd == 1:
         # dx[i,k] = sum_o gy[i,o]*w[k,o] -> smm_dot(gy, w): B=w luu [in_d hang]
         # [out_d cot] dung ngay bo tri [n hang][k giam]
-        dx = smm_dot(gy, w, n, in_d, out_d)
+        # YEU CAU #10 Ask B (2026-11-01): native `linear_dx_fused` (1 entry) thay
+        # `smm_dot` — SgemmFull tinh DAY DU 256 hang nhung chi hang < m duoc cong
+        # vao dx -> 248/256 hang thua = 32x phep nhan. Probe _am6: bit_bad=0 tren
+        # shape that; k<256 / m>256 / m le 4 / k le 256 -> rc != 0 -> fallback
+        # `smm_dot` NGUYEN VAN (loss EXACT khong phu thuoc native).
+        dx = t_zeros([n, in_d])
+        l10b = -1
+        _gy10 = gy.data
+        _w10 = w.data
+        _dx10 = dx.data
+        l10b = linear_dx_fused(_gy10, _w10, _dx10, n, in_d, out_d)
+        if l10b != 0:
+            dx = smm_dot(gy, w, n, in_d, out_d)
         # P5.4 (2026-10-20): dw = x^T . gy TRUC TIEP [in_d][out_d].
         # P6 GĐ6 (2026-10-21, probe BP[1a/b] maxdiff 0.0): smm_fwd_at doc x
         # truc tiep (x luu [k=n hang][m=in_d cot] = dang A^T cho trans-A) —
         # bo luon phep smm_transpose (BO: xT2 94 + xT1 15 ms/layer MLP +
         # xT h*n trong attn): dw 234 -> 157 ms (r2 shape), 141 -> 125 (r1).
         # Thu tu tich luy p0 tang dan NGUYEN -> BIT-EXACT (P5.8 AX + BP).
-        dw = smm_fwd_at(x, gy, in_d, out_d, n)
+        # YEU CAU #10 Ask A (2026-11-01): native `linear_dw_fused` (true-k, ghi
+        # thang gflat) thay `smm_fwd_at` + vong copy dw -> gflat. Probe _am5:
+        # bit_bad=0 tren 4 shape that; k>64 / out_d le -> rc != 0 -> fallback
+        # duong cu NGUYEN VAN (nen loss EXACT khong phu thuoc native).
+        dw = t_zeros([0])
+        l10 = -1
+        if goff >= 0:
+            _x10 = x.data
+            _y10 = gy.data
+            _g10 = gflat
+            l10 = linear_dw_fused(_x10, _y10, _g10, goff, n, in_d, out_d)
+        if l10 != 0:
+            dw = smm_fwd_at(x, gy, in_d, out_d, n)
         db = t_zeros([out_d])
-        for i in range(n):
-            base = i * out_d
-            for o in range(out_d):
-                if dboff >= 0:
-                    gflat[dboff + o] = gflat[dboff + o] + gy.data[base + o]
-                else:
-                    db.data[o] = db.data[o] + gy.data[base + o]
+        # YEU CAU #12 Ask A4: native `bias_grad` — gflat[dboff + o] (hoac
+        # db.data) += sum_i gy[i,o] theo thu tu i NGUYEN (AVX2 8 lane moi
+        # lane = 1 cot) -> bit-exact. rc != 0 -> fallback vong cu NGUYEN VAN.
+        l10c = -1
+
+        if dboff >= 0:
+
+            gyl = gy.data
+
+            gfl = gflat
+
+            l10c = bias_grad(gyl, gfl, dboff, n, out_d)
+
+        else:
+
+            gyl = gy.data
+
+            gfl = db.data
+
+            l10c = bias_grad(gyl, gfl, 0, n, out_d)
+        if l10c != 0:
+            for i in range(n):
+                base = i * out_d
+                for o in range(out_d):
+                    if dboff >= 0:
+                        gflat[dboff + o] = gflat[dboff + o] + gy.data[base + o]
+                    else:
+                        db.data[o] = db.data[o] + gy.data[base + o]
         r = []
         r.append(dx)
         if goff >= 0:
-            for k in range(in_d * out_d):
-                gflat[goff + k] = gflat[goff + k] + dw.data[k]
+            if l10 != 0:
+                for k in range(in_d * out_d):
+                    gflat[goff + k] = gflat[goff + k] + dw.data[k]
             r.append(t_zeros([0]))
         else:
             r.append(dw)
@@ -896,13 +956,33 @@ def gpt2_linear_bwd(x: "Tensor", w: "Tensor", gy: "Tensor", n: 'i64', in_d: 'i64
     db = t_zeros([out_d])
     if goff >= 0 or dboff >= 0:
         # vong ghi thang (copy tu vong cu — chi doi cho dw/db)
+        # YEU CAU #12 Ask A4: bias tinh truoc bang native `bias_grad` (thu tu
+        # i nguyen moi cot -> bit-exact); rc != 0 -> tinh trong vong nhu cu.
+        l10d = -1
+
+        if dboff >= 0:
+
+            gyl = gy.data
+
+            gfl = gflat
+
+            l10d = bias_grad(gyl, gfl, dboff, n, out_d)
+
+        else:
+
+            gyl = gy.data
+
+            gfl = db.data
+
+            l10d = bias_grad(gyl, gfl, 0, n, out_d)
         for i in range(n):
             for o in range(out_d):
                 gg = gy.data[i * out_d + o]
-                if dboff >= 0:
-                    gflat[dboff + o] = gflat[dboff + o] + gg
-                else:
-                    db.data[o] = db.data[o] + gg
+                if l10d != 0:
+                    if dboff >= 0:
+                        gflat[dboff + o] = gflat[dboff + o] + gg
+                    else:
+                        db.data[o] = db.data[o] + gg
                 for k in range(in_d):
                     if goff >= 0:
                         gflat[goff + k * out_d + o] = gflat[goff + k * out_d + o] + x.data[i * in_d + k] * gg
@@ -1016,17 +1096,31 @@ def _attn_hb_one(j: "_AtnJob") -> 'i64':
         # dp[t,u] = sum_d dctx[t,d] * V[u,d]  -> smm_dot
         gDp = smm_dot(gDc, gV, n, n, hd)
         # ds[t,u] = P[t,u] * (dp[t,u] - dot[t]); u > t = 0
-        gDs = t_zeros([n, n])
-        for t2 in range(n):
-            b0 = t2 * n
-            d0 = t2 * hd
-            dotv = 0.0
-            for d in range(hd):
-                dotv = dotv + gDc.data[d0 + d] * gCtx.data[d0 + d]
-            for u in range(t2 + 1):
-                gDs.data[b0 + u] = Smat.data[b0 + u] * (gDp.data[b0 + u] - dotv)
-            for u in range(t2 + 1, n):
-                gDs.data[b0 + u] = 0.0
+        # YEU CAU #12 Ask A3 (2026-11-05): native `softmax_causal_bwd` ghi
+        # IN-PLACE vao gDp (dotv tich f64, causal mask giu nguyen) -> bo cap
+        # phat gDs n*n + vong interpreted. rc != 0 -> duong cu NGUYEN VAN.
+        dpl = gDp.data
+
+        pl = Smat.data
+
+        dcl = gDc.data
+
+        cl = gCtx.data
+
+        l12b = softmax_causal_bwd(dpl, pl, dcl, cl, n, hd)
+        gDs = gDp
+        if l12b != 0:
+            gDs = t_zeros([n, n])
+            for t2 in range(n):
+                b0 = t2 * n
+                d0 = t2 * hd
+                dotv = 0.0
+                for d in range(hd):
+                    dotv = dotv + gDc.data[d0 + d] * gCtx.data[d0 + d]
+                for u in range(t2 + 1):
+                    gDs.data[b0 + u] = Smat.data[b0 + u] * (gDp.data[b0 + u] - dotv)
+                for u in range(t2 + 1, n):
+                    gDs.data[b0 + u] = 0.0
         # dq[t,d] = inv * sum_u ds[t,u] * K[u,d]
         gDq = smm_fwd(gDs, gK, n, hd, n)
         # P5.4 (2026-10-20, do PROBE AR): BO 2 transpose n x n (1M phan
@@ -1071,8 +1165,8 @@ def _attn_hb_merge(co: "list[f32]", qo: "list[f32]", ct: "list[f32]", dq: "list[
     return hhi - hlo
 def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                        w_proj: "Tensor", b_proj: "Tensor", n: 'i64', gout: "Tensor", simd: 'i32' = 0,
-                       gflat: 'list[f32]' = None, o_qkv: 'i64' = -1, o_bqkv: 'i64' = -1,
-                       o_proj: 'i64' = -1, o_bproj: 'i64' = -1) -> 'list[Tensor]':
+                       gflat: 'list[f32]' = None, o_qkv: "i64" = -1, o_bqkv: "i64" = -1,
+                       o_proj: "i64" = -1, o_bproj: "i64" = -1) -> 'list[Tensor]':
     h = HiddenSize
     hd = HeadDim
     qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h, simd)
@@ -1101,12 +1195,18 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
         # P6 (2026-10-21): SONG SONG 12 HEAD — worker rieng, main gop (xem
         # ghi chu P6 truoc gpt2_attention_bwd). n nho (<128) giu duong cu.
         if n < 128:
+            # YEU CAU #10 Ask C.2 (2026-11-01): cache 5 scratch cua 12 head —
+            # truoc do 5 t_zeros/head = 60 cap phat/moi goi (4.39 ms bucket).
+            # Moi head GHI DAY DU truoc khi doc (gQ/gK/gV/gDc = n*hd day boi
+            # vong t2/d; gDs = n*n day boi vong t2 voi u=0..t2 + 0.0 t2+1..n-1)
+            # -> hoist ra ngoai vong khong doi 1 phep tinh nao -> BIT-EXACT.
+            gQ = t_zeros([n, hd])
+            gK = t_zeros([n, hd])
+            gV = t_zeros([n, hd])
+            gDc = t_zeros([n, hd])
+            gDs = t_zeros([n, n])
             for head in range(NHeads):
                 ho = head * hd
-                gQ = t_zeros([n, hd])
-                gK = t_zeros([n, hd])
-                gV = t_zeros([n, hd])
-                gDc = t_zeros([n, hd])
                 for t2 in range(n):
                     s0 = t2 * 3 * h + ho
                     c0 = t2 * h + ho
@@ -1147,17 +1247,30 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                 # dp[t,u] = sum_d dctx[t,d] * V[u,d]  -> smm_dot
                 gDp = smm_dot(gDc, gV, n, n, hd)
                 # ds[t,u] = P[t,u] * (dp[t,u] - dot[t]); u > t = 0
-                gDs = t_zeros([n, n])
-                for t2 in range(n):
-                    b0 = t2 * n
-                    d0 = t2 * hd
-                    dotv = 0.0
-                    for d in range(hd):
-                        dotv = dotv + gDc.data[d0 + d] * gCtx.data[d0 + d]
-                    for u in range(t2 + 1):
-                        gDs.data[b0 + u] = Smat.data[b0 + u] * (gDp.data[b0 + u] - dotv)
-                    for u in range(t2 + 1, n):
-                        gDs.data[b0 + u] = 0.0
+                # YEU CAU #12 Ask A3: native `softmax_causal_bwd` ghi IN-PLACE
+                # vao gDp (gDs = gDp) — bo vong interpreted; rc != 0 -> vong cu.
+                dpl = gDp.data
+
+                pl = Smat.data
+
+                dcl = gDc.data
+
+                cl = gCtx.data
+
+                l12c = softmax_causal_bwd(dpl, pl, dcl, cl, n, hd)
+                gDs = gDp
+                if l12c != 0:
+                    gDs = t_zeros([n, n])
+                    for t2 in range(n):
+                        b0 = t2 * n
+                        d0 = t2 * hd
+                        dotv = 0.0
+                        for d in range(hd):
+                            dotv = dotv + gDc.data[d0 + d] * gCtx.data[d0 + d]
+                        for u in range(t2 + 1):
+                            gDs.data[b0 + u] = Smat.data[b0 + u] * (gDp.data[b0 + u] - dotv)
+                        for u in range(t2 + 1, n):
+                            gDs.data[b0 + u] = 0.0
                 # dq[t,d] = inv * sum_u ds[t,u] * K[u,d]
                 gDq = smm_fwd(gDs, gK, n, hd, n)
                 # P5.4 (2026-10-20, do PROBE AR): BO 2 transpose n x n (1M phan
@@ -1245,8 +1358,16 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
             _attn_hb_merge(ctxo11, dqo11, ctxT.data, dqkv.data, n, h, hd, 11, 12)
         # P5.1: dw_proj[r,o] = sum_t ctxT[t,r]*gout[t,o] -> GEMM (ctxT^T @ gout)
         # + db_proj[o] = sum_t gout[t,o] (thay vong scalar n*h^2)
-        ctxTt = smm_transpose(ctxT, n, h)
-        dwG = smm_fwd(ctxTt, gout, h, h, n)
+        dwG = t_zeros([0])
+        l10p = -1
+        if o_proj >= 0:
+            _ct10 = ctxT.data
+            _go10 = gout.data
+            _gf10 = gflat
+            l10p = linear_dw_fused(_ct10, _go10, _gf10, o_proj, n, h, h)
+        if l10p != 0:
+            ctxTt = smm_transpose(ctxT, n, h)
+            dwG = smm_fwd(ctxTt, gout, h, h, n)
         for o in range(h):
             acc = 0.0
             for t2 in range(n):
@@ -1255,12 +1376,13 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                 gflat[o_bproj + o] = gflat[o_bproj + o] + acc
             else:
                 db_proj.data[o] = db_proj.data[o] + acc
-        for r in range(h):
-            for o in range(h):
-                if o_proj >= 0:
-                    gflat[o_proj + r * h + o] = gflat[o_proj + r * h + o] + dwG.data[r * h + o]
-                else:
-                    dw_proj.data[r * h + o] = dw_proj.data[r * h + o] + dwG.data[r * h + o]
+        if l10p != 0:
+            for r in range(h):
+                for o in range(h):
+                    if o_proj >= 0:
+                        gflat[o_proj + r * h + o] = gflat[o_proj + r * h + o] + dwG.data[r * h + o]
+                    else:
+                        dw_proj.data[r * h + o] = dw_proj.data[r * h + o] + dwG.data[r * h + o]
         rq = gpt2_linear_bwd(x, w_qkv, dqkv, n, h, 3 * h, simd, gflat, o_qkv, o_bqkv)
         # dw_proj / db_proj placeholder khi ghi thang
         if o_proj >= 0:
@@ -1380,8 +1502,8 @@ def _mlp_gelu_one(j: "_MlpGJob") -> 'i64':
 
 def gpt2_mlp_bwd(x: "Tensor", w1: "Tensor", b1: "Tensor",
                  w2: "Tensor", b2: "Tensor", n: 'i64', gout: "Tensor", simd: 'i32' = 0,
-                 gflat: 'list[f32]' = None, o_w1: 'i64' = -1, o_b1: 'i64' = -1,
-                 o_w2: 'i64' = -1, o_b2: 'i64' = -1) -> 'list[Tensor]':
+                 gflat: 'list[f32]' = None, o_w1: "i64" = -1, o_b1: "i64" = -1,
+                 o_w2: "i64" = -1, o_b2: "i64" = -1) -> 'list[Tensor]':
     h = HiddenSize
     ih = 4 * h
     inner = gpt2_linear(x, w1, b1, n, h, ih, simd)
@@ -1398,7 +1520,17 @@ def gpt2_mlp_bwd(x: "Tensor", w1: "Tensor", b1: "Tensor",
     dx2 = smm_dot(gout, w2, n, ih, h)
     outd = t_zeros([n * ih])
     hb = thread_spawn(_mlp_gelu_one, _MlpGJob(inner.data, dx2.data, outd.data, n * ih))
-    dw2 = smm_fwd_at(a, gout, ih, h, n)
+    # YEU CAU #10 Ask A: native linear_dw_fused cho dw2 (thay smm_fwd_at +
+    # vong copy dw2 -> gflat). rc != 0 -> fallback duong cu NGUYEN VAN.
+    dw2 = t_zeros([0])
+    l10m = -1
+    if o_w2 >= 0:
+        _a10 = a.data
+        _gn10 = gout.data
+        _gf10 = gflat
+        l10m = linear_dw_fused(_a10, _gn10, _gf10, o_w2, n, ih, h)
+    if l10m != 0:
+        dw2 = smm_fwd_at(a, gout, ih, h, n)
     rj = thread_join(hb)
     # db2 — copy NGUYEN VAN gpt2_linear_bwd (dboff path) — cung thu tu
     if o_b2 >= 0:
@@ -1416,8 +1548,9 @@ def gpt2_mlp_bwd(x: "Tensor", w1: "Tensor", b1: "Tensor",
         rdb = db2
     # dw2 -> gflat (goff path) — copy NGUYEN VAN
     if o_w2 >= 0:
-        for k in range(ih * h):
-            gflat[o_w2 + k] = gflat[o_w2 + k] + dw2.data[k]
+        if l10m != 0:
+            for k in range(ih * h):
+                gflat[o_w2 + k] = gflat[o_w2 + k] + dw2.data[k]
         rdw = t_zeros([0])
     else:
         rdw = dw2
@@ -1440,18 +1573,18 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
     # rong = off (duong cu, parity nguyen ven).
     if offs == None:
         offs = []
-    o_l1g = -1
-    o_l1b = -1
-    o_qkv = -1
-    o_bqkv = -1
-    o_proj = -1
-    o_bproj = -1
-    o_l2g = -1
-    o_l2b = -1
-    o_w1 = -1
-    o_b1 = -1
-    o_w2 = -1
-    o_b2 = -1
+    o_l1g: "i64" = -1
+    o_l1b: "i64" = -1
+    o_qkv: "i64" = -1
+    o_bqkv: "i64" = -1
+    o_proj: "i64" = -1
+    o_bproj: "i64" = -1
+    o_l2g: "i64" = -1
+    o_l2b: "i64" = -1
+    o_w1: "i64" = -1
+    o_b1: "i64" = -1
+    o_w2: "i64" = -1
+    o_b2: "i64" = -1
     if len(offs) >= 12:
         o_l1g = offs[0]
         o_l1b = offs[1]
@@ -1465,8 +1598,8 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
         o_b1 = offs[9]
         o_w2 = offs[10]
         o_b2 = offs[11]
-    n = _sh0(x)
-    h = _sh1(x)
+    n: "i64" = _sh0(x)
+    h: "i64" = _sh1(x)
     # P6 GĐ7 (do BR[3]: 24 goi LN fwd recompute = 359ms @1024): save_a/save_m
     # tu forward_saved -> bo recompute. Cung input + cung phep -> BIT-EXACT.
     a = save_a
@@ -1487,23 +1620,26 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
         m = gpt2_layernorm(r, ln2_g, ln2_b)
     # out = r + mlp(m)
     rmlp = gpt2_mlp_bwd(m, w1, b1, w2, b2, n, gout, simd, gflat, o_w1, o_b1, o_w2, o_b2)
-    dr = t_zeros([n, h])
-    for i in range(n * h):
-        dr.data[i] = gout.data[i]
+    # P5.9 (2026-11-05): dr = gout + drl2 - mutate gout in-place, bo t_zeros +
+    # copy loop. gout khong con duoc dung sau mlp_bwd -> an toan. dx = drl1 + gout
+    # mutate drl1, bo t_zeros + copy loop. Cung thu tu cong -> bit-exact.
     rl2 = gpt2_layernorm_bwd(r, ln2_g, ln2_b, rmlp[0], gflat, o_l2g, o_l2b)
-    # quirk: khong duoc `rl2[0].data[i]` — gan ra bien truoc
+    # quirk: khong duoc `rl2[0].data[i]` - gan ra bien truoc
     drl2 = rl2[0]
+    _gd = gout.data
+    _dl2 = drl2.data
     for i in range(n * h):
-        dr.data[i] = dr.data[i] + drl2.data[i]
+        _gd[i] = _gd[i] + _dl2[i]
     # r = x + attn_out
-    r_att = gpt2_attention_bwd(a, w_qkv, b_qkv, w_proj, b_proj, n, dr, simd,
+    r_att = gpt2_attention_bwd(a, w_qkv, b_qkv, w_proj, b_proj, n, gout, simd,
                                gflat, o_qkv, o_bqkv, o_proj, o_bproj)
     rl1 = gpt2_layernorm_bwd(x, ln1_g, ln1_b, r_att[0], gflat, o_l1g, o_l1b)
     drl1 = rl1[0]
-    dx = t_zeros([n, h])
+    _dl1 = drl1.data
     for i in range(n * h):
         # r = x + attn_out -> x nhan grad TU 2 duong: truc tiep (dr) + qua LN1
-        dx.data[i] = drl1.data[i] + dr.data[i]
+        _dl1[i] = _dl1[i] + _gd[i]
+    dx = drl1
     return [dx, rl1[1], rl1[2],
             r_att[1], r_att[2], r_att[3], r_att[4],
             rl2[1], rl2[2],
@@ -1641,34 +1777,17 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
         m6_nlg = n * VocabSize
         m6_nwe = VocabSize * h
         m6_nxe = n * h
-        m6_plg = alloc_bytes(m6_nlg * 4)
         m6_pids = alloc_bytes(n * 4)
-        m6_pwte = alloc_bytes(m6_nwe * 4)
-        m6_pxf = alloc_bytes(m6_nxe * 4)
-        m6_pdxf = alloc_bytes(m6_nxe * 4)
-        m6_pdwe = alloc_bytes(m6_nwe * 4)
-        m6_c1 = f32_copy_to_buf(m6_lgd, m6_plg, m6_nlg)
-        m6_c2 = f32_copy_to_buf(m6_wtd, m6_pwte, m6_nwe)
-        m6_c3 = f32_copy_to_buf(m6_xfd, m6_pxf, m6_nxe)
         m6_i = 0
         while m6_i < n:
             m6_w = write_i32(m6_pids, m6_i * 4, ids[m6_i])
             m6_i = m6_i + 1
-        m6_z1 = f32_zero(m6_pdxf, m6_nxe)
-        m6_z2 = f32_zero(m6_pdwe, m6_nwe)
         m6_sc: "f32" = 1.0 / float(n)
-        m6_st = lmhead_bwd_fused(m6_plg, m6_pids, m6_pwte, m6_pxf,
-                                 m6_pdxf, m6_pdwe, n, 1, h, VocabSize, m6_sc)
+        # H4b: zero-copy managed data - fused doc/ghi truc tiep .data (list[f32])
+        m6_st = lmhead_bwd_fused_list(m6_lgd, m6_pids, m6_wtd, m6_xfd, m6_dd, m6_dw, n, 1, h, VocabSize, m6_sc)
         if m6_st != 0:
             raise ValueError("lmhead_bwd_fused loi st=" + str(m6_st))
-        m6_c4 = f32_copy_from_buf(m6_pdxf, m6_dd, m6_nxe)
-        m6_c5 = f32_copy_from_buf(m6_pdwe, m6_dw, m6_nwe)
-        m6_f1 = free_bytes(m6_plg)
         m6_f2 = free_bytes(m6_pids)
-        m6_f3 = free_bytes(m6_pwte)
-        m6_f4 = free_bytes(m6_pxf)
-        m6_f5 = free_bytes(m6_pdxf)
-        m6_f6 = free_bytes(m6_pdwe)
         # dxf/dwte van la Tensor t_zeros o tren — du lieu da dien day du
     if simd == 0:
         for i in range(n):
