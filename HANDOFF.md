@@ -5385,3 +5385,37 @@ theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.87 attention_bwd - probe phan ra vung, khac voi HANDOFF §0.84
+
+Probe `tv/tests/_ab1024.tkv` (cong khai, khong chuyen private function) da
+compile duoc va cho so do thu tu:
+
+seq1024, 1 tang (`li = NLayers-1 = 11`), simd=1, no TKV_GEMM_THREADS:
+
+  qkv_fwd    (`gpt2_linear`)                       ~16 ms
+  dctx       (`smm_dot tl` n=768                )   ~15 ms
+  attention_bwd  (ham production, 1 tang)          ~250-266 ms
+  dw_proj    (`linear_dw_fused` native)            ~few ms (vote < 15 ms)
+  db_proj    (`bias_grad` native)                  ~0 ms
+  qkv_bwd    (`gpt2_linear_bwd`)                   ~47-62 ms
+  worker+merge (proxy: 36-37 ms/head native syr + merge loops) ~128-152 ms
+  NL = worker+merge                                ~142 ms (PAR12)
+  => attention_bwd ~266 ms = ~50 ms ngoai + ~216 ms GEMM/native
+
+Chay: _seq_cfg.txt -> 1024
+0
+1; tkvc-tv.exe COMPILE: tkvc-tv.exe
+`tv/tests/_ab1024.tkv out/ab2_new.exe main`; copy runtimeconfig + .exe ->
+.dll; `dotnet out/ab2_new.dll`. KHONG can TKV_GEMM_THREADS.
+
+BEST _seq_cfg.txt luc commit la `8
+0
+1`.
+
+**Trang thai hien tai:** attention_bwd la phan ~3.0-3.2 s. §0.84 khong bi
+thay doi; moi so do tu 1 tang, 12 tang toan bo luc doing context.
+
+**Chua ket luan toi uu.** KHONG wire gi tu ket qua nay. Muon attack attention
+phai dung huong: `AttentionBwdFusedAll(x, wqkv, bqkv, wp, bp, gy, gf, o_*)
+` trong native hypothesis - nhung chua du bang chung; tuan thu nguyen tac
+bit-exact + gate 3 seq + loss EXACT.
