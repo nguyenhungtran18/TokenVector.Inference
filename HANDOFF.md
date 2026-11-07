@@ -4212,6 +4212,33 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.100 MKL (mkl-devel 2026.2.0, pip) - lien ket thu tinh THAT, khong giu
+User yeu cau lam giong torch_cpu.dll (oneDNN nhung MKL tinh). Da cai pip wheel
+`mkl-devel` 2026.2.0 vao `Release/build/_mkl` (KHONG track: `Release/.gitignore` /build/),
+ng danh import lib (mkl_intel_lp64_dll.lib + mkl_intel_thread_dll.lib + mkl_core_dll.lib
++ libiomp5md.lib). KHONG co .lib tinh that su (mkl_intel_lp64.lib) qua pip - MKL tinh
+chi co o Intel oneAPI toolkit (download ~1-2 GB, chua lam).
+TKV_LINK_MKL=1 build tao `tkv_simd_native.dll` lien ket MKL: cblas_sgemm resolve AT LINK
+TIME (kieu oneDNN), `mkl_set_num_threads_local(nt)` per call thay openblas_set_num_threads;
+runtime can mkl_avx2.3.dll / mkl_mc3.3.dll / mkl_def.3.dll + mkl_core.3.dll
+/ mkl_sequential.3.dll / mkl_intel_thread.3.dll + libiomp5md.dll (da copy vao
+`Release/runtime/` va `Inference/out/` de run - 30-130 MB).
+**Ket qua: chua nhanh hon - phai giu OpenBLAS.**
+| cau hinh | mode1 seq1024 | mode0 seq1024 fwd+bwd |
+|---|---|---|
+| OpenBLAS (mac dinh) | ~9400 ms | 8906 ms |
+| MKL threaded | ~14750 ms | 14688 ms |
+| MKL sequential | ~19188 ms | 18375 ms |
+Ghi nhan seq8 tot hon (~1719 ms vs 2250 ms OpenBLAS) nhung seq256+ t te h th.
+Ly do: PyTorch nhanh la do **oneDNN fused kernels** (LayerNorm/softmax/GELU fused)
+voi MKL ben trong, KHONG phai do cblas_sgemm thuan; va OpenBLAS 0.3.34 tren Xeon
+E5-2695 v3 phan cung nay nhanh hon MKL 2026.2 o shape nay (threads = 1 ve BW-bound).
+Loss mode0 ANYWAY EXACT o ca 3 seq (MKL khop hop) - dispatch MKL an toan.
+Quyet dinh: `build.ps1` mac dinh KHONG dung MKL (TKV_MKL mac dinh = 0).
+MKL opt-in: `TKV_MKL=1 powershell build.ps1` (test hoac supply onemkl wheels).
+`TKV_MKL_SEQ=1` build sequential (phai co).
+Runtime tu dong load dung BLAS ("MKL" message in khi dung MKL, "scipy-openblas64_"
+khi OpenBLAS) - quyet dinh chon tu bien luc BUILD, khong quyet dinh dong khi chay.
 ## §0.99 GELU erf kernel - unroll 4-way (elementwise, bit-identic)
 `tkv_bwd_ops.c`: GeluErfFwd/GeluErfBwd - tach `gelu_f_one`/`gelu_b_one` + erf chi tiet
 (2 duong chia: bwd f64-div->ep f32, fwd f32-div - GIU NGUYEN);
