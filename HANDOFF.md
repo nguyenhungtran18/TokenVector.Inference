@@ -5359,3 +5359,29 @@ kernel rieng le (probe khong mo phong duoc tap hang i-tail).
 
 File tam (fmavs.c, fmavs2.c, probe_tile.py) DA GO khoi Release/tools/simd_native
 (chua commit). Hieu nang giu nguyen §0.84 (lmhead 765 ms, bwd 7375-7516 ms).
+## §0.86 P2 AdamW opt.step — da do nhieu tiep can, KHONG co gain (machine-bound)
+
+**Do thuc (cung phien):** opt (mode 2) seq1024 = **954 ms** (torch ~660 ms; gap ~294 ms).
+Ben trong: `AdamwStepF32` kernel **~320-345 ms** don luong; con lai la
+`grad_norm()` .tkv (34 worker, elementwise `.tkv` interpreted) + copy/marshal
+glue.
+
+**Thu nghiem that bai:** parallelize `AdamwStepF32` (16 lan x 14 core,
+slice boundary 8 phan tu, bit-exact per-element). Ket luan DO THUC:
+- ST memopc: ~10.9 GB/s. MT14 copy benchmark: **~10.3 GB/s** — bang ST.
+- RAM bandwidth cua Xeon E5-2695 v3 o may nay chi ~10-11 GB/s (ke ca khi da
+  thread). AdamW doc/ghi ~4 luong 496MB p/m/v/g + ghi 3x496MB p/m/v
+  ≈ **3.5 GB / 320 ms ≈ 11 GB/s — da SATTURATE memory bandwidth.**
+- Parallel AdamW chay KHONG nhanh hon (giu nguyen ~320 ms).
+
+**Quyet dinh:** revert toan bo buoc song song (source quay ve f328ac8 - git diff clean).
+runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
+`bseq` seq8 mode 0 loss **10.572291** xac nhan sau restore. KHONG commit Release.
+
+**He qua:** opt.step khong the giam hon bang luong code kernel; phan con lai
+~630 ms la `.tkv` glue interpreted (grad_norm list batch) — neu muon cat
+`.tkv` con phai rewrite grad_norm sang native IL_helper (bit-exact GROUP norm
+theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
+
+**Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
+van la chunk lon nhat de attack tiep.
