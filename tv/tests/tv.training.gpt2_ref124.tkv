@@ -140,6 +140,15 @@ def _attn_f_one(j: "_AtnFJob") -> 'i64':
     n = j.n
     inv = j.inv
     for head in range(j.hlo, j.hhi):
+        # flash attention fwd (online-softmax, fp32 causal; port thuat toan tu C++
+        # kernel ATen BSD-3, KHONG phai PyTorch binary):
+        # 1 lenh native thay block smm_dot+softmax_causal_fwd+smm_fwd.
+        # rc != 0 -> duong cu NGUYEN VAN ben duoi (fallback).
+        ql = j.qkvl
+        cel = j.ctx_out
+        rc_f = attention_fwd_fused(ql, cel, n, h, hd, head, inv)
+        if rc_f == 0:
+            continue
         ho = head * hd
         gQ = t_zeros([n, hd])
         gK = t_zeros([n, hd])

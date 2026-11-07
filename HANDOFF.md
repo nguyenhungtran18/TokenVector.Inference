@@ -4212,6 +4212,28 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.98 Flash attention FWD qua IL builtin - WIRED + verify
+Compiler (Release 1d1df0d): builtin moi `attention_fwd_fused(qkv, ctxo, n, h, hd, head, inv) -> i32`
+- simd_feature.tkv: pinvoke `FlashAttentionFwdFusedNative`, IL wrapper `AttentionFwdFusedM`,
+  `_pt_attention_fwd_wrapper`, `compile_attention_fwd_fused`, register_expr_builtin, ra = ...
+- file_io.tkv: `_BUILTIN_LENH_DOC_LAP` them `attention_fwd_fused`
+- Self-host `tools\vong.exe`: **IL_IDENTICAL** (133 files, dist/tkvc-tv.exe rebuilt).
+- Binary flash `tkv_simd_native.dll` (Release b52f28a) da export FlashAttentionFwdFused/FwdLse.
+Production .tkv wiring (ca 2 copies, production va tests module search deu bat buoc):
+`_attn_f_one` goi `attention_fwd_fused(ql, cel, n, h, hd, head, inv)`, rc==0 continue,
+ELIF fallback duong cu NGUYEN VAN (gQ/gK/gV extraction + smm_dot + softmax_causal_fwd + smm_fwd).
+Module resolution quan trong: bseq_gp compile tu `tv/tests/simd_bench_124m_seq.tkv`, nen import
+`tv.training.gpt2_ref124` resolve vao `tv/tests/tv.training.gpt2_ref124.tkv` (cung thu muc),
+KHONG phai `tv/training/...` - 2 copies deu phai dong bo (QUAN TRONG).
+Verification (may nay):
+- module intercept xac nhan: 144 call sites rc=0 (12 layer x 12 head) sau khi sua module copies.
+- loss mode0: seq8/256/1024 EXACT `10.572291 / 10.756927 / 10.760399`
+- **seq1024 fwd+bwd: 9219 -> 8656 ms** (fwd 3031 -> ~2515 ms)
+- mode1 full-step: **9312 ms** (truoc: ~10594 ON / ~11000+ trend); loss `13.442913` (drift ~1e-6)
+- gate re-run sau compiler rebuild: **9/10** (gpt2_full_tests PASS 33/33 tren compiler moi,
+  TOTAL fails=1 = chi gap_tests exit=82 pre-existing). Trainer **15/15** (eval buoc them nhanh
+  hon: 47.0 ms vs 62.0 truoc gate moi/tuong ung).
+PyTorch ref (bench_torch d, cung may): ~4081-4191 ms. Gap hien tai ~2.28x.
 ## §0.97 Flash attention (port tu C++ algorithm) - WIRED, verify 9/10 gate
 **Port note (bat buoc):** `tkv_flash_attn.c` la **port lai thuat toan** online-softmax
 flash attention (khoi tao -inf, block KV 64, dst accumulate, logsumexp) duoc viet lai
