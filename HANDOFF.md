@@ -5385,6 +5385,19 @@ theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.88 attention_bwd: SgemmPacked T=256 -> T=64 - single=33-37ms, PAR12 ~110-115ms vs ~142-161 truoc
+
+**Do thay doi:** `attn_xgemm` doi `256 -> 64` tai 4 cho (SgemmFull/packed_create A/B/SgemmPacked)
+trong `tkv_simd_native.c` (commit Release `a2299a2`).
+
+**Muc tieu:** k = hd = 64 -> Smat/gCtx/gDp/gDq GEMM uu T=64, khong padding zeros 75%;
+luong cong k tang dan, KC=64 giu -> bit-giong.
+
+**Verify:** loss EXACT o ca 3 seq: seq8 `10.572291`, seq256 `10.756927`, seq1024 `10.760399`;
+mode 1 `13.442915`; gate 9/10 (chi gap_tests pre-existing); trainer 15/15; self-host `IL_IDENTICAL`.
+mode 2 seq1024 mode=2 (best-of-4): bwd ~7500-7550 ms, opt ~906-922 (flat do may ram-bound).
+bench PAR12 best ~111-115 ms/layer (baseline ~142 ms) -> ~27 ms/layer * 12 tang.
+
 ## §0.87 attention_bwd - probe phan ra vung, khac voi HANDOFF §0.84
 
 Probe `tv/tests/_ab1024.tkv` (cong khai, khong chuyen private function) da
