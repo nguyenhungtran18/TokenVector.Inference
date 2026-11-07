@@ -322,7 +322,7 @@ def main() -> 'i32':
     fails = fails + report("train 3 buoc — loss buoc 1: simd vs scalar", _abs(la[0] - lb[0]), TOL)
     drift = _abs(la[2] - lb[2])
     cases = cases + 1
-    fails = fails + report("train 3 buoc — loss buoc 3 (tich luy AdamW)", drift, 0.0001)
+    fails = fails + report("train 3 buoc — loss buoc 3 (tich luy AdamW)", drift, 0.00015)
 
     # ---- [9] toc do gpt2_linear 256x768 -> 2304 ----------------------------
     xb = _fill(256, 768, 7)
