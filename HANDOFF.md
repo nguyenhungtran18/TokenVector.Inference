@@ -4212,6 +4212,17 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.94 BLAS loader fallback to scipy-prefixed exports - 547->531 ms lmhead fused
+Root cause: `GetProcAddress(g_blas_mod, "cblas_sgemm")` returned NULL vì scipy-openblas
+EXPORTS ALL SYMBOLS WITH ``scipy_`` PREFIX. Our loader printed «BLAS loaded» vì
+`p_cblas_sgemm` was never checked for NULL before the print — so BLAS dispatch thực
+chất KHÔNG BAOGIO xảy ra trong §0.92-0.93; toàn bộ runtime đi qua kernel native AVX2.
+Sau khi fallback `cblas_sgemm → scipy_cblas_sgemm` +
+`openblas_set_num_threads → scipy_openblas_set_num_threads`:
+- `lmhead_bwd_fused` 531 ms (trước: 750 nhờ BLAS giả vờ; thật: 782).
+- `isBooleanGone: gate vẫn 9/10 (chỉ gap_tests pre-existing); trainer 15/15.`
+Verify: mode0 bwd 6672 ms (vs 7500 trước default) — giảm ~830 ms; mode1 ~10800 ms;
+gate 9/10, trainer 15/15.
 ## §0.93 BLAS always-default + flash attempted discussion
 User tiến tiếp, mệt RT điều chỉnh (bit-exact contract relaxed). Đã set
 BLAS dispatch làm default (TKV_GEMM_BLAS=0 để tắt). Loss EXACT vẫn ổn
