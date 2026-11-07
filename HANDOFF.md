@@ -5283,3 +5283,44 @@ Comment luôn ghi kết luận đo thực tế, không ghi ước tính chưa ki
 2. `op_embed_bwd(wte)` 141 ms + `f32_list_add` 47 ms + `gwpe→gflat` 62 ms (~250 ms/bước) —
    nếu muốn cắt tiếp, dùng kernel scatter-add/`add at offset`.
 3. `gelu` "one native call": **266 ms 1 luồng** — không chạy 1 luồng; chỉ parallel/giữ nguyên.
+
+## §0.84 lm-head bwd: bỏ transpose bằng GEMM A[k][m] — lmhead 813→765 ms, bit-exact
+
+**Mục tiêu**: chunk ≥500 ms lớn nhất còn lại là `lmhead_bwd_fused` (**813 ms** @seq1024,
+đo ngoài-block §0.83). Tách 5 pha bằng trace QPC tạm trong DLL (đã gỡ trước commit):
+
+| pha | ms |
+|---|---|
+| softmax-grad (mode 3) | 58–70 |
+| `dxf = dl @ wte` | 311–333 |
+| transpose `dl -> dlT` (mode 4) | 120 |
+| `dw = dlT @ xf` | 292–310 |
+| `dwte += tmp` (mode 5) | 53 |
+
+**Thay đổi GIỮ LẠI (bit-exact)**: thêm `micro_ta_f32` + `gemm_rect_ta_f32` (pool
+mode 7) đọc A kiểu `[k][m]`; `run_rect_shaped_m(mode,...)` + `run_rect_ta_shaped`;
+pha 3+4 gọi `run_rect_ta_shaped(dl, V, xf, E, tmp, E, V, E, T)` → **bỏ hẳn bước
+transpose 51,5M phần tử và buffer `dlT` 205 MB**. Với p cố định, 4 giá trị v = i..i+3
+nằm liền nhau nên 4 broadcast thành 4 lần đọc sát nhau; thứ tự cộng k và FMA y
+nguyên `micro_f32`.
+
+Đo lại (DLL chốt, cùng phiên): lm-head **813 → 765 ms**; ngoài-block
+(head + embed 125 + add 31 + vòng gwpe 63) **1063 → 984 ms**; bwd seq1024
+**7375–7516** (best 7375, nhiễu ±150 ms).
+
+**Đã thử và LOẠI vì LỆCH BIT**: đổi tiling 2 GEMM này sang cột bội 16
+(bench_tile 2026-11-07: dxf 299→190 ms, dw 286→160 ms với cols=4/NC=64 thay vì
+cols=14/NC=128). Nhanh hơn ~190 ms nhưng **mode-1 loss 13.442915 → 13.442913**:
+strip cũ rộng 55 nên 7/55 cột biên rơi nhánh scalar `s += a*b` (mul+add), đổi sang
+strip 192 thì các cột đó thành FMA → đổi bit. A/B xác nhận: HEAD **13.442915**,
+tiling mới **13.442913**, TA + tiling cũ **13.442915**.
+
+Hệ quả: A traffic của 2 GEMM = m·k·(n/nc_block), với nc_block = 55 bắt buộc để giữ
+bit → 14 lượt đọc A (≈2,9 GB), không giảm bằng cách đổi strip. Hướng còn lại (chưa
+làm): **k-outer + C nằm L3** (mỗi thread giữ C 37×768 trong L2, pack B panel 64×768
+mỗi pc) → A/B đọc đúng 1 lần (≈360 MB) mà vẫn giữ grid 55 → bit-exact.
+
+**Kiểm chứng chốt**: loss EXACT seq8 `10.572291`, seq256 `10.756927`, seq1024
+`10.760399`; mode 1 **`13.442915`**; gate **9/10** (chỉ `gap_tests` FAIL exit=82,
+pre-existing); trainer **15/15**; self-host `IL_IDENTICAL` (chạy `tools/vong.exe`
+từ `D:\TokenVector\Release`).
