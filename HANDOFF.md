@@ -5324,3 +5324,38 @@ mỗi pc) → A/B đọc đúng 1 lần (≈360 MB) mà vẫn giữ grid 55 → 
 `10.760399`; mode 1 **`13.442915`**; gate **9/10** (chỉ `gap_tests` FAIL exit=82,
 pre-existing); trainer **15/15**; self-host `IL_IDENTICAL` (chạy `tools/vong.exe`
 từ `D:\TokenVector\Release`).
+## §0.85 Thu nghiem giu luoi so hoc / k-outer lmhead bwd - THAT BAI, da revert
+
+`tkv_simd_native.c` quay ve dung commit f328ac8 (luoi so hoc 55); loss mode-1
+seq1024 xac nhan EXACT 13.442915 sau revert. DLL runtime cung restore byte
+ve f328ac8. Khong co commit Release moi tu phien nay.
+
+**Tuyen bo cu trong §0.84 SAI**: nguyen nhan 13.442915 -> 13.442917 KHONG phai
+"7/55 cot bien roi nhanh scalar s+=a*b (mul+add) khac FMA".
+
+- Test `/O2 /arch:AVX2 /fp:fast`: fmavs.c (A stride, 4 accumulator, kc=64)
+  va fmavs2.c (dung hinh dang j-tail micro_f32: A lien mach theo p, B stride).
+  Scalar y nhu kernel bi contract thanh FMA, KHOP TUNG BIT voice FMA: 0/112
+  va 0/28 mau lech. Nhanh scalar trong j-tail KHONG phai nguon lech bit.
+- TKV_TILE_PROBE tach cols/nc: doi nc 128 -> 64 khong doi bit
+  (loss 13.442915 giu nguyen); doi cols -> 13.442917.
+- **Nguyen nhan that la chia hang (i-tail scalar), khong phai j-tail**:
+  probe TkvProbeTile so bit layout A (rows=2, strip 55) vs B (strip rong hon,
+  boi so 55): chi doi cot -> diff=0 cho ca mode 2 va mode 7; doi hang
+  rows 2 -> 7 (per_i 512 -> 147) -> 609 ptu lech (mode 2, ca cot j%55 < 48);
+  mode 7 lech 1203 ptu tai hang 25128 (hang i-tail). per_i = ceil(m/rows)
+  quyet dinh tap hang roi vao i-tail scalar, doc lap voi strip.
+- **k-outer giu nguyen grid 55 van dat loi khi doi rows**: bench LM bwd
+  (dxf cols=4, rows=7, mc2 chunk ~1 MB) nghe diff=0 tren probe kernel rieng
+  le nhung production loss seq1024 mode-1 = 13.442911 (-4e-6); dw mode 7 khong
+  lech trong probe nhung bi loai vi m%4 != 0 (co i-tail 1 hang). => probe
+  diff=0 cho kernel rieng le KHONG du de bao dam bit-exact production khi
+  `rows` thay doi; tap hang i-tail phai GIU NGUYEN.
+
+**Bai hoc**: voi kernel goong luoi so hoc 55 (VOCAB n=768), chi cols=14/
+NC=128/rows=2 la an toan; moi thay doi khac phai du qua gate loss mode-1
+(seq1024 = 13.442915) + trainer 15/15 + 3 seq, khong du de tin vao probe
+kernel rieng le (probe khong mo phong duoc tap hang i-tail).
+
+File tam (fmavs.c, fmavs2.c, probe_tile.py) DA GO khoi Release/tools/simd_native
+(chua commit). Hieu nang giu nguyen §0.84 (lmhead 765 ms, bwd 7375-7516 ms).
