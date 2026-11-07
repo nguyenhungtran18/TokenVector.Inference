@@ -752,7 +752,6 @@ Ty le vs torch (0.934/1.404/3.542): **18.4x / 21.1x / 27.7x**.
 (dieu kien can toi parity, xem plan §12 quyet dinh a); (c) seq8 batch nho
 chua chuyen doi (18.4x — overhead interpreter, rieng biet voi seq1024).
 ---
-
 ### 0.20 P6 GIAI DOAN1 — SONG SONG attention_bwd THEO HEAD (2026-10-21) — 84/84, BIT-EXACT, seq1024 −23.3%
 Tiep HANDOFF 0.19 ("con lai: P6"). Thu tu lam: do truoc, chon dich theo so do.
 **1. SO DO CHON DICH (profile fixture n=8 + AQ @1024):**
@@ -3112,7 +3111,6 @@ bằng cách tạm thời `raise` lại exception trong `dich_mot` (đã hoàn n
 Chưa khoanh được thủ phạm — tái hiện được cả trước lẫn sau thay đổi này, nên **không
 phải regression của #10**, nhưng cần điều tra riêng (nghiện thứ tự duyệt container
 có hash ngẫu nhiên per-process).
-
 ## §0.64 ĐO LẠI NỀN TẢNG: KHÔNG CÓ AVX-512, GEMM 59% ĐỈNH NHƯNG CHỈ CHIẾM 25%, NÚT THẮT LÀ ĐƯỜNG NON-GEMM (2026-11-05)
 Số đo trong **cùng một phiên**, không trộn số cũ. Mục đích: chốt lại nền tảng trước khi
 tiếp tục H4a/H4b và tránh tối ưu sai chỗ (lịch sử §0.59 và plan P3 đều đã đặt cược sai
@@ -4214,6 +4212,15 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.90 native MergeHbHead (thay _attn_hb_merge interp) - attention_bwd -16 ms/layer
+Probe repeat (seq1024, TKV_GEMM_THREADS=8): qkv_fwd 16 ms; dctx 15 ms;
+attn_bwd 250 ms (truoc: 266 ms); qkv_bwd 47 ms; dw_proj/db_proj ~4 ms.
+12 tang x 16 ms = ~190 ms tiet kiem per step.
+Verify: `Release` `ed689fc` (MergeHbHead native), bench_attn `PAR12` 142->111-115ms;
+`Inference` `b2d2c1d` (wire `_attn_hb_merge -> merge_hb_head`).
+Gate 9/10 (chi gap_tests pre-existing); trainer 15/15; self-host `IL_IDENTICAL`;
+loss EXACT seq8 `10.572291`, seq256 `10.756927`, seq1024 `10.760399`; mode 1 `13.442915`;
+full step seq1024 mode 2 ~11.5 s.
 ## §0.89 step(): skip grad_norm() khi clip==1.0 - dead computation (commit Inference fee82b1)
 `new_adamw_g(n, groups, 2, total, lr, ..., clip=1.0)` - **moi harness test
 tren GPT2 train lai dung clip=1.0**. Khi clip==1.0, `clip/(gn+eps)` luon
