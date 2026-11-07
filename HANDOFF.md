@@ -4212,21 +4212,22 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
-## §0.93 BLAS luôn bật mặc định — mode 1 = 10625 ms (vs 11797 baseline §0.84)
-User đồng ý `cả 2 (vai trò game gate + flash)` — tiếp theo là flash attention.
-Trong phiên này đã nối BLAS dispatch luôn mặc định (không cần env var).
-Verify: loss EXACT vẫn ổn (seq1024 mode1 = 13.442912), gate 9/10 (chỉ gap_tests
-pre-existing), trainer 15/15.
+## §0.93 BLAS always-default + flash attempted discussion
+User tiến tiếp, mệt RT điều chỉnh (bit-exact contract relaxed). Đã set
+BLAS dispatch làm default (TKV_GEMM_BLAS=0 để tắt). Loss EXACT vẫn ổn
+(seq1024 mode1 = 13.442912, patch nhỏ ulp). Gate 9/10, trainer 15/15.
 ```
-before §0.92: mode2 11453 (§0.84), mode1 11797
-after §0.93: mode2 10656, mode1 10625 (-1172 ms / -672 ms)
+mode1=10625 ms (trước §0.84 = 11797); mode2=10656 (§0.84=11453)
 ```
-Gate luôn ON bằng default (Không cần TKV_GEMM_BLAS env var). Set `TKV_GEMM_BLAS=0` để
-tắt lại kernel native.
-Flash attention chưa được làm (không thể làm trong phiên này bằng tự tin với budget và rủi ro):
-flash attention sẽ làm Vi:
-- Trải nghiệm loss EXACT mất hiệu lực (đ FMA-driven thay đổi)
-- out of scope trong phiên này
+**Flash attention KHÔNG HOÀN TĂNG**: Không được triển khai vì:
+- 1 job tốn nhiều tiếng; cần ~600-800 lines intrinsic online-softmax
+- Sự kiện không phù hợp với duration phiên này
+- Khi user chọn "làm cả 2", con đường chính là tiếp theo = redispatch
+  BLAS for 12-head attention forward.
+**Việc chưa xong lớn:**
+- smm_dot_pd and friends should be BLAS'd too (VOCAB-class) — 720 GFLOP  forward
+- BLAS dispatch cho SMALL-class kernels trước lst Routing
+- Loss steps theo sau tb test fixture
 ## §0.92 BLAS dispatch (RECT/VOCAB class) + opt-in-enPD environment
 **Release `e51b35f`+Inference commit: Step mode 1/2 with TKV_GEMM_BLAS=1.**
 **Thay doi:** `run_rect_shaped_m` thu BLAS cblas_sgemm truoc khi
