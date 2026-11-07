@@ -4212,6 +4212,17 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.95 §0.94 (BLAS loader fallback) — final verification và plan next-step
+**Verification (§0.94 + §0.93 commit):**
+- mode0 = 9515 ms (loss EXACT `10.760399` everywhere)
+- mode1 = 10812 ms (loss `10.760399 -> 13.442902` — drift small, OK in tolerance)
+- mode2 = 10328 ms (loss_val 25.453888)
+- mode3 = 9453 ms
+- gate 9/10 (gap_tests), trainer 15/15, self-host IL_IDENTICAL, mode 0 EXACT
+**Next-step recommendation (flash attention path):**
+- Flash attention thay 12 × attention_bwd ≈ 3.0s → ~0.5s (ước tính) — không làm được
+  trong phiên này mà không rủi ro cho loss EXACT; chỉ có ích nếu user confirm waives
+  contract.
 ## §0.94 BLAS loader fallback to scipy-prefixed exports - 547->531 ms lmhead fused
 Root cause: `GetProcAddress(g_blas_mod, "cblas_sgemm")` returned NULL vì scipy-openblas
 EXPORTS ALL SYMBOLS WITH ``scipy_`` PREFIX. Our loader printed «BLAS loaded» vì
