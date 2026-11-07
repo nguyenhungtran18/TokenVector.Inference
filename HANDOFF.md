@@ -4212,6 +4212,15 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.99 GELU erf kernel - unroll 4-way (elementwise, bit-identic)
+`tkv_bwd_ops.c`: GeluErfFwd/GeluErfBwd - tach `gelu_f_one`/`gelu_b_one` + erf chi tiet
+(2 duong chia: bwd f64-div->ep f32, fwd f32-div - GIU NGUYEN);
+main loops unroll 4 phan tu doc lap (memory traffic + divider pipeline); /fp:precise giu nguyen.
+Ket qua elementwise IDENTICAL bit-for-bit (cung chuoi op tren tung ptu).
+Verification: mode0 EXACT 3 seq; mode1 loss `13.442909/13.442913` (drift ~e-6);
+trainer 15/15 (eval loss `0.014949893` khop §0.97/§0.98); gate 9/10 (chi gap_tests exit=82 pre-existing).
+Timing: mb1024 gelu_fwd/bwd re-measure 31-47 ms (noi may query-timer 15-30 ms grad dinh gioi han) -
+unit unroll KHONG co regression; cuong do throughput tot hon ly thuyet (ILP tren chain Horner+div).
 ## §0.98 Flash attention FWD qua IL builtin - WIRED + verify
 Compiler (Release 1d1df0d): builtin moi `attention_fwd_fused(qkv, ctxo, n, h, hd, head, inv) -> i32`
 - simd_feature.tkv: pinvoke `FlashAttentionFwdFusedNative`, IL wrapper `AttentionFwdFusedM`,
