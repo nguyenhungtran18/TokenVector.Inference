@@ -4212,6 +4212,36 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.101 Fusion kernels nhỏ: simd_add + bias_add_rows (interpreted->native)
+Trạng thái TRIZ D1-ish: hai thủ phủ interpreted trong hot path đã native:
+1) **residual add loops** (`r = x + a`, `out = r + m`, block_bwd `drl2/dl1`):
+   dùng builtin `simd_add(a, b, o)` (vectorized native, HopAddL<T> wrapper)
+   — bỏ các vòng interpreted `n*h` trong `gpt2_block*`/`gpt2_block_bwd` của
+   cả 2 copy (`tv/tests`, `tv/training`). elementwise add, kết quả bit-identic.
+2) **bias broadcast add trong `gpt2_linear`** (simd==1 path): calls 48/step;
+   vong interpreted bị thay bằng native `BiasAddRows` mới
+   (`tkv_bwd_ops.c`, AVX2, /fp:precise, bit-exact elementwise, cùng thứ tự c).
+   Builtin mới `bias_add_rows(yd, lbd, n, out_d) -> i32` trong compiler
+   (simd_feature.tkv + file_io.tkv + IL_IDENTICAL reverify).
+Pitfall / bài học (đồng nghĩa với attention_fwd_fused trước đó):
+- `_dtype_mang`, `_la_list` chỉ chấp nhận BIEN `var` thuần
+  - attribute expressions (`x.data`) -> SyntaxError `nhan BIEN mang rank 1`.
+  Luong local bind (`_rlc = r.data`, `_xl = x.data`) rồi truyền local.
+- IL assembly syntax: `ldc.i4` có suffix `.0` nhưng `ldc.i8` không có
+  (`ldc.i8 0` đúng, `ldc.i8.0` sai) -> ilasm error ở line 4308 (BiasAddRowsM);
+  fixed + vong.exe IL_IDENTICAL rebuild SUCCESS.
+- Module resolution: `simd_bench_124m_seq.tkv` resolve `tv.training.gpt2_ref124`
+  sang `tv/tests/tv.training.gpt2_ref124.tkv` (cùng thư mục) — LUÔN sửa cả 2 copies.
+Verification (máy này):
+- ILL: BiasAddRowsM call có mặt trong out/bseq_gp.il (1 call site shared by
+  toàn bộ `gpt2_linear`, 48 lần gọi/bước runtime).
+- loss mode0 EXACT: `10.572291 / 10.756927 / 10.760399` giữ nguyên 3 seq.
+- mode1 seq1024: ~**9937** ms (mode0 ~8750-8890) — KHONG có lợi đo được trong noise
+  (±600-700 ms lặp lại cùng cấu hình trước; mode0 có lúc 8687 cùng cài trước).
+  Ghi nhận trung thực: các native calls đưa thẳng vào đường nóng, nhưng
+  không cho cải thiện rõ rệt vì phần tử interpreted của tensorAdd tuyến tính
+  chính nó đã rẻ; gain thực = ~0 trên máy này.
+- gate **9/10** (gpt2_full_tests PASS 33/33), trainer **15/15**, selfhost IL_IDENTICAL.
 ## §0.100 MKL (mkl-devel 2026.2.0, pip) - lien ket thu tinh THAT, khong giu
 User yeu cau lam giong torch_cpu.dll (oneDNN nhung MKL tinh). Da cai pip wheel
 `mkl-devel` 2026.2.0 vao `Release/build/_mkl` (KHONG track: `Release/.gitignore` /build/),

@@ -94,10 +94,13 @@ def gpt2_linear(x: "Tensor", w: "Tensor", b: "Tensor", n: 'i64', in_d: 'i64', ou
         # (w [in_d hang][out_d cot] dung ngay layout B [k][n]), roi cong bias
         y = smm_fwd(x, w, n, out_d, in_d)
         yd = y.data
-        for i in range(n):
-            base = i * out_d
-            for o in range(out_d):
-                yd[base + o] = yd[base + o] + b.data[o]
+        lbd = b.data
+        brc = bias_add_rows(yd, lbd, n, out_d)
+        if brc != 0:
+            for i in range(n):
+                base = i * out_d
+                for o in range(out_d):
+                    yd[base + o] = yd[base + o] + lbd[o]
         return y
     y = t_zeros([n, out_d])
     for i in range(n):
@@ -539,13 +542,17 @@ def gpt2_block(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
     a = gpt2_layernorm(x, ln1_g, ln1_b)
     a = gpt2_attention(a, w_qkv, b_qkv, w_proj, b_proj, n, simd)
     r = t_zeros([n, h])
-    for i in range(n * h):
-        r.data[i] = x.data[i] + a.data[i]
+    _xl = x.data
+    _al = a.data
+    _rldc = r.data
+    simd_add(_xl, _al, _rldc)
     m = gpt2_layernorm(r, ln2_g, ln2_b)
     m = gpt2_mlp(m, w1, b1, w2, b2, n, simd)
     out = t_zeros([n, h])
-    for i in range(n * h):
-        out.data[i] = r.data[i] + m.data[i]
+    _rl = r.data
+    _ml = m.data
+    _oldc = out.data
+    simd_add(_rl, _ml, _oldc)
     return out
 
 # ---- P5.6 (2026-10-20): block forward + tra them residual r ----------------
@@ -562,13 +569,17 @@ def gpt2_block_saved(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
     a_ln = gpt2_layernorm(x, ln1_g, ln1_b)
     a = gpt2_attention(a_ln, w_qkv, b_qkv, w_proj, b_proj, n, simd)
     r = t_zeros([n, h])
-    for i in range(n * h):
-        r.data[i] = x.data[i] + a.data[i]
+    _xl = x.data
+    _al = a.data
+    _rldc = r.data
+    simd_add(_xl, _al, _rldc)
     m_ln = gpt2_layernorm(r, ln2_g, ln2_b)
     m = gpt2_mlp(m_ln, w1, b1, w2, b2, n, simd)
     out = t_zeros([n, h])
-    for i in range(n * h):
-        out.data[i] = r.data[i] + m.data[i]
+    _rl = r.data
+    _ml = m.data
+    _oldc = out.data
+    simd_add(_rl, _ml, _oldc)
     # P6 GĐ7 (do BR[3]: LN fwd recompute 24 goi = 359ms @1024 trong
     # block_bwd): LUU luon dau vao LN (a_ln, m_ln) — cung input cung phep
     # voi viec recompute -> BIT-EXACT, bo duoc 24 goi gpt2_layernorm.
@@ -1732,8 +1743,10 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
     if save_r == None:
         attn_out = gpt2_attention(a, w_qkv, b_qkv, w_proj, b_proj, n, simd)
         r = t_zeros([n, h])
-        for i in range(n * h):
-            r.data[i] = x.data[i] + attn_out.data[i]
+        _xl2 = x.data
+        _ao = attn_out.data
+        _rldc2 = r.data
+        simd_add(_xl2, _ao, _rldc2)
     else:
         r = save_r
     m = save_m
@@ -1749,17 +1762,14 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
     drl2 = rl2[0]
     _gd = gout.data
     _dl2 = drl2.data
-    for i in range(n * h):
-        _gd[i] = _gd[i] + _dl2[i]
+    simd_add(_gd, _dl2, _gd)
     # r = x + attn_out
     r_att = gpt2_attention_bwd(a, w_qkv, b_qkv, w_proj, b_proj, n, gout, simd,
                                gflat, o_qkv, o_bqkv, o_proj, o_bproj)
     rl1 = gpt2_layernorm_bwd(x, ln1_g, ln1_b, r_att[0], gflat, o_l1g, o_l1b)
     drl1 = rl1[0]
     _dl1 = drl1.data
-    for i in range(n * h):
-        # r = x + attn_out -> x nhan grad TU 2 duong: truc tiep (dr) + qua LN1
-        _dl1[i] = _dl1[i] + _gd[i]
+    simd_add(_dl1, _gd, _dl1)
     dx = drl1
     return [dx, rl1[1], rl1[2],
             r_att[1], r_att[2], r_att[3], r_att[4],
@@ -2142,13 +2152,17 @@ def gpt2_block_m(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
     a = gpt2_layernorm(x, ln1_g, ln1_b)
     a = gpt2_attention_m(a, w_qkv, b_qkv, w_proj, b_proj, n, kmask, simd)
     r = t_zeros([n, h])
-    for i in range(n * h):
-        r.data[i] = x.data[i] + a.data[i]
+    _xl = x.data
+    _al = a.data
+    _rldc = r.data
+    simd_add(_xl, _al, _rldc)
     m = gpt2_layernorm(r, ln2_g, ln2_b)
     m = gpt2_mlp(m, w1, b1, w2, b2, n, simd)
     out = t_zeros([n, h])
-    for i in range(n * h):
-        out.data[i] = r.data[i] + m.data[i]
+    _rl = r.data
+    _ml = m.data
+    _oldc = out.data
+    simd_add(_rl, _ml, _oldc)
     return out
 
 def gpt2_forward_m(ids: 'list[i64]', pos: 'list[i64]', kmask: 'list[i64]',
