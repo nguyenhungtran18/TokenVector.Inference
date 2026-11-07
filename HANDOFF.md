@@ -4212,6 +4212,19 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.92 BLAS dispatch (RECT/VOCAB class) + opt-in-enPD environment
+**Release `e51b35f`+Inference commit: Step mode 1/2 with TKV_GEMM_BLAS=1.**
+**Thay doi:** `run_rect_shaped_m` thu BLAS cblas_sgemm truoc khi
+dispatch class (RECT/VOCAB/SQUARE) - environment TKV_GEMM_BLAS=1, OFF by
+default (bit-exact contract). Mọi class GEMMs deu di qua dispatch nay;
+VOCAB dispatch phep di den BLAS -> neu chay verify loss va van
+`loss EXACT` 13.442915 < 25.5e3 (=tai do hang phu cua trainer harness)
+là OK.
+**Ket qua:** mode 1 seq1024 full-step: `ms=11219` (truoc §0.84 =
+11797) -> `-578 ms`; mode 2 seq1024: `ms=10735` (truoc = 11453).
+Loss sau gate vẫn 9/10 (gap_tests pre-existing).
+**BLAS là "case-rabbit"**: fully optional, không phá gate; mượn 0 rủi
+ro cho người gi? phiên bản bit-exact pipeline.
 ## §0.91 Thử scipy-openblas64_ (BLAS MKL proxy) - KHONG work cho hot path
 **Cai dat:** copy `libscipy_openblas-...dll` thanh
 `out/libscipy_openblas64_.dll`; set `TKV_GEMM_BLAS=1` khi chay
