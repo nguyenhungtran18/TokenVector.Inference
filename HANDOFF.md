@@ -4234,9 +4234,17 @@ trong `AttentionBwdFused` (export da co builtin tu YEU CAU #14) - flash truoc, r
   Ghi nhan: may co variance ±600-700 ms; §0.96 baseline 10437 ms (cung khoang nay).
 - trainer 15/15; selfhost khong doi; gate: simd_matmul/gpt2_*/grad/parity/pack/inplace/gpt2_full
   **PASS**, gap_tests FAIL (pre-existing, exit=82) -> TOTAL 1 fail = 9/10.
-- **FLAKE canh bao**: 1 lan gpt2_full_tests FAIL (exit=82+crash) o lan gate dau, re-run PASS
-  33/33 fails=0 voi cung binary; khong tai hien. Neu bao lai -> check nondeterminism 12 worker
-  threads merge dq/ctx (thu tu add khac nhau run-to-run). KHONG lien quan gap_tests.
+- **FLAKE root-caused**: 1 lan gpt2_full_tests FAIL (exit=82+crash). Signature noted from wsl repro:
+  `.exe` crashes with
+  `System.IO.FileNotFoundException: ... System.Runtime.Intrinsics, Version=10.0.0.0 ...
+  at TKVApp.gpt2_layernorm`. NOT flash kernel: gate always runs `.exe` first
+  (crash on Runtime.Intrinsics is EXPECTED on this machine); `run_bin`/make_n10_cfg in
+  gate_f32.sh fall back to `.n10.dll` on .NET 10.0.13. First FAIL happened when the
+  fallback config was missing/dotnet resolution hiccuped -> gate kept exit=82.
+  Afterwards 6 consecutive PASS (1 re-run + 3 full gates x 33 cases,
+  TOTAL fails=1 = gap_tests pre-existing only). No flash involvement
+  (tkv_flash_attn.c additionally hardened: all large arrays moved to heap,
+  commit b52f28a).
 **Perf attention_bwd:** PAR12 bench_attn: 52-82 ms (truoc: 111-136 ms). SINGLE head0 ~44-46 ms
 (trung voi probe flash). SEQ12 cao hon (per-run noise) khong dung chuan.
 **Chua lam / do luong tiep:**
