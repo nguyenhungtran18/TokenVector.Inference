@@ -4212,6 +4212,20 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.91 Thử scipy-openblas64_ (BLAS MKL proxy) - KHONG work cho hot path
+**Cai dat:** copy `libscipy_openblas-...dll` thanh
+`out/libscipy_openblas64_.dll`; set `TKV_GEMM_BLAS=1` khi chay
+"QUAD-sco (`bseq_gp_n10.dll`).
+**Ket qua:** `[tkv] BLAS: scipy-openblas64_ loaded` hien thi; quyet dinh
+bwd flat (~7480 ms, same as before). Lý do: dispatch BLAS chi ap dung
+`SgemmF32` duong vuong (m=n=k); attention_bwd cac head GEMM (m=1024,
+n=64, k=64 class RECT), va MLP backward cac GEMM SQUARE class (nhieu
+thua) co khong tham so `k` he so va khong du lon.
+**BLAS khong work cho production.** BLAS chỉ đảm san (?) op-squar, không
+dung cho hot path. Phải rewrite `tkv_try_blas` de ho tro cac shapes khac
+(RECT/VOCAB/SMALL) mac dinh dispatch -> thay doi output bit pattern ->
+cần RCAST+bit-exact re-gate. Chua lam duoc o tinh trang hien tai.
+**Ket luan:** BLAS không trong tầm với ở §0.84. Hot path không thay doi.
 ## §0.90 native MergeHbHead (thay _attn_hb_merge interp) - attention_bwd -16 ms/layer
 Probe repeat (seq1024, TKV_GEMM_THREADS=8): qkv_fwd 16 ms; dctx 15 ms;
 attn_bwd 250 ms (truoc: 266 ms); qkv_bwd 47 ms; dw_proj/db_proj ~4 ms.
