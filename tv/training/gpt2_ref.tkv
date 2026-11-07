@@ -429,10 +429,11 @@ def _gf_div(a: 'i64', b: 'i64') -> 'i64':
     return q
 
 def _gf_zeros(n: 'i64') -> 'list[f32]':
-    out = []
-    for i in range(n):
-        out.append(0.0)
-    return out
+    # P9-c style (giong t_zeros): list[f32] * n -> List<f32> native (Array.Copy),
+    # thay vong append(0.0) interpreted 3.1M lan/call.
+    seed: "list[f32]" = []
+    seed.append(0.0)
+    return seed * n
 
 def _gf_one(j: "_GfJob") -> 'i64':
     # YEU CAU #19: moi worker 1 doan [lo, hi) -> native gelu_erf_fwd (bit-exact,

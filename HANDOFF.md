@@ -5239,3 +5239,47 @@ chậm hơn §0.81 ~10%, nên không so trực tiếp 8359):
 - Ứng viên ≥ 500 ms kế tiếp (đã có số): `gelu_fwd 47 + gelu_bwd 31 = ~936 ms` cho 12 layer;
   `vòng gwpe->gflat` .tkv 62 ms; `op_embed_bwd(wte) 141 ms`; head1 `1024x768x50257` còn 267 GFLOPS
   (7/55 cột rơi vào nhánh scalar của `micro_f32` — sửa bằng `maskload/maskstore`, vẫn bit-exact).
+
+## §0.83 `_gf_zeros` nhanh (seed*n) + chú giải nested-guard attention — bwd ~7406–7547 ms, loss EXACT
+
+### 1. `_gf_zeros` thay vòng append(0.0) bằng `seed * n` (giống `t_zeros`, P9-c)
+
+File: `ops.tkv`? KHÔNG — đây là GELU: `_gf_zeros` trong 3 mirror
+`tv/tests/tv.training.gpt2_ref124.tkv`, `tv/training/gpt2_ref.tkv`,
+`tv/training/tv.training.gpt2_ref124.tkv`.
+
+Đo `_mb1024` @seq1024 (best-of-3, cùng phiên): **gelu_fwd 47 → 31–32 ms** (~15 ms/layer,
+~180 ms toàn 12 layer). Xác minh loss EXACT: seq8 **10.572291**, seq1024 **10.760399**.
+Gate **9/10** (chỉ gap_tests pre-existing); trainer **15/15**.
+
+### 2. Profile GELU (`_gfm.tkv`, 3.1M phần tử) — số đo tách phần
+- `_gelu_fwd_par` 31–47 ms
+- `gelu_erf_fwd` **1 luồng** = **266 ms** (erf + double exp rất nặng)
+- 12× `_gf_zeros` = 15–16 ms
+- 12× `_gf_mcopy` = ~0 ms
+
+⇒ nút thắt là alloc temp, không phải copy-back; chỉ còn ~16 ms/layer để dành (cần đổi wrapper
+IL `&out[lo]` nếu muốn bỏ triệt để).
+
+### 3. Nested guard `t_nested` trong DLL (attention)
+`AttentionBwdFused` giờ đặt `t_nested = 1` (g_local TLS), `packed_create` và
+`run_rect_shaped` chuyển sang đơn luồng khi `t_nested`.
+
+**Đo lại và ghi thật**: attention GEMMs đều rơi nhánh SMALL (k = hd = 64, n = 64 < TKV_MIN_N = 96)
+nên vốn đã đơn luồng; kết quả **không đổi** (ATTENTION_BWD ~250 ms/layer trước & sau; PAR12 head =
+125–136 ms trong bench C, gấp ~2 lần khi tính cả merge/qkv). Code giữ lại làm safeguard cho shape
+lớn hơn; pack (pure copy) cũng được tắt song song trong nested.
+
+Comment luôn ghi kết luận đo thực tế, không ghi ước tính chưa kiểm chứng.
+
+### 4. Ghi nhận thêm (chưa commit / chưa wire)
+- `bench_attn2.c` đo 4/6/8/12 head `AttentionBwdFused`: PAR12 ≈ 125–136 ms ⇒ attention bwd thật sự
+  bị giới hạn ô nhớ/kernel từng head, không phải pool contention.
+- `bench_attn.c` single head ≈ 35 ms; 6 GEMM/head đều nhánh SMALL/đơn luồng.
+
+### 5. Việc tiếp theo (ưu tiên)
+1. **Attention** (12 block bwd, ~250 ms/layer = ~3 s): chưa có đường tăng tốc; cần benchmark
+   engine GEMM n=64 / kernel SOFTMAX riêng — chưa wire.
+2. `op_embed_bwd(wte)` 141 ms + `f32_list_add` 47 ms + `gwpe→gflat` 62 ms (~250 ms/bước) —
+   nếu muốn cắt tiếp, dùng kernel scatter-add/`add at offset`.
+3. `gelu` "one native call": **266 ms 1 luồng** — không chạy 1 luồng; chỉ parallel/giữ nguyên.
