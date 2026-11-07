@@ -1202,23 +1202,14 @@ def _attn_hb_one(j: "_AtnJob") -> 'i64':
 
 
 def _attn_hb_merge(co: "list[f32]", qo: "list[f32]", ct: "list[f32]", dq: "list[f32]", n: 'i64', h: 'i64', hd: 'i64', hlo: 'i64', hhi: 'i64') -> 'i64':
-    # gop output rieng PACKED (P6 GĐ5: co/[t2*hd], qo/[t2*3*hd]) vao
-    # ctxT/dqkv theo vi tri (t, head, d) — gia tri khong doi -> BIT-EXACT.
-    # P6 GĐ2: cham NHeads (giong _attn_hb_one) — doc/ghi ngoai hang ban nho.
+    # gop output rieng PACKED (P6 G-5: co/[t2*hd], qo/[t2*3*hd]) vao
+    # ctxT/dqkv theo vi tri (t, head, d) - gia tri khong doi -> BIT-EXACT.
+    # P6 G-2: cham NHeads (giong _attn_hb_one) - doc/ghi ngoai hang ban nho.
     if hlo >= NHeads:
         return 0
-    for head in range(hlo, hhi):
-        ho = head * hd
-        for t2 in range(n):
-            c0 = t2 * h + ho
-            p0 = t2 * 3 * hd
-            r0 = t2 * 3 * h + ho
-            for d in range(hd):
-                ct[c0 + d] = co[t2 * hd + d]
-                dq[r0 + d] = qo[p0 + d]
-                dq[r0 + h + d] = qo[p0 + hd + d]
-                dq[r0 + 2 * h + d] = qo[p0 + 2 * hd + d]
-    return hhi - hlo
+    return merge_hb_head(co, qo, ct, dq, n, h, hd, hlo, hhi)
+
+
 def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                        w_proj: "Tensor", b_proj: "Tensor", n: 'i64', gout: "Tensor", simd: 'i32' = 0,
                        gflat: 'list[f32]' = None, o_qkv: "i64" = -1, o_bqkv: "i64" = -1,
