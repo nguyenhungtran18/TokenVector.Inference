@@ -4212,6 +4212,18 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.96 User confirm: relax bit-exact, write flash attention
+User confirmed: relax bit-exact; drop gates's strict bit-exact requirements.
+**Verification current §0.94-§0.96 (BLAS all-default):**
+- mode0: seq8 `10.572291`, seq256 `10.756927`, seq1024 `10.760399` (EXACT)
+- mode1 seq1024 full step: **10437 ms** vs §0.84 11797 ms (-1360 ms = -11.5%)
+- gate 9/10, trainer 15/15, self-host IL_IDENTICAL
+- Pytorch full step ≈ 4190 ms; we are 2.5x slower (chưa thắng)
+**BLAS path empirically**: SgemmF32, SgemmPacked dispatch đều hit BLAS by default;
+in **bench_attn.exe**: SINGLE head0 ~28-30 ms (trước §0.84 = 30+ ms); PAR12 ~111-115 ms
+(trước 120-125).
+**Next attempt: flash attention**. Scope ước tính ~10 h skill expert C/FMA.
+Pytorch target ~4190 ms viable only via FlashAttention-class algorithm.
 ## §0.95 §0.94 (BLAS loader fallback) — final verification và plan next-step
 **Verification (§0.94 + §0.93 commit):**
 - mode0 = 9515 ms (loss EXACT `10.760399` everywhere)
