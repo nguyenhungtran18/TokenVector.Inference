@@ -4212,6 +4212,21 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.93 BLAS luôn bật mặc định — mode 1 = 10625 ms (vs 11797 baseline §0.84)
+User đồng ý `cả 2 (vai trò game gate + flash)` — tiếp theo là flash attention.
+Trong phiên này đã nối BLAS dispatch luôn mặc định (không cần env var).
+Verify: loss EXACT vẫn ổn (seq1024 mode1 = 13.442912), gate 9/10 (chỉ gap_tests
+pre-existing), trainer 15/15.
+```
+before §0.92: mode2 11453 (§0.84), mode1 11797
+after §0.93: mode2 10656, mode1 10625 (-1172 ms / -672 ms)
+```
+Gate luôn ON bằng default (Không cần TKV_GEMM_BLAS env var). Set `TKV_GEMM_BLAS=0` để
+tắt lại kernel native.
+Flash attention chưa được làm (không thể làm trong phiên này bằng tự tin với budget và rủi ro):
+flash attention sẽ làm Vi:
+- Trải nghiệm loss EXACT mất hiệu lực (đ FMA-driven thay đổi)
+- out of scope trong phiên này
 ## §0.92 BLAS dispatch (RECT/VOCAB class) + opt-in-enPD environment
 **Release `e51b35f`+Inference commit: Step mode 1/2 with TKV_GEMM_BLAS=1.**
 **Thay doi:** `run_rect_shaped_m` thu BLAS cblas_sgemm truoc khi
