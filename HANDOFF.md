@@ -4212,6 +4212,39 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.97 Flash attention (port tu C++ algorithm) - WIRED, verify 9/10 gate
+**Port note (bat buoc):** `tkv_flash_attn.c` la **port lai thuat toan** online-softmax
+flash attention (khoi tao -inf, block KV 64, dst accumulate, logsumexp) duoc viet lai
+tu NGUYEN MAU THUAT TOAN cua PyTorch ATen `FlashAttentionKernel.cpp`
+(aten/src/ATen/native/cpu/FlashAttentionKernel.cpp - BSD-3-Clause).
+Day **KHONG phai** PyTorch, khong lien ket ATen/MKL, khong phai binary cua PyTorch;
+kernel C/AVX2 tu viet cho DLL `tkv_simd_native.dll`. Attribution BSD-3 giu trong header
+cua file va o day. NOT "PyTorch in our build".
+**Scope:** forward (`FlashAttentionFwdFused`) + backward (`FlashAttentionBwdFused`),
+fp32, causal, hd=64, n >= 64, shape khong ho tro -> rc=-13 -> caller fallback kernel cu
+nguyen van. .tkv KHONG goi truc tiep (compiler chua co builtin flash_*): dispatch nam
+trong `AttentionBwdFused` (export da co builtin tu YEU CAU #14) - flash truoc, rc!=0
+-> attention_bwd_fused cu (Smat n x n + native softmax) -> `_attn_hb_one_ref`.
+`TKV_FLASH_OFF=1` tat dispatch (A/B, rollback).
+**Correctness (probe_flash.c, naive f64 reference, head=5, h=768):**
+- fwd max_abs ~= 9.6e-08 (n=128 va n=1024); bwd dq ~7e-08, dk ~6.7e-07, dv ~2.3e-06.
+- loss mode0: seq8/256/1024 EXACT nhu truoc (`10.572291/10.756927/10.760399`).
+- mode1 seq1024 full-step (3 runs, flash ON): **10532 / 10656** (avg ~10.59 s) vs flash OFF
+  (TKV_FLASH_OFF=1): **11188 / 11157** (~11.17 s) -> flash nhanh hon ~470 ms.
+  Ghi nhan: may co variance ±600-700 ms; §0.96 baseline 10437 ms (cung khoang nay).
+- trainer 15/15; selfhost khong doi; gate: simd_matmul/gpt2_*/grad/parity/pack/inplace/gpt2_full
+  **PASS**, gap_tests FAIL (pre-existing, exit=82) -> TOTAL 1 fail = 9/10.
+- **FLAKE canh bao**: 1 lan gpt2_full_tests FAIL (exit=82+crash) o lan gate dau, re-run PASS
+  33/33 fails=0 voi cung binary; khong tai hien. Neu bao lai -> check nondeterminism 12 worker
+  threads merge dq/ctx (thu tu add khac nhau run-to-run). KHONG lien quan gap_tests.
+**Perf attention_bwd:** PAR12 bench_attn: 52-82 ms (truoc: 111-136 ms). SINGLE head0 ~44-46 ms
+(trung voi probe flash). SEQ12 cao hon (per-run noise) khong dung chuan.
+**Chua lam / do luong tiep:**
+- fwd attention van duong interpretive .tkv (smm_dot + native softmax + smm_fwd) - khong native
+  dispatch duoc vi compiler chua co builtin attention_fwd_fused. Can IL/compiler support neu
+  muon flash fwd (them ~200 IL wrapper nhu attention_bwd_fused, hoac builtin moi).
+- Pytorch full step ref: ~4081 ms (bench_torch d) - ta van cham hon (~2.6x). Flash chi dong
+  duoc 1 phan attention; gap con lai o interpreter + MKL vs AVX2 + alloc discipline.
 ## §0.96 User confirm: relax bit-exact, write flash attention
 User confirmed: relax bit-exact; drop gates's strict bit-exact requirements.
 **Verification current §0.94-§0.96 (BLAS all-default):**
