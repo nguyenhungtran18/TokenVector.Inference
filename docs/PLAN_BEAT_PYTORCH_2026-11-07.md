@@ -102,3 +102,47 @@ Cấu thành bwd 7375–7516 ms @seq1024 (đo 2026-11-07):
 - Nới contract bit-exact vs PyTorch (chỉ cần loss EXACT với chính nó) →
   GELU erf→tanh (~100–200 ms), GEMM reorder (thêm ~10–15%). **Cần xin phép trước**;
   không tự ý.
+
+## 8. Trạng thái thực tế sau §0.96 + §0.97 (2026-11-07 tối)
+
+Đo trực tiếp trên máy này (Xeon 14C, .NET 10.0.13, BLAS scipy-openblas64_ always-on,
+flash bwd dispatch trong AttentionBwdFused):
+
+| seq | TV fwd+bwd | TV full step (mode1, flash ON) | loss (\$10^{-6}$ EXACT) | PyTorch full |
+|---|---|---|---|---|
+| 8 | 2250 (812 + 1438) | (chưa đo lại) | 10.572291 ✓ | 1042.7 ms |
+| 256 | 4687 (1500 + 3187) | (chưa đo lại) | 10.756927 ✓ | ~1573 ms |
+| 1024 | 9219 (3031 + 6188) | ~10594 (10532/10656) vs OFF ~11172 | 10.760399 ✓ | ~4081-4191 ms |
+
+mode2 seq1024: fwd 2750 + bwd 6359 + opt 953 + copyback 156 = 10312 ms (loss_val in-noise).
+Win condition của §2 (seq8<1042.7/seq256<1573/seq1024<4190.6): **CHƯA đạt** (still ~2.5-2.6x).
+
+### Trạng thái từng phase
+- **P1 Attention bwd**: DONE (không theo plan gốc). Giải pháp: port thuật toán online-softmax
+  flash attention từ nguyên mẫu PyTorch ATen (BSD-3, KHÔNG phải PyTorch binary) sang
+  `tkv_flash_attn.c` (AVX2, causal fp32), dispatch trong `AttentionBwdFused` trước kernel cũ
+  (rc!=0 -> fallback nguyên văn; TKV_FLASH_OFF=1 tắt). PAR12: 52-82 ms (trước 111-136 ms).
+  loss mode0 EXACT 3 seq; probe vs naive f64: fwd 9.6e-08, bwd dv ≤ 2.3e-06.
+  Flash fwd CHƯA wire: compiler chua co builtin `attention_fwd_fused` (cần IL wrapper trong
+  `simd_feature.tkv` + rebuild self-host — ngoài phạm vi an toàn hiện tại).
+- **P2 AdamW**: native `adamw_step`/`adamw_step_glm` wired sẵn (M5/B2); skip grad_norm khi clip==1.0;
+  parallel bị từ chối (RAM-bound). Copy-back opt=953 ms (nội dung mode2). Phần tách r3/glm
+  chỉ là ĐO LƯỜNG — chưa làm; gain dự kiến < ~100 ms.
+- **P3 GELU erf**: ĐÃ native + song song sẵn (`_gelu_fwd_par` worker 12 thread §YEU CAU #19,
+  `op_gelu_erf_bwd` native §#12 Ask A2) — không cần làm lại.
+- **P4 Embed/bwd + gflat**: ĐÃ native (`embed_bwd_fused` YEU CAU #16 scatter-add, f32_list_add dwte
+  native, gflat accumulate thẳng) — không cần làm lại.
+- **P5 seq8**: không làm phiên này (fixed overhead m6/op_embed; gain nhỏ, rủi ro cao).
+- **P6 AdamW unroll `_day_vec64_operand`**: chỉ tồn tại trong compiler internals — không khả thi
+  an toàn trong phiên này (cần self-host rebuild).
+- `gap_tests` FAIL exit=82: pre-existing, không liên quan. `gpt2_full_tests` flake 1 lần
+  (fallback .exe -> .n10.dll của gate_f32.sh; không phải flash kernel) - 3 gates đầy đủ liên tiếp PASS.
+- Safe-word: loss mode0 EXACT 3 seq; trainer 15/15; selfhost IL_IDENTICAL; gate 9/10.
+
+### Kết luận
+Theo §6 (điều kiện dừng): LOSS/GATE/TRAINER đều xanh; cả 2 đòn bẩy lớn duy nhất
+(attention ~3s, AdamW ~250ms) đã xử; mọi phase còn lại đều stale/done hoặc compiler-internals.
+PyTorch vẫn nhanh hơn ~2.5x ở mode1; **gap còn lại do interpreter IL + alloc discipline +
+MKL-vs-AVX2 throughput, không còn GEMM đơn lẻ nào**. Quyết định dừng phase mới ở đây;
+mọi nỗ lực tiếp theo (flash fwd qua IL builtin, MLP interpreter) cần user chỉ định rõ scope.
+
