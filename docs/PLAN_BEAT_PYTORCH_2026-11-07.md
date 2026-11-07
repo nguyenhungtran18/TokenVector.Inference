@@ -112,7 +112,7 @@ flash bwd dispatch trong AttentionBwdFused):
 |---|---|---|---|---|
 | 8 | 2250 (812 + 1438) | (chưa đo lại) | 10.572291 ✓ | 1042.7 ms |
 | 256 | 4687 (1500 + 3187) | (chưa đo lại) | 10.756927 ✓ | ~1573 ms |
-| 1024 | 9219 (3031 + 6188) | ~10594 (10532/10656) vs OFF ~11172 | 10.760399 ✓ | ~4081-4191 ms |
+| 1024 | 8656 (2515 + 6141) | **9312** (ON, sau §0.98) | 10.760399 EXACT | ~4081-4191 ms |
 
 mode2 seq1024: fwd 2750 + bwd 6359 + opt 953 + copyback 156 = 10312 ms (loss_val in-noise).
 Win condition của §2 (seq8<1042.7/seq256<1573/seq1024<4190.6): **CHƯA đạt** (still ~2.5-2.6x).
@@ -123,8 +123,9 @@ Win condition của §2 (seq8<1042.7/seq256<1573/seq1024<4190.6): **CHƯA đạt
   `tkv_flash_attn.c` (AVX2, causal fp32), dispatch trong `AttentionBwdFused` trước kernel cũ
   (rc!=0 -> fallback nguyên văn; TKV_FLASH_OFF=1 tắt). PAR12: 52-82 ms (trước 111-136 ms).
   loss mode0 EXACT 3 seq; probe vs naive f64: fwd 9.6e-08, bwd dv ≤ 2.3e-06.
-  Flash fwd CHƯA wire: compiler chua co builtin `attention_fwd_fused` (cần IL wrapper trong
-  `simd_feature.tkv` + rebuild self-host — ngoài phạm vi an toàn hiện tại).
+  Flash fwd DA WIRED (s0.98): IL builtin `attention_fwd_fused` (SIMD_CLASS AttentionFwdFusedM;
+  selfhost IL_IDENTICAL - Release 1d1df0d); `_attn_f_one` goi, rc!=0 fallback duong cu NGUYEN VAN.
+  production module = tv/tests/tv.training.gpt2_ref124.tkv (synced with tv/training copy).
 - **P2 AdamW**: native `adamw_step`/`adamw_step_glm` wired sẵn (M5/B2); skip grad_norm khi clip==1.0;
   parallel bị từ chối (RAM-bound). Copy-back opt=953 ms (nội dung mode2). Phần tách r3/glm
   chỉ là ĐO LƯỜNG — chưa làm; gain dự kiến < ~100 ms.
