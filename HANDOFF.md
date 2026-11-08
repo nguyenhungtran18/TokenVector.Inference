@@ -4212,6 +4212,18 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.110 D5-2 — tkv_step124.c + ATen bridge probe (2026-11-08)
+Native trampoline skeleton tot nghia:
+- `tools/simd_native/tkv_step124.c` lazy-load `runtime/tkv_torch_fused.dll`
+  qua dir-of-self (GetModuleHandleExA + LOAD_WITH_ALTERED_SEARCH_PATH),
+  fallback LoadLibraryA("tkv_torch_fused.dll"), expose `TkvStep124Probe`
+  - `float32 y[4] = x @ w + b` cho tiny 2x2/2x2/2x2 @ seq1024 khong dung.
+- `build_tkv_step124.ps1` build `tkv_step124.dll` AVX2 (/O2 /Arch:AVX2 /MD),
+  fallback test `test_tkv_step124.exe` -> RC=0 y=[29,42,53,70].
+- BUG gap giai: typedef arg y sai vi tri (toi de x,w,b,y,n,in_d,out_d nhung
+  bridge la x,w,b,n,in_d,out_d,y) — bridge ran -> from_blob() threw -4.
+  Fix typedef + call thu tu dung; probe green.
+- D5-3 su dung skeleton nay de bung dan 12 block / AdamW native.
 ## §0.109 D5-0 — profile + inventory native exports (2026-11-08)
 Milestone D5-0 xong (chua commit gi ve code):
 
