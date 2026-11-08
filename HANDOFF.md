@@ -4212,6 +4212,26 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.102 ATen/oneDNN bridge (tkv_torch_fused.dll) — WIRED + verify
+Buil dung oneDNN của torch thông qua ATen dispatch (user OK).
+**Kiến trúc:** `torch_fused.cpp` (C++20) export `TkvTorchLinearGeluFwd`/
+`TkvTorchLinearFwd` — gọi `at::addmm`+`at::gelu` (oneDNN dispatch trong torch).
+Bridge trong `tkv_simd_native.c`: `LoadLibraryExW(dir-of-this-DLL, LOAD_WITH_ALTERED_SEARCH_PATH)`
+tim `tkv_torch_fused.dll` cạnh `tkv_simd_native.dll`, cache fn pointer
+`TkvTorchLinearGeluFwd`; rc < 0 -> fallback đường .tkv nguyên văn.
+Builtin `onednn_linear_bias_gelu` (IL wrapper OnednnLinearBiasGeluM + compiler
+`simd_feature.tkv` + file_io.tkv set; selfhost IL_IDENTICAL).
+`gpt2_mlp` simd==1: rc==0 -> dùng output fused; rc != 0 -> fallback.
+Runtime dep: torch_cpu.dll, c10.dll, libiomp5md.dll, uv.dll, VCRUNTIME140_THREADS.dll
+(không commit, chạy out/).
+**Bug tìm & fix:** .NET pinvoke module loader không tìm bridge bằng tên ngắn;
+cần `GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, ...)` để lấy
+handle module gọi + `LoadLibraryEx(..., LOAD_WITH_ALTERED_SEARCH_PATH)` để dep
+`torch_cpu.dll` resolve theo directory của bridge.
+**Numbers seq1024:** mode0 fwd ~2422 (baseline §0.98 ~2515), mode1 ~9375;
+seq8 fwd 797→579; seq256 fwd 1422→922; **loss mode0 EXACT 3 seq giữ nguyên**
+(`10.572291 / 10.756927 / 10.760399`); gate 9/10 (gap_tests pre-existing);
+trainer 15/15; selfhost IL_IDENTICAL. PyTorch 4081 ms vẫn giữ ~2.29x.
 ## §0.101 Fusion kernels nhỏ: simd_add + bias_add_rows (interpreted->native)
 Trạng thái TRIZ D1-ish: hai thủ phủ interpreted trong hot path đã native:
 1) **residual add loops** (`r = x + a`, `out = r + m`, block_bwd `drl2/dl1`):

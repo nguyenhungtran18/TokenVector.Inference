@@ -528,6 +528,14 @@ def _gelu_fwd_par(sl: 'list[f32]', dl: 'list[f32]', cnt: 'i64', simd: 'i32') -> 
 def gpt2_mlp(x: "Tensor", w1: "Tensor", b1: "Tensor",
              w2: "Tensor", b2: "Tensor", n: 'i64', simd: 'i32' = 0) -> "Tensor":
     h = HiddenSize
+    xd = x.data
+    w1d = w1.data
+    b1d = b1.data
+    inn = t_zeros([n, 4 * h])
+    ind = inn.data
+    il = onednn_linear_bias_gelu(xd, w1d, b1d, ind, n, h, 4 * h)
+    if il == 0:
+        return gpt2_linear(inn, w2, b2, n, 4 * h, h, simd)
     inner = gpt2_linear(x, w1, b1, n, h, 4 * h, simd)
     # P6 GĐ4: gelu parallel (guard 2M + simd==1 — probe BM[3]: 7.3x @3.14M)
     gf = _gelu_fwd_par(inner.data, inner.data, n * 4 * h, simd)
