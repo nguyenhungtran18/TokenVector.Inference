@@ -4212,6 +4212,26 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.104 Bỏ gelu/lin recompute trong mlp bwd — sao lưu gelu output vào saves (2026-11-08)
+User goal phiên này: "bwd bằng fwd" (PyTorch cùng máy: bwd:fwd ≈ 2.2×, ta ~2.8×).
+Thay đổi (chỉ 2 file .tkv, cả 2 copies `tv/tests` + `tv/training`):
+- `gpt2_block_saved`: giữ fused `onednn_linear_bias_gelu` (1 ATen call addmm+gelu, như §0.103). Tách output gelu ra buffer riêng `_save_a` ([n, 4h]) và **lưu** nó vào `res` (slot mới). Fallback (rc != 0): `gpt2_linear` + `_gelu_fwd_par` ghi vào `_save_a` (bit-cùng-phần-tử, loss EXACT vẫn giữ nếu rơi về fallback).
+- `gpt2_forward_saved`: `saves` mở rộng **3 + 5·NLayers** = `[logits, xf, xf_in, xins[N], rs[N], a_ln[N], m_ln[N], a_gelu[N]]` (slot cuối = gelu output mỗi layer).
+- `gpt2_block_bwd`: nhận thêm `save_inner` + `save_a_gelu` (cả 2 optional). `gpt2_backward`: `len(saves) >= 3 + 5·NLayers` → truyền `saves[3 + 4·NLayers + li]` làm `save_a_gelu` (`save_inner = None`); `3 + 4·NLayers` → đường cũ.
+- `gpt2_mlp_bwd`: nếu `save_a != None` → dùng `a` lưu, chỉ recompute `inner` (1 GEMM BLAS, ~15ms @seq1024/layer), **không recompute gelu** (~47ms). Nếu cả 2 được saves thì không recompute gì (giữ lại cho tương lai/native pre-gelu dump).
+Lưu ý thiết kế: bản đầu thử **full-save** (inner + gelu output) cho bwd thấp nhất (~5422–5485 ms) nhưng **fwd regress lên ~2860 ms** (phải tách fused call thành 2 call `gpt2_linear`+`_gelu_fwd_par`, quay lại trước §0.102). Bản hiện tại giữ fwd ở mức fused và chỉ mất ~180–200 ms bwd so với full-save → tổng nhanh hơn ~300 ms.
+Số đo thật (máy này, nhiễu ±200 ms):
+| seq  | fwd §0.103 | fwd §0.104 | bwd §0.103 | bwd §0.104 |
+|------|-----------|-----------|------------|------------|
+| 8    | 406–422    | 375       | ?          | 1313       |
+| 256  | 719–750    | 718       | ?          | 2219       |
+| 1024 | 2188–2234  | 2187–2266 | ~6219 (mode2) | 5672–5735 |
+- seq1024 mode0 1-step: fwd=2265/2187/2266, bwd=5672/5735/5687, total=7922–7953 ms (loss `10.760399`).
+- seq1024 sau sửa comment: fwd=2234, bwd=5906 (noise), loss EXACT.
+- Loss mode0 EXACT 3 seq: `10.572291 / 10.756927 / 10.760399`. Gate **9/10** (chỉ `gap_tests` exit=82 pre-existing); trainer **15/15**.
+- `_seq_cfg.txt` kết thúc ở `8 / 0 / 1` như phiên trước.
+Chưa bao gồm trong §0.104: native export pre-gelu (sẽ cho bwd ≈ 5450 ms mà không regress fwd — cần thêm `TkvTorchLinearGeluFwdPre` trong `tkv_torch_fused.dll` + entry mới trong `tkv_simd_native.c` + IL builtin mới; chưa làm).
+
 ## §0.103 Wire bwd path through oneDNN (onednn_linear_bwd + onednn_linear_bias)
 User: "làm bwb giống với fwd" — extend bridge to bwd like the MLP fwd wiring in §0.102.
 New IL builtins + wrappers: `onednn_linear_bias` (y = x·w + b via ATen addmm, plain)

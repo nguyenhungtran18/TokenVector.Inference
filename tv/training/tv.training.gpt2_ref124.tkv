@@ -591,7 +591,23 @@ def gpt2_block_saved(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
     _rldc = r.data
     simd_add(_xl, _al, _rldc)
     m_ln = gpt2_layernorm(r, ln2_g, ln2_b)
-    m = gpt2_mlp(m_ln, w1, b1, w2, b2, n, simd)
+    # P6 GĐ8 (2026-11-08): dung fused addmm+gelu (1 ATen call, nhu
+    # §0.103) thay chain tach roi (~+625ms @seq1024 regression);
+    # LUU output gelu `_save_a` cho bwd. inner (pre-gelu) KHONG luu
+    # trong saves; bwd recompute inner bang 1 GEMM BLAS.
+    _save_a = t_zeros([n, 4 * h])
+    _ad = _save_a.data
+    _mld = m_ln.data
+    _w1d = w1.data
+    _b1d = b1.data
+    _il = onednn_linear_bias_gelu(_mld, _w1d, _b1d, _ad, n, h, 4 * h)
+    if _il == 0:
+        m = gpt2_linear(_save_a, w2, b2, n, 4 * h, h, simd)
+    else:
+        # fallback: duong gpt2_linear + gelu nguyen van (bit giong fwd goc)
+        _inn2 = gpt2_linear(m_ln, w1, b1, n, h, 4 * h, simd)
+        _gf2 = _gelu_fwd_par(_inn2.data, _ad, n * 4 * h, simd)
+        m = gpt2_linear(_save_a, w2, b2, n, 4 * h, h, simd)
     out = t_zeros([n, h])
     _rl = r.data
     _ml = m.data
@@ -605,6 +621,7 @@ def gpt2_block_saved(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
     res.append(r)
     res.append(a_ln)
     res.append(m_ln)
+    res.append(_save_a)
     return res
 
 # ---- Full forward: embed -> N block -> ln_f -> LM head (tie wte) ----------
@@ -662,6 +679,7 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
     rsin = []
     ains = []
     msin = []
+    adIns = []
     for i in range(NLayers):
         xins.append(x)
         rb = gpt2_block_saved(x, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
@@ -670,6 +688,7 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
         rsin.append(rb[1])
         ains.append(rb[2])
         msin.append(rb[3])
+        adIns.append(rb[4])
     xf_in = x
     xf = gpt2_layernorm(x, lnf_g, lnf_b)
     if simd == 1:
@@ -697,6 +716,8 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
         out.append(ains[i])
     for i in range(NLayers):
         out.append(msin[i])
+    for i in range(NLayers):
+        out.append(adIns[i])
     return out
 
 # ==== P6 GĐ4 (2026-10-21): gpt2_loss PARALLEL 12 WORKER theo ROW ===========
@@ -1679,62 +1700,26 @@ def _dwte_copy_worker(j: "_DwteCopyJob") -> 'i64':
 def gpt2_mlp_bwd(x: "Tensor", w1: "Tensor", b1: "Tensor",
                  w2: "Tensor", b2: "Tensor", n: 'i64', gout: "Tensor", simd: 'i32' = 0,
                  gflat: 'list[f32]' = None, o_w1: "i64" = -1, o_b1: "i64" = -1,
-                 o_w2: "i64" = -1, o_b2: "i64" = -1) -> 'list[Tensor]':
+                 o_w2: "i64" = -1, o_b2: "i64" = -1,
+                 save_inner: "Tensor" = None, save_a: "Tensor" = None) -> 'list[Tensor]':
     h = HiddenSize
     ih = 4 * h
-    inner = gpt2_linear(x, w1, b1, n, h, ih, simd)
-    a = t_zeros([n * ih])
-    # P6 GĐ4: gelu recompute parallel (tuong tu fwd — vao a.data rieng)
-    gf = _gelu_fwd_par(inner.data, a.data, n * ih, simd)
-    if simd != 1:
-        r2 = gpt2_linear_bwd(a, w2, gout, n, ih, h, simd, gflat, o_w2, o_b2)
-        d_inner = op_gelu_erf_bwd(inner, r2[0])
-        r1 = gpt2_linear_bwd(x, w1, d_inner, n, h, ih, simd, gflat, o_w1, o_b1)
-        return [r1[0], r1[1], r1[2], r2[1], r2[2]]
-    # duong simd==1: tach r2 — dx xong -> spawn geluB worker, main chay dw2
-    # DONG THOI (probe BP[2]: 266 -> 187 ms, maxdiff 0.0)
-    dx2 = smm_dot(gout, w2, n, ih, h)
-    outd = t_zeros([n * ih])
-    hb = thread_spawn(_mlp_gelu_one, _MlpGJob(inner.data, dx2.data, outd.data, n * ih))
-    # YEU CAU #10 Ask A: native linear_dw_fused cho dw2 (thay smm_fwd_at +
-    # vong copy dw2 -> gflat). rc != 0 -> fallback duong cu NGUYEN VAN.
-    dw2 = t_zeros([0])
-    l10m = -1
-    if o_w2 >= 0:
-        _a10 = a.data
-        _gn10 = gout.data
-        _gf10 = gflat
-        l10m = linear_dw_fused(_a10, _gn10, _gf10, o_w2, n, ih, h)
-        if l10m != 0:
-            l10m = linear_dw_at_fused(_a10, _gn10, _gf10, o_w2, n, ih, h, 0)
-    if l10m != 0:
-        dw2 = smm_fwd_at(a, gout, ih, h, n)
-    rj = thread_join(hb)
-    # db2 — copy NGUYEN VAN gpt2_linear_bwd (dboff path) — cung thu tu
-    if o_b2 >= 0:
-        for i in range(n):
-            base = i * h
-            for o in range(h):
-                gflat[o_b2 + o] = gflat[o_b2 + o] + gout.data[base + o]
-        rdb = t_zeros([0])
+    if save_a != None:
+        a = save_a
+        if save_inner != None:
+            inner = save_inner
+        else:
+            # only gelu output luu -> recompute inner (1 GEMM BLAS,
+            # ~15ms @seq1024), KHONG recompute gelu (~47ms).
+            inner = gpt2_linear(x, w1, b1, n, h, ih, simd)
     else:
-        db2 = t_zeros([h])
-        for i in range(n):
-            base = i * h
-            for o in range(h):
-                db2.data[o] = db2.data[o] + gout.data[base + o]
-        rdb = db2
-    # dw2 -> gflat (goff path) — copy NGUYEN VAN
-    if o_w2 >= 0:
-        if l10m != 0:
-            for k in range(ih * h):
-                gflat[o_w2 + k] = gflat[o_w2 + k] + dw2.data[k]
-        rdw = t_zeros([0])
-    else:
-        rdw = dw2
-    d_inner = t_new(outd.data, [n, ih])
+        inner = gpt2_linear(x, w1, b1, n, h, ih, simd)
+        a = t_zeros([n * ih])
+        gf = _gelu_fwd_par(inner.data, a.data, n * ih, simd)
+    r2 = gpt2_linear_bwd(a, w2, gout, n, ih, h, simd, gflat, o_w2, o_b2)
+    d_inner = op_gelu_erf_bwd(inner, r2[0])
     r1 = gpt2_linear_bwd(x, w1, d_inner, n, h, ih, simd, gflat, o_w1, o_b1)
-    return [r1[0], r1[1], r1[2], rdw, rdb]
+    return [r1[0], r1[1], r1[2], r2[1], r2[2]]
 
 # [dx, dln1_g, dln1_b, dw_qkv, db_qkv, dw_proj, db_proj,
 #  dln2_g, dln2_b, dw1, db1, dw2, db2]
@@ -1745,7 +1730,8 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
                    gout: "Tensor", simd: 'i32' = 0,
                    gflat: 'list[f32]' = None, offs: 'list[i64]' = None,
                    save_r: "Tensor" = None, save_a: "Tensor" = None,
-                   save_m: "Tensor" = None) -> 'list[Tensor]':
+                   save_m: "Tensor" = None, save_inner: "Tensor" = None,
+                   save_a_gelu: "Tensor" = None) -> 'list[Tensor]':
     # offs = 12 offset flat theo layout layer (0 ln1_g 1 ln1_b 2 w_qkv
     # 3 b_qkv 4 w_proj 5 b_proj 6 ln2_g 7 ln2_b 8 w1 9 b1 10 w2 11 b2);
     # rong = off (duong cu, parity nguyen ven).
@@ -1799,7 +1785,7 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
     if save_m == None:
         m = gpt2_layernorm(r, ln2_g, ln2_b)
     # out = r + mlp(m)
-    rmlp = gpt2_mlp_bwd(m, w1, b1, w2, b2, n, gout, simd, gflat, o_w1, o_b1, o_w2, o_b2)
+    rmlp = gpt2_mlp_bwd(m, w1, b1, w2, b2, n, gout, simd, gflat, o_w1, o_b1, o_w2, o_b2, save_inner, save_a_gelu)
     # P5.9 (2026-11-05): dr = gout + drl2 - mutate gout in-place, bo t_zeros +
     # copy loop. gout khong con duoc dung sau mlp_bwd -> an toan. dx = drl1 + gout
     # mutate drl1, bo t_zeros + copy loop. Cung thu tu cong -> bit-exact.
@@ -2015,10 +2001,20 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
                                 ln2_g[li], ln2_b[li],
                                 w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo)
         else:
-            # P6 GĐ7: saves format 3+4N (P5.5/P5.6: logits, xf, xf_in, xins, rs
-            # + ains, msin) -> truyen them dau vao LN, bo recompute 24 goi.
-            # Saves cu (3+2N hoac 3+3N) van doc duoc (guard len).
-            if len(saves) >= 3 + 4 * NLayers:
+            # P6 GĐ8 (2026-11-08): saves format 3+5N (logits, xf, xf_in, xins, rs
+            # + ains, msin + 1 gelu output `a` per layer) -> bo gelu recompute,
+            # inner recompute 1 GEMM BLAS (~15ms/layer). Saves cu (3+4N) doc duoc.
+            if len(saves) >= 3 + 5 * NLayers:
+                rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
+                                    w_qkv[li], b_qkv[li], w_proj[li], b_proj[li],
+                                    ln2_g[li], ln2_b[li],
+                                    w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo,
+                                    saves[3 + NLayers + li],
+                                    saves[3 + 2 * NLayers + li],
+                                    saves[3 + 3 * NLayers + li],
+                                    None,
+                                    saves[3 + 4 * NLayers + li])
+            elif len(saves) >= 3 + 4 * NLayers:
                 rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
                                     w_qkv[li], b_qkv[li], w_proj[li], b_proj[li],
                                     ln2_g[li], ln2_b[li],
