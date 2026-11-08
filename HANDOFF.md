@@ -4212,6 +4212,14 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.111 D5-3 segment I — native embed kernel (2026-11-08)
+Native `TkvStep124Embed(ids, pos, wte, wpe, out, n, h)` in `tkv_step124.c`:
+  out[t, j] = wte[ids[t], j] + wpe[pos[t], j]
+AVX2 8×f32 unroll, scalar tail; bit-exact với phép f32 add của đường .tkv.
+Độc lập, chưa wire production (.tkv chỉ gọi qua `torch_step124` no-op; path
+native-embed sẽ được wire ở D5-3 sub-step sau khi .tkv caller đã build+gate xanh từng bước).
+Verify: probe `test_tkv_step124.exe` (AVX2) — OK cho 3×8 input, bit-equal với
+computation cùng phép; runtime `attn_bwd rc` từ probe trước OK.
 ## §0.110 D5-2 — tkv_step124.c + ATen bridge probe (2026-11-08)
 Native trampoline skeleton tot nghia:
 - `tools/simd_native/tkv_step124.c` lazy-load `runtime/tkv_torch_fused.dll`
