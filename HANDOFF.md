@@ -4212,6 +4212,28 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.109 D5-0 — profile + inventory native exports (2026-11-08)
+Milestone D5-0 xong (chua commit gi ve code):
+
+Profile dotnet-trace seq1024 mode0 (`out/d5_s1024.speedscope.json`, uncommitted):
+- ~99.5% samples => UNMANAGED_CODE_TIME (native GEMM/oneDNN) — D5 cai thien
+  managed glue it hon 200-300 ms/step, khong dong duoc gap PyTorch (PyTorch cung
+  native).
+- `TKVApp.main` 14.7 ms self; `_gi_noise` 5.1 ms (warmup RNG, khong steady-state).
+- `TKVApp.Main` 14.7 ms; CPU_TIME 10.0 ms; Thread (11024) 6.8 ms x nhieu worker.
+=> Khong co diem nong managed dot bien; D5 khong phai cuu tinh toc do.
+
+Native exports (runtime/):
+- `tkv_simd_native.dll` — 62 exports: AdamwStepF32, AttentionBwdFused/Fwd/Lse,
+  FlashAttentionFwd/Bwd, LayernormFwd/BwdFused, SoftmaxCausalFwd/Bwd,
+  BiasAddRows/BiasGrad, GeluErfFwd/Bwd, LinearDw/Dx/AtFused, EmbedBwdFused,
+  lmhead_bwd_fused, SgemmF32/F64/Packed*, TkvTorchLayerNormFwd/Bwd, TkvTorchLinear*,
+  TkvTorchMmT, TkvTorchSdpa, TkvTorchAttentionBwd, ...
+- `tkv_torch_fused.dll` — 8 exports (TkvTorch*): LinearFwd/GeluFwd/BwdFwd,
+  LayerNormFwd/Bwd, MmT, Sdpa, AttentionBwd.
+
+D5-1 (IL builtin `torch_step124` no-op -> i64) chua lam.
+
 ## §0.108 ZerosListF32 — t_zeros expand sớm, ~2s bench copy bỏ (2026-11-08)
 Nguyên nhân từ profile (`dotnet-trace`): UNMANAGED ≈99.6% samples (native GEMM),
 `TKVApp.t_zeros` là điểm nóng managed nhất (~2.6 s CPU / block noise fill).
