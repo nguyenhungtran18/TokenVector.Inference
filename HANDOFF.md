@@ -4212,6 +4212,40 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.103 Wire bwd path through oneDNN (onednn_linear_bwd + onednn_linear_bias)
+User: "làm bwb giống với fwd" — extend bridge to bwd like the MLP fwd wiring in §0.102.
+New IL builtins + wrappers: `onednn_linear_bias` (y = x·w + b via ATen addmm, plain)
+and `onednn_linear_bwd` (dx = gy·wᵀ, dw = xᵀ·gy, db = Σgy via ATen mm_out + sum_out).
+Compiler file `simd_feature.tkv`: added `_pt_onednn_linear_bias_wrapper`/`OnednnLinearBiasM`,
+`_pt_onednn_linear_bwd_wrapper`/`OnednnLinearBwdM`; `compile_onednn_linear_bias`/`_bwd`;
+`register_expr_builtin` for both; pinvoke `TkvTorchLinearFwdNative` + `TkvTorchLinearBwdFwdNative`.
+Native bridge `tkv_simd_native.c`: lazy `tkv_torch_fused_load()` (shared from §0.102);
+export `TkvTorchLinearFwd` + `TkvTorchLinearBwdFwd`; fallback to GELU-fwd typed bridge.
+`.tkv` wiring (both copies):
+- `gpt2_linear` simd==1: rc==0 → use `onednn_linear_bias` result, else fallback to
+  `smm_fwd + bias_add_rows` (giữ nguyên NGUYÊN VĂN).
+- `gpt2_linear_bwd` simd==1: rc==0 → dx/dw/db từ `onednn_linear_bwd`; rc!=0 →
+  fallback chuỗi `linear_dx_fused`/`linear_dw_fused` NGUYÊN VĂN.
+IL_IDENTICAL selfhost success:
+```
+gop 133 file
+g1 xong
+g2 xong
+IL_IDENTICAL
+```
+Numbers (best-of-n, máy này):
+| seq  | fwd §0.102 | fwd §0.103 | delta |
+|------|-----------|------------|-------|
+| 8    | 579        | 406–422    | −160  |
+| 256  | 922        | 719–750    | −200  |
+| 1024 | 2515       | 2188–2234  | −300  |
+| mode1 full-step | 9312–9937 | 9218–9312 | (noise) |
+- loss mode0 EXACT 3 seq: `10.572291 / 10.756927 / 10.760399` — giữ nguyên.
+- gate 9/10 (gap_tests pre-existing); trainer 15/15; selfhost IL_IDENTICAL.
+Caveats portability:
+- `tkv_torch_fused.dll` cần `torch_cpu.dll`, `c10.dll`, `libiomp5md.dll`, `uv.dll`, `VCRUNTIME140_THREADS.dll` (không commit).
+- Optional absolute path env TKV_TORCH_PATH.
+- Noise machine (chrome running) may skew measurements ±600 ms; loss EXACT unaffected.
 ## §0.102 ATen/oneDNN bridge (tkv_torch_fused.dll) — WIRED + verify
 Buil dung oneDNN của torch thông qua ATen dispatch (user OK).
 **Kiến trúc:** `torch_fused.cpp` (C++20) export `TkvTorchLinearGeluFwd`/

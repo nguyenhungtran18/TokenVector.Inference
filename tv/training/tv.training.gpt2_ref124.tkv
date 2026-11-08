@@ -92,6 +92,15 @@ def gpt2_linear(x: "Tensor", w: "Tensor", b: "Tensor", n: 'i64', in_d: 'i64', ou
     if simd == 1:
         # duong SIMD: y[i,o] = sum_k x[i,k]*w[k,o] — smm_fwd chuan
         # (w [in_d hang][out_d cot] dung ngay layout B [k][n]), roi cong bias
+        ql2 = x.data
+        wl2 = w.data
+        bl2 = b.data
+        y2 = t_zeros([n, out_d])
+        yd2 = y2.data
+        il2 = onednn_linear_bias(ql2, wl2, bl2, yd2, n, in_d, out_d)
+        if il2 == 0:
+            y = y2
+            return y
         y = smm_fwd(x, w, n, out_d, in_d)
         yd = y.data
         lbd = b.data
@@ -930,8 +939,37 @@ def gpt2_linear_bwd(x: "Tensor", w: "Tensor", gy: "Tensor", n: 'i64', in_d: 'i64
                     simd: 'i32' = 0, gflat: 'list[f32]' = None, goff: 'i64' = -1,
                     dboff: 'i64' = -1) -> 'list[Tensor]':
     if simd == 1:
-        # dx[i,k] = sum_o gy[i,o]*w[k,o] -> smm_dot(gy, w): B=w luu [in_d hang]
-        # [out_d cot] dung ngay bo tri [n hang][k giam]
+        # oneDNN bridge (rc==0 -> fallback duong duoi day)
+        _xd_x = x.data
+        _xd_w = w.data
+        _xd_gy = gy.data
+        xd_dx = t_zeros([n, in_d])
+        xd_dw = t_zeros([in_d, out_d])
+        xd_db = t_zeros([out_d])
+        _dxdp = xd_dx.data
+        _dwdp = xd_dw.data
+        _dbdp = xd_db.data
+        rlo = onednn_linear_bwd(_xd_x, _xd_gy, _xd_w, _dxdp, _dwdp, _dbdp, n, in_d, out_d)
+        if rlo == 0:
+            if goff >= 0:
+                wl4 = xd_dw.data
+                for k in range(in_d * out_d):
+                    gflat[goff + k] = gflat[goff + k] + wl4[k]
+            if dboff >= 0:
+                bl4 = xd_db.data
+                for o in range(out_d):
+                    gflat[dboff + o] = gflat[dboff + o] + bl4[o]
+            if goff < 0:
+                dw = xd_dw
+            else:
+                dw = t_zeros([0])
+            if dboff < 0:
+                db = xd_db
+            else:
+                db = t_zeros([0])
+            return [xd_dx, dw, db]
+        # Fallback duong cu NGUYEN VAN duoi day.
+        dx = t_zeros([n, in_d])
         # YEU CAU #10 Ask B (2026-11-01): native `linear_dx_fused` (1 entry) thay
         # `smm_dot` — SgemmFull tinh DAY DU 256 hang nhung chi hang < m duoc cong
         # vao dx -> 248/256 hang thua = 32x phep nhan. Probe _am6: bit_bad=0 tren
