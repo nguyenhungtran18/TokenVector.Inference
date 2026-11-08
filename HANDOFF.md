@@ -4212,6 +4212,14 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.112 D5-3 segment I — native embed wired + EXACT verify (2026-11-08)
+Native `TkvStep124Embed` (AVX2 unroll f32) gọi từ `.tkv` qua IL builtin `torch_step124_embed`:
+- IL wrapper `TorchStep124EmbedM` + pinvoke `TkvStep124Embed` (`.vt step124.dll`); bit-exact.
+- `.tkv` `gpt2_embed` cả 2 bản copies: fast path `torch_step124_embed(_ids, _pos, _wd, _pd, _od, n, HiddenSize)`; `rc != 0` → fallback nguyên văn.
+- Sửa 3 token IL syntax (`ldarg.4`/`ldloc.4` bare → `.s 4`); vong.exe IL_IDENTICAL.
+- Bench seq1024/256/8 loss mode0 EXACT: `10.760399 / 10.756927 / 10.572291` giữ nguyên.
+- mode1 loss 13.442929 (drift 1.4e-05 so với baseline cũ 13.442915 — đây là drift từ §0.105 LN-bwd ATen chuyển cross-product bit pattern; user chọn bỏ contrac, drift chấp nhận được; gate_f32.sh không kiểm tra mode1).
+- fwd seq1024 ~2109 ms; bwd ~4344 ms (noise ±3%); trainer 15/15; gate 9/10.
 ## §0.111 D5-3 segment I — native embed kernel (2026-11-08)
 Native `TkvStep124Embed(ids, pos, wte, wpe, out, n, h)` in `tkv_step124.c`:
   out[t, j] = wte[ids[t], j] + wpe[pos[t], j]

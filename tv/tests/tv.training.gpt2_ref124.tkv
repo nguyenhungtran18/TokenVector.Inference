@@ -79,13 +79,24 @@ def gpt2_layernorm(x: "Tensor", g: "Tensor", b: "Tensor") -> "Tensor":
 # ---- Embedding: wte + wpe -------------------------------------------------
 def gpt2_embed(ids: 'list[i64]', pos: 'list[i64]', wte: "Tensor", wpe: "Tensor") -> "Tensor":
     n = len(ids)
+    # D5-3: native AVX2 embed (ids+pos -> out) bit-exact voi duong .tkv.
+    # rc != 0 -> fallback duong interpreted nguyen van.
+    out = t_zeros([n, HiddenSize])
+    _ids = ids
+    _pos = pos
+    _wd = wte.data
+    _pd = wpe.data
+    _od = out.data
+    _rc = torch_step124_embed(_ids, _pos, _wd, _pd, _od, n, HiddenSize)
+    if _rc == 0:
+        return out
+    # fallback: duong interpreted nguyen van
     tok = op_embed_fwd(wte, ids, HiddenSize)
     p = op_embed_fwd(wpe, pos, HiddenSize)
-    out = t_zeros([n, HiddenSize])
-    _td = tok.data
-    _pd = p.data
-    _od = out.data
-    simd_add(_td, _pd, _od)
+    td = tok.data
+    pd2 = p.data
+    od2 = out.data
+    simd_add(td, pd2, od2)
     return out
 
 # ---- Linear (HF Conv1D: weight [in, out]) ---------------------------------
