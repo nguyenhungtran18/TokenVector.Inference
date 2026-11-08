@@ -82,9 +82,10 @@ def gpt2_embed(ids: 'list[i64]', pos: 'list[i64]', wte: "Tensor", wpe: "Tensor")
     tok = op_embed_fwd(wte, ids, HiddenSize)
     p = op_embed_fwd(wpe, pos, HiddenSize)
     out = t_zeros([n, HiddenSize])
-    for i in range(n):
-        for j in range(HiddenSize):
-            out.data[i * HiddenSize + j] = tok.data[i * HiddenSize + j] + p.data[i * HiddenSize + j]
+    _td = tok.data
+    _pd = p.data
+    _od = out.data
+    simd_add(_td, _pd, _od)
     return out
 
 # ---- Linear (HF Conv1D: weight [in, out]) ---------------------------------
