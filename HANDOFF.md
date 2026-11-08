@@ -4212,6 +4212,21 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.108 ZerosListF32 — t_zeros expand sớm, ~2s bench copy bỏ (2026-11-08)
+Nguyên nhân từ profile (`dotnet-trace`): UNMANAGED ≈99.6% samples (native GEMM),
+`TKVApp.t_zeros` là điểm nóng managed nhất (~2.6 s CPU / block noise fill).
+
+Tối ưu: `t_zeros` không còn `seed * n` (RepL rank-1 fill per-Add); thay bằng
+builtin `zeros_list(n) -> list[f32]` → `TkvSlice::ZeroListF32(int32)` sinh IL
+bưu kiện thuần — `newarr float32` loop `stelem.r4` 0.0f rồi wrap
+`.ctor(IEnumerable`1<!0>)`. Ổn định .NET 10 khi dùng IL token `IEnumerable`1<!0>`;
+lỗi CLR `MissingMethodException` nếu viết `<float32>` explicit.
+Cần có `_ensure_class_slice(ctx)` trong `compile_zeros_list` để always emit TkvSlice.
+Cả 3 bản `tensor.tkv` chuyển từ `seed * n` sang `big = zeros_list(n)`.
+
+Kết quả: gate 9/10 (gap_tests pre-existing); trainer 15/15; loss EXACT 3 seq.
+seq1024 mode0 1-step: `fwd=2031/2110 ms, bwd=4297/4390 ms, loss=10.760399`.
+seq256: `fwd=454, bwd=2078, loss=10.756927`; seq8: `fwd=62, bwd=1031, loss=10.572291`.
 ## §0.107 Route bwd hot ops qua ATen — attention bwd bit-exact, bwd 5750→4515 ms (2026-11-08)
 Tiếp mục tiêu "giống PyTorch khắp nơi" (từ chối hop-dong-số-học 2026-11-08): fwd bit-exact đã có
 (§0.105/0.106, SIMD logits 0.0); giờ route **backward** qua ATen.
