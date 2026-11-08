@@ -1350,6 +1350,25 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
     ctxT = t_zeros([n, h])
     dctxT = t_zeros([n, h])
     if simd == 1:
+        # P6 G11 (s.0.107): ATen full-block bwd (addmm/sdpa/addmm backward)
+        # qua autograd — BIT-IDENTICAL voi backward cua HF GPT2.
+        # rc != 0 -> fallback duong cu NGUYEN VAN.
+        # gflat rong (caller khong truyen) -> runtime class List[object],
+        # IL wrapper castclass float32[] crash -> chi dung ATen khi gflat co data.
+        if gflat != None:
+            if len(gflat) > 0:
+                _axd = x.data
+                _agd = gout.data
+                _awq = w_qkv.data
+                _abq = b_qkv.data
+                _awp = w_proj.data
+                _abp = b_proj.data
+                dx = t_zeros([n, h])
+                _adx = dx.data
+                _aat = torch_attention_bwd(_axd, _agd, _awq, _abq, _awp, _abp, _adx, gflat, n, h, NHeads, hd, o_qkv, o_bqkv, o_proj, o_bproj)
+                if _aat == 0:
+                    return [dx, t_zeros([0]), t_zeros([0]), t_zeros([0]), t_zeros([0])]
+        # fallback: duong cu nguyen van
         # dctx[t,r] = sum_o gout[t,o]*w_proj[r,o] -> smm_dot (thay vong n*h^2)
         dctxT = smm_dot(gout, w_proj, n, h, h)
         # ---- P5.3 (perf-plan): dp/ds/dqkv theo TUNG HEAD bang GEMM -------

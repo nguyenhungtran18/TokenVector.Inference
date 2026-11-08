@@ -4212,6 +4212,38 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.107 Route bwd hot ops qua ATen — attention bwd bit-exact, bwd 5750→4515 ms (2026-11-08)
+Tiếp mục tiêu "giống PyTorch khắp nơi" (từ chối hop-dong-số-học 2026-11-08): fwd bit-exact đã có
+(§0.105/0.106, SIMD logits 0.0); giờ route **backward** qua ATen.
+Cầu nối `tkv_torch_fused.dll` thêm 2 export (rebuild /std:c++20, deploy runtime + out):
+- `TkvTorchLayerNormBwd` (-> autograd `at::layer_norm(...).backward()`) → `LayernormBwdFused` gọi
+  **ATen trước** (cùng kernel HF backward), fallback nguyên văn đường f64 nếu rc≠0.
+- `TkvTorchAttentionBwd` (toàn-block: `addmm`->`sdpa`->`reshape contiguous`->`addmm`->`.backward(gy)`)
+  — cùng graph HF GPT2 → dQ/dK/dV = bit-identical; ghi dw_qkv/db_qkv/dw_proj/db_proj THẲNG
+  vào gflat tại offsets (caller-prezero, mỗi offset ghi 1 lần). rc<0 -> fallback nguyên văn.
+IL: pinvoke `TkvTorchAttentionBwdNative` trong **dp chunk** + wrapper `TorchAttentionBwdM`
+(float32 x List<float32>, 16 tham số), `compile_torch_attention_bwd`, builtin `torch_attention_bwd`
+(file_io.tkv set); selfhost `IL_IDENTICAL`. `.tkv` (cả 2 bản): fast-path ở đầu `if simd == 1:`
+của `gpt2_attention_bwd` — **chỉ kích hoạt khi gflat thật sự có dữ liệu** (AdamW flat buffer);
+gflat trống (List[object] khi caller truyền None) -> runtime cast crash — đã chặn tường minh;
+fallback nguyên văn (test gates dùng simd=1 + gflat=None nên không đụng native mới).
+Sự cố chặn và fix:
+- `ldarg.4`/`ldloc...` bare-toàn số trong wrapper mới -> ilasm "syntax error at token 'ldarg'"
+  (chỉ ldarg.0..3 hợp lệ bare; ≥4 phải `.s`); sửa 30 token trong vùng wrapper, rebuild vong.exe OK.
+- dist compiler stale sau edit IL -> `vong.exe` rebuild (IL_IDENTICAL) mới dùng được builtin.
+- Probe `tv/tests/_p6g10.tkv`/`_v3`: xác nhận `attn_bwd rc=0`; đối chiếu Python bitwise (torch
+  autograd same graph): dx/dw_qkv/db_qkv/dw_proj/db_proj max|diff| ≤ 1.5e-08 (~1 ulp),
+  mismatch ~1e-3 element (sdpa dispatch cùng họ, không bit-exact tuyệt đối — cần ghi nhận).
+Kết quả bench (seq: fwd §0.106 -> §0.107; bwd §0.106 -> §0.107):
+| seq  | fwd          | bwd             | loss |
+|------|--------------|-----------------|------|
+| 8    | 63           | 1500  -> 1047   | 10.572291 EXACT |
+| 256  | 469          | 2563  -> 1937   | 10.756927 EXACT |
+| 1024 | 2031 -> 1907 | 5750  -> 4515   | 10.760399 EXACT |
+gate 9/10 (gap_tests exit=82 pre-existing); trainer 15/15; mode0 3 seq EXACT (in-print);
+torch_attention_bwd probe bit_mismatch ~1.0e-3 element nhưng max_abs ≤ 1.5e-08 (f32 1 ulp) —
+KHÔNG thể xem là bit-exact; chấp nhận như "cùng họ kernel".
+
 ## §0.105+0.106 Route fwd hot ops qua ATen — SIMD logits vs PyTorch = 0.0 (BIT-EXACT) (2026-11-08)
 User: bỏ hợp đồng số học; làm fwd giống PyTorch. Giải pháp đã đo: mọi op nóng của
 fwd route qua **chính kernel ATen của PyTorch** (bridge `tkv_torch_fused.dll`,
