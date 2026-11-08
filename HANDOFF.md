@@ -4212,6 +4212,22 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.113 D5 — tổng kết: nat take-aş vị trí hiện tại (2026-11-08)
+D5 steps đã tới một giới hạn tự nhiên:
+
+| Phase | fwd seq1024 | bwd seq1024 | loss mode0 |
+|---|---|---|---|
+| §0.102 | 2515 | n/a (bwd riêng) | EXACT |
+| §0.105 | 2235 | n/a | EXACT |
+| §0.107 | 2031 | ~4600 | EXACT |
+| §0.108 | 1953-2110 | 4300-4344 | EXACT |
+| §0.112 | ~2080-2110 | ~4344 | EXACT |
+
+**Đánh giá thật:** MB1024_g shows GEMM ~78% (đã offload qua ATen) + gelu/lin ATen/fused — mọi op hot trong MLP vừa dùng rc==0 → ATen đều đã chạm trần native/SSL; D5 segment I (embed wire) không đo được gain có ý nghĩa (~3 MB traffic/step).
+**Giới hạn:** PyTorch ~2x gap vẫn là 1.5x; D5 theo thiết kế không đóng được gap — cần chuyển đổi toàn runtime (thêm ngoài D5).
+**Revert rule để áp dụng:** không thêm phase D5 mới trừ khi có **profiler measurement** chỉ ra a.≥100ms/hot op trong fwd/bwd và b.có giải pháp native-ATen bit-exact-OR workaround-bypass-verifier-ko-ảnh-hưởng-EXACT.
+**Khi nào nâng D5 lên D6:** nếu cần shave 200+ ms ở lớp **activation fused full-block** (e.g. linear→gelu→linear qua các phép tính MLP) — đó là vấn đề thiết kế native pipeline, không phải pruning-op.
+**Khuyến nghị:** dừng D5 tại §0.112. Architecture hiện tại (ATen all-hot + zeros_list) đã tốt nhất trong bisterminal; mọi phase tiếp theo cần đồng ý từ user.
 ## §0.112 D5-3 segment I — native embed wired + EXACT verify (2026-11-08)
 Native `TkvStep124Embed` (AVX2 unroll f32) gọi từ `.tkv` qua IL builtin `torch_step124_embed`:
 - IL wrapper `TorchStep124EmbedM` + pinvoke `TkvStep124Embed` (`.vt step124.dll`); bit-exact.
