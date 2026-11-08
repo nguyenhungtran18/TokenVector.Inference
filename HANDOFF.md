@@ -4212,6 +4212,33 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.114 Trạng thái 2026-11-08 — dừng tại D5, ổn định (2026-11-08)
+D5 đã đến điểm tự nhiên:
+- gate 9/10 (chỉ `gap_tests` exit=82 pre-existing); trainer 15/15; selfhost IL_IDENTICAL
+- loss EXACT 3 seq: `10.572291 / 10.756927 / 10.760399`
+- fwd seq1024 B: 1922–1953 ms (best-of-3; nhiễu);
+  bwd seq1024 B: 4078–4812 ms (nhiễu máy; nhìn chung tốt hơn so với 4518 baseline §0.107)
+Tính cách các thành phần hiện (MB1024_g seq1024):
+- lin_fwd (ATen) 31 ms ×12 ≈ 372 ms
+- gelu_fwd (native) 47 ms ×12 ≈ 565 ms (qua `gelu_erf_bwd` IL builtin → ATen/vector)
+- linear_dw_fused 62 ms ×12 ≈ 744 ms
+- LIN_bwd 62 ms ×12 ≈ 744 ms
+- tổng MLP bwd ~218 ms/layer ×12 ≈ 2628 ms
+- (Attention bwd đang ~1050 ms ATen; LN fwd/bwd ATen; CE M6 native; embed native)
+
+**Kết luận:** với mọi op GEMM chuyển qua ATen + mọi element-wise hot path đã native
+bên 101, runtime này gần trần biên độ WIN của kiến trúc hiện tại; mọi op phát sinh
+thêm đều có thể chỉ đem ~5–10 ms/cost, không đủ cho phase mới.
+
+**Không thể giảm thiểu hơn mà không:**
+1. Biển đổi sang pure-AOT native build (LLVM/MLIR) — scope 1 dự án
+2. D6 full-block MLP fused GEMM+bias+GELU (dự đoán gain ~90–120 ms/layer → ~1100 ms;
+   nhân lực cần thiết + có thể phá vỡ loss EXACT cần verify nghiêm ngặt)
+3. Chờ phần cứng nhanh hơn (hiện tại ~ 6000 ms).
+
+**Khuyến nghị:** giữ nguyên cốc hiện tại; không commit thêm D6 cho đến khi xác định
+rõ vị trí hành vi runtime vs PyTorch thực sự; current best: 2× PyTorch nhưng ổn định.
+
 ## §0.113 D5 — tổng kết: nat take-aş vị trí hiện tại (2026-11-08)
 D5 steps đã tới một giới hạn tự nhiên:
 
