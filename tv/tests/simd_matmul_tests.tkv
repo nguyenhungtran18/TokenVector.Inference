@@ -307,6 +307,10 @@ def main() -> 'i32':
     cases = cases + 1
     fails = fails + report("gpt2_loss_m: simd vs scalar", r[1], TOL_LOSS)
 
+    # s.0.105 (2026-11-08): SIMD path goi ATen (LN/SDPA/mm_t) - drift
+    # so voi scalar (interpreted + f64 LN) sau 3 step AdamW do THAT =
+    # 2.53e-04; tol 0.00035 de gate phan anh pyTorch-vs-scalar sau
+    # khi ATen doi tung kernel thay vi simd-vs-scalar cu.
     # ---- [8] train 3 buoc --------------------------------------------------
     npar = gpt2_n_param(ps)
     groups = gpt2_group_sizes(ps)
@@ -322,7 +326,8 @@ def main() -> 'i32':
     fails = fails + report("train 3 buoc — loss buoc 1: simd vs scalar", _abs(la[0] - lb[0]), TOL)
     drift = _abs(la[2] - lb[2])
     cases = cases + 1
-    fails = fails + report("train 3 buoc — loss buoc 3 (tich luy AdamW)", drift, 0.00015)
+    fails = fails + report("train 3 buoc - loss buoc 3 (tich luy AdamW)", drift, 0.00035)
+
 
     # ---- [9] toc do gpt2_linear 256x768 -> 2304 ----------------------------
     xb = _fill(256, 768, 7)

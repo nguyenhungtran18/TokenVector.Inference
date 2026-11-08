@@ -236,6 +236,19 @@ def gpt2_attention(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
     ctxT = t_zeros([n, h])
     inv = 1.0 / sqrt(float(hd))
     if simd == 1:
+        # P6 G9 (s.0.105): ATen SDPA (same kernel HF gpt2 sdpa) + ATen addmm proj;
+        # rc != 0 -> fallback duong flash cu nguyen van.
+        _qvd = qkv.data
+        _ct0 = ctxT.data
+        _sad = torch_sdpa_fwd(_qvd, _ct0, n, NHeads, hd)
+        if _sad == 0:
+            _wpd0 = w_proj.data
+            _bpd0 = b_proj.data
+            _upd0 = out.data
+            _rpl0 = onednn_linear_bias(_ct0, _wpd0, _bpd0, _upd0, n, h, h)
+            if _rpl0 == 0:
+                return out
+        # fallback: duong flash cu nguyen van
         # P6 GĐ2 (2026-10-21): SONG SONG THEO HEAD — attention FWD.
         # Giong P6 GĐ1 (gpt2_attention_bwd): worker rieng + main merge (BG2:
         # ghi list RIENG 5.2x vs list CHUNG 1.24x); moi head ghi vi tri
@@ -644,6 +657,14 @@ def gpt2_forward(ids: 'list[i64]', pos: 'list[i64]',
     x = gpt2_layernorm(x, lnf_g, lnf_b)
     # LM head: tie weight voi wte -> logits = x @ wte^T  (wte [vocab, h])
     if simd == 1:
+        # P6 G9: ATen mm(x, W^T) - bit-identical HF lm_head
+        logits = t_zeros([n, VocabSize])
+        _xd6 = x.data
+        _wt6 = wte.data
+        _ld6 = logits.data
+        _mmr6 = torch_mm_t(_xd6, _wt6, _ld6, n, h, VocabSize)
+        if _mmr6 == 0:
+            return logits
         return smm_dot(x, wte, n, VocabSize, h, sc5)
     logits = t_zeros([n, VocabSize])
     for i in range(n):
@@ -692,7 +713,14 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
     xf_in = x
     xf = gpt2_layernorm(x, lnf_g, lnf_b)
     if simd == 1:
-        logits = smm_dot_pd(xf, wte, n, VocabSize, h, sc5)
+        # P6 G9: ATen mm(x, W^T) - bit-identical HF lm_head
+        _xd5 = xf.data
+        _wt5 = wte.data
+        logits = t_zeros([n, VocabSize])
+        _ld5 = logits.data
+        _mmr5 = torch_mm_t(_xd5, _wt5, _ld5, n, h, VocabSize)
+        if _mmr5 != 0:
+            logits = smm_dot_pd(xf, wte, n, VocabSize, h, sc5)
     else:
         logits = t_zeros([n, VocabSize])
         for i in range(n):
@@ -2224,6 +2252,14 @@ def gpt2_forward_m(ids: 'list[i64]', pos: 'list[i64]', kmask: 'list[i64]',
                          ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i], kmask, simd)
     x = gpt2_layernorm(x, lnf_g, lnf_b)
     if simd == 1:
+        # P6 G9: ATen mm(x, W^T) - bit-identical HF lm_head
+        logits = t_zeros([n, VocabSize])
+        _xd7 = x.data
+        _wt7 = wte.data
+        _ld7 = logits.data
+        _mmr7 = torch_mm_t(_xd7, _wt7, _ld7, n, h, VocabSize)
+        if _mmr7 == 0:
+            return logits
         return smm_dot(x, wte, n, VocabSize, h)
     logits = t_zeros([n, VocabSize])
     for i in range(n):

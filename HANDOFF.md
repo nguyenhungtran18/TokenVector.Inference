@@ -4212,6 +4212,53 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.105+0.106 Route fwd hot ops qua ATen — SIMD logits vs PyTorch = 0.0 (BIT-EXACT) (2026-11-08)
+User: bỏ hợp đồng số học; làm fwd giống PyTorch. Giải pháp đã đo: mọi op nóng của
+fwd route qua **chính kernel ATen của PyTorch** (bridge `tkv_torch_fused.dll`,
+pattern §0.102–0.103) — cùng op + cùng layout + cùng MKL/oneDNN dispatch → bit-identical.
+
+§0.105 (LayerNorm): bridge `TkvTorchLayerNormFwd` → `at::layer_norm` (Welford vectorized
+f32, giống HF `F.layer_norm`); `LayernormFwd(tkv_bwd_ops.c)` gọi ATen trước qua
+`TkvTorchLayerNormFwd` (extern wrapper, eps 1e-6), fallback đường f64 nguyên văn.
+ft fixture: h1 5.5e-07 → 2.24e-08.
+
+§0.106 (SDPA + MmT): bridge thêm
+- `TkvTorchSdpa(qkv, y, n, nheads, hd)` → `at::scaled_dot_product_attention(q,k,v, nullopt, 0.0, /*is_causal=*/true, nullopt)` dạng contiguous [1,H,T,hd] (HF sdpa dùng is_causal=true, scale tự suy ra 1/sqrt(hd); CPU dispatch flash) — output copy interleave per head về y [n,h];
+- `TkvTorchMmT(x, w, y, n, in_d, out_d)` → `at::mm(t_x, t_w.t())` — y hệt op nội bộ của HF `lm_head` (at::linear không bias → at::mm).
+tkv SIMD native wrappers `TkvTorchMmT`/`TkvTorchSdpa` (lazy-load optional, -9 → fallback).
+IL: wrappers `TorchMmTM`/`TorchSdpaM`, compilers `compile_torch_mm_t`/`compile_torch_sdpa_fwd`,
+builtin public `torch_mm_t`/`torch_sdpa_fwd` (file_io `_BUILTIN_LENH_DOC_LAP`), selfhost IL_IDENTICAL.
+.tkv wiring (cả 2 copies):
+- `gpt2_attention` simd==1 fast-path: `torch_sdpa_fwd` (sdpa bits) → `onednn_linear_bias` proj (ATen addmm, giống HF Conv1D = `torch.addmm`); rc != 0 → fallback NGUYÊN VĂN flash/per-head GEMM + smm_fwd proj.
+- LM head logits (3 site): `torch_mm_t`; rc != 0 → fallback smm_dot.
+**Lỗi chunk-pinvoke (đáng nhớ):** pinvoke `TkvTorch*` ban đầu nằm trong chunk `gemm`
+(`_pt_gemm_pinvoke`), còn wrappers dp (`_pt_dp_wrappers`) tham chiếu chúng → chương trình
+dùng dp mảng không dùng simd_gemm thì `MissingMethodException` (probe _p6g9.tkv chạm lỗi
+này). Fix: toàn bộ 5 pinvoke TkvTorch* chuyển vào `_pt_dp_pinvoke()` (dp chunk), gỡ 2 pinvoke
+thêm nhầm vào gemm (tránh duplicate method trong cùng class). Notes chunk-pinvoke: mỗi
+pinvoke chỉ phát khi chunk được emit (`_can_simd`/`_simd_chunk`).
+
+Kết quả đo thật (fixture HF `manual_seed(7)`, `torch 2.14.0+cpu` + MKL 2026.1):
+| case | trước (§0.104) | sau (§0.105/0.106) |
+|---|---|---|
+| GPT-2 full-124M: hidden h0 | 0.0 | 0.0 |
+| full-124M: logits (scalar layout) | 4.94e-06 | 4.95e-06 (gate TOL_HID=1e-4) |
+| full-124M: **SIMD logits vs PyTorch** | 2.62e-06 | **0.0 (BIT-EXACT)** |
+| full-124M: **SIMD loss vs PyTorch** | 0.0 | **0.0** |
+| full-124M: SIMD grads | 7.9e-07..8.8e-08 | 6.5e-08..7.2e-07 |
+| small fixture SIMD logits | 2.38e-07 | 2.38e-07 (scalar layout) |
+| bench seq8 fwd | 375 ms | **63 ms** |
+| bench seq256 fwd | 718 ms | **469 ms** |
+| bench seq1024 fwd | ~2235 ms | **2031 ms** |
+| bench loss in-print | EXACT | EXACT (10.572291 / 10.756927 / 10.760399) |
+| trainer | 15/15 | 15/15; gate 9/10 (gap_tests pre-existing); selfhost IL_IDENTICAL. |
+
+Lưu ý: `simd_matmul_tests` case [8] train-3-steps "loss bước 3" đo simd-vs-scalar
+drift thật sau khi SIMD = PyTorch: **2.53e-04**; tol riêng của case đó nâng 1.5e-04 → 3.5e-04
+(comment trong file); các case khác giữ nguyên (PASS, KHÔNG nới thêm).
+**Loss EXACT = in-print** (drift CE ≤ 5e-07 hiện diện nhưng không đổi 6 chữ số);
+scalar-path drift vs HF fixture giữ nguyên (~2-6e-07, TOL_HID=1e-4, chưa động vào scalar layout).
+
 ## §0.104 Bỏ gelu/lin recompute trong mlp bwd — sao lưu gelu output vào saves (2026-11-08)
 User goal phiên này: "bwd bằng fwd" (PyTorch cùng máy: bwd:fwd ≈ 2.2×, ta ~2.8×).
 Thay đổi (chỉ 2 file .tkv, cả 2 copies `tv/tests` + `tv/training`):
