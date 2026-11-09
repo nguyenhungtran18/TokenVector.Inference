@@ -66,14 +66,26 @@ def _ab_pool_k(abuf: 'list[Tensor]', idx: 'i64', n: 'i64', k: 'i64') -> 'Tensor'
                 return t
     return t_zeros([n, k])
 
+def _one_pool(p: "Tensor", n: 'i64', h: 'i64') -> "Tensor":
+    if p != None:
+        if len(p.data) == n * h:
+            return p
+    return t_zeros([n, h])
+
 def _zeros2(n: 'i64', d: 'i64') -> "Tensor":
     return t_zeros([n, d])
 
 # ---- LayerNorm theo row, co gain/bias (giong nn.LayerNorm cua HF) ---------
-def gpt2_layernorm(x: "Tensor", g: "Tensor", b: "Tensor") -> "Tensor":
+def gpt2_layernorm(x: "Tensor", g: "Tensor", b: "Tensor", obuf: "Tensor" = None) -> "Tensor":
     n = _sh0(x)
     h = _sh1(x)
-    out = t_zeros([n, h])
+    if obuf != None:
+        if len(obuf.data) == n * h:
+            out = obuf
+        else:
+            out = t_zeros([n, h])
+    else:
+        out = t_zeros([n, h])
     # YEU CAU #19 (2026-11-06): native layernorm_fwd — mu/v acc f64,
     # rstd f64, scale f32; rc != 0 -> fallback duong interpreted cu.
     xl = x.data
@@ -638,17 +650,19 @@ def gpt2_block_saved(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
                      ln2_g: "Tensor", ln2_b: "Tensor",
                      w1: "Tensor", b1: "Tensor", w2: "Tensor", b2: "Tensor",
                      simd: 'i32' = 0, sa_buf: "Tensor" = None,
-                      abuf: 'list[Tensor]' = None) -> 'list[Tensor]':
+                      abuf: 'list[Tensor]' = None,
+                      a_ln_p: "Tensor" = None, r_p: "Tensor" = None,
+                      m_ln_p: "Tensor" = None, out_p: "Tensor" = None) -> 'list[Tensor]':
     n = _sh0(x)
     h = _sh1(x)
-    a_ln = gpt2_layernorm(x, ln1_g, ln1_b)
+    a_ln = gpt2_layernorm(x, ln1_g, ln1_b, a_ln_p)
     a = gpt2_attention(a_ln, w_qkv, b_qkv, w_proj, b_proj, n, simd, abuf)
-    r = t_zeros([n, h])
+    r = _one_pool(r_p, n, h)
     _xl = x.data
     _al = a.data
     _rldc = r.data
     simd_add(_xl, _al, _rldc)
-    m_ln = gpt2_layernorm(r, ln2_g, ln2_b)
+    m_ln = gpt2_layernorm(r, ln2_g, ln2_b, m_ln_p)
     # P6 GĐ8 (2026-11-08): dung fused addmm+gelu (1 ATen call, nhu
     # §0.103) thay chain tach roi (~+625ms @seq1024 regression);
     # LUU output gelu `_save_a` cho bwd. inner (pre-gelu) KHONG luu
@@ -674,7 +688,7 @@ def gpt2_block_saved(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
         _inn2 = gpt2_linear(m_ln, w1, b1, n, h, 4 * h, simd)
         _gf2 = _gelu_fwd_par(_inn2.data, _ad, n * 4 * h, simd)
         m = gpt2_linear(_save_a, w2, b2, n, 4 * h, h, simd)
-    out = t_zeros([n, h])
+    out = _one_pool(out_p, n, h)
     _rl = r.data
     _ml = m.data
     _oldc = out.data
@@ -747,7 +761,8 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
                        lnf_g: "Tensor", lnf_b: "Tensor", simd: 'i32' = 0,
                        sc5: "list[f32]" = None,
                        sa_bufs: 'list[Tensor]' = None,
-                       abuf: 'list[Tensor]' = None) -> 'list[Tensor]':
+                       abuf: 'list[Tensor]' = None,
+                       hpool: 'list[Tensor]' = None) -> 'list[Tensor]':
     n = len(ids)
     h = HiddenSize
     x = gpt2_embed(ids, pos, wte, wpe)
@@ -762,8 +777,20 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
         if sa_bufs != None:
             if i < len(sa_bufs):
                 _sab = sa_bufs[i]
+        _ap = None
+        _rp = None
+        _mp = None
+        _op = None
+        if hpool != None:
+            _bi = 4 * i
+            if len(hpool) > _bi + 3:
+                _ap = hpool[_bi]
+                _rp = hpool[_bi + 1]
+                _mp = hpool[_bi + 2]
+                _op = hpool[_bi + 3]
         rb = gpt2_block_saved(x, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
-                              ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i], simd, _sab, abuf)
+                              ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i], simd, _sab, abuf,
+                              _ap, _rp, _mp, _op)
         x = rb[0]
         rsin.append(rb[1])
         ains.append(rb[2])
@@ -986,10 +1013,17 @@ def gpt2_loss(logits: "Tensor", ids: 'list[i64]') -> 'f32':
 
 # [dx, dg, db] — LayerNorm theo row co g/b
 def gpt2_layernorm_bwd(x: "Tensor", g: "Tensor", b: "Tensor", gy: "Tensor",
-                       gflat: 'list[f32]' = None, o_dg: 'i64' = -1, o_db: 'i64' = -1) -> 'list[Tensor]':
+                       gflat: 'list[f32]' = None, o_dg: 'i64' = -1, o_db: 'i64' = -1,
+                       dxbuf: "Tensor" = None) -> 'list[Tensor]':
     n = _sh0(x)
     h = _sh1(x)
-    dx = t_zeros([n, h])
+    if dxbuf != None:
+        if len(dxbuf.data) == n * h:
+            dx = dxbuf
+        else:
+            dx = t_zeros([n, h])
+    else:
+        dx = t_zeros([n, h])
     dg = t_zeros([h])
     db = t_zeros([h])
     # YEU CAU #12 Ask A1 (2026-11-05): native `layernorm_bwd_fused` — mu/v/

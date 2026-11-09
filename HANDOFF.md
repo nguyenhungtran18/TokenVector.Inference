@@ -4212,6 +4212,40 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.120 Pool LN-fwd out + r/m_ln/out/a_ln (bọc per-layer) — total −21% vs pool=0 (2026-11-09)
+Nhom cap phat con sot: `gpt2_layernorm` output (moi lan goi cap moi), va
+`r`/`m_ln`/`a_ln`/`out` trong block (moi layer cap 3.1 MB ~2.6 ms, ×24
+lan/buoc). **Discovered: LN fwd ghi day du n*h nen dung obuf khong doc
+gia tri cu -> BIT-EXACT.**
+**Thay doi (chi cap buffer, khong doi phep tinh; LN bwd dx VAN cap moi):**
+- `gpt2_layernorm(..., obuf: "Tensor" = None)` — dung obuf neu len == n*h,
+  fallback t_zeros nhu cu. `gpt2_layernorm_bwd(..., dxbuf: "Tensor" = None)` —
+  tuong tu.
+- Helper `_one_pool(p, n, h)`: pool [n,h], 1 slot/layer (a_ln, r, m_ln, out)
+  -> `hpool` = 4*NLayers tensor cap 1 lan,
+  `gpt2_forward_saved(... hpool)` -> `gpt2_block_saved(..., a_ln_p, r_p,
+  m_ln_p, out_p)`.
+- `gpt2_backward(... lndx)`/`gpt2_block_bwd(... lndx)`: them pool n hung
+  nhung **bo wiring lndx vi LN bwd ghi de len `_gd` (== lndx)** -> simd_add
+  voi 3 ten cung tro buffer se `lndx[i] += lndx[i]` -> gradient sai rong.
+  **Da xoa hoan toan lndx** (params + bench `_mk_1h` + mode1/mode2 wiring).
+- Bench: `_mk_hpool`, mode 0/1/2 thread hpool.
+  Mode 1 = GATE gradient: mode 0 KHONG bao gio phat hien bug gradient vi
+  loss fwd van EXACT. **Mode 1 (seq512) pool=1 vs pool=0 = loss bite-ident
+  `10.764943 -> 12.684581` ca 2 ben.**
+**A/B (mode 0, xen ke 1/0, best-of-3):**
+| seq | fwd 0→1 | bwd 0→1 | total 0→1 | loss |
+|---|---|---|---|---|
+| 1024 | 1938→1219 (−37%) | 3782→3375 (−11%) | 5797→4594 (−20,8%) | EXACT `10.760399` |
+| 512 | — | — | fwd 672 / bwd 2265 | EXACT `10.764943` |
+| 256 | — | — | fwd 296 / bwd 1469 | EXACT `10.756927` |
+(Pool-1 comparison vs §0.119 pool=1 best [1328/3343/4671]: fwd −8%, total −1,6%.)
+Mode 1 loss EXACT, gates 9/10, trainer 15/15.
+**Con lai (do duoc, chua lam):** `gpt2_mlp` (duong khong-saved) van
+t_zeros; `opt.step()` ~900ms/chunk (mode 2 do duoc, can kernel rieng);
+`gpt2_attention` ATen dx slot co san (§0.118 slots 0/4) con `out` MLP-side.
+
+
 ## §0.119 Pool [n,3h] cho qkv/dqkv — them −5% total (2026-11-09)
 Nhom transient lon con sot sau §0.118: qkv fwd (recompute none), qkv bwd
 (recompute for attention bwd), dqkv bwd — moi [n,3h] = 9,4 MB ~8 ms,
