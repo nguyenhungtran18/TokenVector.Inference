@@ -123,7 +123,13 @@ Neu dua seq1024 ve < 4600 ma PyTorch re-measure van ~4190 thi con thieu ~400 ms 
   (LinearDwAtFused) - bwd ~3547 -> ~3297. Loss in-ra khong doi.
 - bf16/TF32: KHONG kha thi (ha tang f16 + hong toan bo gates EXACT).
 - LN (obuf 0.86 ms): khong can sua (ATen 0.43 + wrapper 0.43; ~0.5% step).
-- Win seq1024 < 4148.4: chua dat (~4313 sau waiver). Con thieu ~165 ms.
+- Win seq1024 < 4148.4: chua dat (sau s0.124+s0.125 - f+b ~4340; mode1 seq512 ~3469).
+- Gap MLP bwd vs ATen hoan toan: chi con ~150-250 ms/buoc (dx/dW da BLAS, s0.124/s0.125) -
+  duoi nguong hieu qua cho mot dot compiler selfhost + risk gate re-base.
+- Seq8/256 benefit tuot dang ke do fixed-cost cua bwd (seq8 bwd 1032 vs fwd 46;
+  seq256 bwd 1391 vs fwd 281). Nguyen nhan nghi do thread_spawn/dispatcher x millions
+  of calls - candidiate cho dot tiep theo nhung CHUA do chinh xac (can profile).
+
 - Con lai: seq8 bwd anomaly (1032 ms, thread-spawn overhead) + thread scaling 2.3x vs 3.7x.
 
 ### 5.4 Win condition & gate (khong doi)
