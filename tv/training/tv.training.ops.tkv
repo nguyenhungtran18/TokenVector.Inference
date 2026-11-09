@@ -518,31 +518,39 @@ def op_embed_bwd(w: "Tensor", idx: 'list[i64]', d: 'i64', gy: "Tensor") -> "Tens
     n = len(idx)
     rows = len(w.data) // d
     gw = t_zeros([rows * d])
-    counts = []
-    for r in range(rows):
-        counts.append(0)
-    for t in range(n):
-        counts[idx[t]] = counts[idx[t]] + 1
-    starts = []
-    s = 0
-    for r in range(rows):
-        starts.append(s)
-        s = s + counts[r]
-    pos = []
-    for t in range(n):
-        pos.append(0)
-    cursor = []
-    for r in range(rows):
-        cursor.append(starts[r])
-    for t in range(n):
-        r = idx[t]
-        pos[cursor[r]] = t
-        cursor[r] = cursor[r] + 1
-    for q in range(n):
-        t = pos[q]
-        r = idx[t]
-        for j in range(d):
-            gw.data[r * d + j] = gw.data[r * d + j] + gy.data[t * d + j]
+    # YEU CAU #16 (2026-11-06): native scatter-add bit-exact (counts/starts/pos/
+    # cursor + main loop — thu tu cong theo q tang dan giong .tkv). rc != 0 ->
+    # fallback duong interpreted cu.
+    idxl = idx
+    gyl = gy.data
+    gwl = gw.data
+    rc = embed_bwd_fused(idxl, rows, d, gyl, gwl)
+    if rc != 0:
+        counts = []
+        for r in range(rows):
+            counts.append(0)
+        for t in range(n):
+            counts[idx[t]] = counts[idx[t]] + 1
+        starts = []
+        s = 0
+        for r in range(rows):
+            starts.append(s)
+            s = s + counts[r]
+        pos = []
+        for t in range(n):
+            pos.append(0)
+        cursor = []
+        for r in range(rows):
+            cursor.append(starts[r])
+        for t in range(n):
+            r = idx[t]
+            pos[cursor[r]] = t
+            cursor[r] = cursor[r] + 1
+        for q in range(n):
+            t = pos[q]
+            r = idx[t]
+            for j in range(d):
+                gw.data[r * d + j] = gw.data[r * d + j] + gy.data[t * d + j]
     return gw
 
 

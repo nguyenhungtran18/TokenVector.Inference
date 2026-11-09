@@ -1,0 +1,57 @@
+# PROBE 18 — tach 1 block: layernorm | attention | mlp | block_saved.
+import tv.training.gpt2_ref124
+import tv.training.tensor
+
+def main() -> 'i32':
+    n = 1024
+    h = 768
+    ih = 3072
+    x = t_zeros([n, h])
+    wq = t_zeros([h, 3 * h])
+    bq = t_zeros([3 * h])
+    wp = t_zeros([h, h])
+    bp = t_zeros([h])
+    w1 = t_zeros([h, ih])
+    b1 = t_zeros([ih])
+    w2 = t_zeros([ih, h])
+    b2 = t_zeros([h])
+    g = t_zeros([h])
+    bb = t_zeros([h])
+
+    # warm
+    a0 = gpt2_layernorm(x, g, bb)
+    a1 = gpt2_attention(a0, wq, bq, wp, bp, n, 1)
+    m0 = gpt2_mlp(a1, w1, b1, w2, b2, n, 1)
+
+    t0 = now_ms()
+    q1 = gpt2_layernorm(x, g, bb)
+    q2 = gpt2_layernorm(x, g, bb)
+    q3 = gpt2_layernorm(x, g, bb)
+    q4 = gpt2_layernorm(x, g, bb)
+    t1 = now_ms()
+    print("LN 4x = " + str(t1 - t0) + " ms")
+
+    t2 = now_ms()
+    r1 = gpt2_attention(q1, wq, bq, wp, bp, n, 1)
+    r2 = gpt2_attention(q1, wq, bq, wp, bp, n, 1)
+    t3 = now_ms()
+    print("ATTN 2x = " + str(t3 - t2) + " ms")
+
+    t4 = now_ms()
+    s1 = gpt2_mlp(q1, w1, b1, w2, b2, n, 1)
+    s2 = gpt2_mlp(q1, w1, b1, w2, b2, n, 1)
+    t5 = now_ms()
+    print("MLP 2x = " + str(t5 - t4) + " ms")
+
+    t6 = now_ms()
+    z1 = gpt2_block_saved(x, g, bb, wq, bq, wp, bp, g, bb, w1, b1, w2, b2, 1)
+    z2 = gpt2_block_saved(x, g, bb, wq, bq, wp, bp, g, bb, w1, b1, w2, b2, 1)
+    t7 = now_ms()
+    print("BLOCK_SAVED 2x = " + str(t7 - t6) + " ms")
+
+    t8 = now_ms()
+    v1 = gpt2_linear(x, wq, bq, n, h, 3 * h, 1)
+    v2 = gpt2_linear(x, wq, bq, n, h, 3 * h, 1)
+    t9 = now_ms()
+    print("LINEAR 2x = " + str(t9 - t8) + " ms")
+    return 0

@@ -1,0 +1,20 @@
+# PROBE 22b — global container: append / set_Item / doc tu trong ham.
+_POOL: "list[f32]" = []
+_CTR: "list[i64]" = [0]
+
+def grow(n: 'i64') -> 'i32':
+    _POOL.append(1.5)
+    _CTR[0] = _CTR[0] + 1
+    return 0
+
+def poke(i: 'i64', v: 'f32') -> 'i32':
+    _POOL[i] = v
+    return 0
+
+def main() -> 'i32':
+    print("before len=" + str(len(_POOL)) + " ctr=" + str(_CTR[0]))
+    a = grow(3)
+    b = grow(3)
+    c = poke(0, 9.25)
+    print("after len=" + str(len(_POOL)) + " ctr=" + str(_CTR[0]) + " p0=" + str(_POOL[0]))
+    return 0

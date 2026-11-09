@@ -1,0 +1,66 @@
+# PROBE 19 — tach 1 block BWD: mlp_bwd | attention_bwd | layernorm_bwd | linear_bwd.
+import tv.training.gpt2_ref124
+import tv.training.tensor
+
+def main() -> 'i32':
+    n = 1024
+    h = 768
+    ih = 3072
+    x = t_zeros([n, h])
+    gout = t_zeros([n, h])
+    wq = t_zeros([h, 3 * h])
+    bq = t_zeros([3 * h])
+    wp = t_zeros([h, h])
+    bp = t_zeros([h])
+    w1 = t_zeros([h, ih])
+    b1 = t_zeros([ih])
+    w2 = t_zeros([ih, h])
+    b2 = t_zeros([h])
+    g = t_zeros([h])
+    bb = t_zeros([h])
+    xb = t_zeros([n, ih])
+    gf = t_zeros([12000000])
+    gfd = gf.data
+
+    a_ln = gpt2_layernorm(x, g, bb)
+    save_a = t_zeros([n, ih])
+    m_ln = gpt2_layernorm(x, g, bb)
+
+    # warm
+    w0 = gpt2_mlp_bwd(m_ln, w1, b1, w2, b2, n, gout, 1, gfd, 0, h * ih, h * ih + ih, h * ih + ih + h, save_a)
+    w1r = gpt2_attention_bwd(a_ln, wq, bq, wp, bp, n, gout, 1, gfd, 0, 3 * h, 4 * h, h * h)
+    w2r = gpt2_layernorm_bwd(x, g, bb, gout, gfd, 0, h)
+    w3r = gpt2_linear_bwd(xb, w2, gout, n, ih, h, 1, gfd, 0, ih * h)
+
+    t0 = now_ms()
+    m1 = gpt2_mlp_bwd(m_ln, w1, b1, w2, b2, n, gout, 1, gfd, 0, h * ih, h * ih + ih, h * ih + ih + h, save_a)
+    m2 = gpt2_mlp_bwd(m_ln, w1, b1, w2, b2, n, gout, 1, gfd, 0, h * ih, h * ih + ih, h * ih + ih + h, save_a)
+    t1 = now_ms()
+    print("MLP_BWD 2x = " + str(t1 - t0) + " ms")
+
+    t2 = now_ms()
+    a1 = gpt2_attention_bwd(a_ln, wq, bq, wp, bp, n, gout, 1, gfd, 0, 3 * h, 4 * h, h * h)
+    a2 = gpt2_attention_bwd(a_ln, wq, bq, wp, bp, n, gout, 1, gfd, 0, 3 * h, 4 * h, h * h)
+    t3 = now_ms()
+    print("ATTN_BWD 2x = " + str(t3 - t2) + " ms")
+
+    t4 = now_ms()
+    l1 = gpt2_layernorm_bwd(x, g, bb, gout, gfd, 0, h)
+    l2 = gpt2_layernorm_bwd(x, g, bb, gout, gfd, 0, h)
+    l3 = gpt2_layernorm_bwd(x, g, bb, gout, gfd, 0, h)
+    l4 = gpt2_layernorm_bwd(x, g, bb, gout, gfd, 0, h)
+    t5 = now_ms()
+    print("LN_BWD 4x = " + str(t5 - t4) + " ms")
+
+    t6 = now_ms()
+    k1 = gpt2_linear_bwd(xb, w2, gout, n, ih, h, 1, gfd, 0, ih * h)
+    k2 = gpt2_linear_bwd(xb, w2, gout, n, ih, h, 1, gfd, 0, ih * h)
+    t7 = now_ms()
+    print("LINEAR_BWD(1024x3072->768) 2x = " + str(t7 - t6) + " ms")
+
+    t8 = now_ms()
+    b1r = gpt2_block_bwd(x, g, bb, wq, bq, wp, bp, g, bb, w1, b1, w2, b2, gout, 1, gfd)
+    b2r = gpt2_block_bwd(x, g, bb, wq, bq, wp, bp, g, bb, w1, b1, w2, b2, gout, 1, gfd)
+    t9 = now_ms()
+    print("BLOCK_BWD 2x = " + str(t9 - t8) + " ms")
+    return 0

@@ -1,0 +1,40 @@
+# PROBE P6G9 — rc cua torch_mm_t / torch_sdpa_fwd (call truc tiep, no benchmark)
+import tv.training.tensor
+
+def main() -> 'i32':
+    n = 2
+    h = 2
+    nhd = 2
+    T = 4
+    xt = t_zeros([2, 2])
+    xt.data[0] = 1.0
+    xt.data[1] = 2.0
+    xt.data[2] = 3.0
+    xt.data[3] = 4.0
+    wt = t_zeros([3, 2])
+    wt.data[0] = 1.0
+    wt.data[1] = 0.0
+    wt.data[2] = 0.0
+    wt.data[3] = 1.0
+    wt.data[4] = 1.0
+    wt.data[5] = 1.0
+    yt = t_zeros([2, 3])
+    _xd = xt.data
+    _wd = wt.data
+    _yd = yt.data
+    rct = torch_mm_t(_xd, _wd, _yd, n, h, 3)
+    print("mm_t rc=" + str(rct))
+    print("y=" + str(_yd[0]) + " " + str(_yd[1]) + " " + str(_yd[2]) + " " + str(_yd[3]) + " " + str(_yd[4]) + " " + str(_yd[5]))
+    # expect: 1 2 3 3 4 7
+    qkv = t_zeros([T, 3 * nhd])
+    i = 0
+    while i < T * 3 * nhd:
+        qkv.data[i] = float(i % 29) * 0.01 - 0.15
+        i = i + 1
+    yv = t_zeros([T, nhd])
+    _qd = qkv.data
+    _yvd = yv.data
+    rct2 = torch_sdpa_fwd(_qd, _yvd, T, 1, nhd)
+    print("sdpa rc=" + str(rct2))
+    print("y0=" + str(_yvd[0]))
+    return 0

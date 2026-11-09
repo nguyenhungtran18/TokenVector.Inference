@@ -1,0 +1,73 @@
+# PROBE GFM — tach chi phi _gelu_fwd_par (3.1M ptu) thanh: native / zero / copy
+# Chay tu goc repo: out/gfm_n10.dll
+import tv.training.tensor
+import tv.training.gpt2_ref124
+
+def _seed(xs: 'list[f32]', n: 'i64', s: 'i64', amp: 'f32') -> 'i64':
+    st = s
+    i = 0
+    while i < n:
+        st = (st * 1103515245 + 12345) % 2147483648
+        v = float((st / 256) % 65536) / 65536.0
+        xs[i] = (v * 2.0 - 1.0) * amp
+        i = i + 1
+    return st
+
+def main() -> 'i32':
+    n = 1024 * 3072
+    x = t_zeros([n])
+    y = t_zeros([n])
+    xl = x.data
+    yl = y.data
+    _s = _seed(xl, n, 4242, 6.0)
+    # warmup
+    rc0 = _gelu_fwd_par(xl, yl, n, 1)
+    rc1 = gelu_erf_fwd(xl, yl, 0, n)
+
+    # A: duong production hien tai (12 worker + temp + mcopy)
+    t0 = now_ms()
+    rc = _gelu_fwd_par(xl, yl, n, 1)
+    t1 = now_ms()
+    print("GFM A _gelu_fwd_par      = " + str(t1 - t0) + " ms rc=" + str(rc))
+
+    # B: 1 lenh native duy nhat (lo=0)
+    t0 = now_ms()
+    rc = gelu_erf_fwd(xl, yl, 0, n)
+    t1 = now_ms()
+    print("GFM B gelu_erf_fwd(1 call)= " + str(t1 - t0) + " ms rc=" + str(rc))
+
+    # C: chi phi zero 12 temp
+    sz = _gf_div(n, 12)
+    t0 = now_ms()
+    a0 = _gf_zeros(sz)
+    a1 = _gf_zeros(sz)
+    a2 = _gf_zeros(sz)
+    a3 = _gf_zeros(sz)
+    a4 = _gf_zeros(sz)
+    a5 = _gf_zeros(sz)
+    a6 = _gf_zeros(sz)
+    a7 = _gf_zeros(sz)
+    a8 = _gf_zeros(sz)
+    a9 = _gf_zeros(sz)
+    a10 = _gf_zeros(sz)
+    a11 = _gf_zeros(n - 11 * sz)
+    t1 = now_ms()
+    print("GFM C 12x _gf_zeros       = " + str(t1 - t0) + " ms")
+
+    # D: chi phi copy-back 12 temp -> dst
+    t0 = now_ms()
+    g0 = _gf_mcopy(yl, a0, 0, sz)
+    g1 = _gf_mcopy(yl, a1, sz, sz)
+    g2 = _gf_mcopy(yl, a2, 2 * sz, sz)
+    g3 = _gf_mcopy(yl, a3, 3 * sz, sz)
+    g4 = _gf_mcopy(yl, a4, 4 * sz, sz)
+    g5 = _gf_mcopy(yl, a5, 5 * sz, sz)
+    g6 = _gf_mcopy(yl, a6, 6 * sz, sz)
+    g7 = _gf_mcopy(yl, a7, 7 * sz, sz)
+    g8 = _gf_mcopy(yl, a8, 8 * sz, sz)
+    g9 = _gf_mcopy(yl, a9, 9 * sz, sz)
+    g10 = _gf_mcopy(yl, a10, 10 * sz, sz)
+    g11 = _gf_mcopy(yl, a11, 11 * sz, n - 11 * sz)
+    t1 = now_ms()
+    print("GFM D 12x _gf_mcopy       = " + str(t1 - t0) + " ms")
+    return 0

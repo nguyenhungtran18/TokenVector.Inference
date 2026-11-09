@@ -1,0 +1,69 @@
+# PROBE P6G10 — rc cua torch_attention_bwd (call truc tiep, tiny)
+import tv.training.tensor
+
+def _mk(n: 'i64', v0: 'f32', dv: 'f32') -> 'list[f32]':
+    out = []
+    i = 0
+    while i < n:
+        out.append(v0 + float(i) * dv - 3.0)
+        i = i + 1
+    return out
+
+def main() -> 'i32':
+    # tiny single-head: h = hd = 64, n = 2 (flash needs hd==64; nheads=1)
+    n = 2
+    h = 64
+    hd = 64
+    nhd = 1
+    xt = t_zeros([n, h])
+    xd = xt.data
+    i = 0
+    while i < n * h:
+        xd[i] = float(i % 17) * 0.02 - 0.16
+        i = i + 1
+    gout = t_zeros([n, h])
+    gd = gout.data
+    i = 0
+    while i < n * h:
+        gd[i] = float((i * 3 + 5) % 23) * 0.01 - 0.11
+        i = i + 1
+    w_qkv = t_zeros([h, 3 * h])
+    wqd = w_qkv.data
+    i = 0
+    while i < h * 3 * h:
+        wqd[i] = float((i * 7 + 11) % 29) * 0.005 - 0.07
+        i = i + 1
+    b_qkv = t_zeros([3 * h])
+    bqd = b_qkv.data
+    i = 0
+    while i < 3 * h:
+        bqd[i] = float(i % 13) * 0.01 - 0.06
+        i = i + 1
+    w_proj = t_zeros([h, h])
+    wpd = w_proj.data
+    i = 0
+    while i < h * h:
+        wpd[i] = float((i * 5 + 3) % 31) * 0.004 - 0.06
+        i = i + 1
+    b_proj = t_zeros([h])
+    bpd = b_proj.data
+    i = 0
+    while i < h:
+        bpd[i] = float(i % 11) * 0.01 - 0.05
+        i = i + 1
+    dx = t_zeros([n, h])
+    gflat = t_zeros([h * 3 * h + 3 * h + h * h + h])
+    _dxd = dx.data
+    _gfl = gflat.data
+    o_qkv = 0
+    o_bqkv = h * 3 * h
+    o_proj = o_bqkv + 3 * h
+    o_bproj = o_proj + h * h
+    rc = torch_attention_bwd(xd, gd, wqd, bqd, wpd, bpd, _dxd, _gfl, n, h, nhd, hd, o_qkv, o_bqkv, o_proj, o_bproj)
+    print("attn_bwd rc=" + str(rc))
+    print("dx0=" + str(_dxd[0]))
+    print("dw0=" + str(_gfl[0]))
+    print("db0=" + str(_gfl[o_bqkv]))
+    print("dwp0=" + str(_gfl[o_proj]))
+    print("dbp0=" + str(_gfl[o_bproj]))
+    return 0
