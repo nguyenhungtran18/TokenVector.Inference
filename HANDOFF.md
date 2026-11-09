@@ -4212,6 +4212,30 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.116 Thu luu `inner` de bo recompute MLP bwd — KET QUA AM, da revert (2026-11-09)
+Gia thuyet: `gpt2_mlp_bwd` recompute 1 GEMM (~16 ms/layer) khi khong co
+`save_inner`; neu forward luu luon inner thi bwd bo duoc.
+**Da lam (roi revert):** them `TkvTorchLinearGeluFwdPre` (addmm+gelu nhung ghi
+them output truoc gelu), builtin `onednn_linear_bias_gelu_pre`, `gpt2_block_saved`
+cap `_save_inner` + goi entry moi, `gpt2_forward_saved` append section thu 6
+(saves 3+6N), `gpt2_backward` truyen `save_inner` khi co.
+**Do (seq1024, mode0, 3 lan):**
+| | truoc (s0.115) | sau (luu inner) |
+|---|---|---|
+| fwd | 1844–1860 | 2015–2078 |
+| bwd | 3453–3531 | 3344–3516 |
+| total | 5313–5391 | **5422–5531** |
+Loss van EXACT `10.760399`.
+**Ket luan: AM (~+70..110 ms/tong).** Bwd chi giam ~50–100 ms (trong nhieu),
+vi phan recompute gom 1 GEMM ~9,4 ms + cap phat 12,5 MB — ma cap phat van
+phai tra du (o fwd). Fwd tang ~180 ms vi moi layer them 1 lan `t_zeros([n,4h])`
++ 1 lan copy 12,5 MB (+12 tensor song -> +150 MB live, ap luc GC/cache).
+**Da revert toan bo** (bridge entry, builtin, IL wrapper/pinvoke, wiring .tkv);
+`git diff` cua 2 repo sach so voi s0.115, selfhost `IL_IDENTICAL`, bench lai
+1891–1953 / 3531–3875, loss EXACT. Bai hoc: muon an duoc phan nay phai bo
+duoc chi phi cap phat/zero 12,5 MB moi layer truoc (vd. buffer tai su dung
+hoac alloc khong zero), luc do moi dang.
+
 ## §0.115 GELU backward qua ATen (torch_gelu_bwd) — bwd −10.5% (2026-11-09)
 Do lai tu dau bang probe rieng (may nay, seq1024, mode0), KHONG dua vao
 speedscope cu (`out/dd_fwd.speedscope.json` = trace `dotnet new`, khong phai
