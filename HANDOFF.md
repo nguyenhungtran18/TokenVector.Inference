@@ -4212,6 +4212,50 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.115 GELU backward qua ATen (torch_gelu_bwd) — bwd −10.5% (2026-11-09)
+Do lai tu dau bang probe rieng (may nay, seq1024, mode0), KHONG dua vao
+speedscope cu (`out/dd_fwd.speedscope.json` = trace `dotnet new`, khong phai
+model — moi ket luan "99.6% UNMANAGED" tu file do la khong hieu luc):
+- fwd = model 1703 ms + loss 109 ms; rieng `t_zeros([1024,50257])` = 172 ms.
+- 1 block fwd: LN ~0, attention 23.5, MLP 31.5, nhung `gpt2_block_saved` = 109
+  ms → ~50 ms/block overhead (cap phat/zero + merge).
+- 1 block bwd: `gpt2_mlp_bwd` 187 ms, `gpt2_attention_bwd` 101 ms,
+  `gpt2_layernorm_bwd` 4 ms. Trong MLP bwd: 2× `gpt2_linear_bwd` 54.5 ms +
+  `op_gelu_erf_bwd` ~47–68 ms (vong native scalar 12 worker + copy 3.1M).
+- ATen `gelu_backward` cung 3.1M: 2.2 ms (do doc lap bang torch 2.14.0+cpu).
+**Thay doi:**
+- `torch_fused.cpp`: BO `TkvTorchMLPBwdFused` (ham dot 1 cua phien truoc:
+  khong duoc wire o dau, va khong compile — 2 `memcpy` thieu tham so);
+  THEM `TkvTorchGeluBwd` = `at::gelu_backward(gy, x, "none")`.
+- `tkv_simd_native.c`: typedef + lazy `GetProcAddress` + export forwarder
+  (rc −9 khi bridge cu/khong co → fallback).
+- `simd_feature.tkv`: pinvoke `TkvTorchGeluBwdNative` + wrapper
+  `TorchGeluBwdM(gy, x, y, n)` + `compile_torch_gelu_bwd` + dang ky builtin;
+  `file_io.tkv`: them `torch_gelu_bwd` vao danh sach builtin.
+- `.tkv`: `op_gelu_erf_bwd` goi ATen truoc, `rc != 0` → duong cu nguyen van.
+  Sua ca 3 ban: `tv/training/ops.tkv`, `tv/training/tv.training.ops.tkv`,
+  `tv/tests/tv.training.ops.tkv` (ban thu 3 moi la ban test/bench resolve).
+- `build_torch_fused.ps1` (moi): script build bridge (truoc do khong co
+  script, DLL duoc build thu cong).
+**A/B cung binary, cung phien (fallback tat/bat chi 1 dong):**
+| lan | fallback (bwd) | ATen (bwd) |
+|---|---|---|
+| 1 | 3890 | 3453 |
+| 2 | 3859 | 3531 |
+| 3 | 4000 | 3469 |
+best 3859 → **3453 ms (−10.5%)**; total 5313–5391 ms (fwd 1844–1860).
+seq256: fwd 453 / bwd 1531 / loss 10.756927; seq8: 62 / 1000 / 10.572291.
+**Kiem chung:** loss mode0 EXACT 3 seq (`10.572291 / 10.756927 / 10.760399`);
+`_p21` so truc tiep voi cong thuc erf: max_abs_diff **1.6e−07** (f32 ULP, do
+ATen dung polynomial khac); gate **9/10** (`gap_tests` exit=82 pre-existing,
+gpt2_full_tests 33/33 PASS); trainer **15/15**; selfhost `IL_IDENTICAL`.
+**Chua lam / leverage con lai (so do duoc):**
+- `gpt2_mlp_bwd` recompute `inner` 16 ms/layer (~190 ms/step) — co the luu
+  `save_inner` tu fwd (dung them ~12.5 MB/layer).
+- `gpt2_block_saved` 109 ms vs tong thanh phan ~60 ms → ~590 ms/step.
+- `t_zeros([n,V])` 172 ms/fwd (buffer `sc5` da co san trong mode1).
+- `gpt2_attention_bwd` 101 ms/layer (da ATen) — kiem tra lai tham so/thread.
+
 ## §0.114 Trạng thái 2026-11-08 — dừng tại D5, ổn định (2026-11-08)
 D5 đã đến điểm tự nhiên:
 - gate 9/10 (chỉ `gap_tests` exit=82 pre-existing); trainer 15/15; selfhost IL_IDENTICAL

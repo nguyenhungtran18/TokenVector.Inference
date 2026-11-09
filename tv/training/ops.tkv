@@ -249,6 +249,14 @@ def _ogb_mcopy(dst: 'list[f32]', sg: 'list[f32]', lo: 'i64', cnt: 'i64') -> 'i32
 def op_gelu_erf_bwd(x: "Tensor", gy: "Tensor") -> "Tensor":
     n = len(x.data)
     g = t_zeros([n])
+    # ATen gelu_backward (cung cong thuc erf, vectorized + multithread):
+    # ~2 ms/3.1M so voi ~47 ms vong native scalar. rc != 0 -> duong cu.
+    _xl_gb = x.data
+    _gyl_gb = gy.data
+    _gl_gb = g.data
+    _r14 = torch_gelu_bwd(_gyl_gb, _xl_gb, _gl_gb, n)
+    if _r14 == 0:
+        return g
     if n < 2000000:
         # YEU CAU #12 Ask A2: native `gelu_erf_bwd` 1 entry (erf + exp f64
         # giong IL, JIT ep f64->f32 nhu probe _nt5) -> bo vong interpreted.
