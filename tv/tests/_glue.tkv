@@ -1,0 +1,68 @@
+# PROBE GLUE (Pha 2 / PLAN muc 5.2) - do overhead managed tren hot call sites.
+# Run: tkvc-tv.exe tv/tests/_glue.tkv out/glue.exe main; copy exe -> dll + runtimeconfig; dotnet out/glue_n10.dll
+import tv.training.gpt2_ref124
+
+def _glue(x: "Tensor") -> 'i64':
+    s = x.shape
+    n = s[0]
+    h = s[1]
+    d = x.data
+    if len(d) == n * h:
+        return 1
+    return 0
+
+def main() -> 'i32':
+    n = 1024
+    h = 768
+    x = t_zeros([n, h])
+    g = t_zeros([h])
+    b = t_zeros([h])
+    obuf = t_zeros([n, h])
+    obuf4 = t_zeros([n, 4 * h])
+    # 1) pure managed-glue floor (shape + data getter + len check)
+    t0 = now_ms()
+    c = 0
+    for i in range(20000):
+        c = c + _glue(x)
+    t1 = now_ms()
+    print("glue-floor 20000 iters ms=" + str(t1 - t0) + " acc=" + str(c))
+    # 2) LN production path (obuf reuse, gpt2_layernorm native call inside)
+    t0 = now_ms()
+    for i in range(1000):
+        r = gpt2_layernorm(x, g, b, obuf)
+    t1 = now_ms()
+    print("LN obuf 1000 iters ms=" + str(t1 - t0))
+    # 3) LN without obuf (t_zeros each call)
+    t0 = now_ms()
+    for i in range(300):
+        r2 = gpt2_layernorm(x, g, b)
+    t1 = now_ms()
+    print("LN no-obuf 300 iters ms=" + str(t1 - t0))
+    # 4) simd_add managed call wrapper
+    a = x.data
+    ay = obuf.data
+    az = obuf.data
+    t0 = now_ms()
+    for i in range(1000):
+        simd_add(a, ay, az)
+    t1 = now_ms()
+    print("simd_add 1000 iters ms=" + str(t1 - t0))
+    # 5) gpt2_linear GEMM-dominated path with obuf [1024,768]->[1024,3072]
+    w1 = t_zeros([h, 4 * h])
+    b1 = t_zeros([4 * h])
+    t0 = now_ms()
+    for i in range(100):
+        r3 = gpt2_linear(x, w1, b1, n, h, 4 * h, 1, obuf4)
+    t1 = now_ms()
+    print("linear 1024x768x3072 100 iters ms=" + str(t1 - t0))
+    # 6) attention production call (ATen full-block fwd)
+    wqkv = t_zeros([h, 3 * h])
+    bqkv = t_zeros([3 * h])
+    wproj = t_zeros([h, h])
+    bproj = t_zeros([h])
+    t0 = now_ms()
+    for i in range(30):
+        r4 = gpt2_attention(obuf, wqkv, bqkv, wproj, bproj, n, 1)
+    t1 = now_ms()
+    print("attention 30 iters ms=" + str(t1 - t0))
+    return 0

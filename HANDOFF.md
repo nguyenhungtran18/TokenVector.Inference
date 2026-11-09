@@ -4212,6 +4212,33 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.123 Pha 2 - simd_add list wrapper: pin _items, bo ToArray/AddRange (2026-11-09)
+Pha 2 (PLAN §5.2) - do managed glue that, tim thay do thi lon, sua chua.
+**Probe `tv/tests/_glue.tkv`** (mode 0, seq1024 shapes): glue-floor ~0.75 us/call (ổn);
+LN obuf ~0.86 ms/call (LayernormFwd da pin _items; chua tim duoc diem san voi dang so sanh 1:1);
+`simd_add` **5.2 ms/call** tren [1024,768] - 786K phan tu moi call.
+**Nguyen nhan:** wrapper `AddLF32/SubLF32/MulLF32` (`_mang_khoi_list` - il_features/
+simd_feature.tkv) sinh: 3x ToArray (3 alloc + copy) + kernel + `Clear()` + `AddRange()`
+-> ~5ms/call. (Dot/Sum/Max/Min giu nguyen nhung += khong trong hot path.)
+**Sua:** emit fast path giong het LayernormFwdM/AdamwGlmM: GetField("_items", 36) +
+GetValue + castclass t[], n = min(get_Count()), pin ldelema, calli unmanaged
+unmanaged stdcall void(native int x3, int32 n) voi kernel id = ma (Add=2, Sub=3, Mul=4,
+f64 +7); fallback gom managed `TkvSimd::AddF32(p0,p1,p2)` neu Kern()==0; n==0 -> ret.
+Bit-exact (cung kernel, cung thu tu, khong doi 1 phep tinh).
+**Verify:**
+- `tv/tests/_glue.tkv`: simd_add **5.2 ms -> 0.328 ms/call (~16x)**.
+- Bench game moi tinh tao (tkvc rebuild, IL_IDENTICAL vong selfhost 2 vong):
+  seq1024 fwd **1203 -> 1078** bwd 3422->3547 total 4625; loss EXACT 10.760399
+  (bwd rong rdn +155ms la dao dong may, khong do IL change - so sanh trong boi).
+  seq512 total **2703 -> 2546**; seq256 **1797 -> 1687**; loss EXACT ca 3 seq.
+- mode 1 seq512: 3719 ms, loss BIT-IDENT `10.764943 -> 12.684581`.
+- Gate 9/10 (pack/gap pre-existing), trainer 15/15.
+**Luu y:** compiler dist/tkvc-tv.exe da tu chinh qua 2 vong selfhost (g1==g2,
+IL_IDENTICAL). VSCode bundle `vscode-tokenvector/bin/tkvc-tv.exe` chua tai tao
+(nhan version release, khong thuoc commit nay). gain Pha 2: ~120/93/48 ms fwd
+(seq1024/512/256) + bot ~4.9 ms moi simd_add call x ~50 calls/buoc.
+
+
 ## §0.122 Pha 1 - prefetch AdamW giu lai, NT-store bi LOAI theo do do (2026-11-09)
 Trien khai PLAN §5.1 (Pha 1) theo thu tu:
 1. **P1a (NT store + prefetch) - thu, do lai that:** `adamw_f32_range` (mode 8 path) thu

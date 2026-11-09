@@ -3,17 +3,17 @@
 Ngay: 2026-11-04 (cap nhat 2026-11-09; them muc 5 - lo trinh toi uu tiep)
 Muc tieu: full step <= PyTorch 14T (1042.7 / 1572.7 / 4148.4 ms) o ca 3 seq, gate 135/135 + trainer 15/15 + loss EXACT.
 
-## 0. Baseline hien tai (do moi 2026-11-09, .NET 10; HANDOFF §0.122)
+## 0. Baseline hien tai (do moi 2026-11-09, .NET 10; HANDOFF §0.123)
 - TV SIMD (2026-11-09, loss EXACT ca 3 seq):
-  - seq1024 fwd+bwd 4625 (fwd 1203 / bwd 3422), full step tuong duong (mode 2) TONG=5375
-  - seq512 fwd+bwd 2703 (fwd 593 / bwd 2110), full step mode 1 ~3782-4047
-  - seq256 fwd+bwd 1797 (fwd 329 / bwd 1468), opt.step ~859-891
+  - seq1024 fwd+bwd 4625 (fwd 1078 / bwd 3547), full step mode 1 ~3719
+  - seq512 fwd+bwd 2546 (fwd 500 / bwd 2046), full step mode 1 ~3719
+  - seq256 fwd+bwd 1687 (fwd 281 / bwd 1406), opt.step ~859-891
   - seq8 chua do lai (giu so 2026-11-06: fwd+bwd 1829, full step 2813)
   - (so 2026-11-06: seq1024 fwd+bwd 11875, full step 12828 -> nay -61%; §0.115-§0.122)
 - PyTorch (do 2026-11-06, CHUA re-measure sau dot toi uu):
   - seq8 full step 1060.6, seq8 fwd+bwd (T=1) 530.4, (T=14) 384.7
   - seq1024 fwd+bwd 3599.5, full step 4190.6
-- Gap: seq1024 fwd+bwd 4625 vs 3599.5 (~1.29x); backward la phan lon; opt.step memory-bound.
+- Gap: seq1024 fwd+bwd 4625 vs 3599.5 (~1.29x); fwd giam 120/93/48 ms sau Pha 2 (s0.123); backward la phan lon; opt.step memory-bound.
   Pha 1 (HANDOFF §0.122) khong dong gap them; Pha 3 (flash, can waiver) la huong manh nhat.
 
 ## 1. Nguyen nhan (do duoc)
@@ -68,9 +68,9 @@ Gap con lai vs PyTorch (cung may, torch 2.14.0+cpu MKL 2026.1): ~1.27x.
 Con thieu ~415 ms de dat win condition seq1024 (muc 3) ma KHONG dung bit-exact.
 
 ### 5.0 Baseline hien tai (so do gan nhat, 2026-11-09 sau Pha 1)
-- TV SIMD seq1024 mode 0: fwd ~1200, bwd ~3422, fwd+bwd ~4625 ms (HANDOFF §0.122)
-- TV seq256 mode 0: fwd ~329, bwd ~1468, total ~1797 ms
-- TV seq512 mode 0: fwd ~593, bwd ~2110, total ~2703 ms; full step mode 1: ~3782-4047 ms
+- TV SIMD seq1024 mode 0: fwd ~1078, bwd ~3547, fwd+bwd ~4625 ms (HANDOFF §0.122)
+- TV seq256 mode 0: fwd ~281, bwd ~1406, total ~1797 ms
+- TV seq512 mode 0: fwd ~500, bwd ~2046, total ~2546 ms; full step mode 1: ~3782-4047 ms
 - TV opt.step (mode 2): ~859-891 ms (AdamW native 8-thread + prefetch; NT stores DA LOAI, xem §0.122)
 - Full step tuong duong (mode 2, seq1024): TONG=5375 ms
 - PyTorch (do 2026-11-06, CHUA chay lai sau dot toi uu): seq1024 fwd+bwd 3599.5, full step 4190.6;
@@ -108,12 +108,14 @@ Con thieu ~415 ms de dat win condition seq1024 (muc 3) ma KHONG dung bit-exact.
 **Du kien Pha 1:** seq1024 full step ~4860-5100 ms (van chua dat 4148.4), opt ~600.
 Neu dua seq1024 ve < 4600 ma PyTorch re-measure van ~4190 thi con thieu ~400 ms -> Pha 2.
 
-### 5.2 Pha 2 - Managed glue: block_saved overhead
-- Do wall that trong vong `gpt2_forward_saved` loop (timer quan quanh tung call), khong doan.
-- Neu qua cao: gop dispatch cua 1 block fwd/bwd thanh it ATen calls hon, hoac native glue
-  cho chuoi op lap lai; giu loss EXACT (moi op van dung kernel cu, chi giam chi phi goi/marshal).
-- Du kien: 100-300 ms/step. Rui ro: trung binh; can probe + A/B truoc khi merge.
-
+### 5.2 Pha 2 - Managed glue: simd_add list wrapper - DA LAM (HANDOFF s0.123)
+- Probe tv/tests/_glue.tkv: glue-floor ~0.75 us/call; LN obuf ~0.86 ms/call;
+  simd_add 5.2 ms -> 0.328 ms/call (~16x): wrapper AddLF32/SubLF32/MulLF32 doi sang
+  pin _items + n=min(get_Count()) + calli unmanaged (kem managed AddF32 fallback).
+- Compiler selfhost (vong) IL_IDENTICAL; trainer 15/15; gate 9/10 (pack/gap pre-existing);
+  mode 1 seq512 bit-ident. Loss EXACT ca 3 seq. fwd: 1024 1203->1078, 512 593->500, 256 329->281.
+- Muon dong gap hoac gate lai tot hon: Pha 3 (flash) van can waiver; Pha 2 chi lay mot
+  tang cuc bo (glue) chu khong dong duoc backward.
 ### 5.3 Pha 3 - CAN USER WAIVER (KHONG tu y trien khai)
 - **Flash-attention-class attention fwd+bwd**: PyTorch th?ng y boi lam duoc fused attention;
   attention_bwd van la phan lon bwd (~1-1.5 s/step). Doi accumulation order -> loss KHONG EXACT nua.
