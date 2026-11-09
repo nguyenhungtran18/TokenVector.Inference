@@ -4212,6 +4212,27 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.121 AdamW native 8-thread + gpt2_mlp obuf (2026-11-09)
+Hai muc con lai:
+1. **`opt.step()` ~890 ms (bench mode 2, seq 256)** — khong phai bug rieng
+   le: `AdamwStepF32` chay serialize ~3.5 GB/buoc, **memory/bandwidth-bound**.
+   Da sua native DLL (`Release/tools/simd_native/tkv_simd_native.c`): mode 8
+   moi chia vung [i0,i1) cho thread pool co san (mode 6/7), moi element van
+   cung cong thuc thu tu -> bit-exact. `test_adamw.c` van PASS 37/64/n=124M
+   (p/m/v maxdiff 5.96e-08 / 7.45e-09 / 1.19e-07 — ULP chênh).
+   **Do standalone vs scalar ref:** 0.335 s -> 0.317 s — gke thi memory-bound,
+   ~5% nhanh, KHONG 1.5-2x. Bench ngoai van: opt 890 -> 859. Trainer van
+   15/15 (tower loss EXACT), gate 9/10 (pack/gap pre-existing).
+2. **`gpt2_mlp` duong khong-saved**: them `obuf: "Tensor" = None` — goi tu
+   `gpt2_mlp(..., obuf=X)` thay vi t_zeros; production (block_saved) KHONG dung
+   ham nay (duong ATen fused). gpt2_mlp chi con duoc gate tests/probes dung.
+   **Khong do thay doi perf** (t_zeros da duoc pool §0.117/§0.118 benh chi
+   dung cho duong production).
+**Luu y quan trong:** Release repo co DLL native. Them `adamw_mt_check.c`
+(de xac minh mode 8). Repo da co san: tools/simd_native .gitignore chan
+*.exe/*.dll/*.obj — chi commit .c + .dll tracker.
+
+
 ## §0.120 Pool LN-fwd out + r/m_ln/out/a_ln (bọc per-layer) — total −21% vs pool=0 (2026-11-09)
 Nhom cap phat con sot: `gpt2_layernorm` output (moi lan goi cap moi), va
 `r`/`m_ln`/`a_ln`/`out` trong block (moi layer cap 3.1 MB ~2.6 ms, ×24

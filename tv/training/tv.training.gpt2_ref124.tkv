@@ -602,12 +602,19 @@ def _gelu_fwd_par(sl: 'list[f32]', dl: 'list[f32]', cnt: 'i64', simd: 'i32') -> 
 
 # ---- MLP: linear -> gelu(erf) -> linear ------------------------------------
 def gpt2_mlp(x: "Tensor", w1: "Tensor", b1: "Tensor",
-             w2: "Tensor", b2: "Tensor", n: 'i64', simd: 'i32' = 0) -> "Tensor":
+             w2: "Tensor", b2: "Tensor", n: 'i64', simd: 'i32' = 0,
+             obuf: "Tensor" = None) -> "Tensor":
     h = HiddenSize
     xd = x.data
     w1d = w1.data
     b1d = b1.data
-    inn = t_zeros([n, 4 * h])
+    if obuf != None:
+        if len(obuf.data) == n * 4 * h:
+            inn = obuf
+        else:
+            inn = t_zeros([n, 4 * h])
+    else:
+        inn = t_zeros([n, 4 * h])
     ind = inn.data
     il = onednn_linear_bias_gelu(xd, w1d, b1d, ind, n, h, 4 * h)
     if il == 0:
