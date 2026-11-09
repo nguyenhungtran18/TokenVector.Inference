@@ -4212,6 +4212,36 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.125 BLAS cho dx GEMM (dx = gy @ w^T, cblas_sgemm transB) (2026-11-09)
+Gap-finding (ket qua `tv/tests/_glue.tkv` v5 tren seq1024 shapes):
+- attention bwd (gflat path, ATen SDPA autograd): **~94 ms/layer** (vs native PAR12 ~190) - da tot.
+- MLP bwd (save path, production): **~92-98 ms/layer**; LN bwd ~0.6 ms/layer (native,
+  cuc nho); gelu bwd ~2.8 ms/layer (ATen, nho).
+- dx GEMM (mind): native `LinearDxFused` bi rc=-10 (m>256) -> fallback `smm_dot`
+  (run_rect_shaped_m -> BLAS da co o s0.93 nhung hoat dong nho/fortuitous);
+  khong co duong BLAS tuong minh cho rect transB.
+**Sua:** `LinearDxFused` them route `tkv_try_blas_rect_tb(gy, k, w, k, dx, n, m, n, k, 112 /*CblasTrans*/)`
+voi beta=0. Fallback native true-k nguyen van neu BLAS khong nap duoc. ATen clamp: dx
+da gim vong lap ac giong native khi BLAS mat (loss gate mode 1 van EXACT, xem duoi).
+**A/B xen ke CUNG binary (seq1024, 2 cap 0/1):**
+| | run1 | run2 | run3 |
+|---|---|---|---|
+| BLAS=1 bwd | 3344 | 3329 | 3359 (all ~3340) |
+| BLAS=0 bwd | 3860 | 3734 | 3547 (all ~3700) |
+| BLAS=1 fwd | 1156 | 1062 | 1078 |
+| BLAS=0 fwd | 1203 | 1078 | 1141 |
+BLAS=1 thang native ~360 ms moi buoc (noisy; CUNG dai chay cuoi cung cua s0.124 dW fix).
+BPHASE seq256 TONG=2640; seq256/512/256 loss EXACT ca 3 seq; mode 1 seq512
+**3469 ms** (vs 3719 @s0.124), loss BIT-IDENT `10.764943 -> 12.684581`; gate 9/10
+(pack/gap pre-existing); trainer 15/15.
+**Toan bo 2026-11-09 (Pha 1+2+3):** seq1024 4610-ish -> ~4313 (f+b) full step
+mode 1 ~3469; PyTorch re-do (2026-11-09, threads=14, torch 2.14.0+cpu): seq1024
+f+b 3451.3, step 3986.1; gap **1.27x f+b** con lai, **mode 1 seq512 3469 vs PyTorch**
+seq8 full step 1012.1 ms (TV seq8 gap ~2.6-3x, seq8 bwd anomaly thread_spawn overhead).
+Win condition seq1024 < 4148.4 van CHUA dat - con thieu ~165 ms; toi thieu can re-do doc
+lai PyTorch dam bao mot phien cung.
+
+
 ## §0.124 Pha 3 - xac minh flash/SDPA ATen da co san + BLAS cho dW GEMM (2026-11-09)
 Xin user waiver che do bit-exact ("lam pha 3"). Ket qua THAT:
 **1) Flash-attention-class trong production - DA CO.** Production attention bwd qua ATen

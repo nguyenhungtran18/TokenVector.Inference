@@ -67,9 +67,8 @@ def main() -> 'i32':
     print("attention 30 iters ms=" + str(t1 - t0))
     # 7) attention bwd ATen path (production) - gflat nho o co :offset; ATen ghi vao gflat
     gout = t_zeros([n, h])
-    gf = []
-    for i in range(2360000):
-        gf.append(0.0)
+    holder = t_zeros([2360000])
+    gf = holder.data
     t0 = now_ms()
     for i in range(6):
         r5 = gpt2_attention_bwd(obuf, wqkv, bqkv, wproj, bproj, n, gout, 1, gf, 0, 0, 0, 0)
@@ -81,4 +80,70 @@ def main() -> 'i32':
         r6 = gpt2_attention_bwd(obuf, wqkv, bqkv, wproj, bproj, n, gout, 1)
     t1 = now_ms()
     print("attn_bwd NATIVE 6 iters ms=" + str(t1 - t0))
+    # 9) LN bwd native (Ask A1): x [1024,768], gflat o_dg=0 o_db=h
+    dxLN = t_zeros([n, h])
+    xl2 = x.data
+    syl2 = obuf.data
+    gl2 = g.data
+    dxl2 = dxLN.data
+    holder = t_zeros([1536])
+    gfl2 = holder.data
+    t0 = now_ms()
+    for i in range(100):
+        rc = layernorm_bwd_fused(xl2, syl2, gl2, dxl2, gfl2, n, h, 0, h)
+    t1 = now_ms()
+    print("LN bwd 100 iters ms=" + str(t1 - t0) + " rc=" + str(rc))
+    # 10) gelu bwd ATen (production): x [1024,3072]
+    g4a = obuf4.data
+    g4b = obuf4.data
+    g4c = obuf4.data
+    t0 = now_ms()
+    for i in range(50):
+        rc2 = torch_gelu_bwd(g4a, g4b, g4c, n * 4 * h)
+    t1 = now_ms()
+    print("gelu_bwd 50 iters ms=" + str(t1 - t0) + " rc=" + str(rc2))
+    # 12) ATen single linear bwd (w1 shape): x [1024,768] gy [1024,3072] w [768,3072]
+    dxc = t_zeros([n, h])
+    dwc = t_zeros([h, 4 * h])
+    dbc = t_zeros([4 * h])
+    xl3 = x.data
+    yl3 = obuf4.data
+    wl3 = t_zeros([h, 4 * h]).data
+    dxl3 = dxc.data
+    dwl3 = dwc.data
+    dbl3 = dbc.data
+    t0 = now_ms()
+    for i in range(20):
+        rc3 = onednn_linear_bwd(xl3, yl3, wl3, dxl3, dwl3, dbl3, n, h, 4 * h)
+    t1 = now_ms()
+    print("onednn_linear_bwd w1 shape 20 iters ms=" + str(t1 - t0) + " rc=" + str(rc3))
+    # 13) ATen single linear bwd (w2 shape): gy [1024,768] w [3072,768]
+    dxc2 = t_zeros([n, 4 * h])
+    dwc2 = t_zeros([4 * h, h])
+    dbc2 = t_zeros([h])
+    x2 = t_zeros([n, 4 * h])
+    yl4 = x2.data
+    gl3 = obuf.data
+    dxl4 = dxc2.data
+    dwl4 = dwc2.data
+    dbl4 = dbc2.data
+    wl4 = t_zeros([4 * h, h]).data
+    t0 = now_ms()
+    for i in range(20):
+        rc4 = onednn_linear_bwd(yl4, gl3, wl4, dxl4, dwl4, dbl4, n, 4 * h, h)
+    t1 = now_ms()
+    print("onednn_linear_bwd w2 shape 20 iters ms=" + str(t1 - t0) + " rc=" + str(rc4))
+    # 11) MLP bwd full layer (save path like production)
+    w1m = t_zeros([h, 4 * h])
+    b1m = t_zeros([4 * h])
+    w2m = t_zeros([4 * h, h])
+    b2m = t_zeros([h])
+    sav_in = t_zeros([n, 4 * h])
+    sav_a = t_zeros([n, 4 * h])
+    gout2 = t_zeros([n, h])
+    t0 = now_ms()
+    for i in range(10):
+        r9 = gpt2_mlp_bwd(x, w1m, b1m, w2m, b2m, n, gout2, 1, gf, 0, 0, 0, 0, sav_in, sav_a, None, None)
+    t1 = now_ms()
+    print("mlp_bwd 10 iters ms=" + str(t1 - t0))
     return 0
