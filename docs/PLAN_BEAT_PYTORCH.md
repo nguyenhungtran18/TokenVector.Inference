@@ -3,15 +3,18 @@
 Ngay: 2026-11-04 (cap nhat 2026-11-09; them muc 5 - lo trinh toi uu tiep)
 Muc tieu: full step <= PyTorch 14T (1042.7 / 1572.7 / 4148.4 ms) o ca 3 seq, gate 135/135 + trainer 15/15 + loss EXACT.
 
-## 0. Baseline hien tai (do moi 2026-11-06, .NET 10)
-- TV SIMD:
-  - seq8 fwd+bwd 1829, full step 2813
-  - seq256 fwd+bwd 3750, full step 4782
-  - seq1024 fwd+bwd 11875, full step 12828
-- PyTorch:
+## 0. Baseline hien tai (do moi 2026-11-09, .NET 10; HANDOFF §0.122)
+- TV SIMD (2026-11-09, loss EXACT ca 3 seq):
+  - seq1024 fwd+bwd 4625 (fwd 1203 / bwd 3422), full step tuong duong (mode 2) TONG=5375
+  - seq512 fwd+bwd 2703 (fwd 593 / bwd 2110), full step mode 1 ~3782-4047
+  - seq256 fwd+bwd 1797 (fwd 329 / bwd 1468), opt.step ~859-891
+  - seq8 chua do lai (giu so 2026-11-06: fwd+bwd 1829, full step 2813)
+  - (so 2026-11-06: seq1024 fwd+bwd 11875, full step 12828 -> nay -61%; §0.115-§0.122)
+- PyTorch (do 2026-11-06, CHUA re-measure sau dot toi uu):
   - seq8 full step 1060.6, seq8 fwd+bwd (T=1) 530.4, (T=14) 384.7
   - seq1024 fwd+bwd 3599.5, full step 4190.6
-- Gap: backward van la phan lon; non-GEMM da qua native (#15/#16); thread scale con chua du 3.7x.
+- Gap: seq1024 fwd+bwd 4625 vs 3599.5 (~1.29x); backward la phan lon; opt.step memory-bound.
+  Pha 1 (HANDOFF §0.122) khong dong gap them; Pha 3 (flash, can waiver) la huong manh nhat.
 
 ## 1. Nguyen nhan (do duoc)
 1. Backward nang; sau #15/#16 bwd seq1024 ~8750 (best 8734), opt.step ~920-1060, fwd ~3400.
@@ -64,19 +67,21 @@ Nguon so: HANDOFF �0.115-�0.121 + bench transcripts 2026-11-09 (seq1024 mode
 Gap con lai vs PyTorch (cung may, torch 2.14.0+cpu MKL 2026.1): ~1.27x.
 Con thieu ~415 ms de dat win condition seq1024 (muc 3) ma KHONG dung bit-exact.
 
-### 5.0 Baseline hien tai (so do gan nhat, 2026-11-09)
-- TV SIMD seq1024 mode 0: fwd ~1210, bwd ~3344-3375, fwd+bwd ~4563 ms (truoc do 5313 @�0.115, 4671 @�0.119)
-- TV seq256 mode 0: fwd ~281-312, bwd ~1313-1454, total ~1766 ms
-- TV seq512 mode 0: fwd ~550-750, bwd ~2125-2265 ms; full step mode 1: ~3766-3954 ms
-- TV opt.step (mode 2): ~859-875 ms (AdamW native 8-thread, �0.121; standalone 0.317 s - memory-bound)
-- Full step tuong duong (mode 2, seq1024): TONG=5328 ms (fwd 1078 + loss 109 + bwd 3141 + opt 875 + copyback 125)
-- PyTorch (do 2026-11-06, CHUA chay lai sau �0.115-0.121): seq1024 fwd+bwd 3599.5, full step 4190.6;
+### 5.0 Baseline hien tai (so do gan nhat, 2026-11-09 sau Pha 1)
+- TV SIMD seq1024 mode 0: fwd ~1200, bwd ~3422, fwd+bwd ~4625 ms (HANDOFF §0.122)
+- TV seq256 mode 0: fwd ~329, bwd ~1468, total ~1797 ms
+- TV seq512 mode 0: fwd ~593, bwd ~2110, total ~2703 ms; full step mode 1: ~3782-4047 ms
+- TV opt.step (mode 2): ~859-891 ms (AdamW native 8-thread + prefetch; NT stores DA LOAI, xem §0.122)
+- Full step tuong duong (mode 2, seq1024): TONG=5375 ms
+- PyTorch (do 2026-11-06, CHUA chay lai sau dot toi uu): seq1024 fwd+bwd 3599.5, full step 4190.6;
   seq8 full step 1060.6. CHU Y: bench_torch d can chay lai sau moi pha de co cap so cung phien.
 - Loss van EXACT ca 3 seq (10.572291 / 10.756927 / 10.760399), mode 1 bite-ident 10.764943 -> 12.684581.
+- Pha 1 da THU: prefetch giu lai (~2% standalone), NT stores bi loai vi cham hon;
+  Pha 1 KHONG dong gap (xem s0.122). Win condition can Pha 2 hoac Pha 3 (waiver).
 
 ### 5.1 Pha 1 - Bit-exact, rui ro thap (lam truoc, dung thu tu)
 
-**P1a. AdamW non-temporal stores + prefetch** (`Release/tools/simd_native/tkv_simd_native.c`,
+**P1a. AdamW non-temporal stores + prefetch - DA LAM (HANDOFF s0.122): NT bi LOAI (cham hon 8-13%), prefetch giu.** (`Release/tools/simd_native/tkv_simd_native.c`,
 `adamw_f32_range` va nhanh mode-8 `AdamwStepF32`):
 - Hien: 7 luong (doc p,m,v,g; ghi p,m,v) dung store thuong -> doc-for-ownership oan.
 - Sua: `_mm256_stream_ps` cho p,m,v ghi (sau khi rong 32B alignment - AllocHGlobal + offset,
@@ -88,15 +93,15 @@ Con thieu ~415 ms de dat win condition seq1024 (muc 3) ma KHONG dung bit-exact.
 - Verify: test_adamw.c van PASS; adamw_mt_check.c maxdiff ~ULP; loss EXACT seq8/256/512/1024;
   mode 1 seq512 bite-ident ca 2 pool.
 
-**P1b. `_save_a` cap [n,4h] vao hpool** (nhanh NON-saved `gpt2_mlp` chung mach �0.117/�0.120):
+**P1b. `_save_a` — DA KIEM TRA: da pool qua sa_bufs (production); non-saved da co obuf (§0.121). Khong co viec.** (nhanh NON-saved `gpt2_mlp` chung mach �0.117/�0.120):
 - Hien moi goi t_zeros [n,4h] cho _save_a; production (saved path) khong anh huong nhieu,
   nhung nhanh non-saved + 2 mirror file can don. Du kien: vai chuc ms. Bit-exact (doc/ghi khong doi).
 
-**P1c. Cache transposition A/B cua QKV giua fwd va bwd** (cung 1 step):
+**P1c. Cache transposition - DA KIEM TRA: production hot path khong transpose (chi n<128 fallback); khong co viec.** (cung 1 step):
 - dqkv/dctx re-pack moi lan; luu transpose 1 lan dung lai. Du kien: vai chuc ms. Kiem tra
   hien co pack nao da cache (pack pool �0.119) truoc de khong doi lap. Bit-exact (pure copy).
 
-**P1d. Do lai head-to-head cung may, ghi HANDOFF �0.122**:
+**P1d. Do lai head-to-head cung may + ghi HANDOFF §0.122 — DA LAM (xem Muc 0 + HANDOFF §0.122)** �0.122**:
 - Chay: mode 0 x3 seq + mode 1 seq512 + `tools/bench_torch.py` (seq8/256/1024).
 - Cap nhat Muc 0 baseline + bang gap; gate 9/10 + trainer 15/15 bat buoc.
 

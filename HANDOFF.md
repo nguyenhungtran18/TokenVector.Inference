@@ -4212,6 +4212,31 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.122 Pha 1 - prefetch AdamW giu lai, NT-store bi LOAI theo do do (2026-11-09)
+Trien khai PLAN §5.1 (Pha 1) theo thu tu:
+1. **P1a (NT store + prefetch) - thu, do lai that:** `adamw_f32_range` (mode 8 path) thu
+   `_mm256_stream_ps` cho 3 stream ghi + prefetch T0 [i+64]. Lan dau CRASH #GP vi pool chunks
+   (tkv_run_aux) cat rui ro at element boundaries - bases 32B-aligned KHONG du, da peel toi da
+   7 phan tu dau + fallback storeu. Sau khi sua: **NT cham hon 8-13%** (0.351-0.365 s vs 0.317 s
+   plain, 4 lan chay) -> **LOAI NT**, giu prefetch T0 + tai sap xep (num/den tinh truoc store vm,vv):
+   **0.311-0.322 s**. NT chi giup khi ghi day du cache line lien tuc; memory-bound kernel khong
+   danh duoc loi the tren may nay.
+2. **P1b - khong co viec:** `_save_a` da pool qua sa_bufs (production pool=1, §0.117); nhanh
+   non-saved da co gpt2_mlp obuf (§0.121). Khong sua gi.
+3. **P1c - khong co viec:** production hot path khong chay smm_transpose (con lai 2 cai o nhanh
+   fallback n<128 va 1 ctxTt o duong cat; ATen bwd production khong dung). Khong co gi de cache.
+4. **P1d - do lai head-to-head (DLL moi trong out/):** mode 0: seq1024 fwd 1203 / bwd 3422 / total
+   4625 / loss EXACT 10.760399; seq512 593 / 2110 / 2703 / EXACT 10.764943; seq256 329 / 1468 /
+   1797 / EXACT 10.756927. Mode 2 (seq1024): fwd 1157 loss 109 bwd 3125 opt 875 copyback 109
+   TONG=5375. Mode 1 seq512: pool=1 3782 ms, pool=0 4047 ms, loss bite-ident ca 2
+   `10.764943 -> 12.684581`. Gate 9/10 (pack/gap pre-existing), trainer 15/15.
+**Ket luan Pha 1:** khong dong duoc gap (opt van ~859-891 ms, memory-bound; prefetch chi ~2%).
+Win condition seq1024 < 4148.4 ms KHONG dat duoc bang cac muc bit-exact con lai. Con 2 huong:
+Pha 2 (managed glue - do wall that quanh block glue, tich luy managed per call) hoac Pha 3
+(waiver: flash-attention-class la don danh manh nhat - xem §0.94). Khong tu y di Pha 3.
+So 2026-11-06 trong ngoac de doi chieu: seq1024 fwd+bwd 11875 (PLAN muc 0) -> 4625 (-61%).
+
+
 ## §0.121 AdamW native 8-thread + gpt2_mlp obuf (2026-11-09)
 Hai muc con lai:
 1. **`opt.step()` ~890 ms (bench mode 2, seq 256)** — khong phai bug rieng
