@@ -4212,6 +4212,18 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.127 Phase 1 SDPA AVX2 - vectorize transcendental (2026-11-09)
+Mo du an Fused SDPA AVX2 (xem PLAN_BEAT_PYTORCH §6):
+- `m256_exp_ps()` - fast expf AVX2 polynomial (deg-6) + scalef (waiver s0.125).
+- `exp_row_fast()` / `exp_sum_row_fast()` - vectorize qk[j] = expf(qk[j]-newmax) va reduction bsum.
+- Ca 2 occurrences `bsum = expf(...)` (pass 1 recompute + pass 2 recompute attn) duoc vectorize.
+- Dot64 / fma_row / mul_row AVX2 da co san.
+**Gioi han Phase 1:** production van di ATen (`torch_attention_bwd`); thay doi chi tren native flash path
+(fallback `attention_bwd_fused`). Speedup native ~17% (noise tren may dao dong). Khong thay doi production metrics:
+loss EXACT `10.760399` / `10.756927`; mode 1 seq512 **3218 ms** (truoc 3438); gate 9/10; trainer 15/15.
+Phase 2-5 (max-vector, mask blend, wire production, re-baseline) o PLAN §6.
+
+
 ## §0.126 ATen MLP bwd (gpt2_mlp_bwd) qua onednn_linear_bwd_off (2026-11-09)
 Phan tiep theo cua s0.124/s0.125: thay toan bo 2 linear-bwd trong `gpt2_mlp_bwd` (2 GEMM + dx + db cho w1 va w2)
 bang ATen oneDNN linear_bwd voi dw/db ghi THANG vao gflat tai offset (caller zero moi buoc - da verify o

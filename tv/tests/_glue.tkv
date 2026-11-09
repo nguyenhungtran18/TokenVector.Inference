@@ -75,11 +75,13 @@ def main() -> 'i32':
     t1 = now_ms()
     print("attn_bwd ATen-compat 6 iters ms=" + str(t1 - t0))
     # 8) native fallback path (gflat=None -> duong native PAR12)
+    for i in range(2):
+        r6 = gpt2_attention_bwd(obuf, wqkv, bqkv, wproj, bproj, n, gout, 1)
     t0 = now_ms()
-    for i in range(6):
+    for i in range(12):
         r6 = gpt2_attention_bwd(obuf, wqkv, bqkv, wproj, bproj, n, gout, 1)
     t1 = now_ms()
-    print("attn_bwd NATIVE 6 iters ms=" + str(t1 - t0))
+    print("attn_bwd NATIVE 12 iters ms=" + str(t1 - t0))
     # 9) LN bwd native (Ask A1): x [1024,768], gflat o_dg=0 o_db=h
     dxLN = t_zeros([n, h])
     xl2 = x.data
