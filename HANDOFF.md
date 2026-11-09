@@ -4212,6 +4212,54 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.117 Tai su dung buffer `[n,4h]` + logits — fwd −17%, bwd −7%, total −10% (2026-11-09)
+Y tuong (tiep bai hoc §0.116): chi phi `t_zeros` moi layer moi buoc moi la
+phan dang cat, khong phai phep tinh. Do lai: `t_zeros([1024,3072])` = 12,5 MB
+~10 ms; `t_zeros([1024,50257])` = 205 MB ~172 ms (**per buoc, khong per layer**).
+**Thay doi (chi cap buffer, khong doi phep tinh nao):**
+- `gpt2_linear(..., obuf)`: ghi thang vao buffer caller cap (`t_zeros` fallback
+  neu kich thuoc sai).
+- `gpt2_block_saved(..., sa_buf)`: `_save_a` [n,4h] lay tu pool thay vi
+  `t_zeros` moi layer.
+- `gpt2_forward_saved(..., sa_bufs)`: truyen pool xuong tung block; logits dung
+  lai `sc5` qua `t_new(sc5, [n, VocabSize])` (bo `t_zeros` 205 MB/buoc).
+- `gpt2_mlp_bwd(..., ibuf, dbuf)`:
+  `ibuf` = buffer cho `inner` recompute (1 GEMM ghi vao buffer co san);
+  `dbuf` = buffer cho output gelu-bwd — helper moi `_mlp_gelu_bwd` goi thang
+  `torch_gelu_bwd` voi out-buffer (thay `t_zeros([n])` 12,5 MB/layer trong
+  `op_gelu_erf_bwd`), `rc != 0` → `op_gelu_erf_bwd` nhu cu.
+- Thread `ibuf`/`dbuf` qua `gpt2_block_bwd` + `gpt2_backward` (ca 3 nhanh saves
+  5N/4N/3N; nhanh cu truyen `None`).
+- Sua ca 2 ban: `tv/tests/tv.training.gpt2_ref124.tkv` (ban bench/test resolve)
+  va `tv/training/tv.training.gpt2_ref124.tkv`.
+- Bench `tv/tests/simd_bench_124m_seq.tkv`: dong 4 cua `_seq_cfg.txt` = co
+  `pool` (1 = dung buffer, 0 = `t_zeros` nhu cu) → A/B **cung binary cung
+  phien**; helper `_mk_sa_bufs` / `_mk_b4h` / `_sc5_arg`. pool=0 tra tensor
+  [1]/list rong (kich thuoc sai) de callee tu cap lai y nhu truoc.
+**A/B (cung binary, mode 0, xen ke 1/0, best-of-3):**
+| seq | fwd pool=0 | fwd pool=1 | bwd pool=0 | bwd pool=1 | total 0→1 |
+|---|---|---|---|---|---|
+| 1024 | 1969 | **1641 (−16,7%)** | 3782 | **3531 (−6,6%)** | 5735 → **5172 (−9,8%)** |
+| 512 | 953 | **750 (−21,3%)** | 2500 | **2422 (−3,1%)** | 3453 → **3172 (−8,1%)** |
+| 256 | 454 | **375 (−17,4%)** | 1656 | **1500 (−9,4%)** | 2110 → **1875 (−11,1%)** |
+Loss EXACT ca 3 seq: `10.572291`(seq8) / `10.756927`(256) / `10.764943`(512) /
+`10.760399`(1024).
+**Kiem chung khong chi loss:** mode 1 (full train step, co AdamW) seq512 pool=1
+vs pool=0: `loss=10.764943 -> 12.684581` **giong het tung byte** → gradient va
+trang thai optimizer bit-identical (chi doi dich cua buffer).
+Gate (`out/run_gates_n10.ps1`, 10 suite): simd_matmul, gpt2, gpt2_scope,
+gpt2_train, grad, parity, inplace, gpt2_full **PASS**; `trainer_tests` **15/15**.
+`pack_tests` FAIL `InvalidProgramException` — **co tu truoc, khong lien quan**:
+compile lai bang compiler commit a547c79 (truoc builtin `torch_gelu_bwd`) cung
+loi y het; `gap_tests` van exit=82 (bai cu §0.72).
+**Cach chay lai:** `out/rebuild_bseq.ps1` → `dotnet out/bseq_gp_n10.dll`
+(can `out/bseq_gp_n10.runtimeconfig.json` tfm net10.0; chay truc tiep
+`out/bseq_gp.exe` se `FileNotFoundException System.Runtime.Intrinsics`).
+**Con lai (do duoc, chua lam):** `t_zeros([n,h])` ~3 MB van cap moi layer
+(ctxT/dctxT/out/dx trong attention fwd+bwd, ~14 cho/layer); `gpt2_mlp` (duong
+khong-saved) van `t_zeros([n,4h])`; `op_gelu_erf_bwd` van cap `g` moi lan voi
+caller khong truyen buffer.
+
 ## §0.116 Thu luu `inner` de bo recompute MLP bwd — KET QUA AM, da revert (2026-11-09)
 Gia thuyet: `gpt2_mlp_bwd` recompute 1 GEMM (~16 ms/layer) khi khong co
 `save_inner`; neu forward luu luon inner thi bwd bo duoc.
