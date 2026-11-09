@@ -4212,6 +4212,38 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.118 Pool buffer [n,h] cho attention — fwd −10.5%, bwd −2.7%, total −4.9% (2026-11-09)
+Nhom cap phat per-layer cuoi cung con sot (§0.117): cac tensor [n,h] trong
+attention fwd (out, ctxT) va bwd (ctxT, dctxT, dx ATen). Slot layout:
+[0] attn fwd `out`, [1] attn fwd `ctxT`, [2] attn bwd `ctxT`,
+[3] attn bwd `dctxT`, [4] attn bwd ATen `dx`.
+**Thay doi (chi cap buffer, khong doi phep tinh):**
+- Helper moi `_ab_pool(abuf, idx, n, h)`: callee ghi DE len toan bo truoc khi
+  doc -> noi dung cu khong bao gio duoc doc -> BIT-EXACT voi t_zeros.
+  abuf thieu slot / sai kich thuoc / None -> t_zeros nhu cu.
+- `gpt2_attention`, `gpt2_attention_bwd`: nhan `abuf`; goi tu
+  `gpt2_block_saved` (fwd) va `gpt2_block_bwd` (bwd); `gpt2_block_bwd`,
+  `gpt2_backward`, `gpt2_forward_saved` thread abuf xuong.
+- Sua ca 2 ban mirror (`tv/tests/` + `tv/training/tv.training.gpt2_ref124.tkv`).
+- Bench: `_mk_abuf(seq, pool)` (pool=0 -> list rong -> callee tu cap nhu cu,
+  A/B cung binary); line 4 `_seq_cfg.txt` = pool giu nguyen nhu §0.117.
+**A/B (cung binary, mode 0, xen ke 1/0, best-of-3):**
+| seq | fwd 0→1 | bwd 0→1 | total 0→1 | loss |
+|---|---|---|---|---|
+| 1024 | 1906→1469 (−23.0%) | 3625→3437 (−5.2%) | 5579→4921 (−11.8%) | EXACT `10.760399` |
+| 256 | — | — | 1859 (fwd 375 / bwd 1484) | EXACT `10.756927` |
+(`pool=0` la duong §0.117; rieng attention pooling so voi §0.117 best-of-3
+pool=1: fwd 1641→1469, bwd 3531→3437, total 5172→4921.)
+Mode 1 (full step, seq512, 1 lan/ben): 4562 (pool=1) vs 3985 (pool=0) —
+**trong nhieu**; loss giong het tung ky tu `10.764943 -> 12.684581` ca 2 ben
+-> gradient + optimizer bit-identical.
+Gate (`out/run_gates_n10.ps1`): 9/10 — simd_matmul, gpt2, gpt2_scope,
+gpt2_train, grad, parity, inplace, gpt2_full **PASS**; `pack_tests` +
+`gap_tests` FAIL (pre-existing, §0.117). trainer_tests 15/15.
+**Cach chay lai:** `tkvc-tv.exe tv/tests/simd_bench_124m_seq.tkv out/bseq_atn.exe main`
+-> copy `out/bseq_atn.exe` thanh `out/bseq_atn_n10.dll` +
+`out/bseq_atn_n10.runtimeconfig.json` (net10.0) -> `dotnet out/bseq_atn_n10.dll`.
+
 ## §0.117 Tai su dung buffer `[n,4h]` + logits — fwd −17%, bwd −7%, total −10% (2026-11-09)
 Y tuong (tiep bai hoc §0.116): chi phi `t_zeros` moi layer moi buoc moi la
 phan dang cat, khong phai phep tinh. Do lai: `t_zeros([1024,3072])` = 12,5 MB

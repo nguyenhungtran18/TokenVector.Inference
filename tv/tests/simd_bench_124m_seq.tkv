@@ -62,7 +62,8 @@ def _mk_pos(n: 'i64') -> 'list[i64]':
 # Tra ve saves = [logits, xf, xf_in, xins...] — loss tinh rieng bang
 # gpt2_loss(saves[0], ids) tai call site (cung ben trong vong do fwd).
 def _f124_fwd2(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32',
-               sc5: "list[f32]" = None, sa_bufs: 'list[Tensor]' = None) -> 'list[Tensor]':
+               sc5: "list[f32]" = None, sa_bufs: 'list[Tensor]' = None,
+               abuf: 'list[Tensor]' = None) -> 'list[Tensor]':
     ln1_g = []
     ln1_b = []
     wq = []
@@ -90,7 +91,7 @@ def _f124_fwd2(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i3
         w2.append(ps[base + 10])
         b2.append(ps[base + 11])
     return gpt2_forward_saved(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
-                              ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd, sc5, sa_bufs)
+                              ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd, sc5, sa_bufs, abuf)
 
 # ---- backward (ban sao gpt2_bwd_ps + saves P5.5) --------------------------
 def _f124_bwd(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32',
@@ -98,7 +99,8 @@ def _f124_bwd(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32
                sc4: "list[f32]" = None,
                m6_plg: 'i64' = 0, m6_pids: 'i64' = 0, m6_pwte: 'i64' = 0,
                m6_pxf: 'i64' = 0, m6_pdxf: 'i64' = 0, m6_pdwe: 'i64' = 0,
-               ibuf: "Tensor" = None, dbuf: "Tensor" = None) -> 'list[Tensor]':
+               ibuf: "Tensor" = None, dbuf: "Tensor" = None,
+                abuf: 'list[Tensor]' = None) -> 'list[Tensor]':
     ln1_g = []
     ln1_b = []
     wq = []
@@ -127,7 +129,7 @@ def _f124_bwd(ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32
         b2.append(ps[base + 11])
     return gpt2_backward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
                           ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], simd, gflat, saves, sc4,
-                          m6_plg, m6_pids, m6_pwte, m6_pxf, m6_pdxf, m6_pdwe, ibuf, dbuf)
+                          m6_plg, m6_pids, m6_pwte, m6_pxf, m6_pdxf, m6_pdwe, ibuf, dbuf, abuf)
 # ---- 1 buoc train day du (ban sao gpt2_train_step) --------------------------
 # P6 GĐ7: zero_grad worker dong thoi forward (join truoc bwd) — giong
 # gpt2_train_step, bit-exact, an ~250ms/buoc @124M (do BR[5]).
@@ -161,6 +163,16 @@ def _mk_b4h(seq: 'i64', pool: 'i64' = 1) -> "Tensor":
         return t_zeros([seq, 4 * HiddenSize])
     return t_zeros([1])
 
+def _mk_abuf(seq: 'i64', pool: 'i64' = 1) -> 'list[Tensor]':
+    # §0.118: 5 buffer [seq, h] cho attention fwd/bwd (out/ctxT fwd, ctxT/dctxT/dx
+    # bwd) — cap 1 lan, tai su dung moi layer moi buoc. pool=0 -> list rong
+    # (callee tu cap t_zeros nhu cu) = A/B cung binary.
+    out = []
+    if pool == 1:
+        for i in range(5):
+            out.append(t_zeros([seq, HiddenSize]))
+    return out
+
 def _sc5_arg(sc5: "list[f32]", pool: 'i64' = 1) -> "list[f32]":
     if pool == 1:
         return sc5
@@ -172,16 +184,17 @@ def _step124(opt: "AdamW", ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]
               m6_plg: 'i64' = 0, m6_pids: 'i64' = 0, m6_pwte: 'i64' = 0,
               m6_pxf: 'i64' = 0, m6_pdxf: 'i64' = 0, m6_pdwe: 'i64' = 0,
               sa_bufs: 'list[Tensor]' = None,
-              ibuf: "Tensor" = None, dbuf: "Tensor" = None) -> 'f32':
+              ibuf: "Tensor" = None, dbuf: "Tensor" = None,
+              abuf: 'list[Tensor]' = None) -> 'f32':
     # M3c: sc5 = scratch [n*V] cho logits (fwd, luu trong saves[0] -> doc trong bwd
     #      nhu logits_t, KHONG ghi lai); sc4 = scratch [V*h] cho dwte (bwd).
     #      2 buffer RIENG (logits + dwte CUNG SONG trong bwd P5.5) — CU do 172ms/shape.
     zh = thread_spawn(_bq_zr_one, _BqZrJob(opt.g))
-    sv = _f124_fwd2(ps, ids, pos, simd, sc5, sa_bufs)
+    sv = _f124_fwd2(ps, ids, pos, simd, sc5, sa_bufs, abuf)
     loss = gpt2_loss(sv[0], ids)
     jz = thread_join(zh)
     grads = _f124_bwd(ps, ids, pos, simd, opt.g, sv, sc4,
-                       m6_plg, m6_pids, m6_pwte, m6_pxf, m6_pdxf, m6_pdwe, ibuf, dbuf)
+                       m6_plg, m6_pids, m6_pwte, m6_pxf, m6_pdxf, m6_pdwe, ibuf, dbuf, abuf)
     opt.step()
     off = 0
     for i in range(len(ps)):
@@ -247,15 +260,16 @@ def main() -> 'i32':
         sab = _mk_sa_bufs(seq, pool)
         ib = _mk_b4h(seq, pool)
         db = _mk_b4h(seq, pool)
+        abp = _mk_abuf(seq, pool)
         m6_plg = alloc_bytes(seq * VocabSize * 4)
         m6_pids = alloc_bytes(seq * 4)
         m6_pwte = alloc_bytes(VocabSize * HiddenSize * 4)
         m6_pxf = alloc_bytes(seq * HiddenSize * 4)
         m6_pdxf = alloc_bytes(seq * HiddenSize * 4)
         m6_pdwe = alloc_bytes(VocabSize * HiddenSize * 4)
-        lw = _step124(opt, ps, ids, pos, 1, _sc5_arg(sc5.data, pool), sc4.data, m6_plg, m6_pids, m6_pwte, m6_pxf, m6_pdxf, m6_pdwe, sab, ib, db)
+        lw = _step124(opt, ps, ids, pos, 1, _sc5_arg(sc5.data, pool), sc4.data, m6_plg, m6_pids, m6_pwte, m6_pxf, m6_pdxf, m6_pdwe, sab, ib, db, abp)
         t0 = now_ms()
-        l1 = _step124(opt, ps, ids, pos, 1, _sc5_arg(sc5.data, pool), sc4.data, m6_plg, m6_pids, m6_pwte, m6_pxf, m6_pdxf, m6_pdwe, sab, ib, db)
+        l1 = _step124(opt, ps, ids, pos, 1, _sc5_arg(sc5.data, pool), sc4.data, m6_plg, m6_pids, m6_pwte, m6_pxf, m6_pdxf, m6_pdwe, sab, ib, db, abp)
         dt = now_ms() - t0
         print("BSEQ full-step simd seq=" + str(seq) + " ms=" + str(dt)
               + " loss=" + str(lw) + " -> " + str(l1))
@@ -271,6 +285,7 @@ def main() -> 'i32':
             sab = _mk_sa_bufs(seq, pool)
             ib = _mk_b4h(seq, pool)
             db = _mk_b4h(seq, pool)
+            abp = _mk_abuf(seq, pool)
             m6_plg = alloc_bytes(seq * VocabSize * 4)
             m6_pids = alloc_bytes(seq * 4)
             m6_pwte = alloc_bytes(VocabSize * HiddenSize * 4)
@@ -278,10 +293,10 @@ def main() -> 'i32':
             m6_pdxf = alloc_bytes(seq * HiddenSize * 4)
             m6_pdwe = alloc_bytes(VocabSize * HiddenSize * 4)
             # warm
-            svw = _f124_fwd2(ps, ids, pos, 1, _sc5_arg(sc5.data, pool), sab)
+            svw = _f124_fwd2(ps, ids, pos, 1, _sc5_arg(sc5.data, pool), sab, abp)
             lw0 = gpt2_loss(svw[0], ids)
             grw = _f124_bwd(ps, ids, pos, 1, opt.g, svw, sc4.data,
-                            m6_plg, m6_pids, m6_pwte, m6_pxf, m6_pdxf, m6_pdwe, ib, db)
+                            m6_plg, m6_pids, m6_pwte, m6_pxf, m6_pdxf, m6_pdwe, ib, db, abp)
             opt.step()
             b_fw = 1.0e9
             b_lo = 1.0e9
@@ -292,13 +307,13 @@ def main() -> 'i32':
             while kk < 2:
                 zh = thread_spawn(_bq_zr_one, _BqZrJob(opt.g))
                 ta = now_ms()
-                sv = _f124_fwd2(ps, ids, pos, 1, _sc5_arg(sc5.data, pool), sab)
+                sv = _f124_fwd2(ps, ids, pos, 1, _sc5_arg(sc5.data, pool), sab, abp)
                 tb = now_ms()
                 lw = gpt2_loss(sv[0], ids)
                 tc = now_ms()
                 jz = thread_join(zh)
                 grd = _f124_bwd(ps, ids, pos, 1, opt.g, sv, sc4.data,
-                                m6_plg, m6_pids, m6_pwte, m6_pxf, m6_pdxf, m6_pdwe, ib, db)
+                                m6_plg, m6_pids, m6_pwte, m6_pxf, m6_pdxf, m6_pdwe, ib, db, abp)
                 td = now_ms()
                 opt.step()
                 te = now_ms()
@@ -339,14 +354,15 @@ def main() -> 'i32':
         sab = _mk_sa_bufs(seq, pool)
         ib = _mk_b4h(seq, pool)
         db = _mk_b4h(seq, pool)
-        sv0 = _f124_fwd2(ps, ids, pos, 1, _sc5_arg(sc5.data, pool), sab)
+        abp = _mk_abuf(seq, pool)
+        sv0 = _f124_fwd2(ps, ids, pos, 1, _sc5_arg(sc5.data, pool), sab, abp)
         l0 = gpt2_loss(sv0[0], ids)
         t0 = now_ms()
-        sv1 = _f124_fwd2(ps, ids, pos, 1, _sc5_arg(sc5.data, pool), sab)
+        sv1 = _f124_fwd2(ps, ids, pos, 1, _sc5_arg(sc5.data, pool), sab, abp)
         l1 = gpt2_loss(sv1[0], ids)
         t_fwd = now_ms() - t0
         t0 = now_ms()
-        gr = _f124_bwd(ps, ids, pos, 1, g, sv1, None, 0, 0, 0, 0, 0, 0, ib, db)
+        gr = _f124_bwd(ps, ids, pos, 1, g, sv1, None, 0, 0, 0, 0, 0, 0, ib, db, abp)
         t_bwd = now_ms() - t0
         print("BSEQ fwd=" + str(t_fwd) + " ms  bwd=" + str(t_bwd) + " ms  total="
               + str(t_fwd + t_bwd) + " ms  loss=" + str(l1) + " (warmup loss=" + str(l0) + ")")

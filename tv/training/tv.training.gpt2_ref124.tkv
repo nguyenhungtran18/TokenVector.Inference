@@ -43,6 +43,20 @@ def _sh1(t: "Tensor") -> 'i64':
     s = t.shape
     return s[1]
 
+# ==== P6 pool [n,h] (2026-11-09): buffer tai su dung cho attention ==========
+# Caller (bench/train step) cap 1 lan roi truyen vao; callee ghi DE len toan
+# bo truoc khi doc -> noi dung cu KHONG bao gio duoc doc -> BIT-EXACT voi
+# duong t_zeros. abuf thieu slot / sai kich thuoc / None -> t_zeros nhu cu.
+# Slot layout: [0] attn fwd `out`, [1] attn fwd `ctxT`, [2] attn bwd `ctxT`,
+# [3] attn bwd `dctxT`, [4] attn bwd ATen `dx`.
+def _ab_pool(abuf: 'list[Tensor]', idx: 'i64', n: 'i64', h: 'i64') -> "Tensor":
+    if abuf != None:
+        if len(abuf) > idx:
+            t = abuf[idx]
+            if len(t.data) == n * h:
+                return t
+    return t_zeros([n, h])
+
 def _zeros2(n: 'i64', d: 'i64') -> "Tensor":
     return t_zeros([n, d])
 
@@ -244,15 +258,16 @@ def _attn_f_merge(co: "list[f32]", ct: "list[f32]", n: 'i64', h: 'i64', hd: 'i64
 # ---- Attention: multi-head, causal mask, softmax fp32, proj ---------------
 # QKV layout: qkv[t, 0:h)=Q, [h,2h)=K, [2h,3h)=V; moi head lien tiep HeadDim.
 def gpt2_attention(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
-                   w_proj: "Tensor", b_proj: "Tensor", n: 'i64', simd: 'i32' = 0) -> "Tensor":
+                   w_proj: "Tensor", b_proj: "Tensor", n: 'i64', simd: 'i32' = 0,
+                   abuf: 'list[Tensor]' = None) -> "Tensor":
     h = HiddenSize
     hd = HeadDim
     qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h, simd)
-    out = t_zeros([n, h])
+    out = _ab_pool(abuf, 0, n, h)
     # P5.1 (perf-plan): ctx theo hang [n, h] — duong SIMD lam proj bang GEMM
     # (smm_fwd) thay vong scalar n*h^2 (do: 3970 ms/layer @seq1024). Duong
     # scalar van giu list cuc bo `ctx` => BIT-EXACT nhu truoc.
-    ctxT = t_zeros([n, h])
+    ctxT = _ab_pool(abuf, 1, n, h)
     inv = 1.0 / sqrt(float(hd))
     if simd == 1:
         # P6 G9 (s.0.105): ATen SDPA (same kernel HF gpt2 sdpa) + ATen addmm proj;
@@ -612,11 +627,12 @@ def gpt2_block_saved(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
                      w_qkv: "Tensor", b_qkv: "Tensor", w_proj: "Tensor", b_proj: "Tensor",
                      ln2_g: "Tensor", ln2_b: "Tensor",
                      w1: "Tensor", b1: "Tensor", w2: "Tensor", b2: "Tensor",
-                     simd: 'i32' = 0, sa_buf: "Tensor" = None) -> 'list[Tensor]':
+                     simd: 'i32' = 0, sa_buf: "Tensor" = None,
+                     abuf: 'list[Tensor]' = None) -> 'list[Tensor]':
     n = _sh0(x)
     h = _sh1(x)
     a_ln = gpt2_layernorm(x, ln1_g, ln1_b)
-    a = gpt2_attention(a_ln, w_qkv, b_qkv, w_proj, b_proj, n, simd)
+    a = gpt2_attention(a_ln, w_qkv, b_qkv, w_proj, b_proj, n, simd, abuf)
     r = t_zeros([n, h])
     _xl = x.data
     _al = a.data
@@ -720,7 +736,8 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
                        w2: 'list[Tensor]', b2: 'list[Tensor]',
                        lnf_g: "Tensor", lnf_b: "Tensor", simd: 'i32' = 0,
                        sc5: "list[f32]" = None,
-                       sa_bufs: 'list[Tensor]' = None) -> 'list[Tensor]':
+                       sa_bufs: 'list[Tensor]' = None,
+                       abuf: 'list[Tensor]' = None) -> 'list[Tensor]':
     n = len(ids)
     h = HiddenSize
     x = gpt2_embed(ids, pos, wte, wpe)
@@ -736,7 +753,7 @@ def gpt2_forward_saved(ids: 'list[i64]', pos: 'list[i64]',
             if i < len(sa_bufs):
                 _sab = sa_bufs[i]
         rb = gpt2_block_saved(x, ln1_g[i], ln1_b[i], w_qkv[i], b_qkv[i], w_proj[i], b_proj[i],
-                              ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i], simd, _sab)
+                              ln2_g[i], ln2_b[i], w1[i], b1[i], w2[i], b2[i], simd, _sab, abuf)
         x = rb[0]
         rsin.append(rb[1])
         ains.append(rb[2])
@@ -1367,7 +1384,8 @@ def _attn_hb_merge(co: "list[f32]", qo: "list[f32]", ct: "list[f32]", dq: "list[
 def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                        w_proj: "Tensor", b_proj: "Tensor", n: 'i64', gout: "Tensor", simd: 'i32' = 0,
                        gflat: 'list[f32]' = None, o_qkv: "i64" = -1, o_bqkv: "i64" = -1,
-                       o_proj: "i64" = -1, o_bproj: "i64" = -1) -> 'list[Tensor]':
+                       o_proj: "i64" = -1, o_bproj: "i64" = -1,
+                       abuf: 'list[Tensor]' = None) -> 'list[Tensor]':
     h = HiddenSize
     hd = HeadDim
     qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h, simd)
@@ -1377,8 +1395,10 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
     db_proj = t_zeros([h])
     # P5.1 (perf-plan): dctx theo hang [n, h] + ctx theo hang [n, h] (cho
     # dw_proj GEMM). Duong scalar van giu list cuc bo => BIT-EXACT nhu truoc.
-    ctxT = t_zeros([n, h])
-    dctxT = t_zeros([n, h])
+    # §0.118: pool [n,h] tai su dung (ATen path khong dung — pool reuse khong
+    # ton zero-fill); sai kich thuoc -> t_zeros nhu cu.
+    ctxT = _ab_pool(abuf, 2, n, h)
+    dctxT = _ab_pool(abuf, 3, n, h)
     if simd == 1:
         # P6 G11 (s.0.107): ATen full-block bwd (addmm/sdpa/addmm backward)
         # qua autograd — BIT-IDENTICAL voi backward cua HF GPT2.
@@ -1393,7 +1413,7 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                 _abq = b_qkv.data
                 _awp = w_proj.data
                 _abp = b_proj.data
-                dx = t_zeros([n, h])
+                dx = _ab_pool(abuf, 4, n, h)
                 _adx = dx.data
                 _aat = torch_attention_bwd(_axd, _agd, _awq, _abq, _awp, _abp, _adx, gflat, n, h, NHeads, hd, o_qkv, o_bqkv, o_proj, o_bproj)
                 if _aat == 0:
@@ -1834,7 +1854,7 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
                    save_r: "Tensor" = None, save_a: "Tensor" = None,
                    save_m: "Tensor" = None, save_inner: "Tensor" = None,
                    save_a_gelu: "Tensor" = None, ibuf: "Tensor" = None,
-                   dbuf: "Tensor" = None) -> 'list[Tensor]':
+                   dbuf: "Tensor" = None, abuf: 'list[Tensor]' = None) -> 'list[Tensor]':
     # offs = 12 offset flat theo layout layer (0 ln1_g 1 ln1_b 2 w_qkv
     # 3 b_qkv 4 w_proj 5 b_proj 6 ln2_g 7 ln2_b 8 w1 9 b1 10 w2 11 b2);
     # rong = off (duong cu, parity nguyen ven).
@@ -1900,7 +1920,7 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
     simd_add(_gd, _dl2, _gd)
     # r = x + attn_out
     r_att = gpt2_attention_bwd(a, w_qkv, b_qkv, w_proj, b_proj, n, gout, simd,
-                               gflat, o_qkv, o_bqkv, o_proj, o_bproj)
+                               gflat, o_qkv, o_bqkv, o_proj, o_bproj, abuf)
     rl1 = gpt2_layernorm_bwd(x, ln1_g, ln1_b, r_att[0], gflat, o_l1g, o_l1b)
     drl1 = rl1[0]
     _dl1 = drl1.data
@@ -1934,7 +1954,8 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
                    sc4: "list[f32]" = None,
                    m6_plg: 'i64' = 0, m6_pids: 'i64' = 0, m6_pwte: 'i64' = 0,
                    m6_pxf: 'i64' = 0, m6_pdxf: 'i64' = 0, m6_pdwe: 'i64' = 0,
-                   ibuf: "Tensor" = None, dbuf: "Tensor" = None) -> 'list[Tensor]':
+                   ibuf: "Tensor" = None, dbuf: "Tensor" = None,
+                    abuf: 'list[Tensor]' = None) -> 'list[Tensor]':
     n = len(ids)
     h = HiddenSize
     # P1.1: gflat = flat grads phang cua AdamW (da zero) — neu KHONG rong thi
@@ -2103,7 +2124,8 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
             rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
                                 w_qkv[li], b_qkv[li], w_proj[li], b_proj[li],
                                 ln2_g[li], ln2_b[li],
-                                w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo)
+                                w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo,
+                                None, None, None, None, None, None, None, abuf)
         else:
             # P6 GĐ8 (2026-11-08): saves format 3+5N (logits, xf, xf_in, xins, rs
             # + ains, msin + 1 gelu output `a` per layer) -> bo gelu recompute,
@@ -2117,7 +2139,7 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
                                     saves[3 + 2 * NLayers + li],
                                     saves[3 + 3 * NLayers + li],
                                     None,
-                                    saves[3 + 4 * NLayers + li], ibuf, dbuf)
+                                    saves[3 + 4 * NLayers + li], ibuf, dbuf, abuf)
             elif len(saves) >= 3 + 4 * NLayers:
                 rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
                                     w_qkv[li], b_qkv[li], w_proj[li], b_proj[li],
@@ -2125,13 +2147,13 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
                                     w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo,
                                     saves[3 + NLayers + li],
                                     saves[3 + 2 * NLayers + li],
-                                    saves[3 + 3 * NLayers + li], None, None, ibuf, dbuf)
+                                    saves[3 + 3 * NLayers + li], None, None, ibuf, dbuf, abuf)
             else:
                 rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
                                     w_qkv[li], b_qkv[li], w_proj[li], b_proj[li],
                                     ln2_g[li], ln2_b[li],
                                     w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo,
-                                    saves[3 + NLayers + li], None, None, None, None, ibuf, dbuf)
+                                    saves[3 + NLayers + li], None, None, None, None, ibuf, dbuf, abuf)
         gx = rb[0]
         for j in range(1, 13):
             rblocks.append(rb[j])
