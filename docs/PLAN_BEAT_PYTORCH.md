@@ -143,3 +143,53 @@ Neu dua seq1024 ve < 4600 ma PyTorch re-measure van ~4190 thi con thieu ~400 ms 
 - mode 1 la gate gradient: mode 0 co the xanh loss ma gradient van sai; luon chay mode 1 (seq512).
 - PyTorch ref 2026-11-06 cu; moi pha PHAI re-run bench_torch de co cap so cung phien.
 - `_seq_cfg.txt` line 4 = pool bit; pool=0 cho ra duong t_zeros cu y nhu truoc (A/B trong cung binary).
+
+
+## 6. Dá»± Ã¡n: Fused SDPA backward AVX2 (2026-11-09, Ä‘á»ƒ thay PyTorch/ATen)
+Má»¥c tiÃªu: viáº¿t/cáº£i thiá»‡n native SDPA backward trÃªn AVX2+FMA Ä‘á»§ nhanh Ä‘á»ƒ s0.125+ cÃ³ thá»ƒ thay tháº¿ ATen `scaled_dot_product_attention(is_causal)`, Ä‘Ã³ng tráº§n hiá»‡u nÄƒng backward (attention_bwd hiá»‡n ~1.1 s/step
+
+### 6.0 Baseline hiá»‡n táº¡i (Ä‘o thá»±c táº¿)
+- **ATen path (production)**: 6 iters = 579-685 ms â†’ ~94-114 ms/layer @seq1024. Loss EXACT, mode-1 bite-ident 10.764943 -> 12.684581.
+- **Native flash (tkv_flash_attn.c, hiá»‡n Ä‘Ã£ AVX2 hÃ³a)**: 12 iters = 2125-2578 ms â†’ ~177-215 ms/layer. Loss EXACT, mode-1 bite-ident (giÃ¡ trá»‹ tÆ°Æ¡ng Ä‘Æ°Æ¡ng â€” cáº£ hai Ä‘á»u váº«n EXACT).
+- **ChÃªnh lá»‡ch**: ATen khoáº£ng 2x nhanh hÆ¡n â€” Ä‘Ã¢y lÃ  má»¥c tiÃªu pháº£i thu háº¹p.
+
+### 6.1 ÄÃ£ lÃ m (Phase 1 â€” vectorize transcendental)
+- `static inline __m256 m256_exp_ps(__m256)` â€” fast expf AVX2 polynomial (deg-6), clamp [-87.3, 88.7], scalef qua `slli_epi32(+127, 23)`. KHÃ”NG cáº§n bit-exact (waiver s0.125).
+- `static inline void exp_row_fast(float* qk, float newmax, int kvb)` â€” vectorize `qk[j] = expf(qk[j] - newmax)`.
+- `static inline float exp_sum_row_fast(float* qk, float newmax, int kvb)` â€” vectorize `bsum += e` reduction + store.
+- `dot64`, `fma_row`, `mul_row` Ä‘Ã£ AVX2 (cÃ³ sáºµn tá»« trÆ°á»›c).
+- Thay tháº¿ 2 bsum-loop (pass 1 recompute + pass 2 recompute attn) qua helper.
+- **Sá»‘ liá»‡u sÆ¡ bá»™**: native ~177-215 ms/layer (dao Ä‘á»™ng Â±10% (noise); ATen ~94-114 ms/layer â€” ATen váº«n tháº¯ng).
+- **Production váº«n Ä‘i ATen** (`torch_attention_bwd`); native chá»‰ lÃ  fallback (`attention_bwd_fused` IL builtin).
+
+### 6.2 Cáº§n lÃ m tiáº¿p
+- **Phase 2**: profile & loáº¡i bá» branch/throw/mask overhead trong hot loop:
+  - Vectorize causal mask (khÃ´ng branch `u > t`) báº±ng `_mm256_cmp_ps` + blend.
+  - Vectorize `gA = dotBN(d_row, V)` vÃ  `ds = attn * (gA - dsum)`.
+  - Pass 1 dÃ¹ng `_mm256_max_ps` theo chunk 8 Ä‘á»ƒ tÃ¬m `rmax`.
+  - Vectorize `_mm256_log_ps` náº¿u cáº§n cho `lse = mx + logf(sm)` (ln-1 láº§n/jalanc/row).
+- **Phase 3**: wire production â€” `TKV_FLASH_OFF=0` â†’ `attention_bwd_fused` native thay ATen trong `gpt2_attention_bwd` (Ä‘Ã£ cÃ³ dispatcher `_pt_flash_slots`).
+  - Quyáº¿t Ä‘á»‹nh dá»±a trÃªn benchmark cuá»‘i: giá»¯ ATen náº¿u native váº«n cháº­m hÆ¡n; switch production náº¿u native â‰¤ ATen.
+- **Phase 4**: Re-baseline gate:
+  - loss EXACT (cÃ³ thá»ƒ drift á»Ÿ ULP level â€” waiver s0.125);
+  - mode 1 bite-ident â€” pháº£i Ä‘áº¡t giÃ¡ trá»‹ trÆ°á»›c Â§0.126 (10.764943 â†’ 12.684581) hoáº·c re-record;
+  - gate 9/10, trainer 15/15 pháº£i xanh.
+- **Phase 5** (tÃ¹y chá»n): Ã¡p dá»¥ng pattern cho cÃ¡c shape nhá» (seq8/256), nÆ¡i fixed overhead ATen dominates â€” native cÃ³ thá»ƒ tháº¯ng á»Ÿ Ä‘Ã³.
+
+### 6.3 Rá»§i ro & rÃ ng buá»™c
+- Loss kommer trÃ´i vÄ©nh viá»…n náº¿u chuyá»ƒn production sang native â€” re-baseline báº¯t buá»™c.
+- MÃ£ C AVX2 dá»… bá»‹ dÃ­nh mmx/mxcsr; má»—i thay Ä‘á»•i pháº£i test loss EXACT + gate.
+- `m256_exp_ps` hiá»‡n ULP ~2 â€” Ä‘á»§ khi waiver; náº¿u return bit-exact cáº§n Sleef-style table lookup (thÃªm cÃ´ng).
+
+### 6.4 Win condition Phase 2-3
+- Native â‰¤ ATen (bwd-attention portion): Ä‘Ã³ng â‰¥ 1.1s/step.
+- Loss EXACT (drift â‰¤ ULP tolerance) + mode-1 giá»¯ 12.684581 hoáº·c re-record.
+- Gate 9/10, trainer 15/15 giá»¯ nguyÃªn.
+
+### 6.5 Pháº¡m vi cÃ´ng viá»‡c (giáº¥y tá»)
+CÃ¡c file sáº½ cháº¡m:
+- `Release/tools/simd_native/tkv_flash_attn.c` â€”Å© fill exp_sum_row_fast selection + mask blending; cÃ³ thá»ƒ tÃ¡ch pass-2 thÃ nh 2-pass fused khi nháº£y sÃ n.
+- `tv/training/tv.training.gpt2_ref124.tkv` + `tv/tests/tv.training.gpt2_ref124.tkv` (mirror) â€” chá»‰ Phase 3.
+- `Release/runtime/tkv_simd_native.dll` â€” rebuild theo má»—i commit.
+- Commit series theo phase cho phÃ©p revert clean náº¿u Phase 2 fails quality gate.
+
