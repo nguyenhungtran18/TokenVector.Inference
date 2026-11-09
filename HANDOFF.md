@@ -4212,6 +4212,35 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.124 Pha 3 - xac minh flash/SDPA ATen da co san + BLAS cho dW GEMM (2026-11-09)
+Xin user waiver che do bit-exact ("lam pha 3"). Ket qua THAT:
+**1) Flash-attention-class trong production - DA CO.** Production attention bwd qua ATen
+SDPA autograd (`at::scaled_dot_product_attention is_causal=true`). Do truc tiep
+(`tv/tests/_glue.tkv` v3): ATen path **~94 ms/layer** vs native PAR12 fallback
+**~190 ms/layer** (bench gate mode 0/1 dung ATen khi gflat co data). Phan fwd qua
+ATen addmm/gelu/sdpa tu s0.105+. Plan §5.3 muc "flash" da loi thoi - da co, khong phai
+việc chưa làm. Loss EXACT o ca 3 seq + mode 1 bit-ident `10.764943 -> 12.684581`.
+**2) LN obuf ~0.86 ms/call - khong can sua.** Do truc tiep: ATen `at::layer_norm` call
+qua bridge = **0.43 ms** (proxy Tensor + dispatcher + 3 MB memcpy) + IL wrapper reflection
+~0.43 ms. Tong lien quan ~20 ms/buoc (0.4% cua step). `LayernormFwdM` da pin `_items`,
+`LayernormFwdNative` dung bridge ATen - khong co duong nhanh on hon de sua buoc nay.
+**3) BLAS cho dW GEMM (waiver):** `LinearDwAtFused` (dW = X^T GY, true-k/transA) them
+route `cblas_sgemm(RowMajor, Trans, NoTrans, beta=1.0)` khi BLAS co (TKV_GEMM_BLAS mac dinh ON);
+fallback native true-k van nguyen. Ket qua: bwd ~3547 -> ~3297 (vs PyTorch 3451 f+b moi);
+loss EXACT o ca 3 seq (dW khong o fwd); mode 1 lo in-ra khong doi; gate 9/10; mode 2
+seq256 TONG=2625. **Khong dong win condition** (f+b ~4313 vs target 4148.4 - van thieu ~165).
+**4) Head-to-head moi 2026-11-09 (cung may, threads=14, torch 2.14.0+cpu):**
+| seq | PyTorch f+b | PyTorch step | TV f+b (mode 0) | TV mode 2 TONG | gap f+b |
+|---|---|---|---|---|---|
+| 8 | 317.8 | 1012.1 | 1078 (bwd 1032 - anomaly thread-spawn overhead) | n/a | 3.4x |
+| 256 | 848.6 | 1517.5 | 1688->1672 | 2625 | 2.0x |
+| 1024 | 3451.3 | 3986.1 | 4625->4313 | 5375 (mode 2) | 1.25x |
+**5) LN/loop con lai:** seq8 anomaly (bwd 1032 ms vs fwd 46 - thread_spawn spin overhead
+o vung tiny) - chua lam. bf16/TF32 - KHONG kha thi (can ha tang bf16 + hong toan bo gates loss EXACT).
+Win condition seq1024 < 4148.4 van chua dat (~4313 sau waiver BLAS). Bot them ~165 ms de
+dat; neu user EXACT waive hand, con la 2 muc cuoi: seq8 anomaly + thread scaling 2.3->3.7x.
+
+
 ## §0.123 Pha 2 - simd_add list wrapper: pin _items, bo ToArray/AddRange (2026-11-09)
 Pha 2 (PLAN §5.2) - do managed glue that, tim thay do thi lon, sua chua.
 **Probe `tv/tests/_glue.tkv`** (mode 0, seq1024 shapes): glue-floor ~0.75 us/call (ổn);

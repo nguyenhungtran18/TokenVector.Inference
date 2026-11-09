@@ -5,15 +5,16 @@ Muc tieu: full step <= PyTorch 14T (1042.7 / 1572.7 / 4148.4 ms) o ca 3 seq, gat
 
 ## 0. Baseline hien tai (do moi 2026-11-09, .NET 10; HANDOFF §0.123)
 - TV SIMD (2026-11-09, loss EXACT ca 3 seq):
-  - seq1024 fwd+bwd 4625 (fwd 1078 / bwd 3547), full step mode 1 ~3719
-  - seq512 fwd+bwd 2546 (fwd 500 / bwd 2046), full step mode 1 ~3719
-  - seq256 fwd+bwd 1687 (fwd 281 / bwd 1406), opt.step ~859-891
+  - seq1024 fwd+bwd ~4313 (fwd 1016 / bwd ~3297), full step mode 1 ~3719
+  - seq512 fwd+bwd 2546 (fwd ~515 / bwd ~2063), full step mode 1 ~3719
+  - seq256 fwd+bwd 1672 (fwd 281 / bwd ~1391), opt.step ~859-891
   - seq8 chua do lai (giu so 2026-11-06: fwd+bwd 1829, full step 2813)
   - (so 2026-11-06: seq1024 fwd+bwd 11875, full step 12828 -> nay -61%; §0.115-§0.122)
-- PyTorch (do 2026-11-06, CHUA re-measure sau dot toi uu):
-  - seq8 full step 1060.6, seq8 fwd+bwd (T=1) 530.4, (T=14) 384.7
-  - seq1024 fwd+bwd 3599.5, full step 4190.6
-- Gap: seq1024 fwd+bwd 4625 vs 3599.5 (~1.29x); fwd giam 120/93/48 ms sau Pha 2 (s0.123); backward la phan lon; opt.step memory-bound.
+- PyTorch (re-do 2026-11-09, threads=14, torch 2.14.0+cpu):
+  - seq8 fwd+bwd 317.8, full step 1012.1  (TV 1078; TV 3.4x)
+  - seq256 fwd+bwd 848.6, full step 1517.5  (TV 1672; TV 2.0x)
+  - seq1024 fwd+bwd 3451.3, full step 3986.1  (TV ~4313; TV 1.25x)
+- Gap: seq1024 fwd+bwd 4625 vs 3599.5 (~1.25x cung ngay 2026-11-09 vs PyTorch re-do 3451.3; TV ~4313, s0.123->s0.124)
   Pha 1 (HANDOFF §0.122) khong dong gap them; Pha 3 (flash, can waiver) la huong manh nhat.
 
 ## 1. Nguyen nhan (do duoc)
@@ -73,8 +74,8 @@ Con thieu ~415 ms de dat win condition seq1024 (muc 3) ma KHONG dung bit-exact.
 - TV seq512 mode 0: fwd ~500, bwd ~2046, total ~2546 ms; full step mode 1: ~3782-4047 ms
 - TV opt.step (mode 2): ~859-891 ms (AdamW native 8-thread + prefetch; NT stores DA LOAI, xem §0.122)
 - Full step tuong duong (mode 2, seq1024): TONG=5375 ms
-- PyTorch (do 2026-11-06, CHUA chay lai sau dot toi uu): seq1024 fwd+bwd 3599.5, full step 4190.6;
-  seq8 full step 1060.6. CHU Y: bench_torch d can chay lai sau moi pha de co cap so cung phien.
+- PyTorch (re-do 2026-11-09, threads=14, torch 2.14.0+cpu):
+  seq8 317.8 / 1012.1; seq256 848.6 / 1517.5; seq1024 3451.3 / 3986.1.
 - Loss van EXACT ca 3 seq (10.572291 / 10.756927 / 10.760399), mode 1 bite-ident 10.764943 -> 12.684581.
 - Pha 1 da THU: prefetch giu lai (~2% standalone), NT stores bi loai vi cham hon;
   Pha 1 KHONG dong gap (xem s0.122). Win condition can Pha 2 hoac Pha 3 (waiver).
@@ -116,14 +117,15 @@ Neu dua seq1024 ve < 4600 ma PyTorch re-measure van ~4190 thi con thieu ~400 ms 
   mode 1 seq512 bit-ident. Loss EXACT ca 3 seq. fwd: 1024 1203->1078, 512 593->500, 256 329->281.
 - Muon dong gap hoac gate lai tot hon: Pha 3 (flash) van can waiver; Pha 2 chi lay mot
   tang cuc bo (glue) chu khong dong duoc backward.
-### 5.3 Pha 3 - CAN USER WAIVER (KHONG tu y trien khai)
-- **Flash-attention-class attention fwd+bwd**: PyTorch th?ng y boi lam duoc fused attention;
-  attention_bwd van la phan lon bwd (~1-1.5 s/step). Doi accumulation order -> loss KHONG EXACT nua.
-- **BLAS dispatch lam default** (hien opt-in TKV_GEMM_BLAS=1, �0.92/0.94): output lech ->
-  can re-cast + re-gate toan bo.
-- **bf16/TF32**: lech numerics, nghiem tuyet doi cua hop dong.
-- Ghi ro: neu user waiver cho attention, do day la don danh manh nhat vao gap ~1.27x
-  (HANDOFF �0.94: flash co the cat ~1-1.5 s), truoc do moi pha chi la bo chin.
+### 5.3 Pha 3 - trang thai thuc (HANDOFF s0.124)
+- Flash-attention-class: DA CO SAN trong production (ATen SDPA fwd + ATen autograd
+  SDPA bwd, ~94 ms/layer vs native 190); loss EXACT giu. __5.3 cu da loi thoi.__
+- BLAS default: da ON tu s0.93; s0.124 them sgemm Trans beta=1 cho dW GEMM
+  (LinearDwAtFused) - bwd ~3547 -> ~3297. Loss in-ra khong doi.
+- bf16/TF32: KHONG kha thi (ha tang f16 + hong toan bo gates EXACT).
+- LN (obuf 0.86 ms): khong can sua (ATen 0.43 + wrapper 0.43; ~0.5% step).
+- Win seq1024 < 4148.4: chua dat (~4313 sau waiver). Con thieu ~165 ms.
+- Con lai: seq8 bwd anomaly (1032 ms, thread-spawn overhead) + thread scaling 2.3x vs 3.7x.
 
 ### 5.4 Win condition & gate (khong doi)
 - seq8 < 1042.7 ms; seq256 < 1572.7 ms; seq1024 < 4148.4 ms (full step, cung may voi PyTorch).

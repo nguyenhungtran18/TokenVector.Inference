@@ -65,4 +65,20 @@ def main() -> 'i32':
         r4 = gpt2_attention(obuf, wqkv, bqkv, wproj, bproj, n, 1)
     t1 = now_ms()
     print("attention 30 iters ms=" + str(t1 - t0))
+    # 7) attention bwd ATen path (production) - gflat nho o co :offset; ATen ghi vao gflat
+    gout = t_zeros([n, h])
+    gf = []
+    for i in range(2360000):
+        gf.append(0.0)
+    t0 = now_ms()
+    for i in range(6):
+        r5 = gpt2_attention_bwd(obuf, wqkv, bqkv, wproj, bproj, n, gout, 1, gf, 0, 0, 0, 0)
+    t1 = now_ms()
+    print("attn_bwd ATen-compat 6 iters ms=" + str(t1 - t0))
+    # 8) native fallback path (gflat=None -> duong native PAR12)
+    t0 = now_ms()
+    for i in range(6):
+        r6 = gpt2_attention_bwd(obuf, wqkv, bqkv, wproj, bproj, n, gout, 1)
+    t1 = now_ms()
+    print("attn_bwd NATIVE 6 iters ms=" + str(t1 - t0))
     return 0
