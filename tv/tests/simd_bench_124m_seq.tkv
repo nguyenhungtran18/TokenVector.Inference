@@ -171,6 +171,9 @@ def _mk_abuf(seq: 'i64', pool: 'i64' = 1) -> 'list[Tensor]':
     if pool == 1:
         for i in range(5):
             out.append(t_zeros([seq, HiddenSize]))
+        # slot 5/6/7: [n,3h] cho qkv fwd / qkv bwd / dqkv bwd
+        for i in range(3):
+            out.append(t_zeros([seq, 3 * HiddenSize]))
     return out
 
 def _sc5_arg(sc5: "list[f32]", pool: 'i64' = 1) -> "list[f32]":

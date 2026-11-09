@@ -4212,6 +4212,35 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.119 Pool [n,3h] cho qkv/dqkv — them −5% total (2026-11-09)
+Nhom transient lon con sot sau §0.118: qkv fwd (recompute none), qkv bwd
+(recompute for attention bwd), dqkv bwd — moi [n,3h] = 9,4 MB ~8 ms,
+tong ~3 lane × 12 layer.
+**Thay doi (chi cap buffer, khong doi phep tinh):**
+- Helper moi `_ab_pool_k(abuf, idx, n, k)` (giong _ab_pool, kiem tra
+  `len == n*k`; wrong size → t_zeros nhu cu).
+- Slot abuf [5]=qkv fwd, [6]=qkv bwd, [7]=dqkv bwd; gpt2_linear nhan
+  obuf cua 2 call site; dqkv ghi thang pool.
+- Bench: _mk_abuf xep them 3 tensor [seq,3h]; pool=0 → list rong y nhu cu
+  (A/B cung binary).
+**A/B (cung binary, mode0, xen ke 1/0, best-of-3):**
+| seq | fwd 0→1 | bwd 0→1 | total 0→1 | loss |
+|---|---|---|---|---|
+| 1024 | 1860→1328 | 3594→3343 | 5563→4671 (−16.1%) | EXACT `10.760399` |
+| 512 | — | — | fwd 625 / bwd 2125 | EXACT `10.764943` |
+| 256 | — | — | fwd 344 / bwd 1406 | EXACT `10.756927` |
+(So voi §0.118 pool=1 best-of-3 [total 4921]: **−5.1%**. Chuan VN:
+§0.115 5313 -> §0.119 4671 = **−12.1%**.)
+Mode 1 (seq512, 1 sample/ben): loss giong het tung ky tu
+`10.764943 -> 12.684581` ca 2 ben (ms 6296 vs 4125 — nhieu, khong dung
+la ket luan).
+Gate (`out/run_gates_n10.ps1`): 9/10 — gpt2_full, gpt2_train, grad, parity,
+inplace, simd_matmul, gpt2, gpt2_scope **PASS**; pack_tests + gap_tests
+FAIL (pre-existing, §0.117). trainer_tests **15/15**.
+**Con lai:** `r`/`out` MLP-side, `_save_a` luon cap [n,4h] per buoc (§0.117)
+và `block_saved` ~109 ms/block overhead; `gpt2_mlp` (duong khong-saved)
+van t_zeros.
+
 ## §0.118 Pool buffer [n,h] cho attention — fwd −10.5%, bwd −2.7%, total −4.9% (2026-11-09)
 Nhom cap phat per-layer cuoi cung con sot (§0.117): cac tensor [n,h] trong
 attention fwd (out, ctxT) va bwd (ctxT, dctxT, dx ATen). Slot layout:
