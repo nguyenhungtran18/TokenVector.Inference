@@ -221,17 +221,38 @@ static inline void ds_row_fast(const float* attn, const float* gA,
 
 ---
 
-### 4.3 Phase 2b (TODO – next)
+### 4.3 Phase 2b (ĐÃ XONG - 2026-11-09)
 
 **Task:** Vectorize causal mask + gA row + compute the ds row fully inline.
 
-**Plan:**
-- [ ] `causal_mask_row` - blend 0/keep based on row/col index, dùng `_mm256_greater_epi32` mask + `_mm256_blendv_ps`
-- [ ] `gA_row_fast` - hlookup + load/store qk/dv in 8-wide chunks with `stride3 = 3*h`
-- [ ] `ds` fully fused with gA and attn (remove intermediate `ds` alloc 7MB per row)
-- [ ] `lse` recompute pass 1 & pass 2 fused cùng nhau khi lse đã cho trước (skip)
-- [ ] Benchmark seq1024 mode 0 và mode 1: target attention bwd bwd ~50 ms/layer (vs ~94 ms ATen) **sau Phase 3**
-- [ ] Loss EXACT (drift acceptable theo waiver s0.125)
+**Done:**
+- [x] **FIX BUG NGHIEM TRONG**: `flash_fwd_head` gọi `row_max_fast`/`exp_sum_row_fast`
+      TRƯỚC khi định nghĩa → MSVC C4013 `extern int` → giá trị trả về bị cắt thành int
+      → **forward sai hoàn toàn** (probe: max_abs 0.98). Đã dời toàn bộ helper lên đầu file.
+      Verify: `cl /W3` sạch C4013, fwd max_abs 5.88e-07.
+- [x] `causal_mask_zero_row` / `causal_mask_neginf_row` — `_mm256_cmpgt_epi32` + `_mm256_blendv_ps`
+- [x] `gemm_nt_block` — S = Q·Kᵀ và gA = dctx·Vᵀ qua K-transposed `BT[d][j]`: 8 output / 8 FMA,
+      không horizontal-reduce mỗi phần tử (thay `dot64` per-element)
+- [x] `acc_block` / `acc_block_t` — dq/dk/dv/PV tích lũy trong 8 thanh ghi ymm, flush 1 lần/block
+- [x] **PACK** Q/K/V/dctx → buffer `[n][64]` contiguous (trước đó mỗi hàng 256 B cách nhau 9216 B)
+- [x] `FlashAttentionBwdFusedLse` (export mới) — caller có ctx+lse từ fwd → **bỏ hẳn pass-1 recompute**
+      (verify khớp tuyệt đối: dqo max_diff = 0.0, ctx max_diff = 0.0)
+- [x] Benchmark probe_flash2 (1 head, n=1024, best-of-3)
+
+**Actuals (1 head, n=1024):**
+
+| đường | fwd | bwd |
+|---|---|---|
+| Phase 2a (87bbce6) | 12.0 ms (SAI) | 42.5 ms |
+| Phase 2b recompute | 4.8 ms | 14.1 ms |
+| Phase 2b + Lse | — | 9.0–10.4 ms |
+
+Edge case sạch: n = 64/96/128/192/256/320/512/1024 (kể cả n lẻ).
+
+**⚠️ PHÁT HIỆN: production KHÔNG đi flash.** `gpt2_attention_bwd` đi `torch_attention_bwd`
+(ATen) trước vì `opt.g` (gflat) luôn có data; flash chỉ là nhánh fallback khi `gflat == None`.
+Đo `_glue.tkv` attn_bwd NATIVE: flash ON **139 ms/layer** vs `TKV_FLASH_OFF=1` **219 ms/layer**
+(-36%), nhưng ATen-compat path vẫn **101 ms/layer**. Flash chưa thắng ATen ở 1 head.
 
 **Ràng buộc:**
 - Không có mem alloc ngoài caller cung cấp (pool)
@@ -244,16 +265,24 @@ static inline void ds_row_fast(const float* attn, const float* gA,
 
 **Task:** Wire `attention_bwd` IL builtin → native `flash_bwd_head` thay vì ATen autograd.
 
-**Sub-phases:**
-1. `attention_bwd_fused` IL builtin emit lệnh gọi `FlashAttentionBwdFused` (đã có sẵn)
-2. `.tkv` production line update: remove dispatcher check `if gflat != None` → chỉ native
+**Trạng thái thực tế (2026-11-09):** dispatch `AttentionBwdFused` trong `tkv_simd_native.c`
+dòng 2184 ĐÃ có sẵn từ §0.97 — flash chạy trước, `rc != 0` → đường cũ, `TKV_FLASH_OFF=1` tắt.
+Nhưng `.tkv` production KHÔNG đi vào nhánh đó: `gpt2_attention_bwd` gọi `torch_attention_bwd`
+(ATen) trước, chỉ rơi xuống native khi `gflat == None`. Vì `opt.g` luôn có data trong bench,
+production đi ATen 100%.
+
+**Việc còn lại của Phase 3 (khác plan gốc):**
+1. Bỏ điều kiện `gflat != None` cho attention bwd, hoặc wire `FlashAttentionBwdFusedLse`
+   vào đường có lse (fwd đã tính sẵn ctx+lse).
+2. **Điều kiện tiên quyết:** flash phải ≤ 80 ms/layer mới có lợi so với ATen 101 ms/layer.
+   Hiện 139 ms/layer → chưa đủ. Xem §4.7.
 3. `/gate run_gates_n10.ps1` — verify PASS 9/10 (hoặc re-baseline nếu drift)
 4. `trainer_tests.tkv` verify 15/15
 5. mode 1 seq512: re-record loss EXACT constant (có thể drift do ATen removed)
-6. **QUAN TRỌNG**: keep ATen path như fallback: `if (rc == 0) return; rc != 0 → torch_attention_bwd` (soft-fail graceful)
+6. **QUAN TRỌNG**: keep ATen path như fallback: `if (rc == 0) return; rc != 0 → torch_attention_bwd`
 
 **Exit criteria:**
-- attention bwd ≤ 50 ms/layer @seq1024 (sau A/B)
+- attention bwd ≤ 50 ms/layer @seq1024 (sau A/B) — **chưa đạt, hiện 139**
 - Loss EXACT (drift acceptable theo waiver s0.125)
 - Gate giữ 9/10 + trainer 15/15 green
 
@@ -278,6 +307,50 @@ static inline void ds_row_fast(const float* attn, const float* gA,
 - [ ] `FlashAttentionFwdFused` already vectorized (Phase 1 w/ transcendentals)
 - [ ] LN fwd could become AVX2 `LayernormFwdAvx2` — replace ATen `layernorm_fwd_fused`
 - [ ] ~20-30 ms/step gain expected
+
+---
+
+### 4.7 Phân tích nút thắt & hướng thắng PyTorch (2026-11-09, sau Phase 2b)
+
+**Số đo hiện tại (seq1024, cùng máy Xeon E5-2695 v3, AVX2 only):**
+
+| đường | ms/layer | ×12 layer |
+|---|---|---|
+| ATen SDPA bwd (production hiện tại) | 101 | 1212 |
+| Native flash bwd, Phase 2b, flash ON | 139 | 1668 |
+| Native flash bwd, `TKV_FLASH_OFF=1` | 219 | 2628 |
+| PyTorch full step (bench_torch.py, T=14) | — | **4193 total** |
+| Ta hiện tại (mode0 fwd+bwd) | — | 4312 total |
+
+→ Còn chậm hơn PyTorch **1.24×**. Attention bwd không phải chỗ duy nhất, nhưng là chỗ lớn nhất.
+
+**Vì sao flash 1-head vẫn chậm hơn ATen:** ATen `scaled_dot_product_attention` CPU dùng
+kernel C++ JIT-built với blocking đa cấp và **vector hóa trên nhiều head cùng lúc**
+(head-dim 64 × nhiều head trong một lần duyệt), trong khi kernel này xử lý **1 head/lần gọi**
+và transpose K/V lại cho **mỗi** block `m0`.
+
+**Ba hướng có tiềm năng thật, xếp theo tỷ lệ lợi/công:**
+
+1. **Transpose K/V một lần cho cả head** (không phải mỗi block `m0`). Hiện
+   `transpose_block64` chạy lại trong vòng `m0` — với n=1024 có 16 block `m0` × 16 block `n0`.
+   Transpose toàn bộ K/V một lần ra buffer `[n][64]` transposed → bỏ ~½ chi phí transpose.
+   Ước tính: −15…25 ms/layer. **Nên làm trước, rẻ nhất.**
+
+2. **Xử lý 2 head cùng lúc** (register blocking theo head). Với hd=64, hai head = 128 float
+   mỗi hàng; 8 thanh ghi ymm đang dùng cho 1 head → cần chia lại. Lợi: chia sẻ hoàn toàn
+   việc đọc K/V (cùng token, khác head) → giảm một nửa lưu lượng đọc K/V.
+   Ước tính: −30…40 ms/layer. Công: viết lại `acc_block`/`gemm_nt_block` cho cặp head.
+
+3. **AVX-512**: CPU này (Haswell) **không có** AVX-512. Bỏ qua trên máy hiện tại, nhưng
+   nên có nhánh `#ifdef __AVX512F__` cho máy khác — không giúp được mục tiêu trên máy này.
+
+**Điều cần nói thẳng:** ngay cả khi (1)+(2) thành công và đưa flash xuống ~80 ms/layer,
+tổng step chỉ giảm ~250 ms (4312 → ~4060), tức **~1.03× so với PyTorch**. Để đạt ≤0.8×
+(≤3350 ms) cần cắt thêm ~700 ms nữa ở chỗ khác — MLP bwd (~92-100 ms/layer) và LN fwd
+(Phase 5) là các ứng viên tiếp theo, không phải attention.
+
+**Khuyến nghị:** làm (1) trước vì rẻ và chắc chắn có lợi; đo lại; rồi quyết định (2) dựa
+trên số thật. Đừng mở production sang flash cho tới khi flash ≤ 80 ms/layer.
 
 ---
 
@@ -331,3 +404,67 @@ static inline void ds_row_fast(const float* attn, const float* gA,
 - PLAN_BEAT_PYTORCH.md §6 (fused SDPA project specific plan)
 - Release/tools/simd_native/tkv_flash_attn.c (current C source)
 - tv/tests/_glue.tkv + _glue_seq.tkv (probes)
+
+---
+
+### 4.8 ĐÍNH CHÍNH §4.7 sau khi đo thật (2026-11-09, Phase 2c)
+
+§4.7 ở trên đặt cược vào 3 hướng micro-optimization. Đo thật cho thấy **cả 3 đều
+không phải nút thắt**. Giữ nguyên §4.7 làm lịch sử suy luận, nhưng đọc §4.8 mới.
+
+**Bằng chứng đo được (Xeon E5-2695 v3, 28 logical / 14 physical core):**
+
+| phép đo | kết quả |
+|---|---|
+| Peak FMA của máy (16 chain độc lập) | 2.58 G-FMA-instr/s = 41.3 GFLOP/s |
+| Ngân sách FMA của bwd_lse @n=1024, 1 head | 136 block-pair × 5 GEMM × 64×64×8 = 22.28 M FMA-instr |
+| Ở peak thì phải mất | 8.64 ms |
+| **Đo thật** | **10.05 ms → 86% của peak** |
+
+Kernel đã ở 86% trần phần cứng. Không còn chỗ cho micro-opt.
+
+**Đối chiếu từng hướng của §4.7:**
+
+1. **Transpose K/V một lần** — *đã làm rồi*, từ Phase 2b. `transpose_block64`
+   nằm NGOÀI vòng `m0` (mỗi `n0` transpose 1 lần, không phải mỗi block `m0`).
+   Ước tính "−15…25 ms/layer" trong §4.7 không còn áp dụng được.
+2. **2 head cùng lúc** — trần lý thuyết chỉ ~1.15× vì đã ở 86% peak.
+   Không đáng một đợt viết lại `acc_block`/`gemm_nt_block`.
+3. **AVX-512** — CPU này (Haswell) không có. Bỏ.
+
+**Nút thắt thật: 12 head chạy TUẦN TỰ trên 1 core.**
+
+| đường | fwd/layer | bwd/layer |
+|---|---|---|
+| serial 1 core | 57.9 ms | 119.3 ms |
+| ATen SDPA (production hiện tại) | — | 101 ms |
+
+ATen không thắng vì kernel nó giỏi hơn. Nó thắng vì **chia head ra nhiều thread**.
+Ta có 28 logical core và chỉ dùng 1. Đó là toàn bộ khoảng cách.
+
+**Cách đã sửa (Phase 2c):** thêm `FlashAttentionBwdFusedLseMulti` /
+`FlashAttentionFwdLseMulti` — work-queue atomic, mỗi head ghi vào slice riêng,
+không lock, không data race.
+
+| threads | fwd/layer | bwd/layer | bwd speedup |
+|---|---|---|---|
+| 1 (serial) | 57.87 | 119.33 | 1.00× |
+| 4 | 18.60 | 37.07 | 3.22× |
+| 7 | 13.09 | 24.53 | 4.86× |
+| **12** | **8.87** | **18.38** | **6.49×** |
+| 14 | 8.35 | 19.66 | 6.07× |
+
+**bwd 18.4 ms/layer so với ATen 101 ms/layer = nhanh hơn 5.5×.**
+12 layer: 220 ms thay vì 1212 ms → tiết kiệm ~990 ms/step.
+
+12 thread là điểm tối ưu (14 chậm lại do SMT tranh chấp). Đặt `nthreads` = số head,
+chặn trên = số core vật lý.
+
+**Correctness:** bit-identical với đường tuần tự, `max_abs = 0.000e+00` cho cả
+`dqo` và `ctx` ở n = 64/96/128/192/256/320/512/1024. Không thêm drift nào ngoài
+waiver s0.125 — vì mỗi head ghi vùng nhớ riêng và thứ tự tính trong một head
+không đổi.
+
+**Điều chỉnh mục tiêu:** với bwd ở 18.4 ms/layer, "≤ 80 ms/layer" của §4.4 không
+còn là ngưỡng đúng — đã vượt xa. Điều kiện tiên quyết của Phase 3 giờ là
+**wire vào production + chạy gate**, không phải tối ưu thêm.

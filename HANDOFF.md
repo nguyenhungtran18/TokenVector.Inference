@@ -5124,3 +5124,169 @@ thay doi; moi so do tu 1 tang, 12 tang toan bo luc doing context.
 phai dung huong: `AttentionBwdFusedAll(x, wqkv, bqkv, wp, bp, gy, gf, o_*)
 ` trong native hypothesis - nhung chua du bang chung; tuan thu nguyen tac
 bit-exact + gate 3 seq + loss EXACT.
+
+## §0.129 Flash SDPA bwd Phase 2b - FIX BUG fwd + block-GEMM + pack (2026-11-09)
+**File:** `Release/tools/simd_native/tkv_flash_attn.c` (20.8 KB -> 34.0 KB).
+Commit truoc: `87bbce6` (Phase 2a). Phase 2b nay: xem commit ke tiep.
+
+### 0. BUG NGHIEM TRONG trong ban dang ship (Phase 2a, `87bbce6`)
+`flash_fwd_head` (dong 106) goi `row_max_fast` (dong 262) va `exp_sum_row_fast`
+(dong 233) TRUOC khi chung duoc dinh nghia. MSVC bao:
+```
+warning C4013: 'row_max_fast' undefined; assuming extern returning int
+warning C4244: 'initializing': conversion from 'int' to 'float'
+```
+-> gia tri tra ve bi cat thanh `int` -> forward SAI HOAN TOAN.
+Do that (probe_flash2 vs naive f64 reference, head=5, h=768):
+| | fwd max_abs | bwd dq | bwd dk | bwd dv |
+|---|---|---|---|---|
+| Phase 2a (87bbce6) | **9.8443e-01** (SAI) | 1.8158e-01 | 1.8977e-01 | 1.05e-06 |
+| Phase 2b (nay) | **5.8799e-07** | 1.8655e-07 | 5.5293e-07 | 2.21e-06 |
+`bwd` khong bi anh huong o dong dq/dv cu vi pass-1 cua no nam SAU phan dinh
+nghia; nhung `dk` van lech 0.19 trong ban cu.
+**Tac dong production:** KHONG (xem muc 3) - nhung neu ai bat native flash
+lam duong chinh thi fwd se hong. Bug nay phai fix truoc moi thu khac.
+Fix: dua TOAN BO helper len dau file, truoc moi cho goi. Verify: `cl /W3`
+khong con C4013.
+
+### 1. Toi uu Phase 2b (4 thay doi)
+1. **PACK**: Q/K/V/dctx copy 1 lan sang buffer `[n][64]` contiguous. Truoc day
+   moi lan doc 1 hang la 256 B cach nhau 9216 B (stride 3*h) -> TLB + cache line
+   phi. Sau pack moi GEMM doc tuan tu.
+2. **gemm_nt_block**: S = Q*K^T va gA = dctx*V^T bang K-transposed `BT[d][j]`
+   -> 8 output / 8 FMA, KHONG horizontal-reduce moi phan tu. Thay `dot64`
+   per-element (8 FMA + hsum cho 1 scalar).
+3. **acc_block / acc_block_t**: dq/dk/dv/PV accumulate trong 8 thanh ghi ymm,
+   flush 1 lan / block thay vi `fma_row` vao bo nho cho tung (i,j).
+4. **blendv_ps mask**: `causal_mask_zero_row` / `causal_mask_neginf_row` thay
+   branch `if (u > t)`.
+5. **FlashAttentionBwdFusedLse** (export moi): caller da co ctx + lse tu fwd ->
+   BO HAN pass-1 recompute. Verify khop tuyet doi voi duong recompute
+   (dqo max_diff = 0.0, ctx max_diff = 0.0).
+
+### 2. Ket qua do (probe_flash2, 1 head, n=1024, best-of-3)
+| duong | fwd | bwd | ghi chu |
+|---|---|---|---|
+| Phase 2a (87bbce6) | 12.0 ms | 42.5 ms | fwd SAI |
+| Phase 2b recompute | 4.8 ms | 14.1 ms | -67% bwd |
+| Phase 2b + Lse (fwd+bwd) | - | 9.0-10.4 ms | bo pass-1 |
+Edge case sach: n = 64/96/128/192/256/320/512/1024 (ke ca n le).
+
+### 3. PHAT HIEN QUAN TRONG: production KHONG di flash
+Do `tv/tests/_glue.tkv` (attn_bwd NATIVE 12 iters, seq1024):
+| cau hinh | ms/12 iters | ms/layer |
+|---|---|---|
+| flash ON (Phase 2b) | 1672 | **139** |
+| `TKV_FLASH_OFF=1` | 2625 | **219** |
+| ATen-compat path | 609 / 6 iters | 101 |
+Flash nhanh hon duong native cu **36%**, nhung van cham hon ATen (101).
+**Nhung production full step KHONG dung flash**: `gpt2_attention_bwd` di
+`torch_attention_bwd` (ATen) truoc, vi `opt.g` (gflat) LUON co data trong
+bench. Flash chi la nhanh fallback khi `gflat == None`.
+Bang chung: thay DLL Phase 2a (fwd sai 0.98) bang Phase 2b tren cung binary
+`out/bseq_final_n10.dll` -> timing va loss GIONG HET
+(fwd 1172/1141 ms, bwd 3110/3171 ms, loss 10.760399). Neu flash chay that thi
+fwd sai phai lam loss lech. => xac nhan flash khong duoc goi.
+
+### 4. Gate / loss
+- loss mode0 seq256 `10.756927`, seq1024 `10.760399` - **EXACT**, khong doi
+  (dung nhu du kien: production khong di flash).
+- `_seq_cfg.txt` da tra ve `256 / 0 / 1 / 1`.
+- DLL deploy: `Release/runtime/tkv_simd_native.dll` (380416 B, 2026-11-09 21:36)
+  build bang `build.ps1` (4 TU, /fp:fast cho flash).
+
+### 5. Buoc tiep de THANG PyTorch (chua lam)
+PyTorch ref (bench_torch.py, cung may): full step seq1024 = **4193 ms**
+(T=14), fwd+bwd = 3483 ms. Ta hien 4312 ms (mode0 fwd+bwd) -> con cham ~1.24x.
+Duong phai di:
+1. Cho production di flash thay ATen: bo dieu kien `gflat != None` cho attention
+   bwd, hoac wire `FlashAttentionBwdFusedLse` vao duong co lse.
+2. Sau do attention bwd 139 ms/layer x 12 = 1.67 s; hien ATen 101 x 12 = 1.21 s
+   -> **flash van CHAM hon ATen o 1 head**. Phai dua xuong <= 80 ms/layer moi
+   co loi. Con thieu: fwd flash (4.8 ms) chua duoc dung trong production fwd
+   (dang `torch_sdpa_fwd`).
+3. Cach that su thang: dung flash cho CA fwd+bdw voi lse truyen qua
+   (`FlashAttentionFwdLse` + `FlashAttentionBwdFusedLse`), bo ATen hoan toan.
+   fwd 4.8 + bwd 9.5 = 14.3 ms/head -> 172 ms/layer -> CHAM HON ATen 101.
+   => Ket luan: kernel hien tai CHUA du de thang ATen o 1 head.
+   Can them: (a) AVX-512 neu CPU ho tro (Xeon E5-2695 v3 chi AVX2),
+   (b) hoac tang block size / register blocking 2 head cung luc,
+   (c) hoac giam so lan transpose (K/V transpose lap lai cho tung m0 block).
+
+## §0.130 Flash SDPA bwd Phase 2c - multi-head parallel (2026-11-09)
+**File:** `tkv_flash_attn.c` (+ driver multi-head). Commit truoc: Phase 2b (§0.129).
+
+### 0. KET LUAN LAT NGUOC SPEC: micro-opt da het duong
+Do tranh luan trong SPEC §4.7 (3 huong: transpose 1 lan / 2 head cung luc /
+AVX-512) bang so that tren may Xeon E5-2695 v3 (28 logical core, 14 physical):
+
+- **Peak do duoc**: 2.58 G-FMA-instr/s (41.3 GFLOP/s) voi 16 chain doc lap
+  -> dung bang peak Haswell ly thuyet. Khong con headroom vi vay.
+- **Ngan sach FMA cua bwd_lse @n=1024, 1 head**: 136 block pair (m0>=n0)
+  x 5 GEMM x 64x64x8 = **22.28 M FMA-instr** -> o peak = **8.64 ms**.
+- **Do that**: 10.05 ms => **86% cua peak**. Kernel da gan nhu toi han.
+- SPEC §4.7 huong (1) "transpose K/V 1 lan thay vi moi block m0":
+  **DA LAM ROI** - `transpose_block64` nam ngoai vong `m0` tu Phase 2b.
+  Uoc tinh -15..25 ms/layer trong spec la khong con ap dung.
+- Huong (2) 2-head register blocking: tran ly thuyet chi ~1.15x (da o 86% peak).
+- Huong (3) AVX-512: CPU nay khong co.
+
+=> Micro-optimization KHONG THE dong gap. Con so 86% peak la bang chung dut diem.
+
+### 1. Nut that su: 12 head chay TUAN TU tren 1 core
+`probe_layer.c` (12 head, goi tuan tu dung nhu production):
+| duong | fwd/layer | bwd/layer |
+|---|---|---|
+| serial 1 core | 57.9 ms | **119.3 ms** |
+| ATen SDPA (production hien tai) | - | 101 ms |
+
+ATen khong nhanh hon vi kernel gioi hon - no **chia head ra nhieu thread**.
+Ta co 28 logical core nhung chi dung 1. Do la toan bo khoang cach.
+
+### 2. Phase 2c: multi-head parallel driver (DA XONG)
+Them `FlashAttentionBwdFusedLseMulti` + `FlashAttentionFwdLseMulti`:
+- Work queue atomic (`InterlockedIncrement`), moi head 1 task, khong lock.
+- Moi head doc `qkv`/`dctx` chi-doc, ghi vao slice RIENG
+  (`ctxo + head*n*hd`, `dqo + head*n*3*hd`) -> khong data race.
+- `nthreads` la tham so caller; `nthreads=1` -> chay inline, khong spawn thread.
+- Fallback: neu `CreateThread` fail -> chay tuan tu, khong bao gio hong.
+
+**Ket qua (n=1024, 12 head, best-of-3):**
+| threads | fwd/layer | bwd/layer | bwd speedup |
+|---|---|---|---|
+| 1 (serial) | 57.87 | 119.33 | 1.00x |
+| 2 | 35.16 | 68.43 | 1.74x |
+| 4 | 18.60 | 37.07 | 3.22x |
+| 7 | 13.09 | 24.53 | 4.86x |
+| **12** | **8.87** | **18.38** | **6.49x** |
+| 14 | 8.35 | 19.66 | 6.07x |
+
+=> bwd **18.4 ms/layer** vs ATen **101 ms/layer** = **5.5x nhanh hon ATen**.
+   12 layer: 220 ms thay vi 1212 ms -> tiet kiem **~990 ms/step**.
+
+### 3. Correctness (bit-identical, khong phai "gan dung")
+| kiem tra | ket qua |
+|---|---|
+| dqo serial vs multi, n=64..1024 | **max_abs = 0.000e+00** |
+| ctx serial vs multi, n=64..1024 | **max_abs = 0.000e+00** |
+| fwd vs naive f64 (n=1024) | 5.8799e-07 (khong doi) |
+| bwd vs naive f64 | dq 1.87e-07 / dk 5.53e-07 / dv 2.21e-06 |
+| edge n = 64/96/128/192/256/320/512/1024 | sach, ke ca n le |
+
+Vi moi head ghi vao vung nho rieng va thu tu tinh trong 1 head khong doi,
+ket qua **bit-identical** voi duong tuan tu - khong them drift ngoai waiver s0.125.
+
+### 4. Con lai (chua lam)
+- Wire `FlashAttentionBwdFusedLseMulti` vao `gpt2_attention_bwd` (Phase 3):
+  van phai bo dieu kien `gflat != None` nhu §0.129 muc 3.
+- Chon `nthreads`: 12 la diem toi uu tren may nay (14 bat dau cham lai do
+  SMT tranh chap). Nen dat = so head, cap tren = so core vat ly.
+- fwd cung huong loi: 57.9 -> 8.9 ms/layer neu production bo `torch_sdpa_fwd`.
+- **Chua chay gate 9/10 + trainer 15/15** - bat buoc truoc khi merge production.
+
+### 5. VAN DE QUY TRINH: source kernel KHONG nam trong git
+`tkv_flash_attn.c` chi ton tai o `Release/tools/simd_native/` = junction toi
+`release/` ma `.gitignore` dong `/release/`. Nghia la toan bo Phase 1/2a/2b/2c
+**khong co trong version control**. Commit e844b34/d958407 chi chua HANDOFF.md.
+Can quyet dinh: track source duoi `tools/simd_native/` (dang co cac .c khac)
+hoac bo sung ngoai le .gitignore. Chua lam vi can xac nhan build.ps1 doc tu dau.
