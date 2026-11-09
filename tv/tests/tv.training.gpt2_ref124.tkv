@@ -1881,6 +1881,29 @@ def gpt2_mlp_bwd(x: "Tensor", w1: "Tensor", b1: "Tensor",
         inner = gpt2_linear(x, w1, b1, n, h, ih, simd, ibuf)
         a = t_zeros([n * ih])
         gf = _gelu_fwd_par(inner.data, a.data, n * ih, simd)
+    # P6 s0.125 (waiver user): ATen fast path khi gflat san sang va offsets >= 0 -
+    # 2x onednn_linear_bwd_off: dx cua scratch, dw/db ghi THANG vao gflat (gflat da
+    # duoc caller zero moi buoc -> overwrite == accumulate tren moi tuong tac lap).
+    # Fallback native nguyen van neu ATen rc != 0.
+    if gflat != None:
+        if len(gflat) > 0:
+            if o_w2 >= 0 and o_b2 >= 0 and o_w1 >= 0 and o_b1 >= 0:
+                _ad4 = a.data
+                _gd4 = gout.data
+                _x4 = x.data
+                _w24 = w2.data
+                _w14 = w1.data
+                dxs2 = t_zeros([n, ih])
+                _dxs2d = dxs2.data
+                at_r2 = onednn_linear_bwd_off(_ad4, _gd4, _w24, _dxs2d, gflat, n, ih, h, o_w2, o_b2)
+                dxs1 = t_zeros([n, h])
+                _dxs1d = dxs1.data
+                if at_r2 == 0:
+                    _di_t = _mlp_gelu_bwd(inner, dxs2, dbuf)
+                    _did = _di_t.data
+                    at_r1 = onednn_linear_bwd_off(_x4, _did, _w14, _dxs1d, gflat, n, h, ih, o_w1, o_b1)
+                    if at_r1 == 0:
+                        return [dxs1, t_zeros([0]), t_zeros([0]), t_zeros([0]), t_zeros([0])]
     r2 = gpt2_linear_bwd(a, w2, gout, n, ih, h, simd, gflat, o_w2, o_b2)
     d_inner = _mlp_gelu_bwd(inner, r2[0], dbuf)
     r1 = gpt2_linear_bwd(x, w1, d_inner, n, h, ih, simd, gflat, o_w1, o_b1)

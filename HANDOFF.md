@@ -4212,6 +4212,30 @@ runtime DLL restore f328ac8 (git checkout), out/tkv_simd_native.dll sync theo;
 theo thu tu nhom) — chua chan doan duoc bench rieng nen chua lam.
 **Xong o day.** Bwd (7375-7516 ms), attention (~250 ms/layer), MLP (~234-266 ms/layer)
 van la chunk lon nhat de attack tiep.
+## §0.126 ATen MLP bwd (gpt2_mlp_bwd) qua onednn_linear_bwd_off (2026-11-09)
+Phan tiep theo cua s0.124/s0.125: thay toan bo 2 linear-bwd trong `gpt2_mlp_bwd` (2 GEMM + dx + db cho w1 va w2)
+bang ATen oneDNN linear_bwd voi dw/db ghi THANG vao gflat tai offset (caller zero moi buoc - da verify o
+_step124: `thread_spawn(_bq_zr_one, _BqZrJob(opt.g))`).
+**IL builtin moi `onednn_linear_bwd_off`**: wrapper `OnednnLinearBwdOffM` giong onednn_linear_bwd nhung pin
+`dw, db` vao gflat tai `ldelema` offset i64 - KHONG dung pointer arithmetic IL (duoc tam la "root cause" cua
+InvalidProgramException o lan thu 2: 2 bug IL that - (a) locals slots loi: pinned/ref stores out-of-range stloc.s 16,
+(b) arg order n, in_d, out_d, o_dw, o_db bi den - 10 args nhung co ldarg.s 10 va ldarg offset lech 1). Fix: viet lai
+toan bo IL theo kieu element-0 + pin offset param i64 (giong TorchAttentionBwdM) - KHONG co pointer arithmetic.
+Them P/Invoke moi `TkvTorchLinearBwdFwdOffNative` + export `TkvTorchLinearBwdFwdOff` trong `tkv_simd_native.c`
+(offset cong o C++: `gflat + o_dw`). `.tkv` production: `gpt2_mlp_bwd` goi `onednn_linear_bwd_off` khi offsets >= 0
+va gflat non-empty (both mirror fiels); fallback native nguyen van neu ATen rc != 0.
+**Verify (windows 10, threads=14):
+- seq1024 mode 0: fwd 1047 / bwd **3016** / total **4063** (truoc do 4625); loss EXACT 10.760399
+- seq512 mode 1: **3438 ms**; loss BIT-IDENT `10.764943 -> 12.684581`
+- seq256 mode 2: TONG=2360; loss EXACT 10.756927
+- seq1024 mode 1: 4985 ms (13.442921)
+- Gate 9/10 (pack/gap pre-existing), trainer 15/15
+**Khong bit-EXACT:** dw/db qua ATen mm -> accumulation order khac vong native - loss EXACT o mode 0 (fwd khong
+doi); mode 1 gia tri bite-ident khong doi. Win condition seq1024 4148.4 van chua dat (full step 4985);
+cong border for full step to beat PyTorch@3986 = can them ~1000 ms (ep back-to-back ATen ops, embed, thread scale).
+Bat dau tu so 2026-11-06: seq1024 f+b 11875 -> 4063 (-66%).
+
+
 ## §0.125 BLAS cho dx GEMM (dx = gy @ w^T, cblas_sgemm transB) (2026-11-09)
 Gap-finding (ket qua `tv/tests/_glue.tkv` v5 tren seq1024 shapes):
 - attention bwd (gflat path, ATen SDPA autograd): **~94 ms/layer** (vs native PAR12 ~190) - da tot.

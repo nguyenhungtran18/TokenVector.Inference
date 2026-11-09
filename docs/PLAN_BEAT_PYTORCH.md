@@ -5,16 +5,16 @@ Muc tieu: full step <= PyTorch 14T (1042.7 / 1572.7 / 4148.4 ms) o ca 3 seq, gat
 
 ## 0. Baseline hien tai (do moi 2026-11-09, .NET 10; HANDOFF §0.123)
 - TV SIMD (2026-11-09, loss EXACT ca 3 seq):
-  - seq1024 fwd+bwd ~4340 (fwd ~1075 / bwd ~3335), full step mode 1 ~3469 (s0.124+s0.125)
-  - seq512 fwd+bwd 2546 (fwd ~515 / bwd ~2063), full step mode 1 ~3719
-  - seq256 fwd+bwd 1672 (fwd 281 / bwd ~1391), opt.step ~859-891
+  - seq1024 fwd+bwd ~4063 (fwd 1047 / bwd ~3016), full step mode 1 ~3438 (s0.126)
+  - seq512 fwd+bwd ~2250 (fwd ~516 / bwd ~1734), full step mode 1 ~3438
+  - seq256 fwd+bwd ~1422 (fwd 281 / bwd ~1141), opt.step ~860-890 (s0.126)
   - seq8 chua do lai (giu so 2026-11-06: fwd+bwd 1829, full step 2813)
   - (so 2026-11-06: seq1024 fwd+bwd 11875, full step 12828 -> nay -61%; §0.115-§0.122)
 - PyTorch (re-do 2026-11-09, threads=14, torch 2.14.0+cpu):
   - seq8 fwd+bwd 317.8, full step 1012.1  (TV 1078; TV 3.4x)
   - seq256 fwd+bwd 848.6, full step 1517.5  (TV 1672; TV 2.0x)
-  - seq1024 fwd+bwd 3451.3, full step 3986.1  (TV ~4340; TV 1.26x)
-- Gap 2026-11-09 (sau s0.125): seq1024 fwd+bwd ~4340 vs PyTorch 3451.3 (~1.26x). Win condition seq1024 < 4148.4; TV chua dat.
+  - seq1024 fwd+bwd 3451.3, full step 3986.1  (TV ~4063; TV 1.18x)
+- Gap 2026-11-09 (s0.126): seq1024 fwd+bwd ~4063 vs PyTorch 3451.3 (~1.18x). Win condition f+b < 4148.4 da dat; full step 4985 vs 3986 - chua.
   Gap con lai la GEMM efficiency + ATen dispatch overhead; bf16 bi loai (s0.124); Pha 2/3 xong (s0.123/s0.125).
 ## 1. Nguyen nhan (do duoc)
 1. Backward nang; sau #15/#16 bwd seq1024 ~8750 (best 8734), opt.step ~920-1060, fwd ~3400.

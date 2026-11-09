@@ -1,0 +1,60 @@
+# PROBE GLUE_SEQ (Pha 3 / fixed-cost anomaly): attn bwd ATen vs native, mlp bwd theo seq.
+# Doc seq tu dong 1 cua tv/tests/_seq_cfg.txt (giong bench).
+import tv.training.gpt2_ref124
+
+def _is_comment(ln: 'str') -> 'i32':
+    if len(ln) < 1:
+        return 1
+    if ln[0] == "#":
+        return 1
+    return 0
+
+def load_ints(path: 'str') -> 'list[i64]':
+    txt = read_file(path)
+    lines = txt.split("\n")
+    vals = []
+    for i in range(len(lines)):
+        if _is_comment(lines[i]) == 1:
+            continue
+        toks = lines[i].split(" ")
+        for j in range(len(toks)):
+            if len(toks[j]) > 0:
+                vals.append(int(toks[j]))
+    return vals
+
+def main() -> 'i32':
+    cfg = load_ints("tv/tests/_seq_cfg.txt")
+    n = cfg[0]
+    h = 768
+    x = t_zeros([n, h])
+    obuf = t_zeros([n, h])
+    wqkv = t_zeros([h, 3 * h])
+    bqkv = t_zeros([3 * h])
+    wproj = t_zeros([h, h])
+    bproj = t_zeros([h])
+    gout = t_zeros([n, h])
+    holder = t_zeros([2360000])
+    gf = holder.data
+    t0 = now_ms()
+    for i in range(12):
+        r5 = gpt2_attention_bwd(x, wqkv, bqkv, wproj, bproj, n, gout, 1, gf, 0, 0, 0, 0)
+    t1 = now_ms()
+    print("attn_bwd ATen 12 iters ms=" + str(t1 - t0))
+    t0 = now_ms()
+    for i in range(12):
+        r6 = gpt2_attention_bwd(x, wqkv, bqkv, wproj, bproj, n, gout, 1)
+    t1 = now_ms()
+    print("attn_bwd NATIVE 12 iters ms=" + str(t1 - t0))
+    w1m = t_zeros([h, 4 * h])
+    b1m = t_zeros([4 * h])
+    w2m = t_zeros([4 * h, h])
+    b2m = t_zeros([h])
+    sav_in = t_zeros([n, 4 * h])
+    sav_a = t_zeros([n, 4 * h])
+    t0 = now_ms()
+    for i in range(10):
+        r9 = gpt2_mlp_bwd(x, w1m, b1m, w2m, b2m, n, gout, 1, gf, 0, 0, 0, 0, sav_in, sav_a, None, None)
+    t1 = now_ms()
+    print("mlp_bwd 10 iters ms=" + str(t1 - t0))
+    print("seq cfg n=" + str(n))
+    return 0
