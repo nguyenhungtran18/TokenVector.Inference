@@ -198,9 +198,7 @@ class AdamW:
 
     def step(self) -> 'f32':
         lr = lr_at(self.t, self.warmup, self.total, self.lr_max, self.lr_min)
-        gn = 0.0
-        if self.clip != 1.0:
-            gn = self.grad_norm()
+        gn = self.grad_norm()
         coef = 1.0
         if gn > 0.0:
             coef = self.clip / (gn + 0.000001)
