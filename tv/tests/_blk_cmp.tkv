@@ -1,0 +1,114 @@
+﻿import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    ih = 4 * h
+    V = VocabSize
+    NL = NLayers
+    print("=== block_bwd vs mlp_bwd, cung 12 bo weight THAT, simd=1 ===")
+    npar = V * h + MaxPos * h + h + h
+    npar = npar + NL * (h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h + h)
+    gt = t_zeros([npar])
+    gflat = gt.data
+
+    # 12 bo weight day du cho block
+    w1s = []
+    w2s = []
+    wqkv = []
+    wproj = []
+    ln1g = []
+    ln1b = []
+    ln2g = []
+    ln2b = []
+    b1s = []
+    b2s = []
+    bqkv = []
+    bproj = []
+    i = 0
+    while i < NL:
+        w1s.append(t_zeros([h, ih]))
+        w2s.append(t_zeros([ih, h]))
+        wqkv.append(t_zeros([h, 3 * h]))
+        wproj.append(t_zeros([h, h]))
+        ln1g.append(t_zeros([h]))
+        ln1b.append(t_zeros([h]))
+        ln2g.append(t_zeros([h]))
+        ln2b.append(t_zeros([h]))
+        b1s.append(t_zeros([ih]))
+        b2s.append(t_zeros([h]))
+        bqkv.append(t_zeros([3 * h]))
+        bproj.append(t_zeros([h]))
+        i = i + 1
+
+    x = t_zeros([n, h])
+    gout = t_zeros([n, h])
+    inner = t_zeros([n, ih])
+    at = t_zeros([n, ih])
+    ibuf = t_zeros([n, ih])
+    dbuf = t_zeros([n, ih])
+    save_r = t_zeros([n, h])
+    save_a = t_zeros([n, h])
+    save_m = t_zeros([n, h])
+    save_ag = t_zeros([n, ih])
+    abuf = []
+    abuf.append(t_zeros([n, ih]))
+    abuf.append(t_zeros([n, h]))
+    j = 2
+    while j < 12:
+        abuf.append(t_zeros([n, ih]))
+        j = j + 1
+    base = V * h + MaxPos * h + h + h
+    stride = h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h + h
+    print("12 bo weight block = " + str(NL * (2 * h * ih + 4 * h * h + 4 * h) * 4 / 1048576.0) + " MB")
+
+    # warm
+    i = 0
+    while i < NL:
+        b = base + i * stride
+        lo = []
+        lo.append(b)
+        lo.append(b + h)
+        lo.append(b + h + h)
+        lo.append(b + h + h + 3 * h * h)
+        lo.append(b + h + h + 3 * h * h + 3 * h)
+        lo.append(b + h + h + 3 * h * h + 3 * h + h * h)
+        lo.append(b + h + h + 3 * h * h + 3 * h + h * h + h)
+        lo.append(b + h + h + 3 * h * h + 3 * h + h * h + h + h)
+        lo.append(b + h + h + 3 * h * h + 3 * h + h * h + h + h + h)
+        lo.append(b + h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h)
+        lo.append(b + h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h)
+        lo.append(b + h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h)
+        rb = gpt2_block_bwd(x, ln1g[i], ln1b[i], wqkv[i], bqkv[i], wproj[i], bproj[i],
+                            ln2g[i], ln2b[i], w1s[i], b1s[i], w2s[i], b2s[i], gout, 1,
+                            gflat, lo, save_r, save_a, save_m, None, save_ag, ibuf, dbuf, abuf)
+        i = i + 1
+
+    tB = 0.0
+    i = 0
+    while i < NL:
+        b = base + i * stride
+        lo = []
+        lo.append(b)
+        lo.append(b + h)
+        lo.append(b + h + h)
+        lo.append(b + h + h + 3 * h * h)
+        lo.append(b + h + h + 3 * h * h + 3 * h)
+        lo.append(b + h + h + 3 * h * h + 3 * h + h * h)
+        lo.append(b + h + h + 3 * h * h + 3 * h + h * h + h)
+        lo.append(b + h + h + 3 * h * h + 3 * h + h * h + h + h)
+        lo.append(b + h + h + 3 * h * h + 3 * h + h * h + h + h + h)
+        lo.append(b + h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h)
+        lo.append(b + h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h)
+        lo.append(b + h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h)
+        t0 = now_ms()
+        rb = gpt2_block_bwd(x, ln1g[i], ln1b[i], wqkv[i], bqkv[i], wproj[i], bproj[i],
+                            ln2g[i], ln2b[i], w1s[i], b1s[i], w2s[i], b2s[i], gout, 1,
+                            gflat, lo, save_r, save_a, save_m, None, save_ag, ibuf, dbuf, abuf)
+        tB = tB + (now_ms() - t0)
+        i = i + 1
+    print("BLOCK_BWD 12 layer = " + str(tB) + " ms  TB=" + str(tB / NL) + " ms/layer")
+    print("(production do duoc 181 ms/layer = 2172 ms)")
+    print("mlp_bwd rieng (save_inner=None) = 67.7 ms/layer")
+    print("=> attn+ln+glue = " + str(tB / NL - 67.7) + " ms/layer")
+    return 0

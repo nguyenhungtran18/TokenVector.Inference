@@ -1,0 +1,46 @@
+﻿import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    ih = 4 * h
+    print("=== mlp_bwd ATen rc probe  n=" + str(n) + " h=" + str(h) + " ih=" + str(ih) + " ===")
+
+    a = t_zeros([n, ih])
+    gout = t_zeros([n, h])
+    w2 = t_zeros([ih, h])
+    w1 = t_zeros([h, ih])
+    x = t_zeros([n, h])
+    dxs2 = t_zeros([n, ih])
+    dxs1 = t_zeros([n, h])
+    gt = t_zeros([h * ih + ih + ih * h + h + 64])
+    gflat = gt.data
+
+    ad = a.data
+    gd = gout.data
+    w2d = w2.data
+    w1d = w1.data
+    xd = x.data
+    d2d = dxs2.data
+    d1d = dxs1.data
+
+    # r2: dxs2[n,ih]  dw2 -> gflat[o_w2], db2 -> gflat[o_b2]
+    o_w2: "i64" = 0
+    o_b2: "i64" = ih * h
+    r2 = onednn_linear_bwd_off(ad, gd, w2d, d2d, gflat, n, ih, h, o_w2, o_b2)
+    print("A) r2 (ih->h)  rc = " + str(r2))
+
+    # r1: dxs1[n,h]   dw1 -> gflat[o_w1], db1 -> gflat[o_b1]
+    o_w1: "i64" = ih * h + ih
+    o_b1: "i64" = ih * h + ih + h * ih
+    r1 = onednn_linear_bwd_off(xd, d2d, w1d, d1d, gflat, n, h, ih, o_w1, o_b1)
+    print("B) r1 (h->ih)  rc = " + str(r1))
+
+    if r2 == 0:
+        if r1 == 0:
+            print("=> DI ATen CA HAI (duong production)")
+        else:
+            print("=> r2 ATen, r1 ROI VE smm_*")
+    else:
+        print("=> ROI VE smm_* CA HAI (duong production KHONG chay)")
+    return 0

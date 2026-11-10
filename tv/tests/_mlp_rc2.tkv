@@ -1,0 +1,31 @@
+﻿import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    ih = 4 * h
+    print("=== r1 rc=-5: kiem tra guard do dai ===")
+    x = t_zeros([n, h])
+    did = t_zeros([n, ih])
+    w1 = t_zeros([h, ih])
+    dxs1 = t_zeros([n, h])
+    need = h * ih + ih + h * ih + ih
+    gt = t_zeros([need + 64])
+    gflat = gt.data
+    xd = x.data
+    ddd = did.data
+    w1d = w1.data
+    d1d = dxs1.data
+    print("n=" + str(n) + " in_d=h=" + str(h) + " out_d=ih=" + str(ih))
+    print("x=" + str(len(xd)) + " (can " + str(n * h) + ")")
+    print("did=" + str(len(ddd)) + " (can " + str(n * ih) + ")")
+    print("w1=" + str(len(w1d)) + " (can " + str(h * ih) + ")")
+    print("dxs1=" + str(len(d1d)) + " (can " + str(n * h) + ")")
+    print("gflat=" + str(len(gflat)) + " (can " + str(need) + ")")
+    o_w1: "i64" = h * ih + ih
+    o_b1: "i64" = h * ih + ih + h * ih
+    r1 = onednn_linear_bwd_off(xd, ddd, w1d, d1d, gflat, n, h, ih, o_w1, o_b1)
+    print("r1 rc = " + str(r1))
+    if r1 == -5:
+        print("=> -5 = guard do dai trong wrapper IL (V_LBO)")
+    return 0

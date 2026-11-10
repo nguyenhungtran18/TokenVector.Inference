@@ -6371,3 +6371,95 @@ trong bất kỳ phiên nào.
   lỗi `Chi ho tro dinh nghia ham/class-record top-level ... gap annassign o dong 2281`.
 - `now_ms()` vẫn là 1 ms; các mảnh `layernorm_bwd` 0 ms là thật (dưới 1 ms), không
   phải lỗi đo.
+
+
+---
+
+## §0.142 `mlp_bwd`: CA HAI lenh `onednn_linear_bwd_off` DI ATen — khong roi ve `smm_*`
+
+**Cau hoi:** 2 lenh `onednn_linear_bwd_off` trong `gpt2_mlp_bwd` co that su di ATen
+hay dang roi ve `smm_*`?
+
+**Tra loi: DI ATen CA HAI. rc = 0.** Khong co fallback.
+
+### Duong di (da truy den tan cung)
+
+```
+gpt2_mlp_bwd (L1897, tv.training.gpt2_ref124.tkv)
+  -> onednn_linear_bwd_off(...)                  [compiler builtin]
+  -> TkvSimd::OnednnLinearBwdOffM (IL L4079)     [managed wrapper]
+       - reflection: List<float>._items -> float[] -> pin -> conv.i
+       - guard do dai: x >= n*in_d, gy >= n*out_d, w >= in_d*out_d,
+                      dx >= n*in_d, gflat >= o_db+out_d   -> fail = -5
+  -> TkvSimd::TkvTorchLinearBwdFwdOffNative      [pinvoke]
+  -> tkv_simd_native.dll : EXPORT TkvTorchLinearBwdFwdOff (tkv_simd_native.c L2631)
+       - o_dw/o_db < 0 -> -6 ; !load -> -9
+       - goi p_lin_bwd(x, gy, w, dx, gflat+o_dw, gflat+o_db, ...)
+  -> tkv_torch_fused.dll : TkvTorchLinearBwdFwd   [ATen addmm x2]
+```
+
+`TkvTorchLinearBwdFwdOff` KHONG co trong `tkv_torch_fused.dll` — dieu do BINH THUONG,
+khong phai loi. Ban `_Off` nam o `tkv_simd_native.dll` va chi doi con tro
+`gflat + o_dw` / `gflat + o_db` roi goi cung `p_lin_bwd` (= `TkvTorchLinearBwdFwd`,
+CO trong DLL). Chi mot kernel ATen, hai cach ghi dw/db.
+
+### rc do duoc (probe `_mlp_rc3.tkv`, gflat dung npar production)
+
+| lenh | shape | rc |
+|---|---|---:|
+| r2 `a[n,ih] x w2[ih,h]` | 1024x3072 -> 768 | **0** |
+| r1 `x[n,h] x w1[h,ih]` | 1024x768 -> 3072 | **0** |
+
+`npar = 124,439,808`; layer 11 co `o_b2 + h = 124,439,808` — **khop CHINH XAC tran**,
+khong du mot phan tu. Guard do dai trong wrapper IL qua sat mep.
+
+### Bay tiem an (chua xay ra, nhung co that)
+
+Guard `gflat.Count < o_db + out_d -> -5` nghia la: neu ai do them mot param vao layout
+flatten ma khong cap nhat `npar` trong `gpt2_backward`, `mlp_bwd` **im lang roi ve
+`smm_*`** — cham ~2.1x, khong co log, khong co assert. Da xac nhan co che: probe dau
+tien cap `gflat` thieu -> r1 tra **-5** va di duong native. Day la kieu hoi quy kho thay
+nhat: khong sai so, chi cham.
+
+### Do lai 12 layer voi 12 BO WEIGHT THAT (tranh loi cache cua §0.141)
+
+| cau hinh | ms/layer | tong |
+|---|---:|---:|
+| 3 manh roi (A+B+C), 4 bo w | 50.8 | — |
+| `gpt2_mlp_bwd` day du, co `save_inner` | 56.0 | 672 |
+| `gpt2_mlp_bwd` day du, `save_inner=None` (**production**) | **67.7** | **812** |
+| `gpt2_block_bwd` that, 12 bo weight | 165.3 | 1984 |
+
+- `save_inner=None` (production) ton them **11.7 ms/layer** = recompute `inner`
+  (`gpt2_linear` 1 GEMM) + `_gelu_fwd_par`. Dung nhu comment trong code.
+- `simd=0` KHONG duoc dung: 11,553 ms/layer (duong native `smm_*`). Production `simd=1`.
+  Do nham mot lan, ghi lai day de khong lap.
+- Cache KHONG phai nguyen nhan chenh 68 -> 90: day L3 ra 96 MB truoc moi layer chi doi
+  **-0.08 ms/layer** (57.33 vs 57.25). Khac han truong hop `_bwd_insitu` (§0.141).
+- `block_bwd` that 165 ms/layer trong probe vs 181 trong production: phan con lai la
+  `attention_bwd` doc them weight attention (12 bo = 108 MB) va tranh chap L3 voi
+  mlp weight (216 MB). Tong weight 1 block = **324 MB**, gap ~21 lan L3 15 MB.
+
+### Ket luan ve thu tu toi uu
+
+`mlp_bwd` KHONG co cho trong o tang toc mien phi: no da di ATen, va ATen la duong nhanh
+nhat hien co (632 GFLOP/s vs `smm_fwd` 298 — §0.140). 67.7 ms/layer la chi phi that cua
+2 GEMM ATen + 1 GEMM recompute + gelu.
+
+Muon giam nua thi phai giam **so lan goi**, khong phai doi kernel.
+
+**DA KIEM TRA va LOAI — khong phai win mien phi:** toi da tuong `saves[3+3N+li]` la
+`inner` nen chi can truyen vao la bo duoc 11.7 ms/layer. SAI. Thu tu `saves` (L833-848)
+la: `logits, xf, xf_in, xins[N], rs[N], ains[N], msin[N], adIns[N]`. Vay
+`saves[3+3N+li]` = `msin[li]` = **`m`** (truyen lam `save_r`), va `saves[3+4N+li]` =
+`adIns[li]` = **`a`** (truyen lam `save_a_gelu`). `inner` (pre-gelu) **khong co trong
+saves** — forward co y khong luu (L671-673), vi no nam ben trong
+`onednn_linear_bias_gelu` fused. Muon co `inner` phai tach fused forward, ma §0.103 da
+do: tach ra ton **+625 ms**. 11.7 ms/layer recompute la gia re hon nhieu. Giu nguyen.
+
+Con lai hai huong that:
+1. Gop `r2` + `gelu_bwd` + `r1` thanh mot fused ATen kernel (giong `lmhead_bwd_fused`).
+   Hien tai 3 lan goi DLL + 3 lan reflection pin moi layer. Tiem nang: bo 2/3 chi phi
+   goi, nhung chi phi goi chua do rieng — **chua co so**, dung tin.
+2. `attention_bwd` (1056 ms, 37%) moi la muc lon thu hai va §0.135 da ket luan kernel
+   native thua ATen o 1 head. Do la cho con lai that su.

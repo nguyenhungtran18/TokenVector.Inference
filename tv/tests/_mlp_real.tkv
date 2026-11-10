@@ -1,0 +1,70 @@
+﻿import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    ih = 4 * h
+    V = VocabSize
+    NL = NLayers
+    print("=== gpt2_mlp_bwd x " + str(NL) + " voi " + str(NL) + " BO WEIGHT THAT ===")
+    npar = V * h + MaxPos * h + h + h
+    npar = npar + NL * (h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h + h)
+    gt = t_zeros([npar])
+    gflat = gt.data
+
+    # 12 bo weight rieng biet -> 226 MB, khong lot L3
+    w1s = []
+    w2s = []
+    i = 0
+    while i < NL:
+        w1s.append(t_zeros([h, ih]))
+        w2s.append(t_zeros([ih, h]))
+        i = i + 1
+    # du lieu vao chung
+    x = t_zeros([n, h])
+    gout = t_zeros([n, h])
+    inner = t_zeros([n, ih])
+    a = t_zeros([n, ih])
+    ibuf = t_zeros([n, ih])
+    dbuf = t_zeros([n, ih])
+    abuf = []
+    abuf.append(t_zeros([n, ih]))
+    abuf.append(t_zeros([n, h]))
+    j = 2
+    while j < 12:
+        abuf.append(t_zeros([n, ih]))
+        j = j + 1
+    b1 = t_zeros([ih])
+    b2 = t_zeros([h])
+    print("weight set = " + str(NL) + " x " + str(2 * h * ih * 4 / 1048576.0) + " MB = " + str(NL * 2 * h * ih * 4 / 1048576.0) + " MB")
+
+    base = V * h + MaxPos * h + h + h
+    stride = h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h + h
+
+    # warm
+    r = gpt2_mlp_bwd(x, w1s[0], b1, w2s[0], b2, n, gout, 0, gflat,
+                     base + h + h + 3 * h * h + 3 * h + h * h + h + h + h,
+                     base + h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h,
+                     base + h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h,
+                     base + h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h,
+                     inner, a, ibuf, dbuf, abuf)
+
+    tot = 0.0
+    i = 0
+    while i < NL:
+        b = base + i * stride
+        ow1 = b + h + h + 3 * h * h + 3 * h + h * h + h + h + h
+        ob1 = ow1 + 4 * h * h
+        ow2 = ob1 + 4 * h
+        ob2 = ow2 + 4 * h * h
+        t0 = now_ms()
+        r = gpt2_mlp_bwd(x, w1s[i], b1, w2s[i], b2, n, gout, 0, gflat,
+                         ow1, ob1, ow2, ob2, inner, a, ibuf, dbuf, abuf)
+        dt = now_ms() - t0
+        tot = tot + dt
+        print("layer " + str(i) + " = " + str(dt) + " ms")
+        i = i + 1
+    print("---")
+    print("TONG 12 layer = " + str(tot) + " ms   TB = " + str(tot / NL) + " ms/layer")
+    print("(trong block that do duoc 90 ms/layer)")
+    return 0
