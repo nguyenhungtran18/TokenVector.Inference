@@ -5415,3 +5415,73 @@ embed (522 ms), (c) `opt.step` (891 ms). Ba cho nay ~2400 ms — du de dong gap
 ### 6. Verify
 - Gate 9/10 (chi `gap_tests` pre-existing exit=82), chay lai 2026-11-10 07:33
 - Khong sua code production nao trong muc nay
+
+## §0.132 Pool hoa scratch trong gpt2_mlp_bwd — 5312 -> 4968 ms/step (-6.5%)
+
+Theo §0.131 muc 5 uu tien (a): profile `gpt2_mlp_bwd` ben trong.
+Probe moi: `tv/tests/_mlp_split.tkv`, `tv/tests/_mlp_pool.tkv`.
+
+### 1. So 82 ms/layer trong §0.131 cung bi thoi phong
+
+`_block_split.tkv` goi `gpt2_mlp_bwd(..., gflat=None, ...)` -> di duong native
+fallback. Production (`gpt2_backward`) luon truyen `opt.g` (co data) -> ATen path.
+
+| duong | ms/layer |
+|---|---|
+| mlp_bwd gflat=None (native fallback) | 82.0 |
+| **mlp_bwd gflat co data (production)** | **62.0** |
+
+### 2. Phan ra mlp_bwd production (62 ms/layer)
+
+| manh | ms |
+|---|---|
+| `onednn_linear_bwd_off` shape w2 (a[n,4h] -> gout[n,h]) | 16.0 |
+| `torch_gelu_bwd` n*4h = 3.15M | 0.0 |
+| `onednn_linear_bwd_off` shape w1 (x[n,h] -> d_inner[n,4h]) | 15.0 |
+| **`t_zeros([n,4h])` + `t_zeros([n,h])` moi call** | **9.2–15.0** |
+| tong | 40.2 |
+| chenh (glue + wrapper + return list) | ~22 |
+
+GEMM chi 31 ms. Phan lon con lai la **cap phat**.
+
+### 3. Nut that: 12.6 MB cap phat lai moi layer moi buoc
+
+`gpt2_mlp_bwd` tao `dxs2 = t_zeros([n, 4h])` = 1024 x 3072 x 4 B = **12.6 MB**,
+zero-fill, roi vut di — moi layer, moi buoc. 12 layer = 151 MB alloc/step.
+Codebase da co pattern pool (`_ab_pool`, `ibuf`, `dbuf`) nhung dxs2/dxs1 thi chua.
+
+A/B do `_mlp_pool.tkv` (cung phep tinh, chi khac cho cap phat):
+
+| | ms/layer |
+|---|---|
+| A) `t_zeros` moi call (hien tai) | 62.0 |
+| B) pool cap 1 lan | **47.0** |
+| tiet kiem | **15.0 ms/layer = 180 ms/step** |
+
+### 4. Sua
+
+- `_mk_abuf` (bench): them slot 8 = `[n,4h]` (dxs2), slot 9 = `[n,h]` (dxs1)
+- `gpt2_mlp_bwd`: them tham so `abuf`; `dxs2 = _ab_pool_k(abuf, 8, n, ih)`,
+  `dxs1 = _ab_pool(abuf, 9, n, h)`. Thieu pool / sai kich thuoc -> `t_zeros` nhu cu.
+- `gpt2_block_bwd`: truyen `abuf` xuong `gpt2_mlp_bwd`
+- Sua CA HAI ban `tv/training/` va `tv/tests/` (bay shadow §0.130)
+
+**Vi sao BIT-EXACT:** `onednn_linear_bwd_off` ghi DE toan bo dxs2/dxs1, khong
+cong don. Khong doc gia tri cu -> khong can zero lai -> cung ket qua tung bit.
+
+### 5. Ket qua do lai (mode 2, seq1024, pool=1)
+
+| pha | truoc | sau | delta |
+|---|---|---|---|
+| fwd | 1000 | 1062 | +62 (nhieu do) |
+| loss | 125 | 110 | -15 |
+| **bwd** | **3156** | **2828** | **-328** |
+| opt | 891 | 859 | -32 |
+| copyback | 140 | 109 | -31 |
+| **TONG** | **5312** | **4968** | **-344 (-6.5%)** |
+
+PyTorch cung phien: full step 4041.4. Gap **1.31x -> 1.23x**.
+
+### 6. Verify
+- Gate 9/10, `gpt2_full_tests` **33/33 PASS** (bit-exact vs PyTorch giu nguyen)
+- `gap_tests` van exit=82 (pre-existing, khong lien quan)

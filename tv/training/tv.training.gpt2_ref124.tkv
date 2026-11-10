@@ -1899,7 +1899,8 @@ def gpt2_mlp_bwd(x: "Tensor", w1: "Tensor", b1: "Tensor",
                  gflat: 'list[f32]' = None, o_w1: "i64" = -1, o_b1: "i64" = -1,
                  o_w2: "i64" = -1, o_b2: "i64" = -1,
                  save_inner: "Tensor" = None, save_a: "Tensor" = None,
-                 ibuf: "Tensor" = None, dbuf: "Tensor" = None) -> 'list[Tensor]':
+                 ibuf: "Tensor" = None, dbuf: "Tensor" = None,
+                 abuf: 'list[Tensor]' = None) -> 'list[Tensor]':
     h = HiddenSize
     ih = 4 * h
     if save_a != None:
@@ -1926,10 +1927,16 @@ def gpt2_mlp_bwd(x: "Tensor", w1: "Tensor", b1: "Tensor",
                 _x4 = x.data
                 _w24 = w2.data
                 _w14 = w1.data
-                dxs2 = t_zeros([n, ih])
+                # s0.132: POOL 2 scratch dxs2/dxs1. Truoc day t_zeros([n,4h]) =
+                # 12.6 MB cap phat + zero-fill MOI LAN GOI (moi layer, moi buoc;
+                # 12 layer = 151 MB/step). Do _mlp_pool.tkv: 62 -> 47 ms/layer
+                # (15 ms/layer, 180 ms/step). ATen ghi DE toan bo dxs2/dxs1 nen
+                # khong can zero lai -> BIT-EXACT. Thieu pool / sai kich thuoc ->
+                # t_zeros nhu cu (duong cu nguyen van).
+                dxs2 = _ab_pool_k(abuf, 8, n, ih)
                 _dxs2d = dxs2.data
                 at_r2 = onednn_linear_bwd_off(_ad4, _gd4, _w24, _dxs2d, gflat, n, ih, h, o_w2, o_b2)
-                dxs1 = t_zeros([n, h])
+                dxs1 = _ab_pool(abuf, 9, n, h)
                 _dxs1d = dxs1.data
                 if at_r2 == 0:
                     _di_t = _mlp_gelu_bwd(inner, dxs2, dbuf)
@@ -2007,7 +2014,7 @@ def gpt2_block_bwd(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
     if save_m == None:
         m = gpt2_layernorm(r, ln2_g, ln2_b)
     # out = r + mlp(m)
-    rmlp = gpt2_mlp_bwd(m, w1, b1, w2, b2, n, gout, simd, gflat, o_w1, o_b1, o_w2, o_b2, save_inner, save_a_gelu, ibuf, dbuf)
+    rmlp = gpt2_mlp_bwd(m, w1, b1, w2, b2, n, gout, simd, gflat, o_w1, o_b1, o_w2, o_b2, save_inner, save_a_gelu, ibuf, dbuf, abuf)
     # P5.9 (2026-11-05): dr = gout + drl2 - mutate gout in-place, bo t_zeros +
     # copy loop. gout khong con duoc dung sau mlp_bwd -> an toan. dx = drl1 + gout
     # mutate drl1, bo t_zeros + copy loop. Cung thu tu cong -> bit-exact.

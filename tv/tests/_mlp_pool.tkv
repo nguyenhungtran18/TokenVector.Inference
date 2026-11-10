@@ -1,0 +1,117 @@
+# PROBE MLP-BWD POOL A/B (HANDOFF §0.131 muc 5 - uu tien (a), buoc 2)
+# Gia thuyet: gpt2_mlp_bwd cap phat `dxs2 = t_zeros([n, 4h])` = 12.6 MB MOI
+# LAN GOI (moi layer, moi buoc). 12 layer = 151 MB alloc + zero-fill / step.
+# Codebase da co pattern pool (_ab_pool, ibuf, dbuf) nhung dxs2/dxs1 thi chua.
+#
+# Probe nay do 2 duong Y HET nhau ve phep tinh, chi khac cho cap phat:
+#   A) tai hien nguyen van: t_zeros([n,4h]) + t_zeros([n,h]) moi call
+#   B) pool: 2 buffer cap 1 lan, dung lai (khong zero-fill lai)
+# Neu B nhanh hon A dang ke -> pool hoa la viec nen lam.
+#
+# Chay:
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_mlp_pool.tkv out/mpool.exe main
+#   copy -> out/mpool_n10.dll + runtimeconfig ; dotnet out/mpool_n10.dll
+#
+# LUU Y bug #8: now_ms() phai dat trong main.
+import tv.training.gpt2_ref124
+import tv.training.trainer
+import tv.training.simd_matmul
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    ih = 4 * h
+
+    x = t_zeros([n, h])
+    gout = t_zeros([n, h])
+    w1 = t_zeros([h, ih])
+    b1 = t_zeros([ih])
+    w2 = t_zeros([ih, h])
+    b2 = t_zeros([h])
+    sav_in = t_zeros([n, ih])
+    sav_ag = t_zeros([n, ih])
+    ibuf = t_zeros([n, ih])
+    dbuf = t_zeros([n, ih])
+
+    o_w1 = 0
+    o_b1 = o_w1 + h * ih
+    o_w2 = o_b1 + ih
+    o_b2 = o_w2 + ih * h
+    hold = t_zeros([o_b2 + h])
+    gf = hold.data
+
+    # pool: cap 1 lan
+    pool_dxs2 = t_zeros([n, ih])
+    pool_dxs1 = t_zeros([n, h])
+    _pd2 = pool_dxs2.data
+    _pd1 = pool_dxs1.data
+
+    _ad = sav_ag.data
+    _gd = gout.data
+    _w2 = w2.data
+    _w1 = w1.data
+    _x4 = x.data
+    _in = sav_in.data
+    _db = dbuf.data
+
+    print("=== MLP BWD POOL A/B seq=" + str(n) + " ===")
+
+    # ---- A) duong hien tai: t_zeros moi call ----
+    for i in range(2):
+        z2 = t_zeros([n, ih])
+        z1 = t_zeros([n, h])
+        _z2 = z2.data
+        _z1 = z1.data
+        ra2 = onednn_linear_bwd_off(_ad, _gd, _w2, _z2, gf, n, ih, h, o_w2, o_b2)
+        rg = torch_gelu_bwd(_z2, _in, _db, n * ih)
+        ra1 = onednn_linear_bwd_off(_x4, _db, _w1, _z1, gf, n, h, ih, o_w1, o_b1)
+    bestA = 1.0e9
+    kk = 0
+    while kk < 6:
+        t0 = now_ms()
+        z2 = t_zeros([n, ih])
+        z1 = t_zeros([n, h])
+        _z2 = z2.data
+        _z1 = z1.data
+        ra2 = onednn_linear_bwd_off(_ad, _gd, _w2, _z2, gf, n, ih, h, o_w2, o_b2)
+        rg = torch_gelu_bwd(_z2, _in, _db, n * ih)
+        ra1 = onednn_linear_bwd_off(_x4, _db, _w1, _z1, gf, n, h, ih, o_w1, o_b1)
+        dt = now_ms() - t0
+        if dt < bestA:
+            bestA = dt
+        kk = kk + 1
+    print("A) t_zeros moi call        best-of-6 ms=" + str(bestA) + "  rc=" + str(ra2) + "/" + str(ra1))
+
+    # ---- B) pool: khong cap phat lai ----
+    for i in range(2):
+        rb2 = onednn_linear_bwd_off(_ad, _gd, _w2, _pd2, gf, n, ih, h, o_w2, o_b2)
+        rgb = torch_gelu_bwd(_pd2, _in, _db, n * ih)
+        rb1 = onednn_linear_bwd_off(_x4, _db, _w1, _pd1, gf, n, h, ih, o_w1, o_b1)
+    bestB = 1.0e9
+    kk = 0
+    while kk < 6:
+        t0 = now_ms()
+        rb2 = onednn_linear_bwd_off(_ad, _gd, _w2, _pd2, gf, n, ih, h, o_w2, o_b2)
+        rgb = torch_gelu_bwd(_pd2, _in, _db, n * ih)
+        rb1 = onednn_linear_bwd_off(_x4, _db, _w1, _pd1, gf, n, h, ih, o_w1, o_b1)
+        dt = now_ms() - t0
+        if dt < bestB:
+            bestB = dt
+        kk = kk + 1
+    print("B) pool (cap 1 lan)        best-of-6 ms=" + str(bestB) + "  rc=" + str(rb2) + "/" + str(rb1))
+
+    print("TIET KIEM per-layer = " + str(bestA - bestB) + " ms   x12 layer = " + str((bestA - bestB) * 12.0) + " ms/step")
+
+    # ---- C) gpt2_mlp_bwd FULL de doi chieu ----
+    bestC = 1.0e9
+    kk = 0
+    while kk < 5:
+        t0 = now_ms()
+        rm = gpt2_mlp_bwd(x, w1, b1, w2, b2, n, gout, 1, gf, o_w1, o_b1, o_w2, o_b2,
+                          sav_in, sav_ag, ibuf, dbuf)
+        dt = now_ms() - t0
+        if dt < bestC:
+            bestC = dt
+        kk = kk + 1
+    print("C) gpt2_mlp_bwd FULL       best-of-5 ms=" + str(bestC))
+    return 0

@@ -1,0 +1,23 @@
+﻿perf(mlp): pool hoa dxs2/dxs1 trong gpt2_mlp_bwd - 5312 -> 4968 ms/step (-6.5%)
+
+gpt2_mlp_bwd tao dxs2 = t_zeros([n, 4h]) = 12.6 MB MOI LAN GOI (moi layer,
+moi buoc; 12 layer = 151 MB alloc/step). Codebase da co pattern pool nhung
+dxs2/dxs1 thi chua.
+
+A/B (_mlp_pool.tkv, cung phep tinh chi khac cho cap phat):
+  A) t_zeros moi call   62.0 ms/layer
+  B) pool cap 1 lan     47.0 ms/layer
+  -> 15 ms/layer = 180 ms/step
+
+Sua:
+- _mk_abuf: them slot 8 [n,4h] (dxs2), slot 9 [n,h] (dxs1)
+- gpt2_mlp_bwd: them tham so abuf, dung _ab_pool_k/_ab_pool
+- gpt2_block_bwd: truyen abuf xuong
+- Ca hai ban tv/training/ va tv/tests/ (bay shadow)
+
+BIT-EXACT: onednn_linear_bwd_off ghi DE toan bo dxs2/dxs1, khong cong don.
+
+Do lai mode 2 seq1024: bwd 3156 -> 2828, TONG 5312 -> 4968.
+Gap PyTorch 1.31x -> 1.23x.
+
+Gate 9/10, gpt2_full_tests 33/33 PASS.
