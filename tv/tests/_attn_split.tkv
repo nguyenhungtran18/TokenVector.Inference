@@ -1,0 +1,179 @@
+# PROBE ATTN-BWD SPLIT (SPEC_FUSED_SDPA_BWD §4.9 con lai)
+# Muc dich: boc 135.4 ms/layer cua duong NATIVE thanh tung phan de biet
+# 117 ms ngoai kernel nam o dau: qkv linear / dctx smm_dot / dw_proj /
+# bias_grad / gpt2_linear_bwd.
+#
+# Chay:
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_attn_split.tkv out/asplit.exe main
+#   copy out/asplit.exe -> out/asplit_n10.dll (+ runtimeconfig) ; dotnet out/asplit_n10.dll
+#
+# LUU Y bug #8: now_ms() phai dat trong main, khong dat trong ham local.
+import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    hd = HeadDim
+    h3 = 3 * h
+    inv = 1.0 / sqrt(float(hd))
+
+    x = t_zeros([n, h])
+    gout = t_zeros([n, h])
+    wqkv = t_zeros([h, h3])
+    bqkv = t_zeros([h3])
+    wproj = t_zeros([h, h])
+    bproj = t_zeros([h])
+
+    # buffer tai su dung (giong production: _ab_pool)
+    obuf_qkv = t_zeros([n, h3])
+    dqkv = t_zeros([n, h3])
+    ctxT = t_zeros([n, h])
+    dctxT = t_zeros([n, h])
+    dx = t_zeros([n, h])
+    o_qkv = 0
+    o_bqkv = h * h3
+    o_proj = h * h3 + h3
+    o_bproj = o_proj + h * h
+    # gflat phai du: o_bproj + h phan tu (truoc day 2360000 -> tran 2368 phan tu
+    # -> Internal CLR error 0x80131506, khong phai loi logic).
+    holder = t_zeros([o_bproj + h])
+    gf = holder.data
+
+    print("=== ATTN BWD SPLIT seq=" + str(n) + " h=" + str(h) + " hd=" + str(hd) + " ===")
+
+    # ---- 0) toan bo duong ATen (production) ----
+    for i in range(2):
+        r0 = gpt2_attention_bwd(x, wqkv, bqkv, wproj, bproj, n, gout, 1, gf, o_qkv, o_bqkv, o_proj, o_bproj)
+    t0 = now_ms()
+    for i in range(6):
+        r0 = gpt2_attention_bwd(x, wqkv, bqkv, wproj, bproj, n, gout, 1, gf, o_qkv, o_bqkv, o_proj, o_bproj)
+    t_aten = now_ms() - t0
+    print("A) full ATen path       6 iters ms=" + str(t_aten) + "  -> per-layer " + str(t_aten / 6.0))
+
+    # ---- 1) qkv linear (onednn_linear_bias + bias) ----
+    for i in range(2):
+        r1 = gpt2_linear(x, wqkv, bqkv, n, h, h3, 1, obuf_qkv)
+    t0 = now_ms()
+    for i in range(10):
+        r1 = gpt2_linear(x, wqkv, bqkv, n, h, h3, 1, obuf_qkv)
+    t_qkv = now_ms() - t0
+    print("B) qkv linear           10 iters ms=" + str(t_qkv) + "  -> per-layer " + str(t_qkv / 10.0))
+
+    # ---- 2) dctx = gout . w_proj  (smm_dot) ----
+    for i in range(2):
+        r2 = smm_dot(gout, wproj, n, h, h)
+    t0 = now_ms()
+    for i in range(10):
+        r2 = smm_dot(gout, wproj, n, h, h)
+    t_dctx = now_ms() - t0
+    print("C) dctx smm_dot         10 iters ms=" + str(t_dctx) + "  -> per-layer " + str(t_dctx / 10.0))
+
+    # ---- 3) kernel flash multi-head (12 head + merge) ----
+    aqkv = obuf_qkv.data
+    adc = dctxT.data
+    act = ctxT.data
+    adq = dqkv.data
+    for i in range(2):
+        rc = attention_bwd_merge_multi(aqkv, adc, act, adq, n, h, hd, inv, NHeads)
+    t0 = now_ms()
+    for i in range(10):
+        rc = attention_bwd_merge_multi(aqkv, adc, act, adq, n, h, hd, inv, NHeads)
+    t_kern = now_ms() - t0
+    print("D) flash kernel multi   10 iters ms=" + str(t_kern) + "  -> per-layer " + str(t_kern / 10.0) + "  rc=" + str(rc))
+
+    # ---- 4) dw_proj: chuoi THAT trong production ----
+    # linear_dw_fused rc=-8 (k=1024 > 64, gioi han thiet ke) -> linear_dw_at_fused
+    # -> neu van != 0 thi smm_transpose + smm_fwd. Do ca 3 manh.
+    ct10 = ctxT.data
+    go10 = gout.data
+    l10p = linear_dw_fused(ct10, go10, gf, o_proj, n, h, h)
+    t0 = now_ms()
+    for i in range(10):
+        l10p = linear_dw_fused(ct10, go10, gf, o_proj, n, h, h)
+    t_dw1 = now_ms() - t0
+    print("E1) linear_dw_fused     10 iters ms=" + str(t_dw1) + "  -> per-layer " + str(t_dw1 / 10.0) + "  rc=" + str(l10p))
+
+    l10q = linear_dw_at_fused(ct10, go10, gf, o_proj, n, h, h, 1)
+    t0 = now_ms()
+    for i in range(10):
+        l10q = linear_dw_at_fused(ct10, go10, gf, o_proj, n, h, h, 1)
+    t_dw2 = now_ms() - t0
+    print("E2) linear_dw_at_fused  10 iters ms=" + str(t_dw2) + "  -> per-layer " + str(t_dw2 / 10.0) + "  rc=" + str(l10q))
+
+    t0 = now_ms()
+    for i in range(10):
+        ctxTt = smm_transpose(ctxT, n, h)
+    t_tr = now_ms() - t0
+    print("E3a) smm_transpose ctx  10 iters ms=" + str(t_tr) + "  -> per-layer " + str(t_tr / 10.0))
+
+    ctxTt = smm_transpose(ctxT, n, h)
+    t0 = now_ms()
+    for i in range(10):
+        dwG = smm_fwd(ctxTt, gout, h, h, n)
+    t_dw3 = now_ms() - t0
+    print("E3b) smm_fwd dw         10 iters ms=" + str(t_dw3) + "  -> per-layer " + str(t_dw3 / 10.0))
+
+    # chuoi day du nhu production (ca 3 buoc, khong re-dung)
+    t0 = now_ms()
+    for i in range(10):
+        lp = linear_dw_fused(ct10, go10, gf, o_proj, n, h, h)
+        if lp != 0:
+            lp = linear_dw_at_fused(ct10, go10, gf, o_proj, n, h, h, 1)
+        if lp != 0:
+            _ctt = smm_transpose(ctxT, n, h)
+            _dwg = smm_fwd(_ctt, gout, h, h, n)
+    t_dwfull = now_ms() - t0
+    print("E) dw_proj CHUOI THAT   10 iters ms=" + str(t_dwfull) + "  -> per-layer " + str(t_dwfull / 10.0))
+
+    # ---- 5) db_proj (bias_grad) ----
+    t0 = now_ms()
+    for i in range(10):
+        rc5 = bias_grad(go10, gf, o_bproj, n, h)
+    t_db = now_ms() - t0
+    print("F) db_proj bias_grad    10 iters ms=" + str(t_db) + "  -> per-layer " + str(t_db / 10.0) + "  rc=" + str(rc5))
+
+    # ---- 6) gpt2_linear_bwd (dx + dw_qkv + db_qkv) ----
+    for i in range(2):
+        r6 = gpt2_linear_bwd(x, wqkv, dqkv, n, h, h3, 1, gf, o_qkv, o_bqkv)
+    t0 = now_ms()
+    for i in range(10):
+        r6 = gpt2_linear_bwd(x, wqkv, dqkv, n, h, h3, 1, gf, o_qkv, o_bqkv)
+    t_lb = now_ms() - t0
+    print("G) gpt2_linear_bwd      10 iters ms=" + str(t_lb) + "  -> per-layer " + str(t_lb / 10.0))
+
+    # ---- 7) tong cac manh ----
+    sum_parts = t_qkv / 10.0 + t_dctx / 10.0 + t_kern / 10.0 + t_dwfull / 10.0 + t_db / 10.0 + t_lb / 10.0
+    print("SUM parts per-layer = " + str(sum_parts) + "  (ATen full = " + str(t_aten / 6.0) + ")")
+
+    # ---- 8) duong NATIVE day du (gflat=None -> khong vao ATen) ----
+    for i in range(2):
+        r8 = gpt2_attention_bwd(x, wqkv, bqkv, wproj, bproj, n, gout, 1)
+    t0 = now_ms()
+    for i in range(8):
+        r8 = gpt2_attention_bwd(x, wqkv, bqkv, wproj, bproj, n, gout, 1)
+    t_nat = now_ms() - t0
+    print("H) full NATIVE (abuf=None) 8 iters ms=" + str(t_nat) + "  -> per-layer " + str(t_nat / 8.0))
+
+    # ---- 9) NATIVE co abuf (DUNG nhu production: gpt2_block_bwd truyen abuf) ----
+    # abuf idx 6 = qkv [n,3h], 7 = dqkv [n,3h], 2 = ctxT [n,h], 3 = dctxT [n,h],
+    # 4 = dx [n,h]. Neu khong truyen abuf thi moi call cap phat 9.4M float
+    # (2.36M x2 + 0.79M x2) -> do sai hoan toan so voi production.
+    abuf = [t_zeros([1]), t_zeros([1]), t_zeros([n, h]), t_zeros([n, h]),
+            t_zeros([n, h]), t_zeros([1]), t_zeros([n, h3]), t_zeros([n, h3])]
+    for i in range(2):
+        r9 = gpt2_attention_bwd(x, wqkv, bqkv, wproj, bproj, n, gout, 1, None, -1, -1, -1, -1, abuf)
+    t0 = now_ms()
+    for i in range(8):
+        r9 = gpt2_attention_bwd(x, wqkv, bqkv, wproj, bproj, n, gout, 1, None, -1, -1, -1, -1, abuf)
+    t_natp = now_ms() - t0
+    print("I) full NATIVE (co abuf)  8 iters ms=" + str(t_natp) + "  -> per-layer " + str(t_natp / 8.0))
+
+    # ---- 10) ATen co abuf (production that) ----
+    for i in range(2):
+        r10 = gpt2_attention_bwd(x, wqkv, bqkv, wproj, bproj, n, gout, 1, gf, o_qkv, o_bqkv, o_proj, o_bproj, abuf)
+    t0 = now_ms()
+    for i in range(6):
+        r10 = gpt2_attention_bwd(x, wqkv, bqkv, wproj, bproj, n, gout, 1, gf, o_qkv, o_bqkv, o_proj, o_bproj, abuf)
+    t_atenp = now_ms() - t0
+    print("J) full ATen   (co abuf)  6 iters ms=" + str(t_atenp) + "  -> per-layer " + str(t_atenp / 6.0))
+    return 0

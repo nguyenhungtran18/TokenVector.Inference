@@ -5333,3 +5333,85 @@ kernel. Ung vien: MLP bwd, LN fwd (Phase 5), va phan linear trong attention bwd.
 - trainer **15/15**
 - self-host **IL_IDENTICAL**
 - bit-identical: `max_abs 0.0`, 0 phan tu lech @n=1024
+
+## §0.131 Profile lai toan bo bwd (2026-11-10) — so cu bi thoi phong, attention khong phai nut that
+
+**Chua commit code nao.** Day la do lai + dinh chinh. Probe moi:
+`tv/tests/_attn_split.tkv`, `tv/tests/_block_split.tkv`, `tv/tests/_bwd_outer.tkv`.
+
+### 1. So cu trong §0.130 SAI vi thieu pool
+
+Probe cu (`_glue.tkv` #7/#8) goi `gpt2_attention_bwd` **khong truyen `abuf`**.
+Moi call khong pool cap phat 9.4M float (qkv 2.36M + dqkv 2.36M + ctxT/dctxT
+0.79M x2). Production (`gpt2_block_bwd`) LUON truyen `abuf`.
+
+| duong | khong abuf (so cu) | **co abuf (that)** |
+|---|---|---|
+| ATen SDPA bwd | 99.0 | **65.0** |
+| Native flash bwd | 138.8 | **119.1** |
+
+Ca hai deu bi thoi phong ~1.5x. Native **cham hon ATen 1.83x**, khong phai
+"1.04x" nhu §0.130. Duong native la fallback khi `gflat == None` — dung nhu vay.
+
+### 2. Phan ra `gpt2_attention_bwd` (co abuf, ms/layer)
+
+| manh | ms |
+|---|---|
+| qkv linear | 7.8 |
+| dctx `smm_dot` | 7.8–14.1 |
+| flash kernel multi-head | 34.4–35.9 |
+| dw_proj (`linear_dw_fused` rc=-8 -> `linear_dw_at_fused`) | 1.5–3.1 |
+| db_proj `bias_grad` | 0.0–1.5 |
+| `gpt2_linear_bwd` | 25.0–26.5 |
+| tong manh | 84.3 |
+| do duoc | 119.1 |
+| chenh (glue + alloc) | ~35 |
+
+`linear_dw_fused` tra **rc=-8** voi shape that (k=1024 > gioi han 64) — nhanh
+native do chua bao gio chay trong production.
+
+### 3. Phan ra `gpt2_backward` — attention chi 35% cua 1 layer
+
+| manh | ms |
+|---|---|
+| `gpt2_backward` FULL | **2766** |
+| 12 x `gpt2_block_bwd` (ATen attn) | 2244 |
+| phan NGOAI 12 layer (lm-head dwte + embed + lnf) | **522** |
+| 12 x `gpt2_block_bwd` (native attn) | 2808 |
+
+1 layer = 187 ms: attention 65 + **mlp_bwd 82** + LN bwd 1.6 + simd_add 0.6
++ ~37 glue. **mlp_bwd lon hon attention.**
+
+### 4. PyTorch do lai CUNG PHIEN (PLAN §5.5 bat buoc)
+
+| | ms |
+|---|---|
+| PyTorch fwd+bwd seq1024 | **3324.6** |
+| PyTorch full step seq1024 | **4041.4** |
+| Ta fwd+bwd (mode 0) | ~4300 |
+| Ta full step (mode 2 BPHASE) | **5312** (fwd 1000 / loss 125 / bwd 3156 / opt 891 / copyback 140) |
+
+Gap that **1.31x** full step. Khong phai 1.26x.
+
+### 5. Doi uu tien (thay §4.9)
+
+§4.9 noi "cat 117 ms/layer ngoai kernel" — **sai don vi**. 117 ms la chenh giua
+hai duong attention, khong phai khoi luong con lai. Khoi luong that trong 5312 ms:
+
+| khoi | ms/step | % full step | da thu gi chua |
+|---|---|---|---|
+| bwd 12 layer | 2244 | 42% | — |
+| trong do attention | 780 | 15% | da toi han (86% peak), native cham hon ATen |
+| trong do **mlp_bwd** | **984** | **19%** | chua profile ben trong |
+| **lm-head + embed** | **522** | **10%** | chua dung toi |
+| **opt.step** | **891** | **17%** | chi thu NT stores (bi loai) |
+| copyback | 140 | 3% | chua |
+| fwd + loss | 1125 | 21% | — |
+
+**Thu tu lam tiep:** (a) profile `gpt2_mlp_bwd` ben trong (984 ms), (b) lm-head /
+embed (522 ms), (c) `opt.step` (891 ms). Ba cho nay ~2400 ms — du de dong gap
+1270 ms ma khong can dung toi attention.
+
+### 6. Verify
+- Gate 9/10 (chi `gap_tests` pre-existing exit=82), chay lai 2026-11-10 07:33
+- Khong sua code production nao trong muc nay

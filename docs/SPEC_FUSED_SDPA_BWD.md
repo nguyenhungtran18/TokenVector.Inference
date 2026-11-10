@@ -511,3 +511,95 @@ chỉ là lợi ích nhỏ hơn dự đoán.
 
 **Việc còn lại để thắng PyTorch:** cắt phần 117 ms/layer ngoài kernel (qkv linear,
 dctx smm_dot, linear_bwd, dw_proj) — đó mới là chỗ có tiền. Không phải attention kernel.
+---
+
+### 4.10 PROFILE LAI TU DAU (2026-11-10) — so that, va mot phat hien lam doi uu tien
+
+Truoc khi sua bat cu thu gi, do lai toan bo bang probe moi
+(`tv/tests/_attn_split.tkv`, `_block_split.tkv`, `_bwd_outer.tkv`).
+Ket qua **khong khop** voi cac so dang ghi trong HANDOFF §0.130 va §4.9.
+
+#### 4.10.1 So do lai (seq1024, Xeon E5-2695 v3, .NET 10, best-of-N)
+
+| duong | ms/layer | ghi chu |
+|---|---|---|
+| `gpt2_attention_bwd` ATen, **co abuf** | **65.0** | production that (block_bwd truyen abuf) |
+| `gpt2_attention_bwd` ATen, khong abuf | 99.0 | so cu trong HANDOFF — thieu pool |
+| `gpt2_attention_bwd` NATIVE, **co abuf** | **119.1** | |
+| `gpt2_attention_bwd` NATIVE, khong abuf | 138.8 | so cu trong HANDOFF — thieu pool |
+| `gpt2_block_bwd` (gflat -> ATen attn) | **187.0** | production that |
+| `gpt2_block_bwd` (gflat=None -> native attn) | 234.0 | |
+
+**Ket luan 1: ca hai con so trong HANDOFF deu bi thoi phong vi probe cu khong
+truyen `abuf`.** Moi call `gpt2_attention_bwd` khong co pool cap phat 9.4M float
+(qkv 2.36M + dqkv 2.36M + ctxT/dctxT 0.79M x2). Production LUON co pool. Do lai
+dung: ATen 65, native 119 — khong phai 101.7 va 135.4.
+
+#### 4.10.2 Phan ra `gpt2_attention_bwd` (co abuf, ms/layer)
+
+| manh | ms |
+|---|---|
+| qkv linear (onednn_linear_bias) | 7.8 |
+| dctx `smm_dot` | 7.8–14.1 |
+| **flash kernel multi-head (12 head + merge)** | **34.4–35.9** |
+| dw_proj (chuoi that: `linear_dw_fused` rc=-8 -> `linear_dw_at_fused` rc=0) | 1.5–3.1 |
+| db_proj `bias_grad` | 0.0–1.5 |
+| `gpt2_linear_bwd` (dx + dw_qkv + db_qkv) | 25.0–26.5 |
+| **tong manh** | **84.3** |
+| do duoc (full native) | 119.1 |
+| chenh (glue + `_ab_pool` + `t_zeros([h,h])`, `t_zeros([h])`) | ~35 |
+
+**Phat hien phu:** `linear_dw_fused` tra **rc = -8** voi shape that cua dw_proj
+(k=1024 > gioi han 64 cua kernel). Nghia la nhanh native do **chua bao gio chay**
+trong production; moi buoc roi xuong `linear_dw_at_fused`. Khong phai loi, nhung
+dang ton 1 lan goi ham vo ich moi layer.
+
+#### 4.10.3 Phan ra `gpt2_backward` (best-of-3)
+
+| manh | ms |
+|---|---|
+| `gpt2_backward` FULL | **2766** |
+| 12 x `gpt2_block_bwd` (ATen attn) | 2244 |
+| **phan NGOAI 12 layer** (lm-head dwte 38.6M + embed bwd + lnf) | **522** |
+| 12 x `gpt2_block_bwd` (native attn) | 2808 |
+
+**Ket luan 2: attention khong con la nut that.** Trong 2766 ms bwd:
+- 522 ms (19%) la lm-head + embed, ngoai 12 layer
+- 2244 ms (81%) la 12 layer, trong do attention chi 65/187 = **35%** cua 1 layer
+- 1 layer = 187 ms: attention 65 + mlp_bwd 82 + LN bwd 1.6 + simd_add 0.6 + ~37 glue
+
+#### 4.10.4 Do lai PyTorch CUNG PHIEN (bat buoc theo PLAN §5.5)
+
+| | ms |
+|---|---|
+| PyTorch fwd+bwd seq1024 | **3324.6** (median, n=2) |
+| PyTorch full step seq1024 | **4041.4** |
+| Ta fwd+bwd (mode 0) | ~4300 |
+| Ta full step (mode 2, BPHASE) | **5312** (fwd 1000 / loss 125 / bwd 3156 / opt 891 / copyback 140) |
+
+Gap that: **1.31x** full step (5312 vs 4041). Khong phai 1.26x nhu §0.130.
+
+#### 4.10.5 Doi uu tien — va ly do
+
+§4.9 ket luan "cat 117 ms/layer ngoai kernel". **Sai don vi.** 117 ms la chenh
+giua hai duong attention, khong phai khoi luong con lai. Khoi luong that:
+
+1. **mlp_bwd 82 ms/layer = 984 ms/step (19% bwd)** — lon hon attention (65 ms/layer).
+   Da co ATen `onednn_linear_bwd_off` cho ca 2 tang, nhung van 82 ms. Chua ai profile
+   ben trong no.
+2. **lm-head + embed 522 ms/step (19% bwd)** — ngoai 12 layer, chua ai dung toi.
+   `dwte` la 38.6M phan tu, GEMM lon nhat trong bwd.
+3. **opt.step 891 ms/step (17% full step)** — §5.1 P1a da thu NT stores (bi loai),
+   prefetch giu lai. Chua thu gi khac.
+4. **copyback 140 ms/step** — vong managed copy `opt.p -> ps[i].data` moi buoc.
+5. **attention 65 ms/layer = 780 ms/step** — chi 15% full step. Native dang CHAM HON
+   ATen (119 vs 65), nen wire native la **regression**, khong phai toi uu.
+
+**Khuyen nghi:** dung toi uu attention them. Thu tu dung: (a) profile mlp_bwd
+ben trong, (b) lm-head/embed 522 ms, (c) opt.step 891 ms. Ba cho nay cong lai
+~2400 ms — du de dong gap 1270 ms.
+
+**Canh bao ve native flash:** §4.8/§4.9 trinh bay native la "5.5x nhanh hon ATen"
+roi "1.04x". Do lai co pool cho thay native **cham hon ATen 1.83x** (119 vs 65).
+Duong native trong production chi la fallback khi `gflat == None`, va dieu do la
+dung — dung bat no lam mac dinh.
