@@ -5858,3 +5858,101 @@ kiến trúc, không phải tối ưu cục bộ.
   (bit-identical, đúng như comment L847-849 khẳng định)
 - `_seq_cfg.txt` đã trả về `1024 / 1 / 1 / 1`
 - Không sửa code production nào trong mục này (chỉ đồng bộ source C + thêm probe)
+
+## §0.136 KẾT QUẢ §0.135 §6 — điều tra opt.step: 437 ms `grad_norm` KHÔNG nằm trên đường chạy, và `F32GradNorm` native bị bỏ không
+
+**Ngày:** 2026-11-10. Probe mới: `tools/simd_native/probe_gradnorm.c` +
+`build_probe_gradnorm.ps1`, `tv/tests/_opt_clip.tkv`.
+
+### 0. Kết luận trước
+
+§0.133 xếp `opt.step` = 859–875 ms/step (17%) và quy 437 ms cho `grad_norm`
+(`_norm_groups` 12 worker). **Con số 437 ms là thật, nhưng nó không nằm trên
+đường chạy của bench.** `_mk_opt` truyền `clip = 1.0` (L250-251), và `step()`
+chỉ gọi `grad_norm()` khi `self.clip != 1.0` (L195-196). Nên trong bench thật,
+`grad_norm` bị bỏ qua hoàn toàn.
+
+Đo lại để chắc: `_opt_clip.tkv` dựng hai optimizer giống nhau, chỉ khác `clip`.
+
+| | opt.step() best-of-3 |
+|---|---|
+| A) `clip = 1.0` (đúng như bench) | **1187–1266 ms** |
+| B) `clip = 0.5` (grad_norm có chạy) | **1140–1375 ms** |
+| C) `grad_norm()` gọi riêng | **438 ms** |
+
+**B nhanh hơn A ở một lần chạy và chậm hơn ở lần khác.** Chênh lệch nằm trong
+nhiễu ±140 ms, dù B phải làm thêm 438 ms `grad_norm`. Đây đúng là bài học
+§0.133: đo trên bench thật, đừng tin probe rời rạc. Kết luận: **`grad_norm`
+không phải nút cổ chai của opt.step trong cấu hình hiện tại.**
+
+### 1. `F32GradNorm` native: có sẵn, đúng hợp đồng bit, và bị bỏ không
+
+`tkv_simd_native.c` L2014 export `F32GradNorm` với hợp đồng ghi rõ ở L2005-2013:
+bình phương trên f32, tích lũy f64 **tuần tự** i = 0..n-1, không gom, không song
+song, sqrt trên f64. Tức là **cùng thứ tự tích lũy** với vòng interpreted.
+
+Đo (`probe_gradnorm.exe`, n = 124,439,808):
+
+| | ms | GB/s |
+|---|---|---|
+| `F32GradNorm` native | **51.9–53.2** | 9.4–9.6 |
+| `_norm_groups` 12 worker interpreted | 422–438 | 1.14 |
+| `f32_copy_to_buf` cùng 498 MB (memcpy native) | 78 | 6.4 |
+
+**Bit-identical: YES (0.0)** — giá trị 11.1552598281 khớp tuyệt đối với vòng C
+tuần tự tương đương vòng `.tkv`. Nhanh hơn **8.1–8.3x**, tiết kiệm **377 ms**
+mỗi lần gọi.
+
+Nhưng: **không nơi nào trong toàn bộ cây `.tkv` gọi `F32GradNorm`.** Grep sạch.
+Nó là dead code — export từ DLL nhưng không có binding. `adamw_step` và
+`f32_copy_to_buf` là **builtin của compiler** (không khai báo trong `.tkv`),
+nên muốn dùng `F32GradNorm` phải đăng ký nó làm builtin trong compiler, không
+chỉ export từ DLL.
+
+### 2. `_norm_groups` chậm vì thông dịch, không vì băng thông
+
+1.14 GB/s cho một phép đọc tuần tự 498 MB là tốc độ code thông dịch, không phải
+tốc độ RAM. Bằng chứng: `f32_copy_to_buf` đọc **cùng khối lượng** và đạt
+6.4 GB/s. Cùng phần cứng, cùng dữ liệu, chênh 5.6x — toàn bộ là chi phí
+interpreted.
+
+12 worker không cứu được vì mỗi phần tử vẫn phải đi qua vòng lặp thông dịch;
+song song hóa một vòng đắt chỉ chia đều cái đắt.
+
+### 3. Việc cần làm (nếu muốn ăn 377 ms)
+
+Không phải sửa `_norm_groups`. Mà là **đăng ký `F32GradNorm` làm builtin trong
+compiler** (cùng cơ chế `adamw_step`), rồi thay thân `_norm_groups`:
+
+```
+def _norm_groups(g, groups):
+    # 1 group (layout GPT-2 124M) -> native thang, bit-identical
+    if len(groups) == 1:
+        return f32_grad_norm(g, groups[0])
+    ... duong cu cho nhieu group ...
+```
+
+Điều kiện: `len(groups) == 1`. Với nhiều group, công thức PyTorch là
+`sqrt(sum_k norm_k^2)` — không thể gộp thành một lần `F32GradNorm` mà vẫn giữ
+đúng thứ tự tích lũy. Layout GPT-2 124M hiện dùng đúng 1 group nên đường nhanh
+phủ được trường hợp thật.
+
+**Chưa làm.** Cần sửa compiler (đăng ký builtin), không phải chỉ sửa `.tkv`.
+Đó là work order riêng.
+
+### 4. Giá trị thực tế: 0 ms/step ở cấu hình hiện tại
+
+Vì `clip = 1.0` trong bench, `grad_norm` không chạy, nên tối ưu nó trả về
+**0 ms/step** — giống hệt kết luận §0.135 về attention native. Chỉ có giá trị
+khi clip được bật (training thật thường bật, bench thì không).
+
+Đây là lần thứ hai trong hai mục liên tiếp: một mục tối ưu bị đề xuất cho
+đường không nằm trên critical path. Nên sửa quy trình: **trước khi tối ưu bất
+cứ thứ gì, xác nhận nó thực sự được gọi trong cấu hình bench.**
+
+### 5. Verify
+
+- `probe_gradnorm.exe`: native vs vòng C tuần tự, **max_abs 0.0**
+- `_opt_clip.tkv`: A/B clip trên cùng máy, cùng optimizer, 3 lần
+- `_seq_cfg.txt` giữ nguyên `1024 / 1 / 1 / 1`
+- Không sửa code production nào

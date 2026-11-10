@@ -1,0 +1,77 @@
+# PROBE OPT STEP — do lai voi clip=1.0 (dung nhu bench) va clip!=1.0
+# Muc dich: §0.133 do opt.step = 859-875 ms va quy cho grad_norm 437 ms.
+# Nhung _mk_opt cua bench truyen clip=1.0 -> step() KHONG goi grad_norm.
+# Probe nay do ca hai truong hop de tach ro.
+#
+# Chay:
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_opt_clip.tkv out/ocl.exe main
+#   copy -> out/ocl_n10.dll + runtimeconfig ; dotnet out/ocl_n10.dll
+import tv.training.trainer
+
+def _bench_opt(opt: "AdamW", reps: 'i64') -> 'f32':
+    best = 1.0e9
+    kk = 0
+    while kk < reps:
+        t0 = now_ms()
+        lr = opt.step()
+        dt = now_ms() - t0
+        if dt < best:
+            best = dt
+        kk = kk + 1
+    return best
+
+def main() -> 'i32':
+    n = 124439808
+    groups: "list[i64]" = [n]
+    print("=== OPT STEP clip A/B n=" + str(n) + " ===")
+
+    # ---- A) clip = 1.0 (DUNG nhu bench: grad_norm KHONG duoc goi) ----
+    oa = new_adamw_g(n, groups, 2, 1000, 0.05, 0.0025, 0.9, 0.999, 1.0e-8, 0.1, 1.0)
+    oa.t = 0
+    gl = oa.g
+    i = 0
+    while i < n:
+        gl[i] = 0.001
+        i = i + 1
+    pl = oa.p
+    i = 0
+    while i < n:
+        pl[i] = 0.02
+        i = i + 1
+    oa.push_p()
+    a = _bench_opt(oa, 3)
+    print("A) opt.step() clip=1.0 (bench that)  best-of-3 ms=" + str(a))
+
+    # ---- B) clip = 0.5 (grad_norm CO chay) ----
+    ob = new_adamw_g(n, groups, 2, 1000, 0.05, 0.0025, 0.9, 0.999, 1.0e-8, 0.1, 0.5)
+    ob.t = 0
+    gl2 = ob.g
+    i = 0
+    while i < n:
+        gl2[i] = 0.001
+        i = i + 1
+    pl2 = ob.p
+    i = 0
+    while i < n:
+        pl2[i] = 0.02
+        i = i + 1
+    ob.push_p()
+    b = _bench_opt(ob, 3)
+    print("B) opt.step() clip=0.5 (co clip)    best-of-3 ms=" + str(b))
+
+    # ---- C) grad_norm rieng ----
+    gnb = 1.0e9
+    kk = 0
+    while kk < 3:
+        t0 = now_ms()
+        gn = ob.grad_norm()
+        dt = now_ms() - t0
+        if dt < gnb:
+            gnb = dt
+        kk = kk + 1
+    print("C) grad_norm() rieng                best-of-3 ms=" + str(gnb) + "  gn=" + str(gn))
+
+    print("---")
+    print("clip overhead = B - A = " + str(b - a))
+    print("grad_norm chiem = " + str(gnb) + " trong so " + str(b - a))
+    return 0
