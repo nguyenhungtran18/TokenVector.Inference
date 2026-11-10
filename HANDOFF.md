@@ -5709,3 +5709,152 @@ ms/buoc**. Do la mieng lon nhat con lai trong 1270 ms gap (hien gap 1.22x,
 - Sua CA HAI ban `tv/training/` va `tv/tests/` (bay shadow §0.130).
 - Do bang chinh bench (`simd_bench_124m_seq.tkv` mode 2), khong chi probe roi
   rac — bai hoc tu §0.133.
+
+## §0.135 KẾT QUẢ §0.134 — tiền đề SAI: kernel native KHÔNG chậm hơn ATen, và production không đi đường native
+
+**Ngày:** 2026-11-10. Probe mới: `tools/simd_native/probe_attn_why.c` +
+`build_probe_attn_why.ps1` (C, nạp DLL động, đo 4 tầng + scaling + CreateThread).
+
+### 0. Kết luận trước, chi tiết sau
+
+Work order §0.134 giả định "native 119.1 chậm hơn ATen 65.0 vì kernel". **Sai ở
+hai chỗ, và chỗ thứ hai làm cả work order thành vô nghĩa:**
+
+1. **119.1 và 65.0 là TOÀN BỘ `gpt2_attention_bwd`, không phải kernel.** Kernel
+   native bwd thuần chỉ **18.2 ms/layer** — nhanh hơn ATen (78–83) **4.3x**.
+   Không có gì để "sửa" trong `tkv_flash_attn.c`.
+2. **Production KHÔNG đi đường native.** `gpt2_attention_bwd` rẽ vào
+   `torch_attention_bwd` (ATen) mỗi khi `gflat` có data, và `gpt2_backward`
+   luôn truyền `opt.g`. Đường native chỉ là fallback cho probe.
+   **A/B bằng `TKV_FLASH_OFF=1` trên bench thật: không lệch gì.**
+
+=> **648 ms "cơ hội" ở §0.134 §6 không tồn tại.** Đường native không nằm trên
+critical path, nên tối ưu nó trả về 0 ms/step.
+
+### 1. Việc 1 của work order: đồng bộ source — XONG
+
+| | bytes | dòng | `MergeMulti` | SHA256 (16) |
+|---|---|---|---|---|
+| repo TRƯỚC | 38622 | 834 | 0 | `7537EA8ED3D48643` |
+| Release | 43765 | 957 | 2 | `F060844DED435E82` |
+| **repo SAU** | **43765** | **957** | **2** | **`F060844DED435E82`** |
+
+Đã copy `Release/tools/simd_native/tkv_flash_attn.c` -> repo. Build lại bằng
+`Release/tools/simd_native/build.ps1` (4 TU: `tkv_simd_native.c` /fp:fast,
+`tkv_linear_dw.c` /fp:precise, `tkv_bwd_ops.c` /fp:precise, `tkv_flash_attn.c`
+/fp:fast, link -> DLL).
+
+**Verify:** DLL build lại = **388608 B**, khớp đúng size DLL đang chạy
+(`out/tkv_simd_native.dll`). Hash khác (`4F4E940B` vs `DEB7A0C2`) chỉ vì PE
+timestamp + `/DEBUG` — không phải khác code. Probe chạy trên DLL build lại cho
+cùng kết quả từng bit (xem §5).
+
+Lưu ý: repo **không track** `tkv_simd_native.c`, `tkv_bwd_ops.c`,
+`tkv_linear_dw.c` (chỉ có trong Release). Nên "build từ repo" vẫn không tái lập
+được DLL — chỉ `tkv_flash_attn.c` là đồng bộ được. Đây là lỗ hổng riêng, chưa sửa.
+
+### 2. Kernel native nhanh hơn ATen 4.3x — số đo
+
+`probe_attn_why.exe 1024`, ms/layer, best-of-5, h=768 hd=64 nh=12:
+
+| nt | fwd (T1) | bwd thuần (T2) | bwd+scatter (T3) | prod call (P) |
+|---|---|---|---|---|
+| 1 | 62.64 | 123.87 | 123.23 | 187.51 |
+| 2 | 32.75 | 65.55 | 65.70 | 102.16 |
+| 4 | 16.71 | 34.84 | 37.37 | 55.69 |
+| 8 | 11.69 | 26.17 | 28.00 | 40.19 |
+| **12** | **8.45** | **18.03** | **20.96** | **35.25** |
+
+Scaling bwd nt=1 -> nt=12 = **6.9x**. Thread dispatch hoạt động đúng, không
+phải nút. (Chạy lặp 3 lần: T2 @nt=12 = 18.03 / 18.15 / 18.49; T3 = 20.96 /
+21.03 / 21.22; P = 31.41 / 32.40 / 35.25.)
+
+### 3. Bốn giả thuyết của §0.134 §4 — cả bốn đều SAI
+
+| giả thuyết §0.134 | đo được | phán |
+|---|---|---|
+| `CreateThread` mỗi lần gọi là nút | 12 thread rỗng = **0.570 ms** (47.5 us/thread) | **SAI** — nhiễu, không phải nút |
+| `malloc` trong worker | nằm trong 18.03 của T2, không tách được | không đáng kể |
+| `mh_scatter_head` strided | T3 − T2 = **2.4–3.1 ms** | nhỏ, không phải nút |
+| kernel có thể chạy 1 thread | nt=12 cho 6.9x | **SAI** — chạy đủ 12 |
+
+Comment L1498-1504 trong `.tkv` nói "work-queue trong C đạt 5.5x = 33 ms/layer"
+— **đúng** (T3 = 21 ms, P = 32 ms). Comment không sai; §0.134 đọc nhầm 119.1 là
+số của kernel.
+
+### 4. 83 ms "ngoài kernel" thực ra là gì
+
+`gpt2_attention_bwd` đường native (co abuf, ms/layer, 3 lần chạy):
+
+| mảnh | ms |
+|---|---|
+| qkv linear | 6.3–10.9 |
+| dctx `smm_dot` | 7.8–9.4 |
+| **flash kernel multi (P)** | **32.8–39.1** |
+| dw_proj chuỗi thật | 3.1 |
+| db_proj `bias_grad` | 0.0 |
+| `gpt2_linear_bwd` | 25.0–28.1 |
+| **tổng mảnh** | **79.7–87.5** |
+| **đo được (I)** | **117.1–123.1** |
+| **glue .tkv (interpreted)** | **~35** |
+
+Và bên trong chính `AttentionBwdMergeMulti` (tầng C):
+
+| | ms | % của P |
+|---|---|---|
+| T1 `FlashAttentionFwdLseMulti` — **recompute fwd** | 8.76 | **27.9%** |
+| T2 `FlashAttentionBwdFusedLseMulti` | 18.15 | 57.8% |
+| T3 `FlashAttentionBwdMergeMulti` (T2 + scatter) | 21.22 | 67.6% |
+| P `AttentionBwdMergeMulti` (T1 + T3 + glue) | 31.41 | 100% |
+| glue C (malloc ctxf/lsef 3.9 MB + 2 lần gọi) | 1.44 | 4.6% |
+
+**Nguyên nhân thật của 119 vs 65:** không phải kernel. Là (a) recompute fwd
+8.8 ms vì production fwd đi `torch_sdpa_fwd` nên không lưu ctx/lse, và (b)
+~35 ms glue interpreted phía `.tkv` (branch, `_ab_pool`, `t_zeros` dw_proj/
+db_proj, return list 5 phần tử).
+
+### 5. Bằng chứng production không đi native — A/B `TKV_FLASH_OFF`
+
+`TKV_FLASH_OFF=1` làm `AttentionBwdMergeMulti` trả -13 -> rơi xuống đường cũ.
+Bench thật `simd_bench_124m_seq.tkv` mode 2, seq1024, 3 cặp:
+
+| run | flash ON (TONG) | flash OFF (TONG) |
+|---|---|---|
+| 1 | 4999 | 5031 |
+| 2 | 5266 | 5078 |
+| 3 | 4984 | 4921 |
+
+Trung bình ON 5083 / OFF 5010, nhiễu ±140. **Không có khác biệt.** Nếu native
+nằm trên critical path thì tắt nó phải chậm đi ~12 × 40 = 480 ms. Không có.
+
+Xác nhận bằng code: `gpt2_attention_bwd` L1479 gọi `torch_attention_bwd` khi
+`simd==1 and gflat != None and len(gflat) > 0` và `return` ngay nếu rc==0.
+`gpt2_backward` luôn truyền `opt.g` (có data). Đường native chỉ chạy khi
+`gflat` rỗng — tức chỉ trong probe.
+
+### 6. Cơ hội thật (khác đường §0.134 đề xuất)
+
+Nếu muốn lấy 648 ms, đường đúng **không phải** sửa kernel — kernel đã 18 ms.
+Mà là: **cho production dùng kernel native thay ATen**, với 3 điều kiện:
+
+1. **Lưu ctx + lse ở fwd** (`torch_sdpa_fwd` hiện không trả). Bỏ được 8.8 ms
+   recompute -> dùng `FlashAttentionBwdFusedLseMulti` trực tiếp.
+2. **Gọi thẳng `FlashAttentionBwdMergeMulti`** (21 ms) thay vì
+   `AttentionBwdMergeMulti` (32 ms) — bỏ luôn tầng recompute trong C.
+3. **Cắt glue interpreted ~35 ms** — đây là phần lớn nhất và khó nhất, vì nó
+   nằm trong `.tkv` chứ không trong C.
+
+Ước tính: 12 × (21 + glue) . Với glue ~35 thì 12 × 56 = 672 ms, gần bằng ATen
+hiện tại (12 × 80 = 960) -> tiết kiệm ~290 ms/step. Muốn ăn đủ 648 ms thì phải
+gộp cả `gpt2_linear_bwd` (25–28 ms/layer) vào một lệnh native, tức thay đổi
+kiến trúc, không phải tối ưu cục bộ.
+
+**Chưa làm. Đây là work order mới, không phải kết quả.**
+
+### 7. Verify
+
+- Source đồng bộ, DLL build lại 388608 B khớp bản đang chạy
+- Probe trên DLL build lại: `P vs T3` **max_abs 0.000e+00, 0 phần tử lệch**
+  (bit-identical, đúng như comment L847-849 khẳng định)
+- `_seq_cfg.txt` đã trả về `1024 / 1 / 1 / 1`
+- Không sửa code production nào trong mục này (chỉ đồng bộ source C + thêm probe)
