@@ -5956,3 +5956,80 @@ cứ thứ gì, xác nhận nó thực sự được gọi trong cấu hình ben
 - `_opt_clip.tkv`: A/B clip trên cùng máy, cùng optimizer, 3 lần
 - `_seq_cfg.txt` giữ nguyên `1024 / 1 / 1 / 1`
 - Không sửa code production nào
+
+## §0.137 ĐÍNH CHÍNH §0.136 + WORK ORDER `_norm_groups` native
+
+**Ngày:** 2026-11-10. Spec đầy đủ: `docs/wo_norm_groups_native.md`.
+
+### 0. §0.136 SAI: `f32_grad_norm` KHÔNG phải dead code
+
+§0.136 §1 kết luận "`F32GradNorm` export nhưng không có binding, phải đăng ký
+builtin trong compiler". **Sai.** Đo lại:
+
+| Bằng chứng | Kết quả |
+|---|---|
+| `f32_grad_norm(g, n)` gọi từ `.tkv` | biên dịch được, chạy được |
+| `out/gnb.il` L2079 | `pinvokeimpl("tkv_simd_native.dll" as "F32GradNorm")` |
+| `out/gnb.il` L4757 | `call TkvSimd::F32GradNormNative` |
+| `simd_feature.tkv` L4009 | `compile_f32_grad_norm` |
+| `simd_feature.tkv` L4132 | `register_expr_builtin(reg, 'f32_grad_norm', ...)` |
+
+Builtin **đã có sẵn, đã hoạt động**. Không có việc gì cho compiler team. Cái
+thiếu chỉ là `_norm_groups` không gọi nó — grep `f32_grad_norm` trong toàn cây
+`.tkv` trước hôm nay: 0 kết quả. Builtin tồn tại, không ai nối vào.
+
+Bài học §0.136 §4 vẫn đúng nhưng lý do khác: không phải "thiếu builtin", mà là
+"builtin có mà không ai nối".
+
+### 1. Bit-identical — mảnh ghép còn thiếu là ép kiểu
+
+Đo `n = 124,439,808`, `g[i] = 0.001`:
+
+| Cách gọi | ms | giá trị |
+|---|---|---|
+| `_norm_groups(g, [n])` | **437** | `11.15526008605957` |
+| `f32_grad_norm(g, n)` không ép | 47 | `11.155259828125383` |
+| `f32(f32_grad_norm(g, n))` có ép | **47** | `11.15526008605957` |
+
+- Không ép: lệch **2.58e-07** → KHÔNG bit-identical
+- Có ép `f32(...)`: lệch **0.0** → **BIT-IDENTICAL**
+
+Vì `_norm_groups` khai báo `-> 'f32'` nên bị cắt về f32; native trả f64. Ép
+`f32()` tái lập đúng phép cắt đó. Vòng `sqrt(nrm*nrm)` thừa trong đường cũ
+**không** tạo khác biệt sau khi cắt f32 — kiểm chứng bằng 0.0.
+
+**437 → 47 ms, 9.3x, bit-identical 0.0.** Không sửa compiler.
+
+### 2. Work order
+
+`docs/wo_norm_groups_native.md`. Tóm tắt: thêm 2 dòng vào đầu `_norm_groups`
+(cả 4 mirror):
+
+```
+if ng == 1:
+    return f32(f32_grad_norm(g, groups[0]))
+```
+
+Điều kiện `ng == 1` bắt buộc: `F32GradNorm` nhận dải liên tục `[0, n)`, không có
+tham số offset, nên không dùng được cho nhiều group. Layout GPT-2 124M dùng đúng
+1 group nên phủ được trường hợp thật.
+
+### 3. GIÁ TRỊ THỰC TẾ TRÊN BENCH: 0 ms/step
+
+Lặp lại cảnh báo: `_mk_opt` truyền `clip = 1.0`, `step()` chỉ gọi `grad_norm()`
+khi `clip != 1.0`. **Bench không chạy `grad_norm`.** Tối ưu này trả về 0 ms/step
+cho con số bench.
+
+Giá trị thật: training có bật clip → 390 ms/step → 390 giây/1000 step.
+
+Đừng verify bằng bench. Verify bằng `tv/tests/_gn_final.tkv` (đã có).
+
+### 4. Rủi ro đáng lo nhất
+
+`trainer_tests` dùng TOL 1e-5, mà lệch do quên ép kiểu chỉ **2.58e-07** → **gate
+sẽ PASS dù sai bit**. Phải verify bằng `max_abs_diff == 0.0`, không bằng gate.
+
+### 5. Chưa làm
+
+Spec viết xong, **chưa patch**. Chưa sửa file production nào. `_norm_groups`
+trong 4 mirror vẫn nguyên đường interpreted.
