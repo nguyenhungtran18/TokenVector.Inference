@@ -178,3 +178,496 @@ Gate: 9/10 suite PASS; `gap_tests` hỏng `InvalidProgramException` trên fallba
 đã xác nhận có từ trước (stash thay đổi rồi build lại từ HEAD vẫn lỗi). Trainer 15/15 PASS.
 
 Build đo: `dotnet out/bseq_p10_n10.dll` với `tv/tests/_seq_cfg.txt` = `<seq> / 1 / 1`.
+
+
+## 7. Kết quả đo lại toàn bộ (2026-11-10 15:48) — TKV vs PyTorch, cùng phiên
+
+Máy: **Intel Xeon E5-2695 v3 @ 2.30 GHz**, 14 core vật lý / 28 logical, Windows 10 19045,
+.NET 10.0.402, PyTorch **2.14.0+cpu threads=14**. TKV: `out/bseq.exe` build **15:26:27**,
+git HEAD `38bfb04`. Script: `tools/_bench_matrix.ps1`, log `out/_bench_matrix_20261110_154851.log`.
+TKV = best-of-3 (min). Torch = median of 2 (harness `tier_d` chạy `timeit(fb,1,2)`).
+
+### 7.1 Bảng chính
+
+| seq | TKV fwd+bwd (mode 0) | Torch fwd+bwd | tỉ lệ | TKV full step (mode 1) | Torch full step | tỉ lệ |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 766 | 314.1 | 2.44× | 1437 | 999.6 | 1.44× |
+| 256 | 1360 | 852.5 | 1.60× | 2141 | 1490.1 | 1.44× |
+| 1024 | **4016** | 3453.7 | **1.16×** | **4578** | 4040.2 | **1.13×** |
+
+seq1024 full step **1.13×** — tốt hơn 1.22× ghi ở §0.133. `loss` TKV 3 seq đều EXACT
+(10.572291 / 10.756927 / 10.760399), khớp giá trị đã ghi.
+
+### 7.2 Phân rã pha seq1024 (TKV mode 2 vs Torch `tier_e` T=14)
+
+| pha | TKV | Torch T=14 | tỉ lệ |
+|---|---:|---:|---:|
+| fwd + loss | 1172 (1062+110) | 1086.8 | 1.08× |
+| **backward** | **2844** | **2352.0** | **1.21×** |
+| `opt.step` | **484** | 655.2 | **0.74×** (TKV nhanh hơn) |
+| copyback / zero_grad | 125 | 62.0 | 2.02× |
+| **TỔNG** | **4625** | **4130.6** | **1.12×** |
+
+### 7.3 Đính chính §0.133: `opt.step` KHÔNG còn là nút thắt
+
+§0.133 ghi `opt` = 875 ms và gọi `grad_norm` (437 ms) là nút thắt. Đo lại trên build
+15:26:27: **`opt` = 484 ms**, và TKV **nhanh hơn** torch (655.2) ở pha này.
+
+Lý do: `_mk_opt` truyền `clip = 1.0`, `AdamW.step()` chỉ gọi `grad_norm()` khi
+`clip != 1.0` (`tv/training/trainer.tkv` L202). Bench **không chạy** `grad_norm`.
+Con số 875 của §0.133 không tái lập được trên build này — cần coi 484 là số đúng
+cho đường bench, và 875 là số của một build/đường khác.
+
+### 7.4 Toàn bộ gap còn lại nằm ở backward
+
+4625 − 4130.6 = **494 ms**. Trong đó backward chiếm **492 ms** (2844 − 2352).
+fwd+loss chỉ 85 ms, copyback 63 ms, còn `opt` TKV đang **thắng** 171 ms.
+
+⇒ Muốn xuống ≤1.0× chỉ cần cắt backward ~1.21× → 1.0×. Không cần đụng `opt`, không
+cần đụng lm-head. Đây là mục tiêu hẹp hơn nhiều so với "ba ưu tiên" của §0.131.
+
+### 7.5 Cảnh báo về cách đọc bảng này
+
+- **Đây là so sánh THỜI GIAN, không phải parity số học.** TKV init bằng `_gi_noise`
+  (LCG), torch init bằng `torch.manual_seed(7)` + `GPT2LMHeadModel` mặc định → loss
+  khác nhau (10.76 vs 9.89). Số tham số khớp (124,439,808 cả hai), ids/pos giống hệt,
+  nên khối lượng tính toán như nhau. Parity được kiểm riêng: `gpt2_full_tests` 33/33.
+- **seq8 có tỉ lệ xấu nhất (2.44×)** vì chi phí cố định theo tham số (lm-head `t_zeros`
+  154 MB, copyback 496 MB, opt) chiếm gần hết, mà đây đúng là chỗ glue interpreted
+  của TKV đắt nhất. Không nên trích seq8 làm đại diện.
+- Torch `tier_d` chỉ n=2 → median = trung bình 2 lần, độ tin thấp hơn best-of-3 của TKV.
+  Chênh lệch ±2% giữa hai lần chạy torch đã thấy trong log (3975.7 vs 4104.7).
+
+## 8. Phân rã backward trên ĐƯỜNG PRODUCTION (2026-11-10 16:xx) — §0.133 đã sai chỗ nào
+
+Build `out/bseq.exe` 15:26:27, HEAD `38bfb04`, cùng máy (Xeon E5-2695 v3, 14T).
+Probe mới: `tv/tests/_bwd_insitu.tkv`, `_bwd_total.tkv`, `_lmhead_bwd.tkv`,
+`_gemm_peak.tkv`, `_bwd_tail_a.tkv`, `_dwte_zero3.tkv`.
+
+### 8.1 Số đo (seq1024)
+
+| mảnh | ms | ghi chú |
+|---|---:|---|
+| `gpt2_backward` FULL | **2860** | khớp bench BPHASE 2844 |
+| 12 × `gpt2_block_bwd` (in-situ) | **1680** | 140 ms/layer |
+| **phần NGOÀI 12 block** | **~1180** | **41% của backward** |
+
+Phân rã 12 block (in-situ, đúng thứ tự, glue = **0.0**):
+
+| mảnh | ms/layer | ×12 |
+|---|---:|---:|
+| `mlp_bwd` | 62 | 744 |
+| `attention_bwd` | 78 | 936 |
+| `layernorm_bwd` ×2 | ~0 | ~0 |
+| `simd_add` ×2 | ~0 | ~0 |
+| **tổng** | **140** | **1680** |
+
+Phân rã phần NGOÀI block (~1180 ms):
+
+| mảnh | ms | ghi chú |
+|---|---:|---|
+| `lmhead_bwd_fused_list` | **515** | 2 GEMM 39.5 GFLOP + softmax-grad |
+| `t_zeros` dwte [V,h] 154 MB | **125** | phải giữ: kernel CỘNG DỒN |
+| `t_zeros` gwte_e [V*h] 154 MB | **~130** | phải giữ: `_emb_bwd_worker` cộng dồn |
+| `f32_list_add` dwte += gwte_e | ~80 | 38.6M phần tử |
+| `f32_list_add` gflat += dwte | ~80 | 38.6M phần tử |
+| `op_embed_bwd` gwpe + lnf + misc | ~250 | |
+| **tổng** | **~1180** | |
+
+### 8.2 §0.133 SAI: "lm-head/embed sát trần, không còn gì"
+
+§0.133 tính 158 GFLOPS rồi kết luận sát trần. Đo lại:
+
+| phép | ms | GFLOPS |
+|---|---:|---:|
+| `smm_dot_pd` [1024,50257]×[50257,768] | 234 | **338** |
+| `smm_fwd_at_pd` (trans-A) [50257,1024]×[1024,768] | 641 | **123** |
+| `smm_dot_pd` vuông 2048³ | 47 | **366** |
+| `lmhead_bwd_fused_list` (cả 2 GEMM + softmax) | 515 | 153 (nếu tính 79 GF) |
+
+Đỉnh thật của tkv GEMM trên máy này là **~366 GFLOPS**, không phải 158. §5.1b ghi
+515 GFLOP/s là đỉnh *torch/numpy*, tkv chưa bao giờ đạt.
+
+**Trans-A GEMM chỉ đạt 123 GFLOPS = 34% đỉnh** — chậm hơn bản không trans 1.36×.
+Nhưng nó **KHÔNG nằm trên đường production**: production đi `lmhead_bwd_fused_list`,
+mà fused (515 ms) đã nhanh hơn 2 GEMM riêng (234+641=875 ms) **1.70×**.
+
+⇒ Kết luận đúng: lm-head **không sát trần**, nhưng đường fused đã tốt hơn đường
+GEMM rời. Muốn cắt 515 ms phải sửa **bên trong kernel fused** (trans-A bên trong nó),
+không phải quay lại 2 GEMM rời.
+
+### 8.3 Đã kiểm chứng: 2 zero-fill 154 MB KHÔNG bỏ được
+
+`_dwte_zero3.tkv`: nạp `dwte` = 1.0, chạy kernel với grad khác 0 → `dwte[0]` =
+**1.0000199** (giữ nguyên 1.0 + grad nhỏ). Kernel **CỘNG DỒN**, không ghi đè.
+`_emb_bwd_worker` cũng cộng dồn (`out_data[r*d+c] = ... + gy_data[...]`).
+⇒ 255 ms zero-fill là chi phí thật, không phải lãng phí.
+
+### 8.4 Hướng cải tiến còn lại, xếp theo ms/độ rủi ro
+
+| # | việc | ms tiết kiệm | rủi ro |
+|---|---|---:|---|
+| 1 | trans-A bên trong `lmhead_bwd_fused_list`: 123 → 338 GFLOPS | **~330** | trung bình, phải giữ bit-exact |
+| 2 | gộp 2 `f32_list_add` 38.6M (dwte+=gwte_e, gflat+=dwte) | **~80** | thấp |
+| 3 | `mlp_bwd` 62 ms/layer (744 ms tổng) — chưa profile bên trong | ? | ? |
+| 4 | `attention_bwd` 78 ms/layer (936 ms) — ATen SDPA bwd là 65 | ~156 | cao (native đã chậm hơn) |
+
+Mục tiêu ≤1.0× cần cắt **494 ms**. Việc #1 + #2 = ~410 ms, gần đủ, và cả hai đều
+nằm ngoài 12 block — chỗ mà §0.131 nói "không còn gì để lấy".
+
+### 8.5 Cảnh báo phương pháp
+
+- Đo từng mảnh trong **vòng lặp riêng** cho số lạc quan: `_bwd_split2` ra 138 ms/layer,
+  in-situ ra **140** — nhưng `_bwd_split2` báo block 148.5 còn in-situ báo 140, tức
+  nhiễu ±6%. Chỉ tin số in-situ.
+- `_block_split.tkv` (09:07) và `_mlp_split.tkv` (09:19) truyền `gflat=None` → đo
+  native fallback, **không phải production**. Đừng dùng lại.
+- Probe quá nhiều local trong `main` → `InvalidProgramException` (giới hạn codegen,
+  cùng loại với `gap_tests`). Phải chia nhỏ probe.
+
+---
+
+## 9. Sửa lại §8: đo đúng đường production (2026-11-10)
+
+§8 ở trên **sai ở hai chỗ**, và cả hai đều do đo sai đường. Ghi lại đầy đủ để không
+ai lặp lại.
+
+### 9.1 §8 đo nhầm đường: thiếu BLAS và thiếu song song
+
+`probe_lmhead_phases2.c` gọi `lmhead_softmax_rows` **1 thread** và để GEMM chạy
+kernel native, vì probe không tìm thấy `libscipy_openblas64_.dll`. Production thì
+khác: `lmhead_bwd_fused` gọi `tkv_run_aux(nt, 3, ...)` cho softmax và
+`tkv_blas_load()` nạp OpenBLAS cho cả hai GEMM.
+
+Số đúng (`probe_lmhead_phases3.c`, mirror đúng 5 pha, BLAS=1, 28 thread):
+
+| pha | ms | % của 542 |
+|---|---:|---:|
+| malloc dl+tmp (343 MB) | 0.03 | 0.0% |
+| pha1 softmax-grad (28 thr) | 71.7 | 13.2% |
+| pha2 `dxf = dl @ wte` | 141.9 | 26.2% |
+| pha3 `tmp = dlT @ xf` (trans-A) | **255.5** | **47.1%** |
+| pha4 `dwte += tmp` (28 thr) | 36.0 | 6.6% |
+| **SUM** | **505.1** | |
+| **FULL** | **542.5** | |
+
+Chênh 37 ms (6.9%) là phần `tkv_run_aux` khởi động pool lần đầu.
+
+**`malloc` 343 MB mỗi lần gọi chỉ 0.03 ms.** Nó không phải vấn đề. Ghi chú cũ
+trong source ("do 2026-11-07 @seq1024: 110 ms" cho transpose) cũng đã lỗi thời.
+
+### 9.2 Trans-A KHÔNG phải chỗ cắt được — giả thuyết §8.4 #1 sai
+
+`probe_ta_fix.c` đo 4 phương án trên cùng shape `[50257,1024]×[1024,768]`, 39.5 GFLOP:
+
+| phương án | ms | GFLOPS |
+|---|---:|---:|
+| P1 transA trực tiếp (hiện tại) | **264.8** | 298.5 |
+| P2 transpose `dl`→`dlT` (blocked 32×32) | 212.7 | — |
+| P3 NoTrans trên `dlT` | 258.2 | 306.1 |
+| P4 = P2 + P3 | 482.3 | 163.9 |
+
+NoTrans (258) so với transA (265) chỉ chênh **3%**. OpenBLAS xử lý transA gần như
+miễn phí ở shape này. Còn transpose rồi NoTrans thì **chậm hơn 1.82×** vì riêng
+bước transpose đã 213 ms cho 196 MB đọc + 196 MB ghi.
+
+⇒ **Bỏ hẳn hướng "sửa trans-A".** 255 ms đó là giá thật của 39.5 GFLOP ở 309 GFLOPS,
+và 309 GFLOPS là 84% của đỉnh đo được 366 GFLOPS. Không còn gì để lấy ở đây.
+
+### 9.3 Phát hiện thật: `t_zeros` chậm hơn `f32_zero` **8×**
+
+Đây là chỗ tiền thật nằm. Cùng 147 MB:
+
+| đường | ms | GB/s |
+|---|---:|---:|
+| `t_zeros([V,h])` | 125–172 | 1.2 |
+| `zeros_list(n)` (thân của `t_zeros`) | 125–172 | 1.2 |
+| `alloc_bytes` + `f32_zero` + `f32buf_wrap` | **15** | **10.0** |
+| `f32_zero` riêng (buffer native) | 16–32 | 5–10 |
+| `f32buf_wrap` riêng | **0.0** | — |
+
+`t_zeros` → `zeros_list(n)` → `List<f32>`. Đường đó đi qua cấp phát managed, và
+CLR zero-fill object lớn trên LOH trước khi trả về — cộng thêm chi phí thông dịch.
+`alloc_bytes` + `f32_zero` là `memset` thẳng trên buffer native, không qua GC.
+
+Kiểm chứng alias hai chiều (`_zero_wire.tkv`): ghi `bl[0]=42.5`, `bl[7]=-3.25` qua
+`list[f32]` → đọc lại qua `f32buf_wrap` thứ hai thấy đúng `42.5 / -3.25`. Gọi
+`f32_zero` xong thì cả hai đọc ra `0.0`. **Không copy, không lệch bit.**
+
+### 9.4 Chuỗi 154 MB trong backward: 4 lần đụng, ~415 ms
+
+Đường production (`_f124_bwd` trong `tv.training.gpt2_ref124.tkv`):
+
+| # | chỗ | ms |
+|---|---|---:|
+| 1 | `dwte = t_zeros([VocabSize, h])` (L2150) | 125 |
+| 2 | `gwte_e = t_zeros([VocabSize * h])` (L2269) | 125 |
+| 3 | `f32_list_add(dwte, gwte_e, V*h)` (L2281) | 63 |
+| 4 | `f32_list_add(gflat, dwte, V*h)` (L2290) | 63 |
+
+Cả bốn đều là thao tác trên đúng một mảng 38.6M phần tử. Thay #1 và #2 bằng
+`alloc_bytes`+`f32_zero`+`f32buf_wrap` tiết kiệm **~220 ms** mà không đổi một bit nào.
+
+### 9.5 Một biến chưa ai kiểm soát: kernel tự bật hyperthread
+
+`tkv_nthreads` (L284) tự nhân đôi lên **28** logical khi `n >= 512`, dù bench khai
+14 thread. Đo A/B trên chính kernel fused:
+
+| `TKV_GEMM_THREADS` | FULL | pha2 | pha3 |
+|---:|---:|---:|---:|
+| 7 | 1655 | 689 | 777 |
+| 14 | 1179 | 510 | 473 |
+| **28 (auto)** | **924** | **371** | **418** |
+
+28 nhanh hơn 14 đúng **1.28×**. Nghĩa là mọi so sánh "TKV 14 thread vs torch 14
+thread" đều đang cho TKV **bất lợi**, không phải ưu thế. Đây là biến cần khai báo
+rõ trong mọi bench về sau.
+
+### 9.6 Bảng ưu tiên sửa lại
+
+| # | việc | ms | rủi ro |
+|---|---|---:|---|
+| 1 | `t_zeros` → `alloc_bytes`+`f32_zero`+`f32buf_wrap` cho 2 buffer 154 MB | **~220** | thấp, đã chứng minh bit-identical |
+| 2 | gộp `f32_list_add` #3 vào #4 | ~63 | thấp |
+| 3 | `mlp_bwd` 62 ms/layer (744 ms) — chưa mở bên trong | ? | ? |
+| 4 | `attention_bwd` 78 ms/layer (936 ms) | ~156 | cao |
+| ~~5~~ | ~~sửa trans-A~~ | ~~0~~ | **bỏ, xem §9.2** |
+
+Mục tiêu ≤1.0× cần 494 ms. Việc #1 + #2 = **~283 ms**, và cả hai đều bit-identical.
+
+### 9.7 Cảnh báo phương pháp (bổ sung §8.5)
+
+- **Probe phải mirror đúng số thread và đúng BLAS của production.** §8 sai vì
+  probe chạy 1 thread softmax + GEMM native, production chạy 28 thread + OpenBLAS.
+  Chênh 924 vs 542 ms — gần 2×.
+- Copy `libscipy_openblas64_.dll` vào cạnh exe probe, hoặc set
+  `TKV_GEMM_BLAS_PATH`. Không có nó thì mọi số GEMM đều sai.
+- `#include` nguyên `tkv_simd_native.c` vào probe là cách gọi được hàm `static`
+  (`run_rect_shaped`, `run_rect_ta_shaped`) mà không sửa source production. Phải
+  link thêm `tkv_bwd_ops.c` + `tkv_flash_attn.c` cho các symbol attention.
+
+### 9.8 Vì sao không sửa được ngay: `f32buf_wrap` trả con trỏ thô, không phải `list[f32]`
+
+Đã thử thay trực tiếp trong production và **revert**. Lý do kỹ thuật, ghi lại để
+không ai thử lại:
+
+`f32buf_wrap` không phải builtin expression. Nó là **statement** riêng
+(`assign_f32buf_wrap`, `tv_gop.tkv` L23378) và trả về một **con trỏ `f32buf` thô**
+(`TypeAnn('f32','f32buf')`), không phải `List<float32>`. Hệ quả:
+
+- Chỉ dùng được dạng `a = f32buf_wrap(p, n)` trong **`main`**, không trong hàm module.
+- Không truyền được vào `lmhead_bwd_fused_list`, vì builtin đó kiểm tra
+  `_la_list(args[idx], scope)` và đòi đúng `list[f32]` (L48589).
+- `t_new(...)` cần `list[f32]`, không nhận con trỏ.
+
+Muốn dùng đường native thì phải thêm một builtin mới (ví dụ
+`zeros_list_buf(n) -> list[f32]` gọi thẳng `ZeroListF32` trên buffer native), hoặc
+mở rộng `f32buf_wrap` để trả `List<float32>`. Cả hai đều là sửa **compiler**, không
+phải sửa `.tkv`. Đó là lý do việc này chưa làm trong phiên này.
+
+### 9.9 Nguyên nhân thật của 1.2 GB/s: cấp phát managed, không phải băng thông
+
+`_zeros_scale.tkv` đo `zeros_list(n)` ở 5 kích thước:
+
+| n | MB | ms | GB/s |
+|---:|---:|---:|---:|
+| 1,000,000 | 3.8 | 0.0 | — |
+| 4,000,000 | 15.3 | 16 | 1.00 |
+| 8,000,000 | 30.5 | 31 | 1.03 |
+| 16,000,000 | 61.0 | 78 | 0.82 |
+| 38,597,376 | 147.2 | 141 | 1.09 |
+| 38,597,376 (lần 2) | 147.2 | 125 | 1.24 |
+
+**GB/s gần như hằng số ~1.0 ở mọi kích thước, kể cả 15 MB.** Nếu nghẽn là LOH/GC
+thì chỉ ngưỡng lớn mới chậm. Nếu nghẽn là băng thông thì phải ~10 GB/s như
+`f32_zero`. Con số 1.0 GB/s phẳng lì ở mọi cỡ cho thấy chi phí nằm ở **đường cấp
+phát managed** (`TkvSlice::ZeroListF32`: `List<float32>(n)` + `SetCount` +
+`Span.Fill`), không phải ở `Span.Fill` và không phải ở GC ngưỡng lớn.
+
+`f32_zero` là `memset` thẳng trên buffer native đã cấp → 10 GB/s. Chênh đúng 8×.
+
+### 9.10 Trạng thái: chưa sửa được, cần sửa compiler
+
+Việc #1 trong §9.6 (~220 ms) **không làm được ở tầng `.tkv`**. Nó cần một trong:
+
+1. Builtin mới `zeros_list_buf(n) -> list[f32]` cấp buffer native rồi wrap thành
+   `List<float32>` (nhanh nhất, nhưng phải giữ được ngữ nghĩa sở hữu/giải phóng).
+2. Mở `f32buf_wrap` trả `List<float32>` thay vì con trỏ thô.
+3. Sửa `ZeroListF32` để dùng `GC.AllocateUninitializedArray` + `Span.Clear`
+   (bỏ bước zero-fill kép mà CLR làm khi cấp `List<float32>(n)`).
+
+Cách 3 là gọn nhất và có lợi cho **mọi** `t_zeros` trong toàn bộ codebase, không
+riêng gpt2. Nên làm trước.
+
+Việc #2 trong §9.6 (gộp 2 `f32_list_add`) vẫn làm được ở tầng `.tkv` — chưa thử.
+
+### 9.11 Nguyên nhân chính xác của `ZeroListF32` — đọc IL, không đoán (2026-11-10)
+
+§9.9 ở trên nói "chi phí nằm ở đường cấp phát managed". Đúng nhưng chưa đủ. Đọc IL
+thật trong `compiler_bootstrap/compiler/il_features/slicing.tkv` L171–188:
+
+```
+ldloc.0 ; newarr float32 ; stloc.1              <-- (1) CLR ĐÃ zero sẵn
+TKVZM_CL:
+  ldloc.1 ; ldloc.3 ; ldc.r4 0.0 ; stelem.r4    <-- (2) 38.6M lần ghi scalar: THỪA
+  ...
+TKVZM_CD:
+  ldloc.1
+  newobj List`1<float32>::.ctor(IEnumerable`1<!0>)  <-- (3) CẤP MẢNG THỨ HAI + copy
+```
+
+Ba lỗi, xếp theo mức tốn:
+
+1. **(3) là chính.** `new List<T>(IEnumerable<T>)` không nhận mảng làm backing store.
+   Nó `new T[n]` mới rồi `Array.Copy`. Tổng: 1 mảng 147 MB (CLR zero) + 1 mảng
+   147 MB nữa (copy) = **294 MB cấp phát + 147 MB copy** cho một buffer 147 MB.
+2. **(2) thừa hoàn toàn.** `newarr` đã bảo đảm mọi phần tử = 0. Đo được: bỏ vòng này
+   tiết kiệm 42 ms (A 102.2 → B 60.0).
+3. **Comment trong source sai.** Docstring ghi *"alloc List(n), SetCount, Span.Fill(0)"*
+   nhưng IL **không** có `SetCount` và **không** có `Span.Fill`. Comment lệch khỏi code
+   từ phiên bản trước. Đừng tin comment hơn IL.
+
+### 9.12 Đo 5 cách cấp phát trên .NET 10 thật (`out/zltest/Program.cs`)
+
+Cùng máy, 147.2 MB, best-of-5, `.NET 10.0.13`, 28 core:
+
+| cách | ms | GB/s |
+|---|---:|---:|
+| **A. IL hiện tại** (`newarr` + vòng `stelem` + `List(IEnumerable)`) | **102.2** | **1.41** |
+| B. bỏ vòng scalar, giữ `List(IEnumerable)` | 60.0 | 2.40 |
+| C. `newarr` + `List(n)` + `AddRange` | 64.2 | 2.24 |
+| D. `List(n)` + `SetCount` (reflection) | 15.8 | 9.12 |
+| **F. `List(n)` + `CollectionsMarshal.SetCount`** | **15.7** | **9.16** |
+
+Cả 5 cách đều cho `count = 38597376`, toàn `0.0`, ghi/đọc `z[0]`/`z[n-1]` bình thường.
+
+**A → F = 6.5×.** Đây là con số phải đưa vào request, không phải con số 8× ước lượng
+ở §9.3 (8× là so `t_zeros` với `f32_zero`, tức so hai đường khác nhau; 6.5× là so
+đúng hai phiên bản của cùng một hàm).
+
+### 9.13 Request đã gửi compiler team
+
+`docs/COMPILER_TEAM_REQUEST13.md` (2026-11-10). Nội dung: sửa **thân IL** của
+`TkvSlice::ZeroListF32`, không đổi chữ ký, không đổi ABI, không đổi ngữ nghĩa `.tkv`.
+
+Phương án chính: `new List<float32>(n)` + `CollectionsMarshal.SetCount(z, n)`.
+Không copy, không cấp thêm, không reflection, không phụ thuộc layout nội bộ.
+
+Phương án dự phòng (nếu IL toolchain không resolve được `CollectionsMarshal`): tự
+viết `TkvSlice::SetCountF32` dùng `stind.i4` ở offset 16. Có cảnh báo phụ thuộc
+layout runtime.
+
+**Điều kiện tiên quyết đã phát hiện:** IL sinh ra hiện chỉ khai `.assembly extern`
+cho `mscorlib`, `System.Core`, `System`, `System.Numerics`,
+`System.Numerics.Vectors`, `System.Runtime.Intrinsics` (kiểm trên `out/zeroscale.il`).
+**Chưa có `System.Runtime`**, mà `CollectionsMarshal` nằm trong đó. Compiler team có
+thể phải thêm extern này. Nếu không thêm được thì dùng phương án dự phòng.
+
+Kỳ vọng: `zeros_list(38597376)` từ 125–172 ms xuống ≤30 ms; full step @seq1024 từ
+4578 ms xuống ≤4350 ms; tiết kiệm ~220–250 ms/bước = ~45% của 494 ms cần cắt để
+đạt ≤1.0×.
+
+### 9.14 COMPILER DA SUA — `ZeroListF32` xong, do lai THAY (2026-11-10)
+
+Compiler team sua bang mot duong khac va **tot hon** de xuat cua toi trong
+`COMPILER_TEAM_REQUEST13.md`:
+
+```
+ZeroListF32(n):
+  n <= 0  -> new List<float32>()
+  else    -> new List<float32>(new TkvZeroSrc(n))
+```
+
+`TkvZeroSrc` la mot `ICollection<float32>` gia: `Count = n`, `CopyTo` **RONG**,
+`GetEnumerator` nem `NotSupportedException`. Ctor `List<T>(IEnumerable<T>)` co
+duong nhanh khi tham so la `ICollection<T>`: no doc `Count` de cap backing array
+**dung mot lan** roi goi `CopyTo`. `CopyTo` rong nen khong co lan chep 147 MB nao,
+va backing array da duoc CLR zero-fill san.
+
+**Tai sao tot hon `CollectionsMarshal.SetCount`:** chay duoc ca .NET Framework 4.8
+lan .NET 10, khong reflection, khong phu thuoc layout noi bo cua `List<T>`
+(`_size` o offset 24 tren Framework, 16 tren .NET 10 — dung offset tho la sai).
+
+**Test chan:** `tests/zeros_list_scale_test.tkv`, 29 assert, n = 0/1/7/1000/38597376.
+Da chay: **29/29 PASS**.
+
+---
+
+### 9.15 CANH BAO PHUONG PHAP — con so "0.0 ms" la SAI, chi phi bi HOAN
+
+Sau khi sua, `_zeros_scale.tkv` bao `zeros_list(38597376)` = **0.0 ms** cho 147 MB.
+Khong the tin. Toi viet `_zeros_verify.tkv` de kiem va tim ra su that:
+
+| buoc | ms |
+|---|---:|
+| A. tao, KHONG cham du lieu | **0.0** |
+| B. tao + doc toan bo | 78 |
+| C. tao + ghi toan bo | 110 |
+| D. tao + doc lan 2 | 109 |
+| E. 1M (3.8 MB) tao + doc | 16 |
+
+Chi phi **khong mat di, no bi hoan**: `new T[38597376]` tren LOH chi dat con tro;
+CLR dua trang zero cua OS vao khi CPU cham lan dau (page fault). `count` tra ve
+dung 38597376 nen khong phai DCE — chi la chi phi nam o buoc cham dau tien.
+
+**He qua do luong:** moi phep do `t_zeros`/`zeros_list` phai **cham vao du lieu**
+roi moi ket luan. Do moi buoc "tao" khong cho so co nghia. Day la cung loai loi
+voi §8 (probe do sai duong), va la lan thu ba trong phien nay.
+
+**Nhung tren duong production thi no van thang that**, vi `f32_list_add` cham toan
+bo buffer ngay sau do — chi phi bi hoan do duoc tra o buoc do, va tong van giam.
+
+---
+
+### 9.16 KET QUA THAT — full step seq1024 giam 359 ms
+
+Do tren `out/bseq_new.exe` (compile bang compiler moi), best-of-3, cung phien:
+
+| seq | truoc | sau | giam |
+|---|---:|---:|---:|
+| 8 (mode 1) | 1437 | **1187** | −250 |
+| 256 (mode 1) | 2141 | **1782** | −359 |
+| **1024 (mode 1)** | **4578** | **4219** | **−359** |
+
+**Loss EXACT ca 3 seq:** `10.572291 / 10.756927 / 10.760399` — khong doi mot bit.
+
+**Parity:** `gpt2_full_tests` **33/33 PASS, fails=0**. (84/84 = 9 suite nho 51 +
+gpt2_full 33; suite nho chua chay lai phien nay.)
+
+Vuot ky vong 220–250 ms trong request. Muc tieu <=1.0x can cat 494 ms; da cat 359,
+con **135 ms**.
+
+---
+
+### 9.17 BAY MOI PHAT HIEN — apphost khong chay duoc binary do tkvc sinh ra
+
+`out/*.exe` do `tkvc-tv.exe` sinh ra **KHONG kem `.runtimeconfig.json`**. Chay
+truc tiep `.exe` se bao:
+
+```
+System.IO.FileNotFoundException: Could not load file or assembly
+'System.Runtime.Intrinsics, Version=10.0.0.0, ...'
+```
+
+Loi nay **danh vao `gpt2_layernorm`** (no that su goi
+`Avx::ConvertToVector256Double`), nen rat de tuong la `Avx` hong. Khong phai.
+
+**Nguyen nhan that:** may nay khong co `C:\Program Files\dotnet`; .NET nam o
+`C:\Users\Admin\.dotnet` va khong co bien `DOTNET_ROOT`. Apphost khong tim duoc
+runtime nen roi ve che do sai.
+
+**Cach chay dung:**
+```powershell
+dotnet out/bseq_new.exe
+```
+nhung **phai co** `out/bseq_new.runtimeconfig.json` truoc:
+```json
+{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}
+```
+
+Khong co file do thi `dotnet` cung bao `hostpolicy.dll not found`. Day chinh la
+blocker da gap o phien truoc khien parity khong verify duoc — **khong phai loi
+compiler hay loi agent**.
+
+**De nghi:** `tkvc-tv.exe` nen sinh `.runtimeconfig.json` canh `.exe`, hoac
+`testkit_gate.ps1` nen tu tao no. Hien tai moi test deu phai copy tay.

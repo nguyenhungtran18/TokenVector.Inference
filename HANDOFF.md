@@ -6033,3 +6033,144 @@ sẽ PASS dù sai bit**. Phải verify bằng `max_abs_diff == 0.0`, không bằ
 
 Spec viết xong, **chưa patch**. Chưa sửa file production nào. `_norm_groups`
 trong 4 mirror vẫn nguyên đường interpreted.
+
+---
+
+## §0.138 COMPILER ĐÃ SỬA `ZeroListF32` — full step seq1024 −359 ms, parity giữ nguyên
+
+**Ngày:** 2026-11-10. Request đầy đủ: `docs/COMPILER_TEAM_REQUEST13.md`.
+Số đo chi tiết: `BENCHMARKS.md` §9.11–§9.17.
+
+### 0. Kết luận trước
+
+Compiler team đã sửa `TkvSlice::ZeroListF32`. Đo lại trên compiler mới:
+
+| seq | TKV trước | TKV sau | torch (phiên trước) | tỷ lệ sau |
+|---|---:|---:|---:|---:|
+| 8 | 1437 | **1187** | 999.6 | 1.187x |
+| 256 | 2141 | **1782** | 1490.1 | 1.196x |
+| **1024** | **4578** | **4219** | 4040.2 | **1.044x** |
+
+Loss EXACT cả 3 seq: `10.572291 / 10.756927 / 10.760399`.
+`gpt2_full_tests`: **33/33 PASS, fails=0**.
+
+Cắt **359 ms** ở seq1024. Nhưng **chưa đạt ≤1.0x** — xem §4.
+
+### 1. Cách sửa — khác và tốt hơn đề xuất của tôi
+
+Request #13 đề nghị `CollectionsMarshal.SetCount`. Compiler team làm cách khác:
+
+```
+ZeroListF32(n):
+  n <= 0  -> new List<float32>()
+  else    -> new List<float32>(new TkvZeroSrc(n))
+```
+
+`TkvZeroSrc` là `ICollection<float32>` giả: `Count = n`, `CopyTo` **RỖNG**,
+`GetEnumerator` ném `NotSupportedException`. Ctor `List<T>(IEnumerable<T>)` có
+đường nhanh khi tham số là `ICollection<T>`: đọc `Count` để cấp backing array
+**đúng một lần** rồi gọi `CopyTo`. `CopyTo` rỗng nên không có lần chép 147 MB nào,
+và backing array đã được CLR zero-fill sẵn.
+
+**Tốt hơn `CollectionsMarshal` ở ba điểm:** chạy được cả .NET Framework 4.8 lẫn
+.NET 10; không reflection; không phụ thuộc layout nội bộ `List<T>` (`_size` ở
+offset **24** trên Framework, **16** trên .NET 10 — dùng offset thô là sai).
+
+Vị trí: `compiler_bootstrap/compiler/il_features/slicing.tkv` (method L171+,
+class `TkvZeroSrc` L266+); bản mirror `build/selfhost/tv_gop.tkv` (L33813, L33908+).
+
+Test chặn: `tests/zeros_list_scale_test.tkv`, 29 assert, n = 0/1/7/1000/38597376.
+Đã chạy: **29/29 PASS**.
+
+### 2. CẢNH BÁO PHƯƠNG PHÁP — con số "0.0 ms" là SAI
+
+Sau khi sửa, `_zeros_scale.tkv` báo `zeros_list(38597376)` = **0.0 ms** cho 147 MB.
+Không tin được. Viết `tv/tests/_zeros_verify.tkv` để kiểm:
+
+| bước | ms |
+|---|---:|
+| A. tạo, KHÔNG chạm dữ liệu | **0.0** |
+| B. tạo + đọc toàn bộ | 78 |
+| C. tạo + ghi toàn bộ | 110 |
+| D. tạo + đọc lần 2 | 109 |
+| E. 1M (3.8 MB) tạo + đọc | 16 |
+
+Chi phí **không mất, nó bị hoãn**: `new T[38597376]` trên LOH chỉ đặt con trỏ;
+CLR đưa trang zero của OS vào khi CPU chạm lần đầu (page fault). `count` trả đúng
+38597376 nên **không phải DCE**.
+
+**Hệ quả:** mọi phép đo `t_zeros`/`zeros_list` phải **chạm vào dữ liệu** rồi mới
+kết luận. Đo riêng bước "tạo" cho số vô nghĩa.
+
+Trên đường production nó vẫn thắng thật, vì `f32_list_add` chạm toàn bộ buffer
+ngay sau đó — chi phí bị hoãn được trả ở bước đọc, tổng vẫn giảm.
+
+### 3. BẪY MỚI — apphost không chạy được binary do `tkvc-tv.exe` sinh ra
+
+`out/*.exe` do `tkvc-tv.exe` sinh **KHÔNG kèm `.runtimeconfig.json`**. Chạy trực
+tiếp `.exe` báo:
+
+```
+System.IO.FileNotFoundException: Could not load file or assembly
+'System.Runtime.Intrinsics, Version=10.0.0.0, ...'
+   at TKVApp.gpt2_layernorm(...)
+```
+
+Lỗi đánh vào `gpt2_layernorm` (nó thật sự gọi `Avx::ConvertToVector256Double`)
+nên rất dễ tưởng Avx hỏng. **Không phải.**
+
+**Nguyên nhân thật:** máy này không có `C:\Program Files\dotnet`; .NET nằm ở
+`C:\Users\Admin\.dotnet` và **không có biến `DOTNET_ROOT`**. Apphost không tìm
+được runtime nên rơi về chế độ sai.
+
+**Cách chạy đúng** — phải có `.runtimeconfig.json` cạnh `.exe`:
+
+```powershell
+Set-Content out/bseq_new.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
+dotnet out/bseq_new.exe
+```
+
+Không có file đó thì `dotnet` cũng báo `hostpolicy.dll not found`.
+
+**Đây chính là blocker khiến parity không verify được ở phiên trước — không phải
+lỗi compiler, không phải lỗi agent.**
+
+**Đề nghị:** `tkvc-tv.exe` sinh luôn `.runtimeconfig.json` cạnh `.exe`, hoặc
+`tools/testkit_gate.ps1` tự tạo. Hiện mỗi test đều phải copy tay.
+
+### 4. Còn cách ≤1.0x bao nhiêu — và nó KHÔNG nằm ở seq1024
+
+Tính lại bằng số đo thật:
+
+| seq | TKV sau | torch | cần cắt để ≤1.0x |
+|---|---:|---:|---:|
+| 8 | 1187 | 999.6 | **187** |
+| 256 | 1782 | 1490.1 | **292** |
+| 1024 | 4219 | 4040.2 | **179** |
+
+**ĐÍNH CHÍNH:** tin nhắn trước của tôi ghi "còn 135 ms". Sai số học — nó lấy
+494 − 359, mà 494 là con số cũ không khớp với torch `4040.2`. Khoảng cách thật ở
+seq1024 là **179 ms** (4578 − 4040.2 = 537.8; đã cắt 359).
+
+**Chỗ đau nhất bây giờ là seq256 (292 ms), không phải seq1024.** Hai seq nhỏ có
+tỷ lệ xấu hơn (1.187x / 1.196x) vì chi phí cố định — khởi tạo, cấp buffer, phần
+không co giãn theo seq — chiếm tỷ trọng lớn khi tổng chỉ ~1.2 s. Tối ưu theo
+ms-tuyệt-đối ở seq1024 sẽ **không** kéo hai seq nhỏ xuống.
+
+### 5. Chưa làm
+
+- **9 suite nhỏ (102 assert) CHƯA chạy lại phiên này.** Mới verify `gpt2_full_tests`
+  33/33. Con số "84/84" trong đề bài chưa được xác nhận lại đầy đủ. Phải chạy
+  `tools/testkit_gate.ps1` trước khi tin.
+- Chưa đo lại phase split (mode 2) sau khi sửa — `BPHASE` bị dừng giữa lúc chạy.
+- Chưa commit gì. Working tree: `M BENCHMARKS.md`, `M tv/tests/tv.training.ops.tkv`,
+  `M tv/tests/tv.training.trainer.tkv`, `?? docs/COMPILER_TEAM_REQUEST13.md` +
+  các probe `_zeros_*.tkv`, `_zeros_iso.tkv`, `_zeros_verify.tkv`.
+- `tv/tests/_seq_cfg.txt` đang để `1024 / 2 / 1 / 1` (mode 2) — **phải trả về
+  `1024 / 1 / 1 / 1`** trước khi chạy bench khác.
+
+### 6. Việc tiếp theo, theo thứ tự
+
+1. Trả `_seq_cfg.txt` về `1024/1/1/1`; chạy `testkit_gate.ps1` để chốt 135/135.
+2. Chạy phase split mode 2 để biết 179 ms còn lại ở pha nào.
+3. Tấn công **seq256** (292 ms) — nghi chi phí cố định, không phải GEMM.
