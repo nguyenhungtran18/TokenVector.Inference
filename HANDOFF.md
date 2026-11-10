@@ -6284,3 +6284,90 @@ dùng 28 logical nên hơi vượt. **`smm_fwd` 298 chỉ đạt ~49% đỉnh, k
    không thắng ATen ở 1 head, nên chỉ còn đường multi-head native đã có
    (`attention_bwd_merge_multi`, L1512) nhưng nó đang KHÔNG chạy vì production
    `return` sớm ở nhánh ATen (L1479).
+
+---
+
+## §0.141 `bwd` ĐÃ QUY ĐỦ 100% — 1000 ms "mất tích" là ẢO GIÁC của probe, và `mlp_bwd` mới là mục số 1
+
+**Ngày:** 2026-11-10. **Tiền đề:** §0.140 để lại "~1000 ms chưa quy được" và nghi
+`_bwd_insitu` đo sai. §0.141 chèn `now_ms()` thẳng vào `gpt2_backward` và
+`gpt2_block_bwd` (không dựng probe mirror) để trả lời dứt điểm.
+
+### 1. KẾT LUẬN: không có 1000 ms mất tích. `_bwd_insitu` đo THIẾU 45%.
+
+Chèn timing vào chính `gpt2_backward`, chạy 3 lượt, seq1024, saves+gflat thật:
+
+| chặng | run 0 | run 1 | run 2 |
+|---|---:|---:|---:|
+| lmhead bwd | 578 | 547 | 609 |
+| lnf bwd | 15 | 15 | 0 |
+| **12 block_bwd** | **2391** | **2172** | — |
+| embed bwd | 78 | 94 | — |
+| tail assembly | 141 | 31 | — |
+| **TOTAL** | **3219** | **2859** | — |
+
+Cộng lại khớp `gpt2_backward` (2875 best-of-3). **Không còn mảnh nào chưa quy.**
+
+`_bwd_insitu` báo `block_bwd = 125 ms/layer` → 1500 cho 12 layer. Vòng lặp thật trong
+`gpt2_backward` cho **181 ms/layer** → 2172. **Chênh 45%.**
+
+**Nguyên nhân:** `_bwd_insitu` gọi `gpt2_block_bwd` 12 lần với **cùng `w[0]`** (weight
+layer 0). 12 layer thật có 12 bộ weight khác nhau = 12×7.1 MB = 85 MB, không lọt L3
+(15 MB). Probe đo 1 bộ weight nằm sẵn trong cache.
+
+Đây là bài học thứ ba liên tiếp cùng loại (§0.133 probe rời, §0.140 cộng dồn probe,
+§0.141 dùng lại weight). **Probe phải dùng đúng dữ liệu production, không chỉ đúng hàm.**
+
+### 2. Bên trong một block: `mlp_bwd` ≈ `attention_bwd`, không phải attn trội
+
+Chèn timing vào `gpt2_block_bwd`, 12 layer thật:
+
+| mảnh | ms/layer (min–max) | × 12 |
+|---|---:|---:|
+| **`mlp_bwd`** | **78–109 (tb 90)** | **1080** |
+| **`attention_bwd`** (ATen) | **78–109 (tb 88)** | **1056** |
+| `layernorm_bwd` ln2 | 0–16 (tb 5) | 60 |
+| `layernorm_bwd` ln1 | 0 (tb 1) | 12 |
+| **block FULL** | **156–219 (tb 184)** | **2208** |
+
+§0.140 ghi "attention_bwd 62 ms/layer là mục lớn nhất" — **sai, và sai vì cùng lý do
+cache.** Số thật: mlp 90 vs attn 88, ngang nhau. `mlp_bwd` chưa từng được nhắm tới
+trong bất kỳ phiên nào.
+
+### 3. Bản đồ `bwd` 2875 ms — bản cuối, cộng khớp
+
+| mảnh | ms | % |
+|---|---:|---:|
+| **12 × `mlp_bwd`** | **1080** | **38%** |
+| **12 × `attention_bwd`** | **1056** | **37%** |
+| `lmhead_bwd_fused_list` | 547 | 19% |
+| `embed_bwd_fused` | 94 | 3% |
+| tail assembly (f32_list_add + wpe loop) | 31 | 1% |
+| `layernorm_bwd` ×24 | 72 | 2% |
+| **TOTAL** | **2880** | |
+
+### 4. Thứ tự tấn công mới (thay §0.140 §5)
+
+1. **`mlp_bwd` 1080 ms** — chưa ai đụng. Nó gọi 2× `onednn_linear_bwd_off` (L1938,
+   L1944) + gelu bwd. Soi xem có đang đi ATen hay rơi về `smm_*`.
+2. **`attention_bwd` 1056 ms** — production đi ATen (`torch_attention_bwd`, L1479
+   `return` sớm). Đường native `attention_bwd_merge_multi` (L1512) KHÔNG chạy.
+   §0.135 đã chứng minh kernel native không thắng ATen ở 1 head, nhưng chưa ai đo
+   bản multi-head trên 12 layer thật.
+3. **`lmhead` pha3 262 ms** — xem §0.140 §2, nghi `dl` bị đọc lại theo cột-block.
+
+### 5. Cảnh báo công cụ (quan trọng, đọc trước khi instrument lần sau)
+
+- Chèn `now_ms()` vào `tv/tests/tv.training.gpt2_ref124.tkv` **làm compiler sinh IL
+  hỏng không ổn định**: cùng một bản sửa, build lần 1 chạy được, build lần 2 ném
+  `ArgumentException: Field '_items' ... not a field on the target object which is of
+  type 'Tensor'` tại `TkvSimd.TorchMmTM`. Đây là bug slot-merge đã biết (biến cùng
+  tên/cùng hàm bị gộp slot).
+- **Luôn backup trước khi instrument:** `Copy-Item ...tv.training.gpt2_ref124.tkv
+  ..._ref124_backup.tkv`, xong thì copy ngược lại và verify
+  `Select-String -Pattern "\[BW\]|\[BLK\]"` phải ra 0.
+- Chèn timing phải kiểm tra **vị trí so với khối `if`/`for`**: lần đầu chèn `_tb3`
+  ngay trước `gwte_e = t_zeros(...)` làm nó rơi vào giữa `if simd == 1:` và thân, sinh
+  lỗi `Chi ho tro dinh nghia ham/class-record top-level ... gap annassign o dong 2281`.
+- `now_ms()` vẫn là 1 ms; các mảnh `layernorm_bwd` 0 ms là thật (dưới 1 ms), không
+  phải lỗi đo.
