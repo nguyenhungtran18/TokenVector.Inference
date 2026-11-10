@@ -1,0 +1,130 @@
+# PROBE OPT.STEP SPLIT (HANDOFF §0.131 muc 5 - uu tien (c))
+# Muc dich: opt.step = 859 ms/step (17%), lon thu 2 sau bwd. Boc ra:
+#   1) grad_norm() -> _norm_groups 12 worker (124M float)
+#   2) f32_copy_to_buf(gl -> pgl)  496 MB
+#   3) f32_copy_from_buf(ppl -> pl) 496 MB
+#   4) adamw_step native 124M
+#   5) f32_zero(ptl) + f32_addcmul (chi khi clip hoat dong, coef != 1.0)
+#
+# Chay:
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_opt_split.tkv out/osp.exe main
+#   copy -> out/osp_n10.dll + runtimeconfig ; dotnet out/osp_n10.dll
+#
+# LUU Y bug #8: now_ms() phai dat trong main.
+import tv.training.trainer
+
+def main() -> 'i32':
+    n = 124439808
+    print("=== OPT.STEP SPLIT n=" + str(n) + " ===")
+
+    # groups giong _mk_opt cua bench: 1 group = toan bo (layout GPT-2 124M)
+    groups: "list[i64]" = [n]
+    opt = new_adamw_g(n, groups, 2, 1000, 0.05, 0.0025, 0.9, 0.999, 1.0e-8, 0.1, 1.0)
+    opt.t = 0
+
+    # nap g khac 0 de grad_norm co y nghia
+    gl = opt.g
+    i = 0
+    while i < n:
+        gl[i] = 0.001
+        i = i + 1
+    pl = opt.p
+    i = 0
+    while i < n:
+        pl[i] = 0.02
+        i = i + 1
+    opt.push_p()
+
+    # ---- 1) grad_norm ----
+    gn = opt.grad_norm()
+    best1 = 1.0e9
+    kk = 0
+    while kk < 3:
+        t0 = now_ms()
+        gn = opt.grad_norm()
+        dt = now_ms() - t0
+        if dt < best1:
+            best1 = dt
+        kk = kk + 1
+    print("1) grad_norm (_norm_groups)  best-of-3 ms=" + str(best1) + "  gn=" + str(gn))
+
+    # ---- 2) f32_copy_to_buf gl -> pgl (496 MB) ----
+    pgl = opt.pg
+    r1 = f32_copy_to_buf(gl, pgl, n)
+    best2 = 1.0e9
+    kk = 0
+    while kk < 3:
+        t0 = now_ms()
+        r1 = f32_copy_to_buf(gl, pgl, n)
+        dt = now_ms() - t0
+        if dt < best2:
+            best2 = dt
+        kk = kk + 1
+    print("2) f32_copy_to_buf g (496MB) best-of-3 ms=" + str(best2) + "  r=" + str(r1))
+
+    # ---- 3) f32_copy_from_buf ppl -> pl (496 MB) ----
+    ppl = opt.pp
+    r3 = f32_copy_from_buf(ppl, pl, n)
+    best3 = 1.0e9
+    kk = 0
+    while kk < 3:
+        t0 = now_ms()
+        r3 = f32_copy_from_buf(ppl, pl, n)
+        dt = now_ms() - t0
+        if dt < best3:
+            best3 = dt
+        kk = kk + 1
+    print("3) f32_copy_from_buf p (496MB) best-of-3 ms=" + str(best3) + "  r=" + str(r3))
+
+    # ---- 4) adamw_step native 124M ----
+    pml = opt.pm
+    pvl = opt.pv
+    ptl = opt.pt
+    ponl = opt.pone
+    step_size: "f32" = 0.001
+    wde: "f32" = 0.0001
+    bc1: "f32" = 0.1
+    bc2s: "f32" = 0.0316
+    stw = adamw_step(ppl, pml, pvl, pgl, n, step_size, 0.9, 0.999, 1.0e-8, wde, bc1, bc2s)
+    best4 = 1.0e9
+    kk = 0
+    while kk < 3:
+        t0 = now_ms()
+        stw = adamw_step(ppl, pml, pvl, pgl, n, step_size, 0.9, 0.999, 1.0e-8, wde, bc1, bc2s)
+        dt = now_ms() - t0
+        if dt < best4:
+            best4 = dt
+        kk = kk + 1
+    print("4) adamw_step native 124M    best-of-3 ms=" + str(best4) + "  st=" + str(stw))
+
+    # ---- 5) f32_zero + f32_addcmul (duong clip) ----
+    coef: "f32" = 0.5
+    rzp = f32_zero(ptl, n)
+    rax = f32_addcmul(ptl, pgl, ponl, coef, n)
+    best5 = 1.0e9
+    kk = 0
+    while kk < 3:
+        t0 = now_ms()
+        rzp = f32_zero(ptl, n)
+        rax = f32_addcmul(ptl, pgl, ponl, coef, n)
+        dt = now_ms() - t0
+        if dt < best5:
+            best5 = dt
+        kk = kk + 1
+    print("5) f32_zero + f32_addcmul     best-of-3 ms=" + str(best5) + "  r=" + str(rzp) + "/" + str(rax))
+
+    # ---- 6) ca opt.step() day du ----
+    best6 = 1.0e9
+    kk = 0
+    while kk < 3:
+        t0 = now_ms()
+        lr = opt.step()
+        dt = now_ms() - t0
+        if dt < best6:
+            best6 = dt
+        kk = kk + 1
+    print("6) opt.step() FULL            best-of-3 ms=" + str(best6) + "  lr=" + str(lr))
+
+    tot = best1 + best2 + best3 + best4 + best5
+    print("SUM 1..5 = " + str(tot) + "   (full = " + str(best6) + ")")
+    return 0

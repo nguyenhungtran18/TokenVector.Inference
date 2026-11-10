@@ -1,0 +1,112 @@
+# PROBE OPT.STEP INLINE (HANDOFF §0.132 - uu tien (c), buoc 2)
+# Van de: opt.step() do duoc 1172 ms nhung tong cac manh chi 469 ms
+# (copy_to 78 + copy_from 78 + adamw_step 313), voi clip=1.0 nen grad_norm
+# bi bo qua. Ho 700 ms chua giai thich.
+#
+# Probe nay chep NGUYEN VAN than ham step() ra main va bam gio TUNG DONG,
+# de tach: (a) chi phi goi method / doc field tren class instance,
+# (b) chi phi that cua tung phep.
+#
+# Chay:
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_opt_inline.tkv out/oin.exe main
+#   copy -> out/oin_n10.dll + runtimeconfig ; dotnet out/oin_n10.dll
+#
+# LUU Y bug #8: now_ms() phai dat trong main.
+import tv.training.trainer
+
+def main() -> 'i32':
+    n = 124439808
+    print("=== OPT.STEP INLINE n=" + str(n) + " ===")
+
+    groups: "list[i64]" = [n]
+    # giong _mk_opt cua bench: wd=0.0, clip=1.0
+    opt = new_adamw_g(n, groups, 2, 1000, 0.05, 0.0025, 0.9, 0.999, 1.0e-8, 0.0, 1.0)
+    opt.t = 0
+    gl = opt.g
+    i = 0
+    while i < n:
+        gl[i] = 0.001
+        i = i + 1
+    pl = opt.p
+    i = 0
+    while i < n:
+        pl[i] = 0.02
+        i = i + 1
+    opt.push_p()
+
+    ppl = opt.pp
+    pml = opt.pm
+    pvl = opt.pv
+    pgl = opt.pg
+    ptl = opt.pt
+    ponl = opt.pone
+
+    # ---- A) opt.step() nguyen ban (clip=1.0 -> khong grad_norm) ----
+    bestA = 1.0e9
+    kk = 0
+    while kk < 3:
+        t0 = now_ms()
+        lrA = opt.step()
+        dt = now_ms() - t0
+        if dt < bestA:
+            bestA = dt
+        kk = kk + 1
+    print("A) opt.step() nguyen ban       best-of-3 ms=" + str(bestA))
+
+    # ---- B) chep than ham ra main, bam gio tung dong ----
+    best_lr = 1.0e9
+    best_c1 = 1.0e9
+    best_c2 = 1.0e9
+    best_aw = 1.0e9
+    best_c3 = 1.0e9
+    best_tot = 1.0e9
+    kk = 0
+    while kk < 3:
+        tA = now_ms()
+        t0 = now_ms()
+        lr = lr_at(opt.t, opt.warmup, opt.total, opt.lr_max, opt.lr_min)
+        dt_lr = now_ms() - t0
+        t0 = now_ms()
+        r1 = f32_copy_to_buf(gl, pgl, n)
+        dt_c1 = now_ms() - t0
+        t0 = now_ms()
+        if opt.pdirty != 0:
+            r2 = f32_copy_to_buf(pl, ppl, n)
+            opt.pdirty = 0
+        dt_c2 = now_ms() - t0
+        t0 = now_ms()
+        stw = adamw_step(ppl, pml, pvl, pgl, n, 0.001, 0.9, 0.999, 1.0e-8, 0.0001, 0.1, 0.0316)
+        dt_aw = now_ms() - t0
+        t0 = now_ms()
+        r3 = f32_copy_from_buf(ppl, pl, n)
+        dt_c3 = now_ms() - t0
+        opt.t = opt.t + 1
+        dt_tot = now_ms() - tA
+        if dt_tot < best_tot:
+            best_tot = dt_tot
+            best_lr = dt_lr
+            best_c1 = dt_c1
+            best_c2 = dt_c2
+            best_aw = dt_aw
+            best_c3 = dt_c3
+        kk = kk + 1
+    print("B) inline: lr_at=" + str(best_lr) + " copy_to_g=" + str(best_c1)
+          + " copy_to_p(pdirty)=" + str(best_c2) + " adamw_step=" + str(best_aw)
+          + " copy_from_p=" + str(best_c3) + " TONG=" + str(best_tot))
+    print("   -> ho so voi tong manh = " + str(best_tot - (best_lr + best_c1 + best_c2 + best_aw + best_c3)))
+
+    # ---- C) chi rieng vong doc field class (khong phep tinh) ----
+    bestC = 1.0e9
+    kk = 0
+    while kk < 3:
+        t0 = now_ms()
+        for i in range(1000):
+            _a = opt.n
+            _b = opt.pdirty
+            _c = opt.t
+        dt = now_ms() - t0
+        if dt < bestC:
+            bestC = dt
+        kk = kk + 1
+    print("C) 1000x doc 3 field          best-of-3 ms=" + str(bestC))
+    return 0

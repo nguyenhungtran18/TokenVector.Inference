@@ -1,0 +1,25 @@
+﻿perf(profile): lm-head/embed va opt.step deu da sat tran - 3/3 uu tien §0.131 do xong
+
+(b) lm-head/embed 522 ms: lmhead_bwd_fused_list = 500 ms mot minh, lam 79 GFLOP
+-> 158 GFLOPS = ~80% dinh Haswell. t_zeros 154 MB chi 218 ms. Khong con gi.
+
+(c) opt.step 875 ms: grad_norm 437 (da parallel 12 worker tu P6 GD4),
+adamw_step native 313 (2.5 ns/ptu), 2 lan copy 496 MB = 156.
+
+Thu refactor that bai: probe _opt_wrap.tkv do method call ton 672 ms/buoc
+(1156 vs 484, da dao thu tu de loai bias). Da chuyen than AdamW.step() sang
+free function that, gate van 9/10 + 33/33 PASS, nhung bench khong xac nhan
+(opt 859 -> 875). Kiem out/bseq3.ilasm.txt: code moi THAT SU duoc dung.
+=> con so 672 ms la artifact cua probe, khong phai chi phi that.
+Da revert toan bo. Do lai sau revert: TONG 4921, opt 875 - dung bang truoc.
+
+Bai hoc: probe do tung manh trong vong lap doc lap khong du de ket luan ve chi
+phi trong bench. Phai A/B bang chinh bench.
+
+Trang thai: fwd 1047 / loss 109 / bwd 2750 / opt 875 / copyback 140 = 4921 ms.
+PyTorch 4041. Gap 1.22x.
+
+Con lai deu la thay doi kien truc, khong phai toi uu cuc bo:
+- gop f32_copy_to_buf + adamw_step (bo 496 MB copy/buoc)
+- bo grad_norm khi clip khong can (PyTorch chi clip khi > max_norm)
+- attention native 1.83x CHAM hon ATen (119 vs 65) -> sua kernel native = 648 ms

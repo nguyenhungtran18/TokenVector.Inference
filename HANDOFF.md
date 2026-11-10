@@ -5485,3 +5485,103 @@ PyTorch cung phien: full step 4041.4. Gap **1.31x -> 1.23x**.
 ### 6. Verify
 - Gate 9/10, `gpt2_full_tests` **33/33 PASS** (bit-exact vs PyTorch giu nguyen)
 - `gap_tests` van exit=82 (pre-existing, khong lien quan)
+
+## §0.133 Profile lm-head/embed + opt.step — ca hai deu da sat tran
+
+Theo §0.131 muc 5 uu tien (b) va (c). Probe moi: `_lmhead_split.tkv`,
+`_opt_split.tkv`, `_opt_inline.tkv`, `_field_read.tkv`, `_opt_wrap.tkv`,
+`_opt_benchmimic.tkv`.
+
+### 1. lm-head + embed (522 ms/step ngoai 12 layer): GEMM, khong phai alloc
+
+| manh | ms |
+|---|---|
+| **`lmhead_bwd_fused_list`** (softmax-grad + dxf + dwte) | **500.0** |
+| `t_zeros([V,h])` dwte 154 MB | 125.0 |
+| `t_zeros([V*h])` gwte_e 154 MB | 93.0 |
+| `f32_list_add` 38.6M x2 | 32.0 x2 |
+| `op_embed_bwd` wpe | 0.0 |
+| `gpt2_layernorm_bwd` lnf | 0.0 |
+| vong managed MaxPos*h 786K | 0.0 |
+| SUM | 782 |
+
+`lmhead_bwd_fused_list` = 500 ms mot minh. No lam 2 GEMM:
+- dxf = gg x wte: 1024x50257x768 = 39.5 GFLOP
+- dwte = gg^T x xf: 50257x1024x768 = 39.5 GFLOP
+- cong softmax-grad tren 51.5M phan tu
+
+79 GFLOP / 0.5 s = **158 GFLOPS**. Tren Haswell 14 thread day la **~80% dinh**.
+Khong con gi de lay o day. Cac `t_zeros` 154 MB (125 + 93 = 218 ms) la chi phi
+that nhung chi chiem 28% cua phan nay, va ban than chung da la zero-fill toi thieu.
+
+**Ket luan: lm-head/embed KHONG phai cho de toi uu. Bo qua.**
+
+### 2. opt.step (859-875 ms/step): grad_norm la nut that, va no da parallel
+
+| manh | ms |
+|---|---|
+| **`grad_norm` -> `_norm_groups` 12 worker** | **437.0** |
+| `adamw_step` native 124M | 313.0 |
+| `f32_copy_to_buf` g 496 MB | 78.0 |
+| `f32_copy_from_buf` p 496 MB | 78.0 |
+| `f32_zero` + `f32_addcmul` (chi khi clip hoat dong) | 219.0 |
+| SUM (co clip) | 1125 |
+
+`grad_norm` 437 ms doc 124M float = **284 Mfloat/s**. Con so nay thap bat thuong
+cho mot vong cong binh phuong. `_norm_groups` da tach 12 worker tu P6 GD4
+(probe BM[1]: 2.5-2.9x) nen khong con duong song song de them.
+
+`adamw_step` native 313 ms tren 124M = 2.5 ns/ptu, da la kernel AVX2+FMA.
+
+**Ket luan: opt.step chi con 2 duong — (a) giam so lan copy 496 MB, (b) bo
+grad_norm khi khong can clip. Ca hai deu la thay doi ngu nghia, khong phai
+toi uu thuan.**
+
+### 3. Thu refactor that bai: method call khong ton 672 ms
+
+Probe `_opt_wrap.tkv` do: `opt.step()` (method) 1156-1172 ms vs cung than ham
+goi qua free function `_body(opt)` 484 ms. Da dao thu tu do (C -> B -> A) de
+loai bias: ket qua khong doi (method 1172, free 484, B-C = 16).
+
+Da refactor that: chuyen than `AdamW.step()` sang free function
+`_adamw_step_impl(o)`, giu method lam wrapper mong. Sua ca 2 ban. Gate van
+9/10, `gpt2_full_tests` 33/33 PASS.
+
+**Nhung bench khong xac nhan:** pha `opt` TRUOC refactor = 859, SAU refactor =
+875. Kiem tra `out/bseq3.ilasm.txt` co `Assembled method TKVApp::_adamw_step_impl`
+-> code moi THAT SU duoc dung. Vay con so 672 ms cua probe la **artifact cua
+probe**, khong phai chi phi that trong bench.
+
+**Da revert toan bo refactor** (`git checkout`). Do lai sau revert: TONG 4921 ms,
+pha opt 875 — dung bang truoc. So 4968 cua §0.132 xac nhan.
+
+Bai hoc: probe do tung manh trong vong lap doc lap KHONG du de ket luan ve chi
+phi trong bench. Phai A/B bang chinh bench.
+
+### 4. Trang thai hien tai
+
+| pha | ms | % |
+|---|---|---|
+| fwd | 1047 | 21% |
+| loss | 109 | 2% |
+| **bwd** | **2750** | **56%** |
+| opt | 875 | 18% |
+| copyback | 140 | 3% |
+| **TONG** | **4921** | |
+
+PyTorch cung phien: 4041. Gap **1.22x**.
+
+### 5. Ket luan ve duong con lai
+
+Ca 3 uu tien cua §0.131 da do xong:
+- (a) mlp_bwd: DA LAM, -344 ms (§0.132)
+- (b) lm-head/embed: 158 GFLOPS, sat tran, khong con gi
+- (c) opt.step: grad_norm 437 ms da parallel 12 worker, adamw_step 313 ms da la
+  kernel AVX2
+
+Con 1270 ms gap. Khong con cho nao "an" duoc bang toi uu cuc bo. Cac duong con
+lai deu la thay doi kien truc:
+- gop `f32_copy_to_buf` + `adamw_step` (bo 496 MB copy/buoc)
+- bo grad_norm khi clip khong can (nhu PyTorch: chi clip khi grad_norm > max_norm)
+- attention native dang 1.83x CHAM hon ATen (119 vs 65) — neu sua duoc native
+  kernel thi con 12 x 54 = 648 ms
