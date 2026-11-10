@@ -5585,3 +5585,127 @@ lai deu la thay doi kien truc:
 - bo grad_norm khi clip khong can (nhu PyTorch: chi clip khi grad_norm > max_norm)
 - attention native dang 1.83x CHAM hon ATen (119 vs 65) — neu sua duoc native
   kernel thi con 12 x 54 = 648 ms
+
+
+## §0.134 WORK ORDER — dao vao tkv_flash_attn.c: vi sao native cham hon ATen
+
+**Yeu cau cua user (2026-11-10):** "Muon toi dao vao tkv_flash_attn.c xem tai sao
+native cham hon ATen khong?" -> GHI VAO HANDOFF de phien sau lam tiep.
+
+Trang thai: **CHUA LAM**. Day la work order, khong phai ket qua.
+
+### 1. Con so can giai thich
+
+Tu §0.131 (probe `_attn_split.tkv`, seq1024, 1 layer):
+
+| duong | ms/layer |
+|---|---|
+| D) flash kernel multi (native, chi kernel) | **35.9** |
+| I) full NATIVE co abuf (production path) | **119.1** |
+| J) full ATen co abuf | **65.0** |
+
+Hai dieu mau thuan:
+- Kernel native (35.9) NHANH hon ATen (65.0) — dung ky vong.
+- Nhung full native path (119.1) CHAM hon ATen 1.83x.
+
+=> **~83 ms/layer khong nam trong kernel.** Do la chi phi khac trong
+`gpt2_attention_bwd` khi di duong native. Day moi la thu can tim.
+
+Comment trong `tv.training.gpt2_ref124.tkv` L1498-1504 noi work-queue trong C
+dat **5.5x = 33 ms/layer** (so 198 ms tuan tu). Con so do KHONG khop voi 119.1
+do duoc. Can xac dinh: comment sai, hay co regression, hay hai duong do khac nhau.
+
+### 2. BLOCKER TRUOC TIEN: source C trong repo KHONG phai ban dang chay
+
+| file | bytes | co `MergeMulti`? |
+|---|---|---|
+| `tools/simd_native/tkv_flash_attn.c` (repo, tracked git) | 38622 | **0 lan** |
+| `D:\TokenVector\Release\tools\simd_native\tkv_flash_attn.c` (dang build DLL) | 43765 | **11 lan** |
+
+Ban repo thieu han `FlashAttentionBwdMergeMulti` + `mh_merge_worker` +
+`mh_merge_run` + `mh_scatter_head` (Phase 2c-2). Ban Release moi co.
+
+`git log -- tools/simd_native/tkv_flash_attn.c` -> commit cuoi la `339358e`
+"flash SDPA Phase 2c - multi-head parallel driver, bwd 119 -> 18.4 ms/layer
+(5.5x faster than ATen)". Commit do chi dua vao ban co `mh_bwd_worker`/`mh_run`
+(co trong repo), KHONG phai ban merge_multi.
+
+**Hau qua:** khong the sua kernel bang cach sua file trong repo — sua xong build
+ra DLL khac voi DLL dang chay. Phai dong bo source TRUOC.
+
+**Viec can lam dau tien:** copy `D:\TokenVector\Release\tools\simd_native\tkv_flash_attn.c`
+(43765 B) ve `tools/simd_native/tkv_flash_attn.c`, verify build lai ra DLL
+388608 B khop ban dang chay, roi commit. Sau do moi sua tiep.
+
+### 3. Duong production dang di (da verify)
+
+`tv.training.gpt2_ref124.tkv` L1506-1512:
+
+```
+_amm_rc = -1
+if n >= 128:
+    _amm_rc = attention_bwd_merge_multi(_aqkv, _adc, _act, _adq, n, h, hd, inv, NHeads)
+```
+
+- `n >= 128` -> native merge_multi (12 head + scatter trong 1 lenh)
+- `n < 128` -> duong interpreted 12 head
+- `rc != 0` -> fallback duong cu (soft-fail)
+
+`kv_simd_native.c` L2374 export `AttentionBwdMergeMulti` -> L2411 goi
+`FlashAttentionBwdMergeMulti`.
+
+### 4. Cau truc kernel (da doc, de dinh huong)
+
+`tkv_flash_attn.c` (ban Release):
+- `flash_bwd_head` — 1 head, n x n causal, hd=64
+- `mh_merge_worker` L888 — work-queue qua `InterlockedIncrement(&c->next)`,
+  moi worker `malloc` 2 buffer rieng (`co` = n*hd, `dq` = n*3*hd), chay
+  `flash_bwd_head` roi `mh_scatter_head` ghi thang vao ctxT/dqkv
+- `mh_merge_run` L914 — `CreateThread` x nthreads, `WaitForMultipleObjects`
+- `FlashAttentionBwdMergeMulti` L934 — validate + goi `mh_merge_run`
+
+Diem dang nghi (CHUA do, la gia thuyet):
+1. **`CreateThread` moi lan goi.** 12 layer x 1 lan = 12 lan tao huy thread/buoc.
+   `CreateThread` tren Windows ~50-100 us/thread; 12 thread x 12 layer = 144
+   thread/buoc. Chua ro co nam trong 83 ms khong.
+2. **`malloc` trong worker.** Moi worker 2 malloc; 12 worker = 24 malloc/layer,
+   288/buoc. Co the bo bang buffer caller cap (giong `abuf` pattern da dung
+   cho mlp_bwd o §0.132).
+3. **`mh_scatter_head` doc/ghi strided.** Moi head ghi cot `[head*hd, +hd)` cua
+   moi hang -> stride h=768, cache-unfriendly. 12 head x n=1024 x hd=64.
+4. **Kernel co the dang chay 1 thread.** `nthreads` truyen tu
+   `NHeads` (12). Can verify gia tri thuc te trong DLL, khong doan.
+
+### 5. Thu tu dieu tra de nghi
+
+1. Dong bo source C repo <- Release, build lai, verify DLL khop. Commit.
+2. Do `nthreads` thuc te ma `AttentionBwdMergeMulti` nhan (them probe C hoac
+   doc `kv_simd_native.c` L2374-2415).
+3. Tach chi phi: goi `FlashAttentionBwdMergeMulti` truc tiep tu probe C
+   (`probe_flash_mh.c` da co san trong `tools/simd_native/`) voi nthreads =
+   1, 2, 4, 8, 12 -> xem scaling. Neu 12 thread khong nhanh hon 1 thread thi
+   van de la kernel/contention, khong phai dispatch.
+4. Do rieng `CreateThread` cost: so sanh goi 1 lan vs 12 lan voi cung khoi luong.
+5. Neu thread dispatch la nut: giu thread pool song qua cac layer thay vi
+   tao moi (thay doi kien truc, can ban rieng).
+
+### 6. Gia tri neu giai duoc
+
+Native hien 119.1, ATen 65.0. Neu dua native ve <= ATen: 12 layer x 54 = **648
+ms/buoc**. Do la mieng lon nhat con lai trong 1270 ms gap (hien gap 1.22x,
+4921 vs 4041).
+
+- Neu chi dua ve 65 ngang ATen: gap con ~620 ms -> 1.15x.
+- Neu dua ve 35.9 (chi kernel, khong overhead): 12 x 83 = ~1000 ms -> **1.0x,
+  dat muc tieu "full train step <= PyTorch"**.
+
+### 7. Rang buoc
+
+- Moi thay doi phai giu **BIT-IDENTICAL** voi duong 12x one + 12x merge
+  (comment L847-849 cua ban Release da khang dinh dieu nay). Gate
+  `gpt2_full_tests` 33/33 phai PASS.
+- `gap_tests` exit=82 la loi co san (`System.InvalidProgramException` trong
+  `ConstantFoldingPass.run`), KHONG lien quan, dung sua o day.
+- Sua CA HAI ban `tv/training/` va `tv/tests/` (bay shadow §0.130).
+- Do bang chinh bench (`simd_bench_124m_seq.tkv` mode 2), khong chi probe roi
+  rac — bai hoc tu §0.133.
