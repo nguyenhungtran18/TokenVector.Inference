@@ -468,6 +468,11 @@ def _norm_groups(g: 'list[f32]', groups: 'list[i64]') -> 'f32':
     tot_elem = 0
     for k in range(ng):
         tot_elem = tot_elem + groups[k]
+    # 0.137: groups phu kin toan mang -> dai lien tuc [0, n) cua native
+    # tuong duong 1 group. f32(...) BAT BUOC: _norm_groups tra f32, native
+    # tra f64; thieu ep -> lech 2.58e-07. Co ep -> 0.0 (verify n=124M, 148 grp).
+    if tot_elem == len(g):
+        return f32(f32_grad_norm(g, tot_elem))
     if tot_elem >= 4000000:
         ssl = _tn_zeros(ng)
         b0 = _tn_div(0 * ng, 12)
