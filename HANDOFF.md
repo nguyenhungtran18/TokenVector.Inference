@@ -6583,3 +6583,99 @@ tiết kiệm ~90 ms/step. Nhưng đổi fwd là đổi kiến trúc, và `torch
 - 5 mảnh cộng lại 78.2, khớp 105.25 − 27.05 glue
 - `_seq_cfg.txt` vẫn `1024 / 1 / 1 / 1`
 - Không sửa code production nào trong mục này (chỉ thêm probe)
+
+## §0.144 BENCHMARK LAI SAU KHI COMPILER SUA — 1.04x (2026-11-11)
+
+### 1. Boi canh
+
+Compiler duoc sua (Release `61510a7`, f-string `{n:5d}` + `list(chuoi)`).
+Yeu cau: benchmark lai voi PyTorch, lay ket qua moi.
+
+### 2. Viec phai lam truoc khi do: shadow dir
+
+Bench `tv/tests/simd_bench_124m_seq.tkv` import `tv.training.trainer` va
+`tv.training.ops`. Compiler resolve import **theo thu muc cua file nguon**
+(`tv/tests/`), nen no doc `tv/tests/tv.training.*.tkv` — KHONG phai
+`tv/training/`. Hai cap lech:
+
+- `tv.training.trainer.tkv`: `tv/training/` di truoc (`fee82b1`), `tv/tests/` cu
+- `tv.training.ops.tkv`: `tv/training/` di truoc (`04f8e6f`), `tv/tests/` cu
+
+Da sync ca hai tu canonical sang shadow, verify 13/13 cap KHOP truoc khi do.
+
+### 3. Regression phat hien duoc (khong phai nhieu)
+
+Sau sync, loss sau 2 buoc doi `13.442921` -> `13.449017`. Truy nguoc bang
+cach revert tung file mot:
+
+| trainer | ops | loss | ket luan |
+|---|---|---|---|
+| moi | moi | 13.449017 | loi |
+| moi | cu | 13.449017 | ops vo can |
+| cu | moi | 13.442921 | **trainer la thu pham** |
+| cu | cu | 13.442921 | baseline dung |
+
+Nguyen nhan: `fee82b1` dat
+
+    gn = 0.0
+    if self.clip != 1.0:
+        gn = self.grad_norm()
+
+voi gia dinh `clip == 1.0` nghia la **tat** clip. Sai. `clip` la **MAX_NORM**.
+Fixture PyTorch `tv/tests/fixtures/train_cases.txt` ghi `clip=1`, va case
+`clip: grad lon bi scale (norm=8.185352)` chung minh clip=1.0 **van phai cat**.
+Voi guard do, `coef` luon 1.0 -> grad khong duoc scale.
+
+Hau qua do duoc: **6/15 trainer tests FAIL** (clip, overfit x3, resume),
+truoc do 15/15 PASS.
+
+Luu y: toi uu 391 -> 62 ms cua `38bfb04` nam trong `_norm_groups` (fast path
+native khi groups phu kin mang), KHONG phai o viec bo grad_norm. Goi
+`grad_norm()` vo dieu kien khong mat gi.
+
+### 4. Sua
+
+Khoi phuc `gn = self.grad_norm()` vo dieu kien trong `AdamW.step()`, ca 4
+mirror (`tv/training/trainer.tkv`, `tv/training/tv.training.trainer.tkv`,
+`tv/tests/`, `tv/tools/`). Commit `6146d37`.
+
+### 5. Ket qua do lai (cung may, cung phien)
+
+PyTorch 2.14.0+cpu, transformers 5.15.1, `python tools/bench_torch.py d`:
+
+- fwd+bwd seq1024: **3532.1 ms** (min 3530.7, max 3533.6, n=2)
+- full step seq1024: **4181.0 ms** (min 4111.4, max 4250.6, n=2)
+- loss=9.8851, params=124439808
+
+Ta, `simd_bench_124m_seq.tkv` mode 1 seq1024, 8 lan:
+
+| lan | ms |
+|---|---|
+| 1 | 4985 |
+| 2 | 4797 |
+| 3 | 4266 |
+| 4 | 4235 |
+| 5 | 4375 |
+| 6 | 4328 |
+| 7 | 4313 |
+| 8 | 4953 |
+
+**Median 4351 ms, best 4235 ms.** Loss `10.760399 -> 13.442921` (dung baseline).
+
+**4351 / 4181 = 1.04x.** Tu 1.26x xuong 1.04x.
+
+### 6. Gate
+
+- trainer_tests: **15/15 PASS** (sau khi sua)
+- gate_f32.sh: **9/10** — chi `gap_tests` FAIL (pre-existing, exit=82)
+- gpt2_full_tests: 33/33 PASS
+
+### 7. Con lai
+
+1.04x la **hoa**, chua thang. Do lech con ~170 ms/step. Theo §0.143 muc 7,
+con hai duong that:
+
+- Gop `gpt2_attention_bwd` thanh mot ham C: glue 27 -> ~2 ms, 114.7 -> ~90 ms/layer
+- Luu ctx+lse o fwd, dung `FlashAttentionBwdFusedLseMulti` truc tiep: ~81 ms/layer
+
+Ca hai la work order, chua lam.
