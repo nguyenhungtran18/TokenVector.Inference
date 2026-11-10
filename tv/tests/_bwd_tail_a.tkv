@@ -1,0 +1,25 @@
+# PROBE BWD TAIL v5b (2026-11-10) — phan NGOAI 12 block (ban gon)
+# _bwd_insitu: block_bwd = 140 ms/layer (mlp 62 + att 78, glue 0) -> 12 block 1680.
+# gpt2_backward ~2860. => ~1180 ms nam NGOAI 12 block. Do tung manh o day.
+import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    V = VocabSize
+    print("=== BWD TAIL v5b seq=" + str(n) + " ===")
+
+    # A) t_zeros dwte [V,h] = 154 MB
+    t0 = now_ms()
+    d1 = t_zeros([V, h])
+    d2 = t_zeros([V, h])
+    d3 = t_zeros([V, h])
+    print("A) 3x t_zeros [V,h] 154MB each = " + str(now_ms() - t0) + "  -> per call " + str((now_ms() - t0) / 3.0))
+
+    # B) t_zeros [V*h] 154 MB
+    t0 = now_ms()
+    e1 = t_zeros([V * h])
+    e2 = t_zeros([V * h])
+    e3 = t_zeros([V * h])
+    print("B) 3x t_zeros [V*h] 154MB each = " + str(now_ms() - t0) + "  -> per call " + str((now_ms() - t0) / 3.0))
+    return 0

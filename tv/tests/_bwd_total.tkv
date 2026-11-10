@@ -1,0 +1,172 @@
+# PROBE BWD TOTAL v3 (2026-11-10) — gpt2_backward THAT, cung buffer nhu bench
+#
+# Cau hoi: _bwd_split2 do 12 x block_bwd = 1782 ms, nhung bench BPHASE do bwd =
+# 2844 ms. Chenh 1062 ms nam o DAU? Probe nay do truc tiep gpt2_backward (ham
+# ma _f124_bwd goi) voi cung bo buffer production, roi do lai 12 block rieng
+# trong CUNG process de loai tru khac biet moi truong.
+#
+# Chay:
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_bwd_total.tkv out/bwt.exe main
+#   copy out/bwt.exe -> out/bwt_n10.dll + runtimeconfig ; dotnet out/bwt_n10.dll
+import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    h4 = 4 * h
+    h3 = 3 * h
+
+    ps = gpt2_init(7)
+    ids = []
+    pos = []
+    i = 0
+    while i < n:
+        ids.append((i * 37 + 11) % 50257)
+        pos.append(i)
+        i = i + 1
+
+    # npar theo cong thuc layout ps (giong _n_param cua bench)
+    npar = VocabSize * h + MaxPos * h + h + h
+    npar = npar + NLayers * (h + h + h3 * h + h3 + h * h + h + h + h + h4 * h + h4 + h4 * h + h)
+    gt = t_zeros([npar])
+    gflat = gt.data
+
+    # ---- bo buffer y het bench ----
+    sc5 = t_zeros([n * VocabSize])
+    sc4 = t_zeros([VocabSize * h])
+    sab = []
+    for i in range(NLayers):
+        sab.append(t_zeros([n, h4]))
+    ib = t_zeros([n, h4])
+    db = t_zeros([n, h4])
+    abp = []
+    for i in range(5):
+        abp.append(t_zeros([n, h]))
+    for i in range(3):
+        abp.append(t_zeros([n, h3]))
+    abp.append(t_zeros([n, h4]))
+    abp.append(t_zeros([n, h]))
+    hpl = []
+    for i in range(4 * NLayers):
+        hpl.append(t_zeros([n, h]))
+    m6_plg = alloc_bytes(n * VocabSize * 4)
+    m6_pids = alloc_bytes(n * 4)
+    m6_pwte = alloc_bytes(VocabSize * h * 4)
+    m6_pxf = alloc_bytes(n * h * 4)
+    m6_pdxf = alloc_bytes(n * h * 4)
+    m6_pdwe = alloc_bytes(VocabSize * h * 4)
+
+    # ---- tach list tham so theo layer (nhu _f124_bwd) ----
+    ln1_g = []
+    ln1_b = []
+    wq = []
+    bq = []
+    wp = []
+    bp = []
+    ln2_g = []
+    ln2_b = []
+    w1 = []
+    b1 = []
+    w2 = []
+    b2 = []
+    for li in range(NLayers):
+        base = 4 + li * 12
+        ln1_g.append(ps[base + 0])
+        ln1_b.append(ps[base + 1])
+        wq.append(ps[base + 2])
+        bq.append(ps[base + 3])
+        wp.append(ps[base + 4])
+        bp.append(ps[base + 5])
+        ln2_g.append(ps[base + 6])
+        ln2_b.append(ps[base + 7])
+        w1.append(ps[base + 8])
+        b1.append(ps[base + 9])
+        w2.append(ps[base + 10])
+        b2.append(ps[base + 11])
+
+    print("=== BWD TOTAL v3 seq=" + str(n) + " npar=" + str(npar) + " ===")
+
+    # ---- warm: forward_saved de co saves ----
+    sv = gpt2_forward_saved(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                            ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], 1,
+                            sc5, sab, abp, hpl)
+    print("saves len=" + str(len(sv)))
+
+    # ---- A) gpt2_backward THAT (nhu bench) ----
+    for i in range(1):
+        g1 = gpt2_backward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                           ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], 1, gflat, sv, sc4,
+                           m6_plg, m6_pids, m6_pwte, m6_pxf, m6_pdxf, m6_pdwe, ib, db, abp)
+    t0 = now_ms()
+    for i in range(2):
+        g1 = gpt2_backward(ids, pos, ps[0], ps[1], ln1_g, ln1_b, wq, bq, wp, bp,
+                           ln2_g, ln2_b, w1, b1, w2, b2, ps[2], ps[3], 1, gflat, sv, sc4,
+                           m6_plg, m6_pids, m6_pwte, m6_pxf, m6_pdxf, m6_pdwe, ib, db, abp)
+    t_bwd = (now_ms() - t0) / 2.0
+    print("A) gpt2_backward FULL      2it avg ms=" + str(t_bwd))
+
+    # ---- B) 12 x block_bwd rieng, CUNG process, cung buffer ----
+    # saves = [logits, xf, xf_in, xins[0..NLayers-1]] -> xins[0] = sv[3]
+    x0 = sv[3]
+    gout = t_zeros([n, h])
+
+    # offs that cho layer 0 (mirror poff cua gpt2_backward)
+    base = VocabSize * h + MaxPos * h + h + h
+    offs = []
+    acc = base
+    offs.append(acc)
+    acc = acc + h
+    offs.append(acc)
+    acc = acc + h
+    offs.append(acc)
+    acc = acc + h3 * h
+    offs.append(acc)
+    acc = acc + h3
+    offs.append(acc)
+    acc = acc + h * h
+    offs.append(acc)
+    acc = acc + h
+    offs.append(acc)
+    acc = acc + h
+    offs.append(acc)
+    acc = acc + h
+    offs.append(acc)
+    acc = acc + h4 * h
+    offs.append(acc)
+    acc = acc + h4
+    offs.append(acc)
+    acc = acc + h4 * h
+    offs.append(acc)
+    for i in range(1):
+        rb = gpt2_block_bwd(x0, ln1_g[0], ln1_b[0], wq[0], bq[0], wp[0], bp[0],
+                            ln2_g[0], ln2_b[0], w1[0], b1[0], w2[0], b2[0], gout, 1,
+                            gflat, offs, None, None, None, None, None, ib, db, abp)
+    t0 = now_ms()
+    for i in range(12):
+        rb = gpt2_block_bwd(x0, ln1_g[0], ln1_b[0], wq[0], bq[0], wp[0], bp[0],
+                            ln2_g[0], ln2_b[0], w1[0], b1[0], w2[0], b2[0], gout, 1,
+                            gflat, offs, None, None, None, None, None, ib, db, abp)
+    t_blk12 = now_ms() - t0
+    print("B) 12 x block_bwd (no save_*)  ms=" + str(t_blk12) + "  per-layer=" + str(t_blk12 / 12.0))
+
+    # ---- C) 12 x block_bwd CO save_* (duong production that) ----
+    sav_r = t_zeros([n, h])
+    sav_a = t_zeros([n, h])
+    sav_m = t_zeros([n, h])
+    sav_in = t_zeros([n, h4])
+    sav_ag = t_zeros([n, h4])
+    for i in range(1):
+        rb2 = gpt2_block_bwd(x0, ln1_g[0], ln1_b[0], wq[0], bq[0], wp[0], bp[0],
+                             ln2_g[0], ln2_b[0], w1[0], b1[0], w2[0], b2[0], gout, 1,
+                             gflat, None, sav_r, sav_a, sav_m, sav_in, sav_ag, ib, db, abp)
+    t0 = now_ms()
+    for i in range(12):
+        rb2 = gpt2_block_bwd(x0, ln1_g[0], ln1_b[0], wq[0], bq[0], wp[0], bp[0],
+                             ln2_g[0], ln2_b[0], w1[0], b1[0], w2[0], b2[0], gout, 1,
+                             gflat, None, sav_r, sav_a, sav_m, sav_in, sav_ag, ib, db, abp)
+    t_blk12s = now_ms() - t0
+    print("C) 12 x block_bwd (save_*)     ms=" + str(t_blk12s) + "  per-layer=" + str(t_blk12s / 12.0))
+
+    print("D) CHENH bwd - 12blk(save) = " + str(t_bwd - t_blk12s))
+    print("E) CHENH bwd - 12blk(nosave) = " + str(t_bwd - t_blk12))
+    return 0

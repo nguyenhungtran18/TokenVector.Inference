@@ -6174,3 +6174,113 @@ ms-tuyệt-đối ở seq1024 sẽ **không** kéo hai seq nhỏ xuống.
 1. Trả `_seq_cfg.txt` về `1024/1/1/1`; chạy `testkit_gate.ps1` để chốt 135/135.
 2. Chạy phase split mode 2 để biết 179 ms còn lại ở pha nào.
 3. Tấn công **seq256** (292 ms) — nghi chi phí cố định, không phải GEMM.
+---
+
+## §0.140 ĐIỀU TRA `bwd` 2625 ms (55% tổng step) — bản đồ đầy đủ, và §0.138 SAI về `lmhead`
+
+**Ngày:** 2026-11-10. **Tiền đề:** §0.139 đóng bằng "bwd=2625 ms là khối lớn nhất chưa
+đụng". §0.138 từng kết luận lm-head "KHÔNG phải chỗ để tối ưu" (158 GFLOPS, ~80% đỉnh).
+Phiên này kiểm lại cả hai bằng số đo mới.
+
+### 1. Bản đồ bwd — đo bằng probe in-situ, không phải cộng dồn probe rời
+
+`_bwd_insitu.tkv` (đo đúng thứ tự `gpt2_block_bwd`, cache nóng, min-of-3):
+
+| mảnh | ms/layer | × 12 |
+|---|---:|---:|
+| `mlp_bwd` | 47 | 564 |
+| `attention_bwd` (ATen) | 62 | 744 |
+| `layernorm_bwd` ln1+ln2 | 0 | 0 |
+| `simd_add` ×2 | 0 | 0 |
+| **block_bwd FULL** | **110** | **1320** |
+| glue (block − sum parts) | 1 | 12 |
+
+`gpt2_backward` FULL (saves, gflat thật, best-of-3) = **2875 ms**.
+12 block = 1320 → **1555 ms nằm NGOÀI 12 block**.
+
+Phần đuôi đo trực tiếp:
+
+| mảnh | ms |
+|---|---:|
+| **`lmhead_bwd_fused_list`** | **531** |
+| `embed_bwd_fused` (gwte) | 16 |
+| `t_zeros` dwte/gwte/dxf | ~11 (đo riêng; xem cảnh báo dưới) |
+| **SUM** | **558** |
+
+**Còn ~1000 ms chưa quy được.** Đây là con số thật, không phải sai số: các probe rời
+cộng lại KHÔNG bằng `gpt2_backward` vì hiệu ứng cache/thứ tự — đúng bài học §0.133.
+`_bwd_split2` đo 12 block đứng riêng = 1782 ms (148.5/layer), `_bwd_total` đo 2938 ms
+(244.8/layer) với cùng tham số. Chênh 2.2x giữa hai probe cùng đo một hàm. **Không dùng
+phép cộng probe rời để kết luận nữa.** Chỉ `gpt2_backward` FULL là ground truth.
+
+### 2. `lmhead_bwd_fused` — §0.138 SAI: còn 2.1x headroom, không phải "80% đỉnh"
+
+Chạy `tools/simd_native/probe_lmhead_phases3.exe` (mirror đúng production, 28 thread):
+
+| pha | ms | % | GFLOP/s |
+|---|---:|---:|---:|
+| pha1 softmax-grad (28 thr) | 66.5 | 12.0% | — |
+| pha2 `dxf = dl @ wte` | 140.9 | 25.4% | **561** |
+| **pha3 `tmp = dlT @ xf` (trans-A)** | **262.3** | **47.3%** | **301** |
+| pha4 `dwte += tmp` (28 thr) | 36.5 | 6.6% | — |
+| **FULL** | **554.9** | | |
+
+**Pha3 chậm 1.86x so với pha2 trong khi CÙNG 39.5 GFLOP.** §0.138 đọc con số tổng
+(79 GFLOP / 0.5 s = 158 GFLOPS) rồi so với một "đỉnh Haswell" không đúng, kết luận
+hết đường. Thực tế pha2 đã đạt 561 GFLOP/s — pha3 lẽ ra cũng phải ở đó.
+
+**Đã thử và LOẠI:** đảo công thức `tmpT[E,V] = xfT @ dl` (transA trên ma trận nhỏ
+`xf[T,E]` thay vì `dl[T,V]`): 296.7 vs 307.3 ms = **1.04x**. Không phải transpose.
+
+**Đã thử và LOẠI: sparse `dwte`.** `dwte` chỉ phụ thuộc các hàng vocab có trong batch
+(1024/50257 = 2.04%), nên tưởng có thể bỏ 98% phép tính. **SAI:** `dl[t][v] = (p[v] −
+onehot[v]) * scale` với `p` là softmax trên TOÀN BỘ V → `dl` DÀY ĐẶC. Đo "sparse" cho
+83.6x nhưng đó là đo GEMM trên ma trận rỗng, không phải cùng bài toán. **Con số 83.6x
+là rác, đã bỏ.**
+
+**Giả thuyết còn lại: pha3 memory-bound.** Nó ghi `tmp` 147 MB và đọc `dl` 196 MB
+mỗi lượt. Đo `f32_zero` 147 MB = 21 ms → **6.8 GB/s**. Nếu pha3 thực sự chỉ chạy
+~343 MB traffic thì phải xong trong ~50 ms, không phải 262. Nghĩa là pha3 đang đọc
+`dl` nhiều lần (blocked GEMM đọc lại A theo từng cột-block của C) — **đây là chỗ
+cần đo tiếp**, chưa kết luận.
+
+### 3. `smm_fwd` vs oneDNN — chênh 2.12x, đã verify
+
+Cùng shape `[1024,50257]×[50257,768]` = 39.5 GFLOP, best-of-3, verify `y[0,0]` cả hai
+= 1.0 (đúng phép tính):
+
+| đường | ms | GFLOP/s |
+|---|---:|---:|
+| `onednn_linear_bias` | **125** | **632** |
+| `smm_fwd` | 265 | 298 |
+
+**2.12x.** `gpt2_linear` (L154) đã ưu tiên oneDNN và chỉ rơi về `smm_fwd` khi
+`il2 != 0`, nên đường này chỉ còn dùng ở `lmhead_bwd_fused` (kernel C) và attention
+fallback. Peak 1 core đo ở §0.129 = 41.3 GFLOP/s → 14 core ≈ 578 GFLOP/s; oneDNN 632
+dùng 28 logical nên hơi vượt. **`smm_fwd` 298 chỉ đạt ~49% đỉnh, không phải 80%.**
+
+### 4. Cảnh báo phương pháp (ghi lại để phiên sau không lặp)
+
+- `now_ms()` độ phân giải **1 ms**. Mọi mảnh <5 ms phải đo bằng vòng lặp ≥20 lần.
+  `t_zeros` đo lẻ ra 0.0 ms nhưng thực chất tốn ~11 ms lần đầu (trang mới từ OS).
+- **Cộng các probe rời KHÔNG tái lập được `gpt2_backward`.** Chênh tới 2.2x. Chỉ tin
+  số đo trên đúng hàm production, đúng thứ tự, cache nóng.
+- `_bwd_tail.tkv` và `_bwd_tail2.tkv` sinh `InvalidProgramException` — không dùng được.
+  `_bwd_tail_a.tkv` chỉ đo `t_zeros`, thiếu phần GEMM.
+- `embed_bwd_fused` cần `ids` khai báo `list[i64]` tường minh, nếu không
+  `il_codegen: tham so 0 phai la list[i64]`.
+- `gpt2_layernorm_bwd` với `gflat` có data → `InvalidProgramException`. Đo riêng nó
+  phải dùng `gflat` rỗng.
+
+### 5. Việc tiếp theo, theo thứ tự
+
+1. **Đo pha3 vì sao 301 GFLOP/s.** Nghi `dl` bị đọc lại theo từng cột-block. Nếu đúng,
+   chặn `dl` theo dải cột (pack `dlT` một lần rồi GEMM NoTrans) là đường rẻ nhất.
+   Tiềm năng: pha3 262 → ~141 ms, **−121 ms/step**.
+2. **Truy 1000 ms chưa quy được** trong `gpt2_backward`. Đây là mục lớn nhất và chưa
+   có giả thuyết nào. Cách làm: chèn `now_ms()` vào chính `gpt2_backward` (không phải
+   probe mirror) và in từng chặng.
+3. `attention_bwd` 62 ms/layer (744 ms tổng) — §0.135 đã chứng minh kernel native
+   không thắng ATen ở 1 head, nên chỉ còn đường multi-head native đã có
+   (`attention_bwd_merge_multi`, L1512) nhưng nó đang KHÔNG chạy vì production
+   `return` sớm ở nhánh ATen (L1479).

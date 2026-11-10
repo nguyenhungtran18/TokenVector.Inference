@@ -1,0 +1,172 @@
+# PROBE BWD IN-SITU v4 (2026-11-10) — do TUNG BUOC THEO DUNG THU TU block_bwd
+#
+# Vi sao: _bwd_split2 do tung manh trong vong lap RIENG (cache nong) -> tong manh
+# 138 ms/layer nhung block that 207 ms/layer. Chenh 69 ms/layer co the la glue
+# THAT, hoac la hieu ung cache/thu tu chi xuat hien khi chay lien tiep.
+# §0.133 da hoc: "probe do tung manh trong vong lap doc lap KHONG du de ket luan".
+#
+# Probe nay chay DUNG thu tu block_bwd, moi buoc 1 lan, now_ms() trong main
+# (bug #8), lap 3 vong lay min tung buoc -> so sanh voi block_bwd that.
+import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    h4 = 4 * h
+    h3 = 3 * h
+
+    x = t_zeros([n, h])
+    gout = t_zeros([n, h])
+    ln1_g = t_zeros([h])
+    ln1_b = t_zeros([h])
+    ln2_g = t_zeros([h])
+    ln2_b = t_zeros([h])
+    wqkv = t_zeros([h, h3])
+    bqkv = t_zeros([h3])
+    wproj = t_zeros([h, h])
+    bproj = t_zeros([h])
+    w1 = t_zeros([h, h4])
+    b1 = t_zeros([h4])
+    w2 = t_zeros([h4, h])
+    b2 = t_zeros([h])
+
+    npar = VocabSize * h + MaxPos * h + h + h
+    npar = npar + NLayers * (h + h + h3 * h + h3 + h * h + h + h + h + h4 * h + h4 + h4 * h + h)
+    gt = t_zeros([npar])
+    gflat = gt.data
+
+    base = VocabSize * h + MaxPos * h + h + h
+    offs = []
+    acc = base
+    offs.append(acc)
+    acc = acc + h
+    offs.append(acc)
+    acc = acc + h
+    offs.append(acc)
+    acc = acc + h3 * h
+    offs.append(acc)
+    acc = acc + h3
+    offs.append(acc)
+    acc = acc + h * h
+    offs.append(acc)
+    acc = acc + h
+    offs.append(acc)
+    acc = acc + h
+    offs.append(acc)
+    acc = acc + h
+    offs.append(acc)
+    acc = acc + h4 * h
+    offs.append(acc)
+    acc = acc + h4
+    offs.append(acc)
+    acc = acc + h4 * h
+    offs.append(acc)
+
+    abuf = []
+    for i in range(5):
+        abuf.append(t_zeros([n, h]))
+    for i in range(3):
+        abuf.append(t_zeros([n, h3]))
+    abuf.append(t_zeros([n, h4]))
+    abuf.append(t_zeros([n, h]))
+
+    sav_a = t_zeros([n, h])
+    sav_r = t_zeros([n, h])
+    sav_m = t_zeros([n, h])
+    sav_in = t_zeros([n, h4])
+    sav_ag = t_zeros([n, h4])
+    ibuf = t_zeros([n, h4])
+    dbuf = t_zeros([n, h4])
+
+    o_l1g = offs[0]
+    o_l1b = offs[1]
+    o_qkv = offs[2]
+    o_bqkv = offs[3]
+    o_proj = offs[4]
+    o_bproj = offs[5]
+    o_l2g = offs[6]
+    o_l2b = offs[7]
+    o_w1 = offs[8]
+    o_b1 = offs[9]
+    o_w2 = offs[10]
+    o_b2 = offs[11]
+
+    print("=== BWD IN-SITU v4 seq=" + str(n) + " ===")
+
+    # warm
+    rb = gpt2_block_bwd(x, ln1_g, ln1_b, wqkv, bqkv, wproj, bproj,
+                        ln2_g, ln2_b, w1, b1, w2, b2, gout, 1, gflat, offs,
+                        sav_r, sav_a, sav_m, sav_in, sav_ag, ibuf, dbuf, abuf)
+
+    b_mlp = 1.0e9
+    b_ln2 = 1.0e9
+    b_add1 = 1.0e9
+    b_att = 1.0e9
+    b_ln1 = 1.0e9
+    b_add2 = 1.0e9
+    b_blk = 1.0e9
+
+    kk = 0
+    while kk < 3:
+        # --- do block FULL truoc (cung trang thai cache) ---
+        t0 = now_ms()
+        rb = gpt2_block_bwd(x, ln1_g, ln1_b, wqkv, bqkv, wproj, bproj,
+                            ln2_g, ln2_b, w1, b1, w2, b2, gout, 1, gflat, offs,
+                            sav_r, sav_a, sav_m, sav_in, sav_ag, ibuf, dbuf, abuf)
+        t_blk = now_ms() - t0
+        if t_blk < b_blk:
+            b_blk = t_blk
+
+        # --- do tung buoc theo DUNG thu tu block_bwd ---
+        t0 = now_ms()
+        rmlp = gpt2_mlp_bwd(sav_m, w1, b1, w2, b2, n, gout, 1, gflat,
+                            o_w1, o_b1, o_w2, o_b2, sav_in, sav_ag, ibuf, dbuf, abuf)
+        t1 = now_ms()
+        if t1 - t0 < b_mlp:
+            b_mlp = t1 - t0
+
+        rl2 = gpt2_layernorm_bwd(sav_r, ln2_g, ln2_b, rmlp[0], gflat, o_l2g, o_l2b)
+        t2 = now_ms()
+        if t2 - t1 < b_ln2:
+            b_ln2 = t2 - t1
+
+        drl2 = rl2[0]
+        _gd = gout.data
+        _dl2 = drl2.data
+        simd_add(_gd, _dl2, _gd)
+        t3 = now_ms()
+        if t3 - t2 < b_add1:
+            b_add1 = t3 - t2
+
+        r_att = gpt2_attention_bwd(sav_a, wqkv, bqkv, wproj, bproj, n, gout, 1, gflat,
+                                   o_qkv, o_bqkv, o_proj, o_bproj, abuf)
+        t4 = now_ms()
+        if t4 - t3 < b_att:
+            b_att = t4 - t3
+
+        rl1 = gpt2_layernorm_bwd(x, ln1_g, ln1_b, r_att[0], gflat, o_l1g, o_l1b)
+        t5 = now_ms()
+        if t5 - t4 < b_ln1:
+            b_ln1 = t5 - t4
+
+        drl1 = rl1[0]
+        _dl1 = drl1.data
+        simd_add(_dl1, _gd, _dl1)
+        t6 = now_ms()
+        if t6 - t5 < b_add2:
+            b_add2 = t6 - t5
+
+        kk = kk + 1
+
+    s_parts = b_mlp + b_ln2 + b_add1 + b_att + b_ln1 + b_add2
+    print("A) block_bwd FULL (min of 3)      = " + str(b_blk))
+    print("B) in-situ: mlp_bwd               = " + str(b_mlp))
+    print("C) in-situ: layernorm_bwd ln2     = " + str(b_ln2))
+    print("D) in-situ: simd_add 1            = " + str(b_add1))
+    print("E) in-situ: attention_bwd         = " + str(b_att))
+    print("F) in-situ: layernorm_bwd ln1     = " + str(b_ln1))
+    print("G) in-situ: simd_add 2            = " + str(b_add2))
+    print("H) SUM in-situ parts              = " + str(s_parts))
+    print("I) CHENH block - sum (in-situ)    = " + str(b_blk - s_parts))
+    print("J) 12 layer: block=" + str(b_blk * 12.0) + "  parts=" + str(s_parts * 12.0))
+    return 0
