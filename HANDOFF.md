@@ -6463,3 +6463,123 @@ Con lai hai huong that:
    goi, nhung chi phi goi chua do rieng — **chua co so**, dung tin.
 2. `attention_bwd` (1056 ms, 37%) moi la muc lon thu hai va §0.135 da ket luan kernel
    native thua ATen o 1 head. Do la cho con lai that su.
+
+## §0.143 KẾT QUẢ §0.142 HƯỚNG 2 — `attention_bwd`: đường native CHẬM HƠN ATen 1.21–1.35x, work order §0.135 §6 KHÔNG đáng làm
+
+**Ngày:** 2026-11-10. Probe: `tv/tests/_attn_ab.tkv`, `_attn_path.tkv`, `_attn_scale.tkv`,
+`_attn_pieces.tkv`, `_attn_parity.tkv`, `_attn_ab3.tkv` (exe `out/attnab.exe`, `attnpath`,
+`attnsc`, `attnpcs`, `attnpar`, `attnab3`).
+
+### 0. Kết luận trước, chi tiết sau
+
+§0.135 §6 đề xuất "cho production dùng kernel native thay ATen", ước **12 × 56 = 672 ms**
+(glue ~35). **Đo thật: đường native 109–121 ms/layer, ATen 85.75–90 ms/layer.**
+Native **chậm hơn 1.21–1.35x**, không phải nhanh hơn. Work order đó **không đáng làm** —
+làm theo nó sẽ **mất 240–370 ms/step**, không phải tiết kiệm 290.
+
+Sai ở đâu: §0.135 lấy `P` = 31.41 ms/layer của **C probe** (gọi DLL trực tiếp, không qua
+.tkv) rồi cộng glue ước lượng. Nhưng `P` đó đo trên **DLL build lại**, và glue .tkv thật
+là **27–35 ms**, không phải 0. Cộng lại: 31.4 + 27 = 58, vẫn thiếu so với 105–121 đo được.
+Phần thiếu là **`gpt2_linear` fwd 9.4 + `smm_dot` 6.2 + `gpt2_linear_bwd` 22.0 = 37.6 ms**
+mà §0.135 §6 xếp vào "glue" nhưng thực ra là **GEMM thật**, không cắt được.
+
+### 1. A/B 3 lần, 4 bộ weight thật (36 MB), seq 1024
+
+Cùng 4 bộ weight, cùng `abuf`, cùng thứ tự gọi. `gflat` có data → ATen; `gflat = None` → native.
+
+| lần | ATen | native | native/ATen |
+|---|---:|---:|---:|
+| 1 | 85.75 | 113.50 | 1.324 |
+| 2 | 90.00 | 109.25 | 1.214 |
+| 3 | 89.75 | 121.25 | 1.351 |
+
+ATen TB **88.5** (khớp 88 ms/layer đo trong block thật ở §0.141). Native TB **114.7**.
+
+### 2. Năm mảnh của đường native — 78.2 ms, glue 27
+
+`_attn_pieces.tkv`, 5 lần/mảnh:
+
+| mảnh | ms | ghi chú |
+|---|---:|---|
+| `gpt2_linear` qkv fwd | 9.4 | GEMM `[n,h]×[h,3h]` |
+| `smm_dot` dctxT | 6.2 | GEMM `[n,h]×[h,h]` |
+| `attention_bwd_merge_multi` | 40.6 | P: recompute fwd + kernel + scatter |
+| `linear_dw_fused` dw_proj | 0.0 | **rc=-8** trong probe (offset `op` sai) — chưa tính |
+| `gpt2_linear_bwd` qkv | 22.0 | ATen addmm ×2 |
+| **tổng 5 mảnh** | **78.2** | |
+| **đo cả hàm native** | **105.25** | |
+| **glue .tkv** | **27.05** | branch, `_ab_pool_k`, `t_zeros` ×5, return list 5 phần tử |
+
+`linear_dw_fused` rc=-8 là lỗi probe (tôi truyền `op` của layer 0 nhưng `gflat` đã zero
+vùng đó), không phải lỗi production — production dùng `o_proj` từ `poff` và rc=0.
+
+### 3. `attention_bwd_merge_multi` scale dưới bậc hai — spawn thread được amortize
+
+`_attn_scale.tkv`, 10 lần mỗi cỡ:
+
+| n | ms | tỉ lệ |
+|---|---:|---:|
+| 256 | 6.2 | |
+| 512 | 17.2 | 2.77x |
+| 1024 | 39.1 | 2.27x |
+
+Work thật là O(n²) → 256→1024 phải là **16x**. Đo được **6.3x**. Nghĩa là ở n=256 có
+**~4.0 ms overhead cố định** (spawn 12 thread + malloc ctxf/lsef 3.9 MB) chiếm 2/3 thời
+gian. Ở n=1024 overhead đó chỉ còn 10%. Đây là lý do kernel "chỉ 18–21 ms" trong C probe
+nhưng 39–43 ms khi gọi từ .tkv: **P bao gồm recompute fwd 8.8 ms + malloc + spawn**.
+
+### 4. ATen có ghi gradient thật — không phải no-op
+
+`_attn_parity.tkv`, dữ liệu khác 0, zero vùng gradient layer 0 trước khi gọi:
+
+| | giá trị |
+|---|---|
+| `torch_attention_bwd` rc | **0** |
+| `sum abs(dw_qkv)` | **44,392.72** |
+| `sum abs(dw_proj)` | **15,705.96** |
+
+Nên 88.5 ms là **công việc thật**, không phải đường tắt. Không có "miếng ăn" ẩn ở đây.
+
+### 5. `FlashAttentionBwdMergeMulti` không expose cho .tkv
+
+`out/attnpath.il` chỉ có pinvoke `FlashAttentionFwdFusedNative`. `FlashAttentionBwdFused`,
+`FlashAttentionBwdFusedLseMulti`, `FlashAttentionBwdMergeMulti` **đều không có pinvoke**.
+Nên đề xuất "gọi thẳng `FlashAttentionBwdMergeMulti` (21 ms) thay `AttentionBwdMergeMulti`
+(32 ms)" của §0.135 §6 **không làm được từ .tkv hiện tại** — phải thêm export + pinvoke
+trước, và ngay cả khi thêm thì cần `ctx`+`lse` mà `torch_sdpa_fwd` không trả.
+
+### 6. Vì sao native không thể thắng ở đây
+
+Ba lý do, đều đã đo:
+
+1. **Recompute fwd 8.8 ms** — production fwd đi `torch_sdpa_fwd`, không lưu ctx/lse. Native
+   bwd phải tính lại toàn bộ attention fwd trước khi bwd. ATen không cần vì autograd giữ
+   graph. Đây là **thuế cấu trúc**, không phải thuế kernel.
+2. **Glue .tkv 27 ms** — interpreted, không cắt được nếu không viết lại hàm trong C.
+3. **GEMM thật 37.6 ms** — `gpt2_linear` 9.4 + `smm_dot` 6.2 + `gpt2_linear_bwd` 22.0.
+   §0.135 §6 xếp nhầm vào "glue". ATen làm cả 3 trong một lệnh.
+
+Cộng: 8.8 + 27 + 37.6 + 40.6 = 114.0 ≈ 114.7 đo được. **Khớp.**
+
+### 7. Cơ hội thật còn lại ở `attention_bwd`
+
+Không phải "đổi sang native". Mà là **cắt glue 27 ms** bằng cách gộp cả `gpt2_attention_bwd`
+thành một hàm C, giống cách `gpt2_mlp_bwd` đã làm với `onednn_linear_bwd_off`. Khi đó:
+
+- glue .tkv 27 → ~2 ms
+- recompute 8.8 vẫn còn (trừ khi fwd lưu ctx/lse)
+- 114.7 → ~90 ms/layer
+
+Đó là **hoà**, không phải thắng. Muốn thắng thật thì phải **lưu ctx+lse ở fwd**, lúc đó
+bỏ được 8.8 và dùng `FlashAttentionBwdFusedLseMulti` trực tiếp: 114.7 → ~81 ms/layer,
+tiết kiệm ~90 ms/step. Nhưng đổi fwd là đổi kiến trúc, và `torch_sdpa_fwd` không trả ctx/lse.
+
+**Chưa làm. Đây là work order, không phải kết quả.**
+
+### 8. Verify
+
+- ATen rc=0, gradient khác 0 (mục 4) — không phải no-op
+- 3 lần A/B, native luôn chậm hơn (1.21–1.35x), không có lần nào đảo chiều
+- 5 mảnh cộng lại 78.2, khớp 105.25 − 27.05 glue
+- `_seq_cfg.txt` vẫn `1024 / 1 / 1 / 1`
+- Không sửa code production nào trong mục này (chỉ thêm probe)

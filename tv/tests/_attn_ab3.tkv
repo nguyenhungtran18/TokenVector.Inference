@@ -1,0 +1,61 @@
+﻿import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    ih = 4 * h
+    V = VocabSize
+    NL = NLayers
+    print("=== A/B 3 lan: gpt2_attention_bwd ATen vs NATIVE, 4 bo weight (36 MB) ===")
+    npar = V * h + MaxPos * h + h + h
+    npar = npar + NL * (h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h + h)
+    gt = t_zeros([npar])
+    gflat = gt.data
+    wqa = t_zeros([h, 3 * h])
+    wqb = t_zeros([h, 3 * h])
+    wqc = t_zeros([h, 3 * h])
+    wqd = t_zeros([h, 3 * h])
+    wpa = t_zeros([h, h])
+    wpb = t_zeros([h, h])
+    wpc = t_zeros([h, h])
+    wpd = t_zeros([h, h])
+    bqkv = t_zeros([3 * h])
+    bproj = t_zeros([h])
+    x = t_zeros([n, h])
+    gout = t_zeros([n, h])
+    abuf = []
+    abuf.append(t_zeros([n, ih]))
+    abuf.append(t_zeros([n, h]))
+    j = 2
+    while j < 12:
+        abuf.append(t_zeros([n, ih]))
+        j = j + 1
+    base = V * h + MaxPos * h + h + h
+    stride = h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h + h
+
+    r = gpt2_attention_bwd(x, wqa, bqkv, wpa, bproj, n, gout, 1, gflat, base + h + h, base + h + h + 3 * h * h, base + h + h + 3 * h * h + 3 * h, base + h + h + 3 * h * h + 3 * h + h * h, abuf)
+    r = gpt2_attention_bwd(x, wqb, bqkv, wpb, bproj, n, gout, 1, gflat, base + stride + h + h, base + stride + h + h + 3 * h * h, base + stride + h + h + 3 * h * h + 3 * h, base + stride + h + h + 3 * h * h + 3 * h + h * h, abuf)
+    r = gpt2_attention_bwd(x, wqc, bqkv, wpc, bproj, n, gout, 1, gflat, base + 2 * stride + h + h, base + 2 * stride + h + h + 3 * h * h, base + 2 * stride + h + h + 3 * h * h + 3 * h, base + 2 * stride + h + h + 3 * h * h + 3 * h + h * h, abuf)
+    r = gpt2_attention_bwd(x, wqd, bqkv, wpd, bproj, n, gout, 1, gflat, base + 3 * stride + h + h, base + 3 * stride + h + h + 3 * h * h, base + 3 * stride + h + h + 3 * h * h + 3 * h, base + 3 * stride + h + h + 3 * h * h + 3 * h + h * h, abuf)
+    r = gpt2_attention_bwd(x, wqa, bqkv, wpa, bproj, n, gout, 1, None, -1, -1, -1, -1, abuf)
+    r = gpt2_attention_bwd(x, wqb, bqkv, wpb, bproj, n, gout, 1, None, -1, -1, -1, -1, abuf)
+    r = gpt2_attention_bwd(x, wqc, bqkv, wpc, bproj, n, gout, 1, None, -1, -1, -1, -1, abuf)
+    r = gpt2_attention_bwd(x, wqd, bqkv, wpd, bproj, n, gout, 1, None, -1, -1, -1, -1, abuf)
+
+    k = 0
+    while k < 3:
+        t0 = now_ms()
+        r = gpt2_attention_bwd(x, wqa, bqkv, wpa, bproj, n, gout, 1, gflat, base + h + h, base + h + h + 3 * h * h, base + h + h + 3 * h * h + 3 * h, base + h + h + 3 * h * h + 3 * h + h * h, abuf)
+        r = gpt2_attention_bwd(x, wqb, bqkv, wpb, bproj, n, gout, 1, gflat, base + stride + h + h, base + stride + h + h + 3 * h * h, base + stride + h + h + 3 * h * h + 3 * h, base + stride + h + h + 3 * h * h + 3 * h + h * h, abuf)
+        r = gpt2_attention_bwd(x, wqc, bqkv, wpc, bproj, n, gout, 1, gflat, base + 2 * stride + h + h, base + 2 * stride + h + h + 3 * h * h, base + 2 * stride + h + h + 3 * h * h + 3 * h, base + 2 * stride + h + h + 3 * h * h + 3 * h + h * h, abuf)
+        r = gpt2_attention_bwd(x, wqd, bqkv, wpd, bproj, n, gout, 1, gflat, base + 3 * stride + h + h, base + 3 * stride + h + h + 3 * h * h, base + 3 * stride + h + h + 3 * h * h + 3 * h, base + 3 * stride + h + h + 3 * h * h + 3 * h + h * h, abuf)
+        ta = (now_ms() - t0) / 4.0
+        t0 = now_ms()
+        r = gpt2_attention_bwd(x, wqa, bqkv, wpa, bproj, n, gout, 1, None, -1, -1, -1, -1, abuf)
+        r = gpt2_attention_bwd(x, wqb, bqkv, wpb, bproj, n, gout, 1, None, -1, -1, -1, -1, abuf)
+        r = gpt2_attention_bwd(x, wqc, bqkv, wpc, bproj, n, gout, 1, None, -1, -1, -1, -1, abuf)
+        r = gpt2_attention_bwd(x, wqd, bqkv, wpd, bproj, n, gout, 1, None, -1, -1, -1, -1, abuf)
+        tb = (now_ms() - t0) / 4.0
+        print("lan " + str(k + 1) + ": ATen = " + str(ta) + "   native = " + str(tb) + "   native/ATen = " + str(tb / ta))
+        k = k + 1
+    return 0

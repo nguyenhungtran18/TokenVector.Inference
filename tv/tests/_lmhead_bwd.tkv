@@ -1,0 +1,37 @@
+# PROBE LMHEAD BWD (2026-11-10) — lmhead_bwd_fused_list: 2 GEMM 39.5 GFLOP moi cai
+import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    V = VocabSize
+    print("=== LMHEAD BWD seq=" + str(n) + " ===")
+
+    xf = t_zeros([n, h])
+    wte = t_zeros([V, h])
+    dxf = t_zeros([n, h])
+    dwte = t_zeros([V, h])
+    logits = t_zeros([n, V])
+    pids = alloc_bytes(n * 4)
+    j = 0
+    while j < n:
+        w = write_i32(pids, j * 4, (j * 37 + 11) % 50257)
+        j = j + 1
+
+    _lgd = logits.data
+    _wtd = wte.data
+    _xfd = xf.data
+    _dd = dxf.data
+    _dw = dwte.data
+    sc = 1.0 / float(n)
+
+    st = lmhead_bwd_fused_list(_lgd, pids, _wtd, _xfd, _dd, _dw, n, 1, h, V, sc)
+    t0 = now_ms()
+    st2 = lmhead_bwd_fused_list(_lgd, pids, _wtd, _xfd, _dd, _dw, n, 1, h, V, sc)
+    t1 = now_ms()
+    st3 = lmhead_bwd_fused_list(_lgd, pids, _wtd, _xfd, _dd, _dw, n, 1, h, V, sc)
+    t2 = now_ms()
+    print("A) lmhead_bwd_fused_list run1 = " + str(t1 - t0) + " ms  st=" + str(st2))
+    print("B) lmhead_bwd_fused_list run2 = " + str(t2 - t1) + " ms  st=" + str(st3))
+    print("C) min = " + str(min(t1 - t0, t2 - t1)))
+    return 0

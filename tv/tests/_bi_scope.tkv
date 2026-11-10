@@ -1,0 +1,16 @@
+# PROBE BUILTIN SCOPE — f32buf_wrap co goi duoc trong ham (khong phai main) khong?
+import tv.training.gpt2_ref124
+
+def _helper(p: 'i64', n: 'i64') -> 'i64':
+    w = f32buf_wrap(p, n)
+    w[0] = 7.5
+    return 1
+
+def main() -> 'i32':
+    p = alloc_bytes(64 * 4)
+    r = f32_zero(p, 64)
+    ok = _helper(p, 64)
+    w2 = f32buf_wrap(p, 64)
+    print("helper ok=" + str(ok) + "  w2[0]=" + str(w2[0]) + " (ky vong 7.5)")
+    f1 = free_bytes(p)
+    return 0

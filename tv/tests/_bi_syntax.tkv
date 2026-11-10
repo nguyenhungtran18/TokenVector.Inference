@@ -1,0 +1,13 @@
+# PROBE F32BUF SYNTAX — f32buf_wrap la STATEMENT hay ham?
+import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n: "i64" = 64
+    p = alloc_bytes(n * 4)
+    r = f32_zero(p, n)
+    # thu dang statement (khong co dau ngoac)
+    w = f32buf_wrap p, n
+    w[0] = 7.5
+    print("stmt form: w[0]=" + str(w[0]) + " (ky vong 7.5)")
+    f1 = free_bytes(p)
+    return 0

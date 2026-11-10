@@ -1,0 +1,107 @@
+﻿import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    hd = HeadDim
+    V = VocabSize
+    NL = NLayers
+    print("=== attention_bwd: ATen (production) vs native merge_multi ===")
+    npar = V * h + MaxPos * h + h + h
+    npar = npar + NL * (h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h + h)
+    gt = t_zeros([npar])
+    gflat = gt.data
+    # 4 bo weight roi
+    wqa = t_zeros([h, 3 * h])
+    wqb = t_zeros([h, 3 * h])
+    wqc = t_zeros([h, 3 * h])
+    wqd = t_zeros([h, 3 * h])
+    wpa = t_zeros([h, h])
+    wpb = t_zeros([h, h])
+    wpc = t_zeros([h, h])
+    wpd = t_zeros([h, h])
+    bqkv = t_zeros([3 * h])
+    bproj = t_zeros([h])
+    x = t_zeros([n, h])
+    gout = t_zeros([n, h])
+    dx = t_zeros([n, h])
+    qkv = t_zeros([n, 3 * h])
+    dctxT = t_zeros([n, h])
+    ctxT = t_zeros([n, h])
+    dqkv = t_zeros([n, 3 * h])
+    xd = x.data
+    gd = gout.data
+    dxd = dx.data
+    qkvd = qkv.data
+    dcd = dctxT.data
+    ctd = ctxT.data
+    dqd = dqkv.data
+    wqad = wqa.data
+    wqbd = wqb.data
+    wqcd = wqc.data
+    wqdd = wqd.data
+    wpad = wpa.data
+    wpbd = wpb.data
+    wpcd = wpc.data
+    wpdd = wpd.data
+    bqd = bqkv.data
+    bpd = bproj.data
+    inv = 1.0 / sqrt(float(hd))
+    base = V * h + MaxPos * h + h + h
+    stride = h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h + h
+    print("4 bo attn weight = " + str(4 * 4 * h * h * 4 / 1048576.0) + " MB")
+
+    oa = base + h + h
+    oba = oa + 3 * h * h
+    opa = oba + 3 * h
+    obpa = opa + h * h
+    bb = base + stride
+    obb = bb + h + h
+    obbb = obb + 3 * h * h
+    opb = obbb + 3 * h
+    obpb = opb + h * h
+    bc = base + 2 * stride
+    oc = bc + h + h
+    obc = oc + 3 * h * h
+    opc = obc + 3 * h
+    obpc = opc + h * h
+    bd = base + 3 * stride
+    od = bd + h + h
+    obd = od + 3 * h * h
+    opd = obd + 3 * h
+    obpd = opd + h * h
+
+    r = torch_attention_bwd(xd, gd, wqad, bqd, wpad, bpd, dxd, gflat, n, h, NHeads, hd, oa, oba, opa, obpa)
+    r = torch_attention_bwd(xd, gd, wqbd, bqd, wpbd, bpd, dxd, gflat, n, h, NHeads, hd, obb, obbb, opb, obpb)
+    r = torch_attention_bwd(xd, gd, wqcd, bqd, wpcd, bpd, dxd, gflat, n, h, NHeads, hd, oc, obc, opc, obpc)
+    r = torch_attention_bwd(xd, gd, wqdd, bqd, wpdd, bpd, dxd, gflat, n, h, NHeads, hd, od, obd, opd, obpd)
+
+    t0 = now_ms()
+    r1 = torch_attention_bwd(xd, gd, wqad, bqd, wpad, bpd, dxd, gflat, n, h, NHeads, hd, oa, oba, opa, obpa)
+    tA1 = now_ms() - t0
+    t0 = now_ms()
+    r2 = torch_attention_bwd(xd, gd, wqbd, bqd, wpbd, bpd, dxd, gflat, n, h, NHeads, hd, obb, obbb, opb, obpb)
+    tA2 = now_ms() - t0
+    t0 = now_ms()
+    r3 = torch_attention_bwd(xd, gd, wqcd, bqd, wpcd, bpd, dxd, gflat, n, h, NHeads, hd, oc, obc, opc, obpc)
+    tA3 = now_ms() - t0
+    t0 = now_ms()
+    r4 = torch_attention_bwd(xd, gd, wqdd, bqd, wpdd, bpd, dxd, gflat, n, h, NHeads, hd, od, obd, opd, obpd)
+    tA4 = now_ms() - t0
+    tA = tA1 + tA2 + tA3 + tA4
+    print("A) ATen torch_attention_bwd: " + str(tA1) + " " + str(tA2) + " " + str(tA3) + " " + str(tA4) + "  TB=" + str(tA / 4.0) + "  rc=" + str(r4))
+
+    r = attention_bwd_merge_multi(qkvd, dcd, ctd, dqd, n, h, hd, inv, NHeads)
+    tB = 0.0
+    rcb = 0
+    i = 0
+    while i < NL:
+        t0 = now_ms()
+        rcb = attention_bwd_merge_multi(qkvd, dcd, ctd, dqd, n, h, hd, inv, NHeads)
+        tB = tB + (now_ms() - t0)
+        i = i + 1
+    print("B) native merge_multi (kernel only) 12x = " + str(tB) + "  TB=" + str(tB / NL) + "  rc=" + str(rcb))
+    print("---")
+    print("ATen / native kernel = " + str((tA / 4.0) / (tB / NL)))
+    print("(production do attention_bwd = 88 ms/layer)")
+    return 0

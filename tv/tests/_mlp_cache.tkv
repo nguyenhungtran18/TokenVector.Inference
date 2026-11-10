@@ -1,0 +1,91 @@
+﻿import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    ih = 4 * h
+    V = VocabSize
+    NL = NLayers
+    print("=== mlp_bwd: 12 bo weight, co/khong co attention weight chen vao ===")
+    npar = V * h + MaxPos * h + h + h
+    npar = npar + NL * (h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h + h)
+    gt = t_zeros([npar])
+    gflat = gt.data
+    w1s = []
+    w2s = []
+    wq = []
+    wp = []
+    i = 0
+    while i < NL:
+        w1s.append(t_zeros([h, ih]))
+        w2s.append(t_zeros([ih, h]))
+        wq.append(t_zeros([h, 3 * h]))
+        wp.append(t_zeros([h, h]))
+        i = i + 1
+    b1 = t_zeros([ih])
+    b2 = t_zeros([h])
+    x = t_zeros([n, h])
+    gout = t_zeros([n, h])
+    inner = t_zeros([n, ih])
+    at = t_zeros([n, ih])
+    ibuf = t_zeros([n, ih])
+    dbuf = t_zeros([n, ih])
+    abuf = []
+    abuf.append(t_zeros([n, ih]))
+    abuf.append(t_zeros([n, h]))
+    j = 2
+    while j < 12:
+        abuf.append(t_zeros([n, ih]))
+        j = j + 1
+    xd = x.data
+    gd = gout.data
+    ad = at.data
+    base = V * h + MaxPos * h + h + h
+    stride = h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h + h
+    print("mlp weights = " + str(NL * 2 * h * ih * 4 / 1048576.0) + " MB ; attn weights = " + str(NL * (3 * h * h + h * h) * 4 / 1048576.0) + " MB")
+
+    i = 0
+    while i < NL:
+        b = base + i * stride
+        ow1 = b + h + h + 3 * h * h + 3 * h + h * h + h + h + h
+        ob1 = ow1 + 4 * h * h
+        ow2 = ob1 + 4 * h
+        ob2 = ow2 + 4 * h * h
+        r = gpt2_mlp_bwd(x, w1s[i], b1, w2s[i], b2, n, gout, 0, gflat, ow1, ob1, ow2, ob2, inner, at, ibuf, dbuf, abuf)
+        i = i + 1
+
+    tA = 0.0
+    i = 0
+    while i < NL:
+        b = base + i * stride
+        ow1 = b + h + h + 3 * h * h + 3 * h + h * h + h + h + h
+        ob1 = ow1 + 4 * h * h
+        ow2 = ob1 + 4 * h
+        ob2 = ow2 + 4 * h * h
+        t0 = now_ms()
+        r = gpt2_mlp_bwd(x, w1s[i], b1, w2s[i], b2, n, gout, 0, gflat, ow1, ob1, ow2, ob2, inner, at, ibuf, dbuf, abuf)
+        tA = tA + (now_ms() - t0)
+        i = i + 1
+    print("A) chi mlp_bwd 12 layer = " + str(tA) + " ms  TB=" + str(tA / NL))
+
+    tB = 0.0
+    i = 0
+    while i < NL:
+        b = base + i * stride
+        ow1 = b + h + h + 3 * h * h + 3 * h + h * h + h + h + h
+        ob1 = ow1 + 4 * h * h
+        ow2 = ob1 + 4 * h
+        ob2 = ow2 + 4 * h * h
+        wqd = wq[i].data
+        wpd = wp[i].data
+        t0 = now_ms()
+        rq = onednn_linear_bwd_off(xd, gd, wqd, ad, gflat, n, h, 3 * h, ow1, ob1)
+        rp = onednn_linear_bwd_off(xd, gd, wpd, ad, gflat, n, h, h, ow2, ob2)
+        r = gpt2_mlp_bwd(x, w1s[i], b1, w2s[i], b2, n, gout, 0, gflat, ow1, ob1, ow2, ob2, inner, at, ibuf, dbuf, abuf)
+        tB = tB + (now_ms() - t0)
+        i = i + 1
+    print("B) attn w + mlp_bwd 12 layer = " + str(tB) + " ms  TB=" + str(tB / NL))
+    print("---")
+    print("chenh lech = " + str((tB - tA) / NL) + " ms/layer")
+    print("(block that do mlp_bwd = 90 ms/layer)")
+    return 0

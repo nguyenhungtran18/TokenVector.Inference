@@ -1,0 +1,52 @@
+# PROBE DWTE ZERO (2026-11-10) — lmhead_bwd_fused_list GHI DE hay CONG DON?
+#
+# Neu GHI DE (overwrite) -> t_zeros([V,h]) 154MB truoc khi goi la VO ICH (125 ms).
+# Neu CONG DON (accumulate) -> phai zero, khong duoc bo.
+# Test: chay 2 lan tren CUNG buffer khong zero lai.
+#   - neu ket qua lan 2 = 2x lan 1  -> accumulate
+#   - neu ket qua lan 2 = lan 1     -> overwrite
+import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    V = VocabSize
+    print("=== DWTE ZERO TEST V=" + str(V) + " ===")
+
+    xf = t_zeros([n, h])
+    wte = t_zeros([V, h])
+    dxf = t_zeros([n, h])
+    dwte = t_zeros([V, h])
+    logits = t_zeros([n, V])
+    pids = alloc_bytes(n * 4)
+    j = 0
+    while j < n:
+        w = write_i32(pids, j * 4, (j * 37 + 11) % 50257)
+        j = j + 1
+
+    _lgd = logits.data
+    _wtd = wte.data
+    _xfd = xf.data
+    _dd = dxf.data
+    _dw = dwte.data
+    sc = 1.0 / float(n)
+
+    # lan 1
+    st = lmhead_bwd_fused_list(_lgd, pids, _wtd, _xfd, _dd, _dw, n, 1, h, V, sc)
+    s1 = 0.0
+    for k in range(0, V * h, 9973):
+        s1 = s1 + _dw[k]
+    # lan 2 tren CUNG buffer, KHONG zero lai
+    st2 = lmhead_bwd_fused_list(_lgd, pids, _wtd, _xfd, _dd, _dw, n, 1, h, V, sc)
+    s2 = 0.0
+    for k in range(0, V * h, 9973):
+        s2 = s2 + _dw[k]
+
+    print("A) sum lan1 = " + str(s1))
+    print("B) sum lan2 = " + str(s2))
+    print("C) ti le lan2/lan1 = " + str(s2 / s1))
+    if s2 / s1 > 1.5:
+        print("D) KET LUAN: CONG DON -> phai zero, KHONG bo duoc")
+    else:
+        print("D) KET LUAN: GHI DE -> t_zeros 154MB truoc do la VO ICH")
+    return 0

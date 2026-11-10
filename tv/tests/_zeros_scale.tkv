@@ -1,0 +1,55 @@
+# PROBE ZEROS SCALE (2026-11-10) — t_zeros cham vi CAP PHAT hay vi ZERO-FILL?
+#
+# Do duoc: t_zeros([V,h]) 147 MB = 125-172 ms (1.2 GB/s)
+#          f32_zero(buffer)  147 MB =  15-32 ms (5-10 GB/s)
+# Neu nghen la BANG THONG thi zeros_list phai tuyen tinh theo kich thuoc.
+# Neu nghen la CAP PHAT (LOH/GC) thi chi nguong lon moi cham.
+import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    print("=== ZEROS SCALE — tim nguong ===")
+    print("n            MB      zeros_list ms    GB/s")
+
+    # 1M, 4M, 8M, 16M, 38.6M phan tu
+    n1: "i64" = 1000000
+    n2: "i64" = 4000000
+    n3: "i64" = 8000000
+    n4: "i64" = 16000000
+    n5: "i64" = 38597376
+
+    t0 = now_ms()
+    a1 = zeros_list(n1)
+    t1 = now_ms()
+    print(str(n1) + "   " + str(float(n1 * 4) / 1048576.0) + "   " + str(t1 - t0) + "   " + str(float(n1 * 4) / (t1 - t0) / 1e6))
+
+    t2 = now_ms()
+    a2 = zeros_list(n2)
+    t3 = now_ms()
+    print(str(n2) + "   " + str(float(n2 * 4) / 1048576.0) + "   " + str(t3 - t2) + "   " + str(float(n2 * 4) / (t3 - t2) / 1e6))
+
+    t4 = now_ms()
+    a3 = zeros_list(n3)
+    t5 = now_ms()
+    print(str(n3) + "   " + str(float(n3 * 4) / 1048576.0) + "   " + str(t5 - t4) + "   " + str(float(n3 * 4) / (t5 - t4) / 1e6))
+
+    t6 = now_ms()
+    a4 = zeros_list(n4)
+    t7 = now_ms()
+    print(str(n4) + "   " + str(float(n4 * 4) / 1048576.0) + "   " + str(t7 - t6) + "   " + str(float(n4 * 4) / (t7 - t6) / 1e6))
+
+    t8 = now_ms()
+    a5 = zeros_list(n5)
+    t9 = now_ms()
+    print(str(n5) + "   " + str(float(n5 * 4) / 1048576.0) + "   " + str(t9 - t8) + "   " + str(float(n5 * 4) / (t9 - t8) / 1e6))
+
+    # lan 2 cua cung kich thuoc lon (GC da quen)
+    t10 = now_ms()
+    a6 = zeros_list(n5)
+    t11 = now_ms()
+    print("LAN2 " + str(n5) + "   " + str(float(n5 * 4) / 1048576.0) + "   " + str(t11 - t10) + "   " + str(float(n5 * 4) / (t11 - t10) / 1e6))
+
+    print("")
+    print("--- doc ---")
+    print("Neu GB/s gan nhu hang so -> nghen bang thong.")
+    print("Neu GB/s tut manh o nguong lon -> nghen cap phat (LOH).")
+    return 0

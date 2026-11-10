@@ -1,0 +1,78 @@
+# PROBE ZEROS ISO (2026-11-10) — cach ly AccessViolation
+#
+# `zeros_list` khai return dtype 'i32' nen KHONG index truc tiep trong main duoc;
+# moi truy cap phai qua tham so `list[f32]`. Do do probe nay chi dung ham.
+#
+# Can biet:
+#   - loi o GHI hay o DOC?
+#   - loi o kich thuoc LON (38.6M) hay moi kich thuoc?
+#   - loi o phan tu DAU hay phan tu CUOI?
+#
+# Moi buoc in TRUOC khi lam, de biet buoc nao chet.
+import tv.training.gpt2_ref124
+
+
+def read0(z: "list[f32]") -> "f64":
+    return float(z[0])
+
+
+def write0(z: "list[f32]") -> "f64":
+    z[0] = 1.5
+    return float(z[0])
+
+
+def read_last(z: "list[f32]", n: "i32") -> "f64":
+    return float(z[n - 1])
+
+
+def write_last(z: "list[f32]", n: "i32") -> "f64":
+    z[n - 1] = -2.5
+    return float(z[n - 1])
+
+
+def count_of(z: "list[f32]") -> "i32":
+    return len(z)
+
+
+def main() -> 'i32':
+    print("=== ZEROS ISO ===")
+
+    # --- NHO: 1000 ---
+    print("N1: zeros_list(1000)")
+    a = zeros_list(1000)
+    print("    count = " + str(count_of(a)))
+    print("    read0 = " + str(read0(a)))
+    print("    write0 = " + str(write0(a)))
+    print("    read_last = " + str(read_last(a, 1000)))
+    print("    write_last = " + str(write_last(a, 1000)))
+    print("N1 OK")
+    print("")
+
+    # --- VUA: 1000000 ---
+    print("N2: zeros_list(1000000)")
+    b = zeros_list(1000000)
+    print("    count = " + str(count_of(b)))
+    print("    read0 = " + str(read0(b)))
+    print("    write0 = " + str(write0(b)))
+    print("    read_last = " + str(read_last(b, 1000000)))
+    print("    write_last = " + str(write_last(b, 1000000)))
+    print("N2 OK")
+    print("")
+
+    # --- LON: 38597376 (147.2 MB) ---
+    print("N3: zeros_list(38597376)")
+    c = zeros_list(38597376)
+    print("    count = " + str(count_of(c)))
+    print("    --- doc phan tu DAU ---")
+    print("    read0 = " + str(read0(c)))
+    print("    --- ghi phan tu DAU ---")
+    print("    write0 = " + str(write0(c)))
+    print("    --- doc phan tu CUOI ---")
+    print("    read_last = " + str(read_last(c, 38597376)))
+    print("    --- ghi phan tu CUOI ---")
+    print("    write_last = " + str(write_last(c, 38597376)))
+    print("N3 OK")
+    print("")
+
+    print("=== TAT CA BUOC PASS ===")
+    return 0

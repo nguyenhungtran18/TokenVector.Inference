@@ -1,0 +1,93 @@
+# PROBE ZERO WIRE (2026-11-10) — co thay t_zeros 154 MB bang buffer native khong?
+#
+# Do duoc (_zero_cost.tkv):
+#   t_zeros([V,h])        = 125-172 ms   (1.2 GB/s)
+#   f32_zero(buffer)      =  15-16 ms    (10 GB/s)  <-- nhanh hon 8x
+#   alloc_bytes(154MB)    =   0.0 ms
+#   f32_list_add 154MB    =  63 ms
+#
+# => t_zeros KHONG phai memset; no di qua duong interpreted. Neu cap phat bang
+#    alloc_bytes roi f32_zero roi f32buf_wrap thanh list[f32] thi tiet kiem
+#    ~110 ms MOI buffer 154 MB.
+#
+# Probe nay kiem tra 3 dieu:
+#   1) f32buf_wrap co cho ghi/ doc qua list[f32] khong (alias dung khong)?
+#   2) f32_zero tren buffer roi wrap co dung bit khong?
+#   3) tong chi phi duong moi vs t_zeros
+import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    h = HiddenSize
+    V = VocabSize
+    nv: "i64" = V * h
+    print("=== ZERO WIRE  V*h=" + str(nv) + " ===")
+
+    # --- 1) duong hien tai: t_zeros ---
+    t0 = now_ms()
+    a = t_zeros([V, h])
+    t1 = now_ms()
+    al: "list[f32]" = a.data
+    print("1) t_zeros([V,h])            = " + str(t1 - t0) + " ms")
+
+    # --- 2) duong moi: alloc + f32_zero + wrap ---
+    t2 = now_ms()
+    p = alloc_bytes(nv * 4)
+    rz = f32_zero(p, nv)
+    bl = f32buf_wrap(p, nv)
+    t3 = now_ms()
+    print("2) alloc+f32_zero+wrap       = " + str(t3 - t2) + " ms  rz=" + str(rz))
+
+    # --- 3) alias check: ghi qua list co thay trong buffer khong? ---
+    bl[0] = 42.5
+    bl[7] = -3.25
+    v0 = bl[0]
+    v7 = bl[7]
+    print("3) alias list->buf: bl[0]=" + str(v0) + " bl[7]=" + str(v7) + " (ky vong 42.5 / -3.25)")
+
+    # doc nguoc tu buffer qua f32buf_wrap thu 2 (alias check)
+    bl_chk = f32buf_wrap(p, nv)
+    b0 = bl_chk[0]
+    b7 = bl_chk[7]
+    print("   doc qua wrap 2 : b[0]=" + str(b0) + " b[7]=" + str(b7))
+
+    # --- 4) zero lai roi kiem tra sach ---
+    rz2 = f32_zero(p, nv)
+    c0 = bl[0]
+    c7 = bl[7]
+    print("4) sau f32_zero: bl[0]=" + str(c0) + " bl[7]=" + str(c7) + " (ky vong 0.0 / 0.0)")
+
+    # --- 5) do lai duong moi lan 2 (khong tinh alloc) ---
+    p2 = alloc_bytes(nv * 4)
+    t4 = now_ms()
+    rz3 = f32_zero(p2, nv)
+    bl2 = f32buf_wrap(p2, nv)
+    t5 = now_ms()
+    print("5) f32_zero+wrap (lan 2)     = " + str(t5 - t4) + " ms")
+
+    # --- 6) so sanh truc tiep 3 lan moi duong ---
+    t6 = now_ms()
+    _x1 = t_zeros([V, h])
+    t7 = now_ms()
+    _x2 = t_zeros([V, h])
+    t8 = now_ms()
+    print("6) t_zeros x2                = " + str(t7 - t6) + " / " + str(t8 - t7) + " ms")
+
+    p3 = alloc_bytes(nv * 4)
+    t9 = now_ms()
+    _r1 = f32_zero(p3, nv)
+    _w1 = f32buf_wrap(p3, nv)
+    t10 = now_ms()
+    _r2 = f32_zero(p3, nv)
+    _w2 = f32buf_wrap(p3, nv)
+    t11 = now_ms()
+    print("   zero+wrap x2              = " + str(t10 - t9) + " / " + str(t11 - t10) + " ms")
+
+    f1 = free_bytes(p)
+    f2 = free_bytes(p2)
+    f3 = free_bytes(p3)
+
+    print("")
+    print("--- ket luan ---")
+    print("Neu alias dung (42.5/-3.25) va zero sach thi duong alloc+zero+wrap")
+    print("thay duoc t_zeros, tiet kiem ~110 ms moi buffer 154 MB.")
+    return 0
