@@ -6680,7 +6680,7 @@ con hai duong that:
 
 Ca hai la work order, chua lam.
 
-## §0.144 KẾT QUẢ "LƯU ctx+lse Ở FWD" — giữ graph ATen là BIT-IDENTICAL nhưng KHÔNG nhanh hơn; tiền đề "~81 ms/layer" của §0.143 §7 SAI
+## §0.145 KẾT QUẢ "LƯU ctx+lse Ở FWD" — giữ graph ATen là BIT-IDENTICAL nhưng KHÔNG nhanh hơn; tiền đề "~81 ms/layer" của §0.143 §7 SAI
 
 **Ngày:** 2026-11-11. Probe: `tools/simd_native/probe_attn_save.cpp` (DLL),
 `probe_attn_save_run.c` (harness), `build_probe_attn_save.ps1`,
@@ -6744,7 +6744,7 @@ Con số 21.9 ms "fwd bên trong" ở §0.143 §2 là **có thật** (`_attn_fwd
 + qkv 4.7 + proj 3.2 = 21.9), nhưng nó **không phải chi phí trùng lặp** — bỏ nó đi thì
 không còn graph để backward.
 
-### 3. Một phát hiện phụ đáng ghi: wrapper managed tốn ~7 ms/call trên gflat 475 MB
+### 3. [ĐÃ BỊ BÁC BỎ Ở §0.146] "wrapper managed tốn ~7 ms/call trên gflat 475 MB" — SAI, là nhiễu
 
 `_attn_wrap.tkv`, cùng hàm `torch_attention_bwd`, cùng 4 bộ weight:
 
@@ -6761,7 +6761,12 @@ phí **tỉ lệ với kích thước list**, khoảng **7 ms cho 475 MB**. Đâ
 từng được ghi trong handoff, và nó áp cho **mọi** lệnh nhận `gflat`. Với 12 layer × 2 lệnh
 (`attention_bwd` + `mlp_bwd` ×2) thì đây là **~170–250 ms/step** chỉ để pin list.
 
-Đây mới là thứ đáng tấn công, và nó **không cần** đụng vào attention.
+**KẾT LUẬN NÀY SAI — xem §0.146.** Đo lại đúng phương pháp (best-of-15, cùng 4 bộ
+weight, cùng hàm): `.tkv` **54.5** vs C harness **61.28** ms/layer — `.tkv` **nhanh
+hơn**, không chậm hơn. Con số 70.17 ở trên là một lần đo đơn lẻ nằm trong dải nhiễu
+±20 ms của máy này; `gflat` 475 MB có lần còn nhanh hơn `gflat` 159 MB 48 ms. Wrapper
+chỉ làm `GetField("_items")` + pin, cả hai O(1), không có chi phí tỉ lệ kích thước.
+Không có gì để cắt ở đây.
 
 ### 4. Verify
 
@@ -6775,9 +6780,81 @@ từng được ghi trong handoff, và nó áp cho **mọi** lệnh nhận `gfla
 
 ### 5. Việc nên làm tiếp (thay cho hai work order đã chết)
 
-1. **Cắt chi phí pin list của wrapper managed** (mục 3). ~7 ms/call × ~24 call/step.
-   Cách: cho các hàm nhận `gflat` một đường "native buffer" (`f32buf_wrap` / `alloc_bytes`)
-   thay vì `list[f32]`, giống `f32_zero` đã làm. Đo được, không đổi số học.
+1. ~~Cắt chi phí pin list của wrapper managed~~ — **đã bác bỏ ở §0.146**, không có
+   chi phí đó. Đừng làm.
 2. Nếu vẫn muốn đường native cho attention: phải **thêm pinvoke** cho
    `FlashAttentionBwdFusedLseMulti` **và** cho fwd trả ctx+lse **trong cùng một lệnh C**,
    rồi đo lại. Nhưng mục 1 rẻ hơn nhiều và chắc chắn thắng.
+
+## §0.146 BÁC BỎ §0.145 §3 — KHÔNG có chi phí pin list theo kích thước; .tkv NHANH hơn C harness
+
+**Ngày:** 2026-11-11. Probe: 	v/tests/_attn_wrap4.tkv, _attn_pin.tkv,
+_attn_best15.tkv; exe out/attnwrap4.exe, ttnpin.exe, ttnb15.exe.
+
+### 0. Kết luận
+
+§0.145 §3 nói wrapper managed tốn **~7 ms/call** trên gflat 475 MB, suy ra
+**~170–250 ms/step** chỉ để pin list. **SAI.** Đo lại đúng phương pháp:
+
+| đo | ms/layer |
+|---|---:|
+| C harness, best-of-15 | 61.28 |
+| .tkv, best-of-15 | **54.50** |
+
+.tkv **nhanh hơn** C harness 6.78 ms. Không có chi phí nào để cắt.
+
+### 1. Lỗi phương pháp đã mắc
+
+§0.145 §3 so **một lần đo đơn lẻ** của .tkv (70.17) với **best-of-10** của C
+harness (63.10). Trên máy này một lần đo đơn lẻ của 	orch_attention_bwd nằm
+trong dải **46–110 ms** — rộng hơn cả hiệu số cần đo. So một mẫu với best-of-N
+là so nhiễu với tín hiệu.
+
+Đây là **lỗi probe thứ tư** cùng loại trong chuỗi §0.133 / §0.140 / §0.141:
+lần trước là dùng sai *data*, lần này là dùng sai *thống kê*.
+
+### 2. Test quyết định — pin có tỉ lệ kích thước không?
+
+Cùng hàm, cùng weight, chỉ đổi kích thước gflat (_attn_pin.tkv):
+
+| lần | gflat 475 MB | gflat 159 MB | chênh |
+|---|---:|---:|---:|
+| 1 | 78.0 | 62.0 | +16.0 |
+| 2 | 63.0 | 78.0 | −15.0 |
+| 3 | 63.0 | 78.0 | −15.0 |
+| 4 | 62.0 | 110.0 | −48.0 |
+| 5 | 46.0 | 63.0 | −17.0 |
+| 6 | 47.0 | 62.0 | −15.0 |
+
+Dấu **đảo liên tục**. gflat 475 MB có lúc nhanh hơn gflat 159 MB **48 ms**.
+Nếu pin tỉ lệ kích thước thì mọi hàng phải dương và xấp xỉ nhau. Không có
+quan hệ nào.
+
+### 3. Vì sao về lý thuyết cũng không thể có chi phí đó
+
+Đọc IL của wrapper (out/attnwrap.il, TkvTorchAttentionBwdM): nó chỉ làm
+
+- ldtoken List<float> + GetField("_items", 36) — **một lần**, O(1)
+- ldelema float32 trên mỗi list để lấy con trỏ — O(1) mỗi list
+- conv.i + gọi TkvTorchAttentionBwdNative — 8 con trỏ, 8 số
+
+Không có vòng lặp trên phần tử, không copy, không Marshal.Copy. Pin một mảng
+lớn không tốn thêm so với pin mảng nhỏ — GC chỉ ghi nhận handle. Nên con số
+"7 ms cho 475 MB" không có cơ chế nào sinh ra nó.
+
+### 4. Hệ quả
+
+- **Đừng** làm work order "native buffer cho gflat" — không có gì để thu.
+- TkvTorchAttentionBwd ở **54.5 ms/layer** là con số đúng, không phải 88.5.
+  Con số 88.5 của §0.143 đo trong **block thật** (12 layer, 324 MB weight, cache
+  lạnh) — khác điều kiện, không phải khác wrapper. Hai số không mâu thuẫn.
+- Việc còn lại của ttention_bwd vẫn là bài toán cũ: đường native chậm hơn
+  ATen (1.26–1.62x, §0.143 + §0.145), và "lưu ctx+lse" không cứu được (§0.145).
+
+### 5. Verify
+
+- .tkv best-of-15 = 54.50; C harness best-of-15 = 61.28 (probe_attn_save_run.exe 1024 15 4)
+- Cùng 4 bộ weight (36 MB) ở cả hai, cùng gflat 124439808 phần tử
+- Dải nhiễu một lần đo: 46–110 ms (6 mẫu, _attn_pin.tkv)
+- IL: out/attnwrap.il L1849 (pinvoke), L3960–4130 (TkvTorchAttentionBwdM thân hàm)
+- Không sửa code production; chỉ thêm probe

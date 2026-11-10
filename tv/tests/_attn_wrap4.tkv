@@ -1,0 +1,75 @@
+﻿import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    hd = HeadDim
+    V = VocabSize
+    NL = NLayers
+    print("=== torch_attention_bwd goi TRUC TIEP tu .tkv, 4 bo weight (giong C harness) ===")
+    npar = V * h + MaxPos * h + h + h
+    npar = npar + NL * (h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h + h)
+    gt = t_zeros([npar])
+    gflat = gt.data
+    wqa = t_zeros([h, 3 * h])
+    wqb = t_zeros([h, 3 * h])
+    wqc = t_zeros([h, 3 * h])
+    wqd = t_zeros([h, 3 * h])
+    wpa = t_zeros([h, h])
+    wpb = t_zeros([h, h])
+    wpc = t_zeros([h, h])
+    wpd = t_zeros([h, h])
+    bqkv = t_zeros([3 * h])
+    bproj = t_zeros([h])
+    x = t_zeros([n, h])
+    gout = t_zeros([n, h])
+    dx = t_zeros([n, h])
+    xd = x.data
+    gd = gout.data
+    dxd = dx.data
+    wqad = wqa.data
+    wqbd = wqb.data
+    wqcd = wqc.data
+    wqdd = wqd.data
+    wpad = wpa.data
+    wpbd = wpb.data
+    wpcd = wpc.data
+    wpdd = wpd.data
+    bqd = bqkv.data
+    bpd = bproj.data
+    base = V * h + MaxPos * h + h + h
+    stride = h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h + h
+    oa = base + h + h
+    oba = oa + 3 * h * h
+    opa = oba + 3 * h
+    obpa = opa + h * h
+    ob = base + stride + h + h
+    obb = ob + 3 * h * h
+    opb = obb + 3 * h
+    obpb = opb + h * h
+    oc = base + 2 * stride + h + h
+    obc = oc + 3 * h * h
+    opc = obc + 3 * h
+    obpc = opc + h * h
+    od = base + 3 * stride + h + h
+    obd = od + 3 * h * h
+    opd = obd + 3 * h
+    obpd = opd + h * h
+
+    r = torch_attention_bwd(xd, gd, wqad, bqd, wpad, bpd, dxd, gflat, n, h, NHeads, hd, oa, oba, opa, obpa)
+    r = torch_attention_bwd(xd, gd, wqbd, bqd, wpbd, bpd, dxd, gflat, n, h, NHeads, hd, ob, obb, opb, obpb)
+    r = torch_attention_bwd(xd, gd, wqcd, bqd, wpcd, bpd, dxd, gflat, n, h, NHeads, hd, oc, obc, opc, obpc)
+    r = torch_attention_bwd(xd, gd, wqdd, bqd, wpdd, bpd, dxd, gflat, n, h, NHeads, hd, od, obd, opd, obpd)
+    print("warm rc = " + str(r))
+
+    k = 0
+    while k < 5:
+        t0 = now_ms()
+        r = torch_attention_bwd(xd, gd, wqad, bqd, wpad, bpd, dxd, gflat, n, h, NHeads, hd, oa, oba, opa, obpa)
+        r = torch_attention_bwd(xd, gd, wqbd, bqd, wpbd, bpd, dxd, gflat, n, h, NHeads, hd, ob, obb, opb, obpb)
+        r = torch_attention_bwd(xd, gd, wqcd, bqd, wpcd, bpd, dxd, gflat, n, h, NHeads, hd, oc, obc, opc, obpc)
+        r = torch_attention_bwd(xd, gd, wqdd, bqd, wpdd, bpd, dxd, gflat, n, h, NHeads, hd, od, obd, opd, obpd)
+        t = (now_ms() - t0) / 4.0
+        print("lan " + str(k + 1) + ": " + str(t) + " ms/layer   [C harness: 63.10]")
+        k = k + 1
+    return 0
