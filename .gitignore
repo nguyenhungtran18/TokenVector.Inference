@@ -1,4 +1,4 @@
-﻿# Build and Output Folders
+# Build and Output Folders
 bin/
 obj/
 TestResults/
@@ -51,3 +51,10 @@ tv/tests/g2_full_dir.txt
 
 # Fixture GPT-2 124M (~2.3 GB, sinh bang gen_gpt2_fixture.py --full) — NGOAI git
 tv/tests/fixtures-124m/
+# Perch session metadata (khong phai source)
+.perch/
+
+# Scratch do luong flash SDPA (probe .c + build artifact, khong phai source)
+/_flash_work/
+/_fw2/
+/_fw3/

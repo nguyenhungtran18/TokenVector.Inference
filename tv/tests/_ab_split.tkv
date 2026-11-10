@@ -1,0 +1,42 @@
+# Probe: tach thoi gian attention_bwd_fused (flash) khoi gpt2_attention_bwd (ca layer)
+import tv.training.gpt2_ref124
+
+def main() -> 'i32':
+    n = 1024
+    h = 768
+    hd = 64
+    inv = 1.0 / 8.0
+    qkv = t_zeros([n, 3 * h])
+    dctx = t_zeros([n, h])
+    ctxo = t_zeros([n, hd])
+    dqo = t_zeros([n, 3 * hd])
+    ql = qkv.data
+    dl = dctx.data
+    cl = ctxo.data
+    qol = dqo.data
+
+    # warmup
+    for head in range(12):
+        rc = attention_bwd_fused(ql, dl, cl, qol, n, h, hd, head, inv)
+    t0 = now_ms()
+    for rep in range(3):
+        for head in range(12):
+            rc = attention_bwd_fused(ql, dl, cl, qol, n, h, hd, head, inv)
+    t1 = now_ms()
+    print("flash 12 head SEQUENTIAL x3: " + str(t1 - t0) + " ms -> " + str((t1 - t0) / 3.0) + " ms/layer  rc=" + str(rc))
+
+    # ca layer (native path: gflat=None)
+    x = t_zeros([n, h])
+    wqkv = t_zeros([h, 3 * h])
+    bqkv = t_zeros([3 * h])
+    wp = t_zeros([h, h])
+    bp = t_zeros([h])
+    gout = t_zeros([n, h])
+    for i in range(2):
+        r = gpt2_attention_bwd(x, wqkv, bqkv, wp, bp, n, gout, 1)
+    t0 = now_ms()
+    for i in range(6):
+        r = gpt2_attention_bwd(x, wqkv, bqkv, wp, bp, n, gout, 1)
+    t1 = now_ms()
+    print("gpt2_attention_bwd NATIVE x6: " + str(t1 - t0) + " ms -> " + str((t1 - t0) / 6.0) + " ms/layer")
+    return 0
