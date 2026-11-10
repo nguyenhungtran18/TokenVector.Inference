@@ -206,8 +206,7 @@ def _attn_f_one(j: "_AtnFJob") -> 'i64':
     n = j.n
     inv = j.inv
     for head in range(j.hlo, j.hhi):
-        # flash attention fwd (online-softmax, fp32 causal; port thuat toan tu C++
-        # kernel ATen BSD-3, KHONG phai PyTorch binary):
+        # flash attention fwd (online-softmax, fp32 causal; YEU CAU IL #flash_fwd):
         # 1 lenh native thay block smm_dot+softmax_causal_fwd+smm_fwd.
         # rc != 0 -> duong cu NGUYEN VAN ben duoi (fallback).
         ql = j.qkvl
@@ -657,9 +656,9 @@ def gpt2_block_saved(x: "Tensor", ln1_g: "Tensor", ln1_b: "Tensor",
                      ln2_g: "Tensor", ln2_b: "Tensor",
                      w1: "Tensor", b1: "Tensor", w2: "Tensor", b2: "Tensor",
                      simd: 'i32' = 0, sa_buf: "Tensor" = None,
-                      abuf: 'list[Tensor]' = None,
-                      a_ln_p: "Tensor" = None, r_p: "Tensor" = None,
-                      m_ln_p: "Tensor" = None, out_p: "Tensor" = None) -> 'list[Tensor]':
+                     abuf: 'list[Tensor]' = None,
+                     a_ln_p: "Tensor" = None, r_p: "Tensor" = None,
+                     m_ln_p: "Tensor" = None, out_p: "Tensor" = None) -> 'list[Tensor]':
     n = _sh0(x)
     h = _sh1(x)
     a_ln = gpt2_layernorm(x, ln1_g, ln1_b, a_ln_p)
@@ -1424,9 +1423,9 @@ def _attn_hb_one(j: "_AtnJob") -> 'i64':
 
 
 def _attn_hb_merge(co: "list[f32]", qo: "list[f32]", ct: "list[f32]", dq: "list[f32]", n: 'i64', h: 'i64', hd: 'i64', hlo: 'i64', hhi: 'i64') -> 'i64':
-    # gop output rieng PACKED (P6 GĐ5: co/[t2*hd], qo/[t2*3*hd]) vao
-    # ctxT/dqkv theo vi tri (t, head, d) — gia tri khong doi -> BIT-EXACT.
-    # P6 GĐ2: cham NHeads (giong _attn_hb_one) — doc/ghi ngoai hang ban nho.
+    # gop output rieng PACKED (P6 G-5: co/[t2*hd], qo/[t2*3*hd]) vao
+    # ctxT/dqkv theo vi tri (t, head, d) - gia tri khong doi -> BIT-EXACT.
+    # P6 G-2: cham NHeads (giong _attn_hb_one) - doc/ghi ngoai hang ban nho.
     if hlo >= NHeads:
         return 0
     for head in range(hlo, hhi):
@@ -1441,6 +1440,8 @@ def _attn_hb_merge(co: "list[f32]", qo: "list[f32]", ct: "list[f32]", dq: "list[
                 dq[r0 + h + d] = qo[p0 + hd + d]
                 dq[r0 + 2 * h + d] = qo[p0 + 2 * hd + d]
     return hhi - hlo
+
+
 def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                        w_proj: "Tensor", b_proj: "Tensor", n: 'i64', gout: "Tensor", simd: 'i32' = 0,
                        gflat: 'list[f32]' = None, o_qkv: "i64" = -1, o_bqkv: "i64" = -1,
@@ -1455,6 +1456,8 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
     db_proj = t_zeros([h])
     # P5.1 (perf-plan): dctx theo hang [n, h] + ctx theo hang [n, h] (cho
     # dw_proj GEMM). Duong scalar van giu list cuc bo => BIT-EXACT nhu truoc.
+    # §0.118: pool [n,h] tai su dung (ATen path khong dung — pool reuse khong
+    # ton zero-fill); sai kich thuoc -> t_zeros nhu cu.
     ctxT = _ab_pool(abuf, 2, n, h)
     dctxT = _ab_pool(abuf, 3, n, h)
     if simd == 1:
@@ -1492,6 +1495,21 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
         # Vong head LA NGOAI vong token -> moi head mot lan n x n, O(n^2*hd).
         # P6 (2026-10-21): SONG SONG 12 HEAD — worker rieng, main gop (xem
         # ghi chu P6 truoc gpt2_attention_bwd). n nho (<128) giu duong cu.
+        # ---- Phase 2c-2 (2026-11-10): CA 12 HEAD + MERGE trong 1 lenh native
+        # .tkv spawn 12 thread roi moi thread goi 1 head, nhung pool cua .tkv
+        # chi dat 1.42x (139 ms/layer vs 198 tuan tu). Work-queue trong C dat
+        # 5.5x (33 ms/layer) — cung ly do ATen SDPA thang truoc day.
+        # Ham nay lam ca 12 head VA ghi thang vao ctxT/dqkv (bo 12 buffer
+        # trung gian + 12 lan goi merge_hb_head). Verify BIT-IDENTICAL
+        # (max_abs 0.0, 0 phan tu lech) tren n=1024.
+        # rc != 0 -> roi xuong duong cu NGUYEN VAN ben duoi (soft-fail).
+        _amm_rc = -1
+        if n >= 128:
+            _aqkv = qkv.data
+            _adc = dctxT.data
+            _act = ctxT.data
+            _adq = dqkv.data
+            _amm_rc = attention_bwd_merge_multi(_aqkv, _adc, _act, _adq, n, h, hd, inv, NHeads)
         if n < 128:
             # YEU CAU #10 Ask C.2 (2026-11-01): cache 5 scratch cua 12 head —
             # truoc do 5 t_zeros/head = 60 cap phat/moi goi (4.39 ms bucket).
@@ -1597,7 +1615,7 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                         # gDkT/gDvT luu [d hang][t cot] -> doc strided [d*n + t2]
                         dqkv.data[r0 + h + d] = gDkT.data[d * n + t2] * inv
                         dqkv.data[r0 + 2 * h + d] = gDvT.data[d * n + t2]
-        else:
+        elif _amm_rc != 0:
             # P6 GĐ5 (probe BN): buffer PACKED n*hd (ctx) + n*3*hd (dq)
             # per worker — bo ~330ms/layer zero-fill (37.2M -> 3.15M ptu)
             ctxo0 = _attn_hb_zlist(n * hd)
@@ -1845,6 +1863,21 @@ def _emb_bwd_worker(j: "_EmbBwdJob") -> 'i64':
         for c in range(d):
             j.out_data[r * d + c] = j.out_data[r * d + c] + j.gy_data[t * d + c]
     return 0
+
+# ==== P6 M6 DWTE COPY OVERLAP (copy m6_pdwe -> dw.data worker || layer bwd main) ====
+class _DwteCopyJob:
+    src: 'i64'
+    dst: "list[f32]"
+    n: 'i64'
+    def __init__(self, src: 'i64', dst: "list[f32]", n: 'i64'):
+        self.src = src
+        self.dst = dst
+        self.n = n
+
+def _dwte_copy_worker(j: "_DwteCopyJob") -> 'i64':
+    dst_l: "list[f32]" = j.dst
+    return f32_copy_from_buf(j.src, dst_l, j.n)
+
 
 
 # P6 GD10 (2026-11-09): gelu-bwd ghi vao buffer caller cap san (tranh
@@ -2190,7 +2223,8 @@ def gpt2_backward(ids: 'list[i64]', pos: 'list[i64]',
             rb = gpt2_block_bwd(xins[li], ln1_g[li], ln1_b[li],
                                 w_qkv[li], b_qkv[li], w_proj[li], b_proj[li],
                                 ln2_g[li], ln2_b[li],
-                                w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo, None, None, None, None, None, None, None, abuf)
+                                w1[li], b1[li], w2[li], b2[li], gx, simd, gflat, lo,
+                                None, None, None, None, None, None, None, abuf)
         else:
             # P6 GĐ8 (2026-11-08): saves format 3+5N (logits, xf, xf_in, xins, rs
             # + ains, msin + 1 gelu output `a` per layer) -> bo gelu recompute,

@@ -336,6 +336,9 @@ và transpose K/V lại cho **mỗi** block `m0`.
    Transpose toàn bộ K/V một lần ra buffer `[n][64]` transposed → bỏ ~½ chi phí transpose.
    Ước tính: −15…25 ms/layer. **Nên làm trước, rẻ nhất.**
 
+   > **SAI — đã đính chính ở §4.8.** `transpose_block64` nằm ở mức vòng `n0`
+   > (16 lần cho n=1024), KHÔNG phải mỗi block `m0`. Không có gì để hoist.
+
 2. **Xử lý 2 head cùng lúc** (register blocking theo head). Với hd=64, hai head = 128 float
    mỗi hàng; 8 thanh ghi ymm đang dùng cho 1 head → cần chia lại. Lợi: chia sẻ hoàn toàn
    việc đọc K/V (cùng token, khác head) → giảm một nửa lưu lượng đọc K/V.
@@ -468,3 +471,43 @@ không đổi.
 **Điều chỉnh mục tiêu:** với bwd ở 18.4 ms/layer, "≤ 80 ms/layer" của §4.4 không
 còn là ngưỡng đúng — đã vượt xa. Điều kiện tiên quyết của Phase 3 giờ là
 **wire vào production + chạy gate**, không phải tối ưu thêm.
+
+---
+
+### 4.9 Phase 2c-2 ĐO THẬT (2026-11-10) — số thật khác §4.8
+
+§4.8 dự đoán bwd 18.4 ms/layer (5.5x so với ATen 101). **Đo end-to-end trong production
+thì không được như vậy.** Ghi lại số thật để không ai đọc §4.8 rồi tưởng đã xong.
+
+**Bẫy đã dính: hai bản module trùng tên.** Compiler resolve `import tv.training.gpt2_ref124`
+theo thư mục của file đang dịch. `tv/tests/simd_bench_124m_seq.tkv` -> nó nạp
+`tv/tests/tv.training.gpt2_ref124.tkv`, KHÔNG phải `tv/training/...`. Sửa bản
+`training` rồi build bench = build bản cũ, im lặng, không báo lỗi. Đã đồng bộ hai bản.
+
+**Số đo end-to-end (Xeon E5-2695 v3, 28 logical, AVX2, seq1024, glue probe #8):**
+
+| đường | ms/layer | ×12 layer |
+|---|---|---|
+| ATen SDPA bwd (production, `gflat` có data) | 101.7 | 1220 |
+| Native cũ (12 thread .tkv + 12x merge) | 140.7 | 1688 |
+| Native mới (`attention_bwd_merge_multi`, work-queue C) | **135.4** | **1625** |
+| Native, `TKV_FLASH_OFF=1` (scalar) | 220.0 | 2640 |
+
+**Kết luận: 140.7 -> 135.4 ms/layer, tức 1.04x. Không phải 5.5x.**
+
+Vì sao lệch với §4.8: con số 18.4 ms/layer ở §4.8 là **chỉ phần flash kernel**, đo
+trên probe gọi thẳng `FlashAttentionBwdFusedLseMulti`. Trong production, `gpt2_attention_bwd`
+còn làm `gpt2_linear` (qkv), `smm_dot` (dctx), `gpt2_linear_bwd`, `dw_proj` GEMM,
+`bias_grad`, và merge — cộng lại ~117 ms/layer không nằm trong kernel. Kernel nhanh
+6.5x chỉ rút được ~5 ms trên tổng, vì phần còn lại đã chiếm 87%.
+
+**Điều này khớp với cảnh báo cuối §4.7:** attention không phải nút thắt duy nhất, và
+tối ưu kernel đơn lẻ không đưa được step xuống ≤0.8x.
+
+**Trạng thái Phase 3:** đã wire xong, gate 9/10 (chỉ `gap_tests` pre-existing),
+trainer 15/15, self-host `IL_IDENTICAL`, loss EXACT cả 3 mốc
+(`10.572291` / `10.756927` / `10.760399`). Đường mới **chạy đúng và bit-identical**,
+chỉ là lợi ích nhỏ hơn dự đoán.
+
+**Việc còn lại để thắng PyTorch:** cắt phần 117 ms/layer ngoài kernel (qkv linear,
+dctx smm_dot, linear_bwd, dw_proj) — đó mới là chỗ có tiền. Không phải attention kernel.

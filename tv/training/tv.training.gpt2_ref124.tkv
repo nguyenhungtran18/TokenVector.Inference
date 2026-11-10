@@ -1428,7 +1428,18 @@ def _attn_hb_merge(co: "list[f32]", qo: "list[f32]", ct: "list[f32]", dq: "list[
     # P6 G-2: cham NHeads (giong _attn_hb_one) - doc/ghi ngoai hang ban nho.
     if hlo >= NHeads:
         return 0
-    return merge_hb_head(co, qo, ct, dq, n, h, hd, hlo, hhi)
+    for head in range(hlo, hhi):
+        ho = head * hd
+        for t2 in range(n):
+            c0 = t2 * h + ho
+            p0 = t2 * 3 * hd
+            r0 = t2 * 3 * h + ho
+            for d in range(hd):
+                ct[c0 + d] = co[t2 * hd + d]
+                dq[r0 + d] = qo[p0 + d]
+                dq[r0 + h + d] = qo[p0 + hd + d]
+                dq[r0 + 2 * h + d] = qo[p0 + 2 * hd + d]
+    return hhi - hlo
 
 
 def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
@@ -1484,6 +1495,21 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
         # Vong head LA NGOAI vong token -> moi head mot lan n x n, O(n^2*hd).
         # P6 (2026-10-21): SONG SONG 12 HEAD — worker rieng, main gop (xem
         # ghi chu P6 truoc gpt2_attention_bwd). n nho (<128) giu duong cu.
+        # ---- Phase 2c-2 (2026-11-10): CA 12 HEAD + MERGE trong 1 lenh native
+        # .tkv spawn 12 thread roi moi thread goi 1 head, nhung pool cua .tkv
+        # chi dat 1.42x (139 ms/layer vs 198 tuan tu). Work-queue trong C dat
+        # 5.5x (33 ms/layer) — cung ly do ATen SDPA thang truoc day.
+        # Ham nay lam ca 12 head VA ghi thang vao ctxT/dqkv (bo 12 buffer
+        # trung gian + 12 lan goi merge_hb_head). Verify BIT-IDENTICAL
+        # (max_abs 0.0, 0 phan tu lech) tren n=1024.
+        # rc != 0 -> roi xuong duong cu NGUYEN VAN ben duoi (soft-fail).
+        _amm_rc = -1
+        if n >= 128:
+            _aqkv = qkv.data
+            _adc = dctxT.data
+            _act = ctxT.data
+            _adq = dqkv.data
+            _amm_rc = attention_bwd_merge_multi(_aqkv, _adc, _act, _adq, n, h, hd, inv, NHeads)
         if n < 128:
             # YEU CAU #10 Ask C.2 (2026-11-01): cache 5 scratch cua 12 head —
             # truoc do 5 t_zeros/head = 60 cap phat/moi goi (4.39 ms bucket).
@@ -1589,7 +1615,7 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                         # gDkT/gDvT luu [d hang][t cot] -> doc strided [d*n + t2]
                         dqkv.data[r0 + h + d] = gDkT.data[d * n + t2] * inv
                         dqkv.data[r0 + 2 * h + d] = gDvT.data[d * n + t2]
-        else:
+        elif _amm_rc != 0:
             # P6 GĐ5 (probe BN): buffer PACKED n*hd (ctx) + n*3*hd (dq)
             # per worker — bo ~330ms/layer zero-fill (37.2M -> 3.15M ptu)
             ctxo0 = _attn_hb_zlist(n * hd)
