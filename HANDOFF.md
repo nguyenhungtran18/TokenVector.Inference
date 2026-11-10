@@ -6679,3 +6679,105 @@ con hai duong that:
 - Luu ctx+lse o fwd, dung `FlashAttentionBwdFusedLseMulti` truc tiep: ~81 ms/layer
 
 Ca hai la work order, chua lam.
+
+## §0.144 KẾT QUẢ "LƯU ctx+lse Ở FWD" — giữ graph ATen là BIT-IDENTICAL nhưng KHÔNG nhanh hơn; tiền đề "~81 ms/layer" của §0.143 §7 SAI
+
+**Ngày:** 2026-11-11. Probe: `tools/simd_native/probe_attn_save.cpp` (DLL),
+`probe_attn_save_run.c` (harness), `build_probe_attn_save.ps1`,
+`build_probe_attn_save_run.ps1`; exe `out/probe_attn_save_run.exe`;
+`.tkv` `tv/tests/_attn_fwdshare.tkv`, `_attn_wrap.tkv`, `_attn_ab4.tkv`.
+
+### 0. Kết luận trước
+
+Yêu cầu: "lưu ctx+lse ở fwd, dùng `FlashAttentionBwdFusedLseMulti` trực tiếp: ~81 ms/layer".
+**Đo thật: không đạt được 81. Không có đường nào ở đây cho ra 81.**
+
+Ba phát hiện, theo thứ tự quan trọng:
+
+1. **`TkvTorchAttentionBwd` đã KHÔNG recompute fwd theo nghĩa tốn kém.** Nó dựng graph
+   ATen fwd rồi `backward()`. Giữ graph đó sống (thay vì dựng lại) **không nhanh hơn**:
+   `A_bwd − C` = **−5.65 … +0.92 ms/layer**, tức quanh 0, có lúc âm. Việc "tính lại fwd"
+   trong bwd **không phải chi phí trùng lặp cắt được** — nó là một phần của chính graph
+   mà autograd cần.
+2. **Giữ graph qua ranh giới fwd/bwd là BIT-IDENTICAL** (max_abs dx = 0.000000e+00,
+   max_abs gflat = 0.000000e+00, 30 node sống). Nên nếu ai muốn làm vì lý do kiến trúc
+   thì nó an toàn về số. Nhưng nó **không mua được thời gian**.
+3. **Đường native vẫn chậm hơn ATen 1.26–1.62x** (xác nhận lại §0.143 với 4 bộ weight:
+   ATen 82.0/86.0/89.75, native 113.25/117.25/132.75). `FlashAttentionBwdFusedLseMulti`
+   có export nhưng **không có pinvoke trong .tkv**, và ngay cả khi thêm thì P (recompute
+   fwd + kernel) vẫn thua một lệnh ATen.
+
+### 1. Số đo chính — 4 bộ weight thật (36 MB), seq 1024, best of 15
+
+`out/probe_attn_save_run.exe 1024 15 4`:
+
+| | ms/layer |
+|---|---:|
+| A) `TkvTorchAttentionBwd` (fwd+bwd 1 lệnh) | 61.28 |
+| — trong đó fwd | 17.88 |
+| — trong đó bwd | 43.40 |
+| B) fwd giữ graph | 24.70 |
+| C) bwd dùng graph đã giữ | 42.48 |
+| **B+C** | **67.18** |
+| D) gọi THẲNG `tkv_simd_native.dll` | 55.02 |
+| E) `TkvTorchSdpa` gọi thẳng (fwd) | 10.12 |
+
+Hai số quyết định:
+- `A_bwd − C` = **+0.92 ms** → giữ graph **không** bỏ được phần fwd trong bwd.
+- `B − A_fwd` = **+6.82 ms** → giữ graph ở fwd **tốn thêm** 6.82 ms.
+
+Nên "lưu ctx+lse" theo nghĩa giữ graph: **+6.82 ms/layer, không phải −21.9**.
+
+### 2. Vì sao tiền đề §0.143 §7 sai
+
+§0.143 §7 tôi viết: "recompute 8.8 ms vẫn còn (trừ khi fwd lưu ctx/lse) … 114.7 → ~81".
+Sai ở hai chỗ:
+
+1. **8.8 ms đó là của đường NATIVE** (`FlashAttentionFwdLseMulti` recompute), không phải
+   của ATen. ATen không recompute gì cả — `TkvTorchAttentionBwd` dựng graph một lần rồi
+   backward trên chính graph đó. Không có "fwd lần hai" để cắt.
+2. **Phép trừ 114.7 − 8.8 − 27 = 79 quá đẹp để đúng.** Nó giả định cả ba khoản (recompute,
+   glue, GEMM) đều cắt được cùng lúc, trong khi glue 27 ms chỉ cắt được nếu viết lại toàn
+   bộ hàm trong C, và GEMM 37.6 ms là công việc thật.
+
+Con số 21.9 ms "fwd bên trong" ở §0.143 §2 là **có thật** (`_attn_fwdshare.tkv`: sdpa 14.0
++ qkv 4.7 + proj 3.2 = 21.9), nhưng nó **không phải chi phí trùng lặp** — bỏ nó đi thì
+không còn graph để backward.
+
+### 3. Một phát hiện phụ đáng ghi: wrapper managed tốn ~7 ms/call trên gflat 475 MB
+
+`_attn_wrap.tkv`, cùng hàm `torch_attention_bwd`, cùng 4 bộ weight:
+
+| gọi từ | ms/call |
+|---|---:|
+| C harness (DLL trực tiếp) | 63.10 |
+| `.tkv` (qua wrapper managed) | 70.17 |
+| chênh | **7.07** |
+
+`torch_sdpa_fwd` (list 9.4 MB): C 8.11 vs `.tkv` 10.9 → chênh **2.8 ms**.
+
+Nghĩa là wrapper `TkvSimd::*` (reflection `List<float>.GetField("_items")` + pin) có chi
+phí **tỉ lệ với kích thước list**, khoảng **7 ms cho 475 MB**. Đây là chi phí thật, chưa
+từng được ghi trong handoff, và nó áp cho **mọi** lệnh nhận `gflat`. Với 12 layer × 2 lệnh
+(`attention_bwd` + `mlp_bwd` ×2) thì đây là **~170–250 ms/step** chỉ để pin list.
+
+Đây mới là thứ đáng tấn công, và nó **không cần** đụng vào attention.
+
+### 4. Verify
+
+- Parity A vs B+C: `max_abs dx = 0.000000e+00`, `max_abs gflat = 0.000000e+00`,
+  `|dx| tổng = 400.665290`, `|gflat| tổng = 37413.496069` → **BIT-IDENTICAL**
+- Graph sống sau fwd: **30 node** (`ProbeGraphNodes`)
+- A/B native vs ATen lặp 3 lần: 1.26 / 1.36 / 1.62 → native luôn chậm hơn
+- `bq`/`bp` phải `memset` 0 trong probe (lần đầu để rác → gradient nổ, |dx| = 1e29)
+- `_seq_cfg.txt` vẫn `1024 / 1 / 1 / 1`
+- Không sửa code production nào; chỉ thêm probe + DLL probe
+
+### 5. Việc nên làm tiếp (thay cho hai work order đã chết)
+
+1. **Cắt chi phí pin list của wrapper managed** (mục 3). ~7 ms/call × ~24 call/step.
+   Cách: cho các hàm nhận `gflat` một đường "native buffer" (`f32buf_wrap` / `alloc_bytes`)
+   thay vì `list[f32]`, giống `f32_zero` đã làm. Đo được, không đổi số học.
+2. Nếu vẫn muốn đường native cho attention: phải **thêm pinvoke** cho
+   `FlashAttentionBwdFusedLseMulti` **và** cho fwd trả ctx+lse **trong cùng một lệnh C**,
+   rồi đo lại. Nhưng mục 1 rẻ hơn nhiều và chắc chắn thắng.

@@ -1,0 +1,8 @@
+﻿import tv.training.gpt2_ref124
+
+@native("probe_attn_save.dll")
+def ProbeFwdBwdOne(x: 'list[f32]', gout: 'list[f32]', wq: 'list[f32]', bq: 'list[f32]', wp: 'list[f32]', bp: 'list[f32]', dx: 'list[f32]', gflat: 'list[f32]', n: 'i64', h: 'i64', nh: 'i64', hd: 'i64', oq: 'i64', obq: 'i64', op: 'i64', obp: 'i64', msf: 'list[f64]', msb: 'list[f64]') -> 'i32': ...
+
+def main() -> 'i32':
+    print("ok")
+    return 0
