@@ -5293,21 +5293,20 @@ hoac bo sung ngoai le .gitignore. Chua lam vi can xac nhan build.ps1 doc tu dau.
 
 ## §0.130 Phase 3 XONG + do lai PyTorch (2026-11-10)
 
-**Commit:** 147d6a1 (Inference) + 4a6dd92 (Release).
+**Commit:** `147d6a1` (Inference) + `4a6dd92` (Release).
 
 ### Da lam
-- Wire ttention_bwd_merge_multi vao gpt2_attention_bwd (fast path 
- >= 128,
-  soft-fail c != 0 -> duong cu nguyen van).
+- Wire `attention_bwd_merge_multi` vao `gpt2_attention_bwd` (fast path `n >= 128`,
+  soft-fail `rc != 0` -> duong cu nguyen van).
 - Sua 2 bug chan:
-  1. 	v/training/... goi merge_hb_head - ham KHONG TON TAI. Ban nay khong dich duoc.
+  1. `tv/training/...` goi `merge_hb_head` - ham KHONG TON TAI. Ban nay khong dich duoc.
      Thay lai bang vong inline.
-  2. **Bay thu muc shadow:** compiler resolve import tv.training.gpt2_ref124 theo
-     thu muc cua file dang dich. 	v/tests/simd_bench_124m_seq.tkv nap
-     	v/tests/tv.training.gpt2_ref124.tkv, KHONG phai 	v/training/.... Sua ban
+  2. **Bay thu muc shadow:** compiler resolve `import tv.training.gpt2_ref124` theo
+     thu muc cua file dang dich. `tv/tests/simd_bench_124m_seq.tkv` nap
+     `tv/tests/tv.training.gpt2_ref124.tkv`, KHONG phai `tv/training/...`. Sua ban
      training roi build bench = build ban cu, im lang. Da dong bo hai ban.
-- Them 	ools/_rungate.sh: WSL khong co dotnet -> 8/10 suite bao FAIL gia
-  (fallback .NET 10 khong chay). Script cai shim + xu ly CRLF cua gate_f32.sh.
+- Them `tools/_rungate.sh`: WSL khong co `dotnet` -> 8/10 suite bao FAIL gia
+  (fallback .NET 10 khong chay). Script cai shim + xu ly CRLF cua `gate_f32.sh`.
 
 ### So do that (seq1024, cung may)
 | | ms | so voi PyTorch |
@@ -5322,15 +5321,15 @@ hoac bo sung ngoai le .gitignore. Chua lam vi can xac nhan build.ps1 doc tu dau.
 ### Su that can noi thang
 Kernel flash nhanh **6.5x** (139 -> 18.4 ms/layer do rieng kernel), nhung
 end-to-end chi **1.04x** (140.7 -> 135.4). Vi 87% thoi gian con lai cua
-gpt2_attention_bwd nam NGOAI kernel: gpt2_linear (qkv), smm_dot (dctx),
-gpt2_linear_bwd, dw_proj GEMM, ias_grad.
+`gpt2_attention_bwd` nam NGOAI kernel: `gpt2_linear` (qkv), `smm_dot` (dctx),
+`gpt2_linear_bwd`, `dw_proj` GEMM, `bias_grad`.
 
 Con 1.26x de dong. Muon <=0.8x phai cat ~1100 ms nua, va no khong nam o attention
 kernel. Ung vien: MLP bwd, LN fwd (Phase 5), va phan linear trong attention bwd.
 
 ### Verify
-- loss EXACT: 10.572291 / 10.756927 / 10.760399
-- gate **9/10** (chi gap_tests pre-existing, exit=82)
+- loss EXACT: `10.572291` / `10.756927` / `10.760399`
+- gate **9/10** (chi `gap_tests` pre-existing, exit=82)
 - trainer **15/15**
 - self-host **IL_IDENTICAL**
-- bit-identical: max_abs 0.0, 0 phan tu lech @n=1024
+- bit-identical: `max_abs 0.0`, 0 phan tu lech @n=1024
