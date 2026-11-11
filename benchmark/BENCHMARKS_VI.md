@@ -1,6 +1,6 @@
 ﻿# BENCHMARKS — Bản tóm tắt tiếng Việt (cập nhật 2026-11-11)
 
-Tài liệu này là bản tóm tắt tiếng Việt của `BENCHMARKS.md` (bản tiếng Anh —
+Tài liệu này là bản tóm tắt tiếng Việt của `benchmark/BENCHMARKS.md` (bản tiếng Anh —
 nhật ký đầy đủ từ §4 đến §9.22). Bản VI cũ (2026-09-28, coi mọi số liệu là
 stub vô nghĩa, "không có SIMD", đường dẫn compiler chết) đã lỗi thời và được
 thay bằng trang này.
@@ -23,7 +23,7 @@ gpt2_full_tests **33/33**.
 
 ## Cách đo (recipe hiện hành)
 
-Xem `BENCHMARKS.md` §1. Tóm tắt:
+Xem `benchmark/BENCHMARKS.md` §1. Tóm tắt:
 
 - TKV: `& $tkvc tv/tests/simd_bench_124m_seq.tkv benchmark/bseq.exe main`, cấu hình
   `tv/tests/_seq_cfg.txt` = `<seq>/<mode>/<steps>/<warmup>` (`mode=0` fwd+bwd,
@@ -42,5 +42,5 @@ Xem `BENCHMARKS.md` §1. Tóm tắt:
 - Mode 1 dao động mạnh; số tin cậy cho quyết định theo pha là mode 2.
 - Suite `compare_rivals.tkv` là smoke legacy — hằng số ORT_*/TORCH_* trong đó
   là literal, không phải phép đo; không trích dẫn.
-- `HANDOFF.md` là nhật ký kỹ thuật; mọi kết luận số học (numerics contract)
+- `docs/HANDOFF.md` là nhật ký kỹ thuật; mọi kết luận số học (numerics contract)
   xem `docs/numerics-contract.md`.

@@ -1,4 +1,4 @@
-**TRẠNG THÁI 2026-11-11:** Gap mà doc này nhắm tới **đã đóng**: backward @seq1024 = 2328 ms (TKV mode 2) vs torch 2357.0 (e, T=14) — gần ngang torch; tổng 0.989× (`BENCHMARKS.md` §9.22). Giữ file làm hồ sơ yêu cầu; không thực thi.
+**TRẠNG THÁI 2026-11-11:** Gap mà doc này nhắm tới **đã đóng**: backward @seq1024 = 2328 ms (TKV mode 2) vs torch 2357.0 (e, T=14) — gần ngang torch; tổng 0.989× (`benchmark/BENCHMARKS.md` §9.22). Giữ file làm hồ sơ yêu cầu; không thực thi.
 
 # YÊU CẦU COMPILER TEAM #12 — BWD non-GEMM native + opt.step copy-back (sau #10/#11)
 

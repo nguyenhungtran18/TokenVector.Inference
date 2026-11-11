@@ -3,7 +3,7 @@
 # ============================================================================
 #  PARITY TESTS â€” doi chieu thuat toan TokenVector voi PyTorch
 # ----------------------------------------------------------------------------
-#  G0-spike-2 (ROADMAP_TRAIN.md): chung minh duong "fixture -> .tkv -> so sanh"
+#  G0-spike-2 (docs/ROADMAP_TRAIN.md): chung minh duong "fixture -> .tkv -> so sanh"
 #  chay duoc TRUOC khi xay G1. Fixture sinh boi tools\gen_fixtures.py (PyTorch).
 #
 #  Dinh dang fixture (xem tools/gen_fixtures.py):
@@ -128,7 +128,7 @@ def main() -> 'i32':
     fails = fails + report("gelu(approximate='tanh')", max_abs_diff(mine_tanh, gt), TOL_HARD)
 
     # 2. GELU: ap dung bien the tanh len kieu PyTorch mac dinh ('none'/erf).
-    #    Day la CAI BAY duoc mo ta o ROADMAP_TRAIN.md muc 4: repo hien dung
+    #    Day la CAI BAY duoc mo ta o docs/ROADMAP_TRAIN.md muc 4: repo hien dung
     #    tanh-approx nen lech ~1e-3 voi PyTorch mac dinh.
     ge = load_floats(FIX_DIR + "gelu_y_erf.txt")
     d_erf = max_abs_diff(mine_tanh, ge)

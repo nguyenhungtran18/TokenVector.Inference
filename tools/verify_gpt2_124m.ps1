@@ -1,6 +1,6 @@
 # verify_gpt2_124m.ps1 — PARITY GPT-2 124M THAT (fixture NGOAI REPO).
 #
-# Mo khoa BLOCKER 124M trong HANDOFF.md 0.6. Thiet ke:
+# Mo khoa BLOCKER 124M trong docs/HANDOFF.md 0.6. Thiet ke:
 # docs/handoff-gpt2-124m-fixture-design.md
 #
 # Cach dung (tu goc repo):

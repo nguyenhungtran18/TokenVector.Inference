@@ -3,7 +3,7 @@ import tv.training.ops
 # ============================================================================
 #  GRAD TESTS — doi chieu BACKWARD cua tung op voi PyTorch autograd
 # ----------------------------------------------------------------------------
-#  G1 (ROADMAP_TRAIN.md): fixture do tools\gen_fixtures.py sinh (torch autograd,
+#  G1 (docs/ROADMAP_TRAIN.md): fixture do tools\gen_fixtures.py sinh (torch autograd,
 #  fp32, CPU, seed 1). Moi op co: dau vao, gradient tai dau ra (gy), va gradient
 #  mong doi cho tham so vao.
 #

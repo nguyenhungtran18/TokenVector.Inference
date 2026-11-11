@@ -1,9 +1,9 @@
-﻿# Hướng dẫn Sử dụng TokenVector.Inference (Tiếng Việt)
+# Hướng dẫn Sử dụng TokenVector.Inference (Tiếng Việt)
 
 ## 1. Tổng quan
 `TokenVector.Inference` là runtime đồ thị thuần TokenVector (`.tkv`): tối ưu hóa đồ thị,
 lượng tử hóa INT8/INT4/FP8, và micro-batcher trong process. Mọi thứ dưới đây là API
-**đã kiểm chứng**. `HANDOFF.md` liệt kê lỗ hổng, `SIMD_NOTES.md` tóm tắt ba tầng SIMD đang dùng.
+**đã kiểm chứng**. `docs/HANDOFF.md` liệt kê lỗ hổng, `docs/SIMD_NOTES.md` tóm tắt ba tầng SIMD đang dùng.
 
 ## 2. Build và chạy ví dụ nhanh
 ```powershell
@@ -99,7 +99,7 @@ dotnet app.exe
 
 powershell -File tools\run_cases.ps1 -Compiler $tkvc     # 22 pass / 4 fail (baseline; gap .NET Framework)
 bash tools/gate_f32.sh                               # 135/135 — con số phải xanh
-powershell -File build_inference.ps1 -SkipBenchmarks     # build + test
+powershell -File tools/build_inference.ps1 -SkipBenchmarks     # build + test
 ```
 
 Chỉ build entry point. Build một module lẻ khiến `tkvc` ghi lại các bản sao import

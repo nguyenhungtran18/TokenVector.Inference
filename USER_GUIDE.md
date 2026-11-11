@@ -1,9 +1,9 @@
-﻿# TokenVector.Inference User Guide
+# TokenVector.Inference User Guide
 
 ## 1. Overview
 `TokenVector.Inference` is a pure TokenVector (`.tkv`) graph runtime: graph optimization,
 INT8/INT4/FP8 quantization, and an in-process micro-batcher. Everything below is the
-**verified** API. `HANDOFF.md` lists the gaps, `SIMD_NOTES.md` summarizes the three SIMD layers in use.
+**verified** API. `docs/HANDOFF.md` lists the gaps, `docs/SIMD_NOTES.md` summarizes the three SIMD layers in use.
 
 ## 2. Build and run the quickstart
 ```powershell
@@ -100,7 +100,7 @@ dotnet app.exe
 
 powershell -File tools\run_cases.ps1 -Compiler $tkvc     # 22 pass / 4 fail (baseline; .NET Framework gap)
 bash tools/gate_f32.sh                               # 135/135 — the number that must stay green
-powershell -File build_inference.ps1 -SkipBenchmarks     # build + test
+powershell -File tools/build_inference.ps1 -SkipBenchmarks     # build + test
 ```
 
 Build entry points only. Building a single module makes `tkvc` rewrite the generated

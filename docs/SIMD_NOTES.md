@@ -1,8 +1,8 @@
 # SIMD trong TokenVector — trạng thái hiện tại (2026-11-11)
 
 Bản khảo sát cũ (2026-10-15, kết luận "chưa dùng được SIMD") đã hết hiệu lực.
-Hồ sơ đầy đủ các bước đi và mọi lần đo sai nằm ở `HANDOFF.md` (journal) và
-`BENCHMARKS.md` §9 (bảng đo hiện tại). Tài liệu gốc được lưu trong git history.
+Hồ sơ đầy đủ các bước đi và mọi lần đo sai nằm ở `docs/HANDOFF.md` (journal) và
+`benchmark/BENCHMARKS.md` §9 (bảng đo hiện tại). Tài liệu gốc được lưu trong git history.
 
 ## Ba tầng SIMD tồn tại hôm nay
 

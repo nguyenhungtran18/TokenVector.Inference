@@ -1,10 +1,10 @@
 # HANDOFF: THIET KE CHE DO FIXTURE NGOAI REPO CHO PARITY GPT-2 124M
 
 Trang thai: **DA TRIEN KHAI + CHAY XANH (2026-10-19)** — gate 20/20, harness
-4 buoc XANH exit=0, khong hoi quy 6/6 gate nho. Chi tiet ket qua: HANDOFF.md
+4 buoc XANH exit=0, khong hoi quy 6/6 gate nho. Chi tiet ket qua: docs/HANDOFF.md
 0.9. Tai lieu nay giu lai su thiet ke + cac so do (doc truoc khi sua code).
 
-Muc tieu: mo khoa BLOCKER 124M trong HANDOFF.md 0.6 — chay parity GPT-2 124M
+Muc tieu: mo khoa BLOCKER 124M trong docs/HANDOFF.md 0.6 — chay parity GPT-2 124M
 THAT (50257/768/12/12) voi fixture khong check-in vao repo, dung lai bo gate
 nho 256/64/4/2 hien tai.
 
@@ -83,9 +83,9 @@ Mau theo verify_parity.ps1:
    (0 = khong FAIL, SKIP duoc phep; 1 = co FAIL).
 
 ### 2.4 Bo sung (sau khi gate chay xanh)
-- HANDOFF.md 0.6: doi ket luan "bi chan" thanh "co che do --full ngoai repo,
+- docs/HANDOFF.md 0.6: doi ket luan "bi chan" thanh "co che do --full ngoai repo,
   chua chay chinh thuc"; ghi ket qua do duoc vao day.
-- ROADMAP_TRAIN.md: dong G2 ghi ro "124M: fixture ngoai repo, gate rieng".
+- docs/ROADMAP_TRAIN.md: dong G2 ghi ro "124M: fixture ngoai repo, gate rieng".
 
 ## 6. KET QUA TRIEN KHAI (19-10-2026) — DA CHAY THAT
 
@@ -154,7 +154,7 @@ swiglu 3/3, inplace 5/5.
   co the xoa ngay)
 
 ## 5. NGUON THAM CHIEU
-- HANDOFF.md 0.6 (blocker 124M + so do toc do), 0.7 (G4xG2), §3 (compiler
+- docs/HANDOFF.md 0.6 (blocker 124M + so do toc do), 0.7 (G4xG2), §3 (compiler
   state: tkvc-tv.exe, intrinsic argv/now_ms/gc, binh thuong .tkv khong chay
   tren mono).
 - docs/numerics-contract.md (fp32, GELU erf, dropout=0, bit-exact CPU).

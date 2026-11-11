@@ -2,7 +2,7 @@
 Verified: compiler build 23:58 (2026-10-17) — B-01..B-07 fixed + SIMD GEMM updates.
 Repo HEAD: `f85ea3d` (P5.3 consolidation — benchmark full seq + recorded figures).
 Truoc do: `b28bdb7` (registry kernel + numerics-contract); G3 tokenizer `8ac487d`, G3 pack `d8a203a`.
-Not staged: `COMPILER-NOTES-2026-10-16.md` (official compiler team update, not ours).
+Not staged: `docs/COMPILER-NOTES-2026-10-16.md` (official compiler team update, not ours).
 **Luu y:** muc 1..6 ben duoi la snapshot 2026-10-17 (truoc G2/G3). Trang thai
 hien tai cua G3 nam o muc 0 ngay duoi day.
 **Dinh huong hien tai (2026-10-20, MUC TIEU MOI — chu khoa):** phai dat
@@ -506,7 +506,7 @@ D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/<gate>.tkv out/<gate>.exe main
 **Diem quan trong cho nguoi ke:** truoc P5.2/P5.3 **khong gate nao chay
 attention GEMM voi `simd=1`** — nen ban draft hong van “xanh” vi khong ai do no.
 So chi tiet: `docs/archive/perf-plan-simd-vs-pytorch.md` (muc **P5.2 + P5.3**),
-`ROADMAP_TRAIN.md` (dong “SIMD train”).
+`docs/ROADMAP_TRAIN.md` (dong “SIMD train”).
 ### 0.14 P5.4 — ATTACK ATTENTION BWD (2026-10-20) — XANH 84/84, −8.8%
 **Vi sao:** probe AQ (muc 1/TRIZ truoc do ghi "chua do duoc") tach duoc
 backward @seq1024: attention_bwd 48.9s + fwd recompute 15.4s = **51%**,
@@ -1800,16 +1800,16 @@ alloc 12 Ct (T=768) = **46-47 ms/call** (đã nằm trong số variant). Run 1 (
 `docs/linux-portability-spike.md`: WSL/mono test results.
 `docs/archive/G1_RESULT_STATE.md`: G1 verification results.
 `docs/numerics-contract.md`: updated from proposal to verified (DUYET).
-`ROADMAP_TRAIN.md` (repo root): updated status + next steps.
-`ROADMAP_TRAIN.md`: included in commit message.
-`HANDOFF.md`: updated (section 4.1 closed list, 4.2 fixed, 4.3 workarounds, 6 remaining items, 7 quick commands, 5 important notes).
+`docs/ROADMAP_TRAIN.md` (repo root): updated status + next steps.
+`docs/ROADMAP_TRAIN.md`: included in commit message.
+`docs/HANDOFF.md`: updated (section 4.1 closed list, 4.2 fixed, 4.3 workarounds, 6 remaining items, 7 quick commands, 5 important notes).
 ### Fixture + test additions (47 fixtures + 60 total):
 `tv/tests/fixtures/`: 60 .txt files (gelu_tanh/erf, softmax, rmsnorm, layernorm, cross_entropy, matmul weights/grad, embedding, chain fixtures for tape, etc.).
 `tv/tests/*.tkv` test files: `grad_tests.tkv` (126 lines), `tape_tests.tkv` (114), `parity_tests.tkv` (139), `gc_tests.tkv` (288).
 `tv/training/*.tgv` colocated copies: created by sync; should NOT be manually edited.
 ### Compiler document updates (not committed in repo, but in compiler repo):
 `D:\TokenVector\Release\docs\e_handoff\*` (4 notes: 2026-10-16 list-alias, record-container, 2026-10-17 fix-request, 2026-10-17 verify-after).
-`COMPILER-NOTES-2026-10-16.md`: committed (`8129c73`). The note's suggested workaround (`annotated local` with single quotes) was incorrect; corrected by user/official compiler docs.
+`docs/COMPILER-NOTES-2026-10-16.md`: committed (`8129c73`). The note's suggested workaround (`annotated local` with single quotes) was incorrect; corrected by user/official compiler docs.
 ---
 ## 3. COMPILER STATE (confirmed 2026-10-17)
 New compiler exe: `D:\TokenVector\Release\dist\tkvc-tv.exe` (build 2026-10-17 23:58, commit `40a3b6f`).
@@ -1863,7 +1863,7 @@ Remaining compiler issues (documented in `docs/e_handoff/`):
 | `5d8a270` | compare_rivals: pool type, list-field, race |
 | `8129c73` | docs: official compiler-notes update + handoff |
 | `6f8ee13` | G1 core + fixtures + docs update |
-Working tree (after `git rm --cached` leftover `docs/archive/G1_RESULT_STATE.md`): all tracked/added; untracked: fixtures dir + mirror copies (`tv.training.*.tkv`) + `COMPILER-NOTES-2026-10-16.md` (official compiler team file, not ours) + `docs/linux-portability-spike.md`.
+Working tree (after `git rm --cached` leftover `docs/archive/G1_RESULT_STATE.md`): all tracked/added; untracked: fixtures dir + mirror copies (`tv.training.*.tkv`) + `docs/COMPILER-NOTES-2026-10-16.md` (official compiler team file, not ours) + `docs/linux-portability-spike.md`.
 ---
 ## 6. Next — G2 full architecture (GPT-2 124M)
 Skeleton complete; fixtures exist for 4 parity + 20 gradient + 8 tape + 7 gradcheck cases. Next steps (user to approve or proceed):
@@ -2634,7 +2634,7 @@ cả 3 cặp vốn giống hệt nhau (md5) nên `cp` đồng bộ. Probe mới:
 ## Thứ tự thực hiện
 1. Xong Task 2: gate → bucket → loss chain → `_p6ms`  (không trộn task 3 vào trước khi task 2 xanh).
 2. Rồi Task 3: builtin → danh sách builtin → self-host → `t_zeros` → đo `_tz2`.
-3. Cuối cùng: chạy lại toàn bộ (gate + bucket + `_p6ms` + full-step 3 seq) và cập nhật `HANDOFF.md`.
+3. Cuối cùng: chạy lại toàn bộ (gate + bucket + `_p6ms` + full-step 3 seq) và cập nhật `docs/HANDOFF.md`.
 ---
 ## §0.58 BENCHMARK LẠI SAU KHI COMPILER SỬA THEO REQUEST — ĐẠT TOÀN BỘ NGƯỠNG, TỈ LỆ VS TORCH 4.07-4.62× (2026-10-31)
 **Chất liệu đo:** compiler `D:/TokenVector/Release/dist/tkvc-tv.exe` build **31/10 09:19**
@@ -5287,7 +5287,7 @@ ket qua **bit-identical** voi duong tuan tu - khong them drift ngoai waiver s0.1
 ### 5. VAN DE QUY TRINH: source kernel KHONG nam trong git
 `tkv_flash_attn.c` chi ton tai o `Release/tools/simd_native/` = junction toi
 `release/` ma `.gitignore` dong `/release/`. Nghia la toan bo Phase 1/2a/2b/2c
-**khong co trong version control**. Commit e844b34/d958407 chi chua HANDOFF.md.
+**khong co trong version control**. Commit e844b34/d958407 chi chua docs/HANDOFF.md.
 Can quyet dinh: track source duoi `tools/simd_native/` (dang co cac .c khac)
 hoac bo sung ngoai le .gitignore. Chua lam vi can xac nhan build.ps1 doc tu dau.
 
@@ -6039,7 +6039,7 @@ trong 4 mirror vẫn nguyên đường interpreted.
 ## §0.138 COMPILER ĐÃ SỬA `ZeroListF32` — full step seq1024 −359 ms, parity giữ nguyên
 
 **Ngày:** 2026-11-10. Request đầy đủ: `docs/COMPILER_TEAM_REQUEST13.md`.
-Số đo chi tiết: `BENCHMARKS.md` §9.11–§9.17.
+Số đo chi tiết: `benchmark/BENCHMARKS.md` §9.11–§9.17.
 
 ### 0. Kết luận trước
 
@@ -6163,7 +6163,7 @@ ms-tuyệt-đối ở seq1024 sẽ **không** kéo hai seq nhỏ xuống.
   33/33. Con số "84/84" trong đề bài chưa được xác nhận lại đầy đủ. Phải chạy
   `tools/testkit_gate.ps1` trước khi tin.
 - Chưa đo lại phase split (mode 2) sau khi sửa — `BPHASE` bị dừng giữa lúc chạy.
-- Chưa commit gì. Working tree: `M BENCHMARKS.md`, `M tv/tests/tv.training.ops.tkv`,
+- Chưa commit gì. Working tree: `M benchmark/BENCHMARKS.md`, `M tv/tests/tv.training.ops.tkv`,
   `M tv/tests/tv.training.trainer.tkv`, `?? docs/COMPILER_TEAM_REQUEST13.md` +
   các probe `_zeros_*.tkv`, `_zeros_iso.tkv`, `_zeros_verify.tkv`.
 - `tv/tests/_seq_cfg.txt` đang để `1024 / 2 / 1 / 1` (mode 2) — **phải trả về
@@ -7518,7 +7518,7 @@ không biết mình đang sửa bản nào.
 
 ## §0.139 PHÂN RÃ 5 PHA SAU KHI SỬA — TKV ĐÃ THẮNG Ở FWD, và ba giả thuyết của tôi đều SAI
 
-**Ngày:** 2026-11-11. Số đo: `BENCHMARKS.md` §9.18.
+**Ngày:** 2026-11-11. Số đo: `benchmark/BENCHMARKS.md` §9.18.
 
 ### 0. Kết luận trước
 
@@ -7690,7 +7690,7 @@ thua +126: forward là compute-bound (BLAS thắng), còn `opt` là memory-bound
 
 ## §0.153 TÌM RA `opt` 781 ms = ĐƯỜNG CLIP — và năm lần tôi đo sai
 
-**Ngày:** 2026-11-11. Request: `docs/COMPILER_TEAM_REQUEST14.md`. Số đo: `BENCHMARKS.md` §9.18–§9.20.
+**Ngày:** 2026-11-11. Request: `docs/COMPILER_TEAM_REQUEST14.md`. Số đo: `benchmark/BENCHMARKS.md` §9.18–§9.20.
 
 ### 0. Kết luận trước
 
@@ -7798,7 +7798,7 @@ bỏ `r1`/`rzp`/`rax`/`gsrc` và cả `if coef != 1.0`. `pt`/`pone` **vẫn cấ
 
 Mode 1 dao động ±5% giữa các phiên (seq1024 từng đọc 4109-4344); số `opt` ở
 mode 2 mới là thứ phản ánh trực tiếp thay đổi. `_seq_cfg.txt` đã trả về
-`1024/1/1/1`. Chi tiết + bảng đầy đủ: `BENCHMARKS.md` §9.21 và
+`1024/1/1/1`. Chi tiết + bảng đầy đủ: `benchmark/BENCHMARKS.md` §9.21 và
 `D:\TokenVector\Release\docs\e_handoff\2026-11-11-request14-adamw-glm-coef.md`.
 
 ## §0.154 DỌN REPO + ĐO LẠI CÙNG PHIÊN VỚI PYTORCH (2026-11-11)
@@ -7807,7 +7807,7 @@ mode 2 mới là thứ phản ánh trực tiếp thay đổi. `_seq_cfg.txt` đ�
 (1) đo lại TKV vs torch **cùng phiên** (không mượn số phiên trước);
 (2) dọn repo (xóa rác, archive docs, viết lại docs lỗi thời).
 
-### 1. Kết quả đo cùng phiên (`BENCHMARKS.md` §9.22, log `benchmark/_bench_matrix_post14_20261111_145719.log`)
+### 1. Kết quả đo cùng phiên (`benchmark/BENCHMARKS.md` §9.22, log `benchmark/_bench_matrix_post14_20261111_145719.log`)
 
 TKV binary: `benchmark/bseq_post14.exe` (build 2026-11-11 14:56 từ `6b9d56f`, compiler
 `D:\TokenVector\Release\dist\tkvc-tv.exe` 2026-11-11 12:45:58, sha256=712704151A996917).
@@ -7829,7 +7829,7 @@ Loss EXACT cả 3 seq ở mọi run. Mode 1 seq1024 dao động mạnh (4016/407
 
 - **Xóa:** thư mục rác (`C?UsersAdmin/`, `out?/`, `_chk/`, `_p6ms_n10/`, `build/` — đều rỗng/không tracked); 13 probe root không ai tham chiếu (`simd_probe{.tkv,d,e,f,g,h,i,j,k,l,m,ab,ac}.tkv`, `git rm`, còn trong history).
 - **Archive:** 10 kế hoạch/spec đã xong chuyển vào `docs/archive/` (+ `docs/archive/README.md` giải thích); tham chiếu trong 13 file được cập nhật đường dẫn (`docs/archive/<name>`).
-- **Viết lại docs:** README(-VI), `BENCHMARKS.md` §1–3 (recipe mới, pointer §9.22), `BENCHMARKS_VI.md` (tóm tắt VI), `SIMD_NOTES.md` (trạng thái hiện tại), `RELEASE_NOTES(-VI)` (2026-11-11 status + v1.0.0 historical), `TEST_REPORT(-VI)` (gate hiện tại + đường compiler đúng), `USER_GUIDE(-VI)` (quickstart mới; các claim stub verified còn đúng — giữ), `COMPETITOR_COMPARISON(-VI)` (các claim lỗi thời: training GPT-2 124M 0.989×, native DLL P/Invoke, CPU row), `PLAN_BEAT_PYTORCH.md` (banner WIN CONDITION ĐÃ ĐẠT + sửa mojibake §6), REQUEST11/12 (banner trạng thái), REQUEST13/14 (banner delivered), ROADMAP_TRAIN / TODO_M9 / COMPILER-NOTES-2026-10-16 (banner `TRẠNG THÁI 2026-11-11` ở đầu; giữ nội dung lịch sử).
+- **Viết lại docs:** README(-VI), `benchmark/BENCHMARKS.md` §1–3 (recipe mới, pointer §9.22), `benchmark/BENCHMARKS_VI.md` (tóm tắt VI), `docs/SIMD_NOTES.md` (trạng thái hiện tại), `RELEASE_NOTES(-VI)` (2026-11-11 status + v1.0.0 historical), `TEST_REPORT(-VI)` (gate hiện tại + đường compiler đúng), `USER_GUIDE(-VI)` (quickstart mới; các claim stub verified còn đúng — giữ), `COMPETITOR_COMPARISON(-VI)` (các claim lỗi thời: training GPT-2 124M 0.989×, native DLL P/Invoke, CPU row), `PLAN_BEAT_PYTORCH.md` (banner WIN CONDITION ĐÃ ĐẠT + sửa mojibake §6), REQUEST11/12 (banner trạng thái), REQUEST13/14 (banner delivered), ROADMAP_TRAIN / TODO_M9 / COMPILER-NOTES-2026-10-16 (banner `TRẠNG THÁI 2026-11-11` ở đầu; giữ nội dung lịch sử).
 - **Giữ nguyên:** `_flash_work/`, `_fw2/`, `_fw3/` (gitignored, giữ theo yêu cầu), `release/`, `out/`, `fixtures-124m/`, BENCHMARKS §4+, `TOKENVECTOR_SYNTAX_SPEC*`, HANDOFF (append-only).
 - **12 probe `tv/tests/_*.tkv`** (bằng chứng request #14): được commit theo yêu cầu.
 
@@ -7885,7 +7885,7 @@ Không có thay đổi nào trong `tv/` — gate 135/135 (§9.21) vẫn nguyên 
    `benchmark/_bench_matrix_post14_20261111_145719.log` (bằng chứng §9.22).
    Các file khác trong `benchmark/` vẫn gitignored.
 
-2. **Hướng dẫn benchmark**: `BENCHMARKING.md` + `BENCHMARKING_VI.md` —
+2. **Hướng dẫn benchmark**: `benchmark/BENCHMARKING.md` + `benchmark/BENCHMARKING_VI.md` —
    công thức đo so với PyTorch (build seq_cfg, best-of-3, mode 0/1/2, tier d/e,
    luật cùng phiên, yêu cầu runtimeconfig, gotchas, cách thêm lần đo mới).
 
@@ -7921,3 +7921,16 @@ về `benchmark/` theo yêu cầu ("cùng để benchmark thì gom lại 1 folde
 - `tools/` chỉ còn: gate/verify (`gate_f32.sh`, `run_cases.ps1`, `verify_*.ps1`),
   sinh fixture (`gen_*.py`), `compare_fixtures.py` — QA/đồ thị không liên quan benchmark.
 - BENCHMARKING guides cập nhật lệnh thành `python benchmark/bench_torch.py ...`.
+
+## §0.159 SẮP XẾP 2 FILE Ở ROOT (2026-11-11)
+
+**Ngày:** 2026-11-11. Di chuyển theo chức năng:
+
+- `libscipy_openblas64_.dll` → `benchmark/` — OpenBLAS (bản scipy, 64-bit int),
+  `tkv_simd_native.dll` lazy-load qua `LoadLibrary` để chạy GEMM nhanh bằng OpenBLAS;
+  thiếu thì fallback AVX2 native (chậm hơn nhưng vẫn đúng). Cần cho đo hiệu năng thật;
+  `gate_f32.sh` không cần. exe trong `benchmark/` load được từ exe-dir.
+- `build_inference.ps1` → `tools/` — pipeline build + test (+ bench) một lệnh;
+  thuộc nhóm host tooling như `gate_f32.sh`, `run_cases.ps1`. Cập nhật USER_GUIDE(-VI).
+
+Root hiện còn: README(-VI), RELEASE_NOTES(-VI), USER_GUIDE(-VI), LICENSE, `.gitignore`.

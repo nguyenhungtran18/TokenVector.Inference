@@ -46,14 +46,14 @@ Kiem chung: 2026-10-17 23:58 (build moi `40a3b6f`: simd_gemm 2D thread, loop fix
 ### G1 con lai (ngoai muc tieu G1 core)
 
 - `kernels_reg.tkv` chinh thuc (dang ki full + test registry)
-- `ROADMAP_TRAIN.md` cap nhat (xong, ghi G1 xong)
+- `docs/ROADMAP_TRAIN.md` cap nhat (xong, ghi G1 xong)
 - `G2` GPT-2 124M: chua bat dau — cho duyet `numerics-contract.md` (da duyet) + chot backend `simd` co hay khong duoc dung cho parity.
 
 ### G0 ket qua duoc bao ton
 
 - `.tkv` chay duoc tren Ubuntu 22.04 / mono 6.8 (`docs/linux-portability-spike.md`)
 - Compiler **khong bi dich** tren Linux (IL cua `tkvc` bi mono tu choi — can compiler team sua)
-- Workaround compiler: `COMPILER-NOTES-2026-10-16.md` da duoc sua (duoc cap nhat tu compiler team, khong do minh)
+- Workaround compiler: `docs/COMPILER-NOTES-2026-10-16.md` da duoc sua (duoc cap nhat tu compiler team, khong do minh)
 - Workaround annotated local: `docs/numerics-contract.md` da duoc ghi ro: nhay kep (`"list[f32]"`) cho annotated local; nhay don (`'list[f32]'`) chi chap nhan cho chu ky ham.
 - Workaround `simd_*`: `docs/2026-10-17-simd-builtins-do-thu-repo-inference.md` (chua commit) bao cao day du: `simd_gemm` 14.6x, `simd_*` 3-list chua duoc vi cap phat 16 B/phan tu va cham 2.4x.
 - Workaround `v_*`: ten co trong whitelist (`file_io.tkv:75`) nhung khong duoc dang ky trong compiler (`simd_feature.tkv`).

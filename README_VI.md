@@ -15,7 +15,7 @@ engine huấn luyện GPT-2 124M có thời gian một bước ngang PyTorch (đ
 > - Full train step GPT-2 124M @seq1024: **4016 ms** so với PyTorch
 >   2.14.0+cpu (cùng phiên, 14 luồng) **4061.1 ms** → **0.989×**, loss
 >   **EXACT** (`10.760399`), `gate_f32.sh` **135/135**, `trainer_tests`
->   **15/15**, `gpt2_full_tests` **33/33**. Chi tiết: `BENCHMARKS.md` §9.21–§9.22.
+>   **15/15**, `gpt2_full_tests` **33/33**. Chi tiết: `benchmark/BENCHMARKS.md` §9.21–§9.22.
 > - Nguồn là `.tkv`; pipeline tối ưu sinh IL P/Invoke thư viện native SIMD
 >   (`tkv_simd_native.dll`, build bởi repo compiler) cho các kernel nóng.
 >   Đường CPU là đường được hỗ trợ.
@@ -23,15 +23,15 @@ engine huấn luyện GPT-2 124M có thời gian một bước ngang PyTorch (đ
 >   working set ~7.2 GB @seq1024; mode-1 đo dao động — dùng mode-2 (phân rã
 >   5 pha) khi ra quyết định.
 >
-> `HANDOFF.md` là nhật ký kỹ thuật (append-only). Mọi lỗ hổng đã biết —
+> `docs/HANDOFF.md` là nhật ký kỹ thuật (append-only). Mọi lỗ hổng đã biết —
 > và mọi lần đo sai trên đường đi — đều được ghi ở đó.
 
 ## Cái gì đã có
 
 | Hạng mục | Trạng thái |
 |---|---|
-| Inference runtime (graph, PTQ INT8/FP8, ONNX reader, batcher) | Chạy được, có test; xem `TEST_REPORT_VI.md` |
-| Huấn luyện GPT-2 124M (fwd/bwd/AdamW/clip/checkpoint) | Chạy được; xem `BENCHMARKS.md` §9 |
+| Inference runtime (graph, PTQ INT8/FP8, ONNX reader, batcher) | Chạy được, có test; xem `docs/TEST_REPORT_VI.md` |
+| Huấn luyện GPT-2 124M (fwd/bwd/AdamW/clip/checkpoint) | Chạy được; xem `benchmark/BENCHMARKS.md` §9 |
 | Kernel native SIMD (GEMM, fused bwd, AdamW) | Ship qua repo compiler (`tkv_simd_native.dll`) |
 | GPU / NPU | **Không có** — chỉ CPU |
 
@@ -47,7 +47,7 @@ engine huấn luyện GPT-2 124M có thời gian một bước ngang PyTorch (đ
   {"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}
   ```
 
-  (chi tiết: `BENCHMARKS.md` §9.17).
+  (chi tiết: `benchmark/BENCHMARKS.md` §9.17).
 
 ## Bố cục repo
 
@@ -64,9 +64,9 @@ benchmark/     Công cụ & scratch benchmark: bench_torch.py (đối chiếu Py
                binary/dump gitignored, script & log được track
 docs/          Tài liệu kỹ thuật;  docs/archive/ = kế hoạch đã xong/hết hiệu lực
 reports/       Báo cáo parity & benchmark theo ngày
-BENCHMARKING_VI.md  Hướng dẫn benchmark (VI + EN)
-BENCHMARKS.md  Nhật ký benchmark chính (hiện tại: §9.22)
-HANDOFF.md     Nhật ký kỹ thuật (append-only)
+benchmark/BENCHMARKING_VI.md  Hướng dẫn benchmark (VI + EN)
+benchmark/BENCHMARKS.md  Nhật ký benchmark chính (hiện tại: §9.22)
+docs/HANDOFF.md     Nhật ký kỹ thuật (append-only)
 ```
 
 Fixture parity GPT-2 124M (~2.3 GB) **không nằm trong git**; sinh lại bằng
@@ -84,7 +84,7 @@ dotnet benchmark/quickstart.exe      # in ra: Y[0] = 2.25  /  quickstart: OK
 ```
 
 API theo dạng graph; không có `tv.inference.load_onnx()` cũng như `NDArray`.
-Xem `USER_GUIDE_VI.md` cho hướng dẫn API và `TOKENVECTOR_SYNTAX_SPEC_VI.md`
+Xem `USER_GUIDE_VI.md` cho hướng dẫn API và `docs/TOKENVECTOR_SYNTAX_SPEC_VI.md`
 cho các quy tắc ngôn ngữ hay cắn (hằng số cấp module không import được;
 `__init__` của record bị bỏ qua; `TkvInt` …).
 
@@ -117,7 +117,7 @@ Set-Content tv/tests/_seq_cfg.txt "1024`n1`n1`n1"
 dotnet benchmark/bseq.exe
 ```
 
-Kết quả cùng phiên mới nhất (2026-11-11, `BENCHMARKS.md` §9.22):
+Kết quả cùng phiên mới nhất (2026-11-11, `benchmark/BENCHMARKS.md` §9.22):
 
 | phép đo | TKV | PyTorch | TKV/torch |
 |---|---:|---:|---:|
@@ -129,15 +129,15 @@ Kết quả cùng phiên mới nhất (2026-11-11, `BENCHMARKS.md` §9.22):
 
 ## Bản đồ tài liệu
 
-- `BENCHMARKS.md` / `BENCHMARKS_VI.md` — nhật ký benchmark
-- `HANDOFF.md` — nhật ký kỹ thuật, mọi điều tra và ngõ cụt
+- `benchmark/BENCHMARKS.md` / `benchmark/BENCHMARKS_VI.md` — nhật ký benchmark
+- `docs/HANDOFF.md` — nhật ký kỹ thuật, mọi điều tra và ngõ cụt
 - `USER_GUIDE_VI.md` — hướng dẫn API
-- `TOKENVECTOR_SYNTAX_SPEC_VI.md` — quy tắc cú pháp ngôn ngữ
+- `docs/TOKENVECTOR_SYNTAX_SPEC_VI.md` — quy tắc cú pháp ngôn ngữ
 - `docs/numerics-contract.md` — hợp đồng số học fp32 (cái gì bit-exact với PyTorch, cái gì không)
 - `docs/COMPILER_TEAM_REQUEST*.md` — các request gửi compiler team (#1–#14)
 - `docs/archive/` — kế hoạch đã xong/hết hiệu lực (đừng thực thi)
 - `RELEASE_NOTES_VI.md` — lịch sử release
-- `ROADMAP_TRAIN.md` — lộ trình huấn luyện (chiến dịch đã hoàn thành)
+- `docs/ROADMAP_TRAIN.md` — lộ trình huấn luyện (chiến dịch đã hoàn thành)
 
 ## Hệ sinh thái
 

@@ -294,7 +294,7 @@ production đi ATen 100%.
 
 - [ ] Re-record bench baselines 2026-11-09
 - [ ] mode 1 bite-ident new constant documented
-- [ ] `HANDOFF.md` updated với Phase 3/4 kết quả
+- [ ] `docs/HANDOFF.md` updated với Phase 3/4 kết quả
 - [ ] `PLAN_BEAT_PYTORCH.md` §6 updated với actuals
 - [ ] Git release tag 1.0.13+ (optional)
 
@@ -402,7 +402,7 @@ trên số thật. Đừng mở production sang flash cho tới khi flash ≤ 80
 
 ## 8. Cross-references
 
-- HANDOFF.md §0.115-§0.128 (historical context)
+- docs/HANDOFF.md §0.115-§0.128 (historical context)
 - PLAN_BEAT_PYTORCH.md §0-6 (overall plan)
 - PLAN_BEAT_PYTORCH.md §6 (fused SDPA project specific plan)
 - Release/tools/simd_native/tkv_flash_attn.c (current C source)

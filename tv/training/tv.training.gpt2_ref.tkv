@@ -1,4 +1,4 @@
-﻿# GPT-2 reference — G2 (ROADMAP_TRAIN.md)
+﻿# GPT-2 reference — G2 (docs/ROADMAP_TRAIN.md)
 # ---------------------------------------------------
 # Kien truc GIONG HF `gpt2`, 124M tham so (de chinh minh thuat toan va train):
 #   vocab 50257, n_embd 768, n_head 12, n_layer 12, max_pos 1024

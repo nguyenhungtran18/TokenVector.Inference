@@ -1,9 +1,9 @@
-**TRẠNG THÁI 2026-11-11: ĐÃ DONE** — `adamw_step_glm` nhận `coef` (13 tham số), loss EXACT, gate 135/135, trainer 15/15; opt 781 → 438–469 ms; seq1024 0.989× torch (`BENCHMARKS.md` §9.21–§9.22).
+**TRẠNG THÁI 2026-11-11: ĐÃ DONE** — `adamw_step_glm` nhận `coef` (13 tham số), loss EXACT, gate 135/135, trainer 15/15; opt 781 → 438–469 ms; seq1024 0.989× torch (`benchmark/BENCHMARKS.md` §9.21–§9.22).
 
 # YÊU CẦU COMPILER TEAM #14 — `adamw_step_glm` nhận thêm `coef`: bỏ 3 bước phụ khi clip hoạt động
 
 **Ngày:** 2026-11-11
-**Nguồn:** HANDOFF §0.152/§0.153 + `BENCHMARKS.md` §9.19
+**Nguồn:** HANDOFF §0.152/§0.153 + `benchmark/BENCHMARKS.md` §9.19
 **Đối tượng:** Compiler team (`build/selfhost/tv_gop.tkv` → `compile_adamw_step_glm`, + native `tkv_simd_native.c`)
 **Ưu tiên:** cao — **~220 ms/bước** trên seq1024, là hạng mục lớn nhất còn lại sau #13.
 **Khác #13:** #13 sửa thân IL một method có sẵn. Lần này **thêm 1 tham số** vào một builtin có sẵn. Không đổi ngữ nghĩa `.tkv`, không đổi ABI cũ nếu làm đúng cách dưới đây.

@@ -7,16 +7,16 @@
 > trong phần v1.0.0 bên dưới là **ảnh chụp 2026-09-28, đã lỗi thời**.
 
 **Huấn luyện (GPT-2 124M, CPU):**
-- Full train step @seq1024: **4016 ms** so với PyTorch 2.14.0+cpu cùng phiên **4061.1 ms** → **0.989×** (`BENCHMARKS.md` §9.22); loss **EXACT** (`10.760399`).
+- Full train step @seq1024: **4016 ms** so với PyTorch 2.14.0+cpu cùng phiên **4061.1 ms** → **0.989×** (`benchmark/BENCHMARKS.md` §9.22); loss **EXACT** (`10.760399`).
 - Request #14 (COMPILER_TEAM): `adamw_step_glm` nhận thêm tham số `coef` — `opt.step` 781 → ~438–469 ms; không còn đường clip chậm.
-- Gate f32 **135/135** (`tools/gate_f32.sh`), `trainer_tests` **15/15**, `gpt2_full_tests` **33/33** (`BENCHMARKS.md` §9.21).
+- Gate f32 **135/135** (`tools/gate_f32.sh`), `trainer_tests` **15/15**, `gpt2_full_tests` **33/33** (`benchmark/BENCHMARKS.md` §9.21).
 - Numerics so với PyTorch: không hứa bit-exact ngoài nội bộ (matmul/reduction lệch 1–3 ulp; xem `docs/numerics-contract.md`). Loss khớp tuyệt đối trên fixture HF vì cùng cấu hình.
 
 **Native & hiệu năng:**
 - Hot kernels (GEMM, fused backward, AdamW) P/Invoke `tkv_simd_native.dll` (compiler repo `D:\TokenVector`, AVX2+FMA). Không có mã C/C++ trong repo này; đường scalar `.tkv` vẫn là tham chiếu ngữ nghĩa.
 - Compiler tự phát lớp IL `TkvSimd` cho builtin `simd_*`.
 
-**Docs:** README(-VI) viết lại hoàn toàn; `BENCHMARKS_VI.md` thay bằng bản tóm tắt hiện hành; các kế hoạch đã xong chuyển vào `docs/archive/`.
+**Docs:** README(-VI) viết lại hoàn toàn; `benchmark/BENCHMARKS_VI.md` thay bằng bản tóm tắt hiện hành; các kế hoạch đã xong chuyển vào `docs/archive/`.
 
 **Còn lại:** seq8/seq256 chậm hơn torch một chút (1.067×/1.027×); arena chưa zero-GC; GPU/NPU không có; working set ~7.2 GB @seq1024.
 
@@ -48,8 +48,8 @@ và micro-batcher trong process.
 
 ## Phần chưa sẵn sàng
 - **Chưa zero-GC.** Arena là `dict[i64, list[f32]]` và `native_arena_alloc` là stub trả
-  `0`, nên tensor là phân bổ managed. `SIMD_NOTES.md` §7 có cách sửa.
-- **Chưa có SIMD.** Các vòng khối `VEC_W = 8` vẫn chạy scalar. `SIMD_NOTES.md` nêu yêu
+  `0`, nên tensor là phân bổ managed. `docs/SIMD_NOTES.md` §7 có cách sửa.
+- **Chưa có SIMD.** Các vòng khối `VEC_W = 8` vẫn chạy scalar. `docs/SIMD_NOTES.md` nêu yêu
   cầu điều chỉnh compiler.
 - **Chưa đọc được file ONNX.** `parser_read_bytes` là stub nên `parse_file` không trả
   gì. `parse_bytes` trên buffer trong bộ nhớ thì chạy được.
@@ -62,4 +62,4 @@ và micro-batcher trong process.
 ## Xác minh
 `tv/tests/inference_tests.tkv` 26/26 và `tv/tests/gap_tests.tkv` 16/16 tại 2026-09-28, chạy
 bằng `powershell -File tools\run_cases.ps1`. Các lỗ hổng phủ biết liệt kê trong
-`TEST_REPORT_VI.md`.
+`docs/TEST_REPORT_VI.md`.

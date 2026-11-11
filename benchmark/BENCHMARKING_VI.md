@@ -1,8 +1,8 @@
 # Cách Benchmark TokenVector.Inference vs PyTorch
 
 Công thức đo apples-to-apples cho bước huấn luyện GPT-2 124M (benchmark mà ta
-công bố). Nhật ký số liệu: `BENCHMARKS.md` (mới nhất: §9.22). Thư mục kết quả:
-`benchmark/` (gitignored, trừ 2 file của mỗi phiến đo). Xem bản tiếng Anh: `BENCHMARKING.md`.
+công bố). Nhật ký số liệu: `benchmark/BENCHMARKS.md` (mới nhất: §9.22). Thư mục kết quả:
+`benchmark/` (gitignored, trừ 2 file của mỗi phiến đo). Xem bản tiếng Anh: `benchmark/BENCHMARKING.md`.
 
 ## Cần chuẩn bị
 
@@ -76,11 +76,11 @@ Loss phải in **EXACT**: `10.572291` / `10.756927` / `10.760399`
 ## Thêm một lần đo vào nhật ký
 
 1. Chạy matrix ở trên; lưu log thô vào `benchmark/_bench_matrix_<tag>_<yyyyMMdd_HHmmss>.log`.
-2. Thêm mục `§9.x` vào `BENCHMARKS.md` với: CPU, đường dẫn + sha256 compiler,
+2. Thêm mục `§9.x` vào `benchmark/BENCHMARKS.md` với: CPU, đường dẫn + sha256 compiler,
    torch version + threads, ghi chú cùng/khác phiên, bảng TKV vs torch
    (mode 1 best-of-3, mode 2 TONG, tier `d`/`e`), dòng loss EXACT, và ghi chú
    phương sai (`mode 1` dao động — số tin cậy là `mode 2`).
-3. Ghi vào `HANDOFF.md` (append-only).
+3. Ghi vào `docs/HANDOFF.md` (append-only).
 
 ## Những cạm bẫy
 

@@ -137,7 +137,7 @@ này thay nó.
 ## 6. NGUỒN SỐ LIỆU
 
 - `docs/archive/spec-m4-m7-compiler-team.md` §1 (bảng CG) + §3 (ràng buộc cứng)
-- `HANDOFF.md` §0.36 (CG), §0.49 (f32 BUST), §0.47 (M4+M6 wire), §0.48 (M5-opt + PyTorch)
+- `docs/HANDOFF.md` §0.36 (CG), §0.49 (f32 BUST), §0.47 (M4+M6 wire), §0.48 (M5-opt + PyTorch)
 - Probe: `tv/tests/simd_probe_cg.tkv` (phân rã wrapper), `tv/tests/_f32p.tkv` (f32 locals BUST)
 - `docs/COMPILER_TEAM_REQUEST.md` §10 (kết quả đo yêu cầu #1)
 - Handoff compiler: `D:\TokenVector\Release\docs\e_handoff\2026-10-26-f32-builtin-compiler-reply.md`

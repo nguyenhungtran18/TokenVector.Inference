@@ -15,7 +15,7 @@ a GPT-2 124M training engine whose step time is now at parity with PyTorch
 > - GPT-2 124M full train step @seq1024: **4016 ms** vs PyTorch 2.14.0+cpu
 >   (same session, 14 threads) **4061.1 ms** → **0.989×**, loss **EXACT**
 >   (`10.760399`), `gate_f32.sh` **135/135**, `trainer_tests` **15/15**,
->   `gpt2_full_tests` **33/33**. Details: `BENCHMARKS.md` §9.21–§9.22.
+>   `gpt2_full_tests` **33/33**. Details: `benchmark/BENCHMARKS.md` §9.21–§9.22.
 > - Sources are `.tkv`; the optimizing pipeline emits IL that P/Invokes the
 >   companion native SIMD library (`tkv_simd_native.dll`, built by the
 >   compiler repo) for hot kernels. The CPU path is the supported path.
@@ -23,15 +23,15 @@ a GPT-2 124M training engine whose step time is now at parity with PyTorch
 >   (1.067×/1.027×); working set ~7.2 GB @seq1024; mode-1 timing is noisy —
 >   use mode-2 (phase breakdown) for decisions.
 >
-> `HANDOFF.md` is the running engineering journal (append-only). Every known
+> `docs/HANDOFF.md` is the running engineering journal (append-only). Every known
 > gap, and every wrong turn taken to find them, is documented there.
 
 ## What ships today
 
 | Area | State |
 |---|---|
-| Inference runtime (graph, PTQ INT8/FP8, ONNX reader, batcher) | Working, tested; see `TEST_REPORT.md` |
-| GPT-2 124M training (fwd/bwd/AdamW/clip/checkpoint) | Working; see `BENCHMARKS.md` §9 |
+| Inference runtime (graph, PTQ INT8/FP8, ONNX reader, batcher) | Working, tested; see `docs/TEST_REPORT.md` |
+| GPT-2 124M training (fwd/bwd/AdamW/clip/checkpoint) | Working; see `benchmark/BENCHMARKS.md` §9 |
 | Native SIMD kernels (GEMM, fused bwd, AdamW) | Shipped via compiler repo (`tkv_simd_native.dll`) |
 | GPU / NPU offload | **Unavailable** — CPU only |
 
@@ -47,7 +47,7 @@ a GPT-2 124M training engine whose step time is now at parity with PyTorch
   {"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}
   ```
 
-  (or run via `dotnet <app>.exe` with the file present, cf. `BENCHMARKS.md` §9.17).
+  (or run via `dotnet <app>.exe` with the file present, cf. `benchmark/BENCHMARKS.md` §9.17).
 
 ## Repository layout
 
@@ -64,9 +64,9 @@ benchmark/     benchmark tooling & scratch: bench_torch.py (PyTorch reference),
                binaries & dumps gitignored, scripts & logs tracked
 docs/          engineering docs;  docs/archive/ = completed/superseded plans
 reports/       dated parity & benchmark reports
-BENCHMARKING.md step-by-step benchmark guide (EN + VI)
-BENCHMARKS.md  master benchmark journal (current: §9.22)
-HANDOFF.md     engineering journal (append-only)
+benchmark/BENCHMARKING.md step-by-step benchmark guide (EN + VI)
+benchmark/BENCHMARKS.md  master benchmark journal (current: §9.22)
+docs/HANDOFF.md     engineering journal (append-only)
 ```
 
 GPT-2 124M parity fixtures (~2.3 GB) are **not in git**; regenerate with
@@ -85,7 +85,7 @@ dotnet benchmark/quickstart.exe      # prints: Y[0] = 2.25  /  quickstart: OK
 
 The API is graph-based; there is no `tv.inference.load_onnx()` and no
 `NDArray`. See `USER_GUIDE.md` for the API walkthrough and
-`TOKENVECTOR_SYNTAX_SPEC.md` for the language rules that bite (module-level
+`docs/TOKENVECTOR_SYNTAX_SPEC.md` for the language rules that bite (module-level
 constants are not importable; record `__init__` is skipped; `TkvInt` …).
 
 ## Build & test
@@ -117,7 +117,7 @@ Set-Content tv/tests/_seq_cfg.txt "1024`n1`n1`n1"
 dotnet benchmark/bseq.exe
 ```
 
-Latest same-session results (2026-11-11, `BENCHMARKS.md` §9.22):
+Latest same-session results (2026-11-11, `benchmark/BENCHMARKS.md` §9.22):
 
 | metric | TKV | PyTorch | TKV/torch |
 |---|---:|---:|---:|
@@ -129,16 +129,16 @@ Latest same-session results (2026-11-11, `BENCHMARKS.md` §9.22):
 
 ## Docs map
 
-- `BENCHMARKS.md` — benchmark journal (§9.22 = latest, same-session vs torch)
-- `HANDOFF.md` — engineering journal, every investigation and wrong turn
+- `benchmark/BENCHMARKS.md` — benchmark journal (§9.22 = latest, same-session vs torch)
+- `docs/HANDOFF.md` — engineering journal, every investigation and wrong turn
 - `USER_GUIDE.md` / `USER_GUIDE_VI.md` — API user guide
 - `TOKENVECTOR_SYNTAX_SPEC(_VI).md` — language syntax rules
-- `COMPILER-NOTES-2026-10-16.md` — compiler team notes (2026-10-16)
+- `docs/COMPILER-NOTES-2026-10-16.md` — compiler team notes (2026-10-16)
 - `docs/numerics-contract.md` — fp32 numerics contract (what is/ isn't bit-exact vs PyTorch)
 - `docs/COMPILER_TEAM_REQUEST*.md` — requests to the compiler team (#1–#14)
 - `docs/archive/` — completed/superseded plans (do not execute)
 - `RELEASE_NOTES(_VI).md` — release history
-- `ROADMAP_TRAIN.md` — training roadmap (campaign complete)
+- `docs/ROADMAP_TRAIN.md` — training roadmap (campaign complete)
 
 ## Ecosystem
 

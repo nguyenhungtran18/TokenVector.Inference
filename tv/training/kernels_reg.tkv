@@ -1,4 +1,4 @@
-# Kernel Registry — backend-agnostic (G1.5, ROADMAP_TRAIN.md)
+# Kernel Registry — backend-agnostic (G1.5, docs/ROADMAP_TRAIN.md)
 #
 # Moi op dang ky ten -> backend (mac dinh: 'cpu'). Khi chuyen sang GPU
 # (G6 hoac test Colab), chi can doi `backend` trong `default_reg` ma

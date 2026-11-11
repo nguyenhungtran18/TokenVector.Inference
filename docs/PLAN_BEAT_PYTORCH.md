@@ -1,10 +1,10 @@
 # PLAN BEAT PYTORCH — TRẠNG THÁI 2026-11-11: WIN CONDITION ĐÃ ĐẠT
 
 > Banner (2026-11-11): mục tiêu "full step seq1024 ≤ torch" **đã đạt**:
-> **4016 ms** vs torch 4061.1 (cùng phiên, `BENCHMARKS.md` §9.22); loss EXACT;
+> **4016 ms** vs torch 4061.1 (cùng phiên, `benchmark/BENCHMARKS.md` §9.22); loss EXACT;
 > gate 135/135. Bảng "torch re-measure" bên dưới (3986.1/4985…) đã lỗi thời —
 > đừng dùng. Phần lớn kế hoạch này đã thực thi; các mảnh còn giá trị nay nằm
-> ở `docs/COMPILER_TEAM_REQUEST11-14.md` và `BENCHMARKS.md`. Giữ file làm hồ
+> ở `docs/COMPILER_TEAM_REQUEST11-14.md` và `benchmark/BENCHMARKS.md`. Giữ file làm hồ
 > sơ quyết định; không thực thi.
 
 # PLAN: TokenVector.Inference beat PyTorch (GPT-2 124M full train step)

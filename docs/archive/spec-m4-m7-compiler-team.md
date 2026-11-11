@@ -1,7 +1,7 @@
 # SPEC M4-M7 — Yêu cầu builtin/ABI mới giao compiler team
 
 Ngày lập: **2026-10-24** · Nguồn: số đo 8 chu trình đo TRIZ repo-local (CG/CH/CB/CI/CU/CW/M1/CX),
-`docs/archive/perf-plan-triz-roadmap.md` §13-§14, `HANDOFF.md` §0.35-§0.44.
+`docs/archive/perf-plan-triz-roadmap.md` §13-§14, `docs/HANDOFF.md` §0.35-§0.44.
 Đối tượng: **compiler/native team** — người có quyền thêm builtin + sửa ABI trong `tkvc`.
 
 ---
@@ -29,7 +29,7 @@ ràng buộc cứng đã khám phá, gate và quy trình nhận bàn giao.
 > **13.2× / 12.1× / 10.3×** (seq 8/256/1024) — baseline ghi trong tài liệu 13.4/12.3/10.4×
 > → **tỉ lệ chưa đổi, khoảng cách còn lại vẫn 10-13×**.
 > Việc còn lại đúng như §4: xác nhận builtin gọi được từ repo này rồi wire M4+M5
-> (kỳ vọng ~11-13 s ≈ 1.8×), rồi M6. Chi tiết: `HANDOFF.md` **§0.45**.
+> (kỳ vọng ~11-13 s ≈ 1.8×), rồi M6. Chi tiết: `docs/HANDOFF.md` **§0.45**.
 
 **Trạng thái baseline (sau M3c, không đổi kể từ `7c7ff44`):**
 

@@ -4,7 +4,7 @@
 **Máy:** Xeon E5-2695 v3 14C · **Cùng ngày, cùng máy, cùng token/config** cho mọi phép đo.
 **Mục tiêu (CẬP NHẬT 2026-10-20, chủ khoa):** seq1024 full step phải **BẰNG rồi NHANH HƠN PyTorch** (≤3.542 s = 1.0×, rồi ≤0.8×) trên **cả 3 seq**, vẫn giữ 84/84 parity assertions. Mốc dọc đường (đã đạt): 154.234 s (43.5×) → 141.219 (P5.4) → **118.641 s (33.5×, P5.5)**. Ladder + phân tích sàn đơn/đa luồng: **§12** (mục ~20× bên dưới bị thay thế).
 
-Chi tiết số đo gốc: `docs/archive/perf-plan-simd-vs-pytorch.md` (mục P5.2 + P5.3). Bàn giao: `HANDOFF.md` mục 0.13 + mục 7.
+Chi tiết số đo gốc: `docs/archive/perf-plan-simd-vs-pytorch.md` (mục P5.2 + P5.3). Bàn giao: `docs/HANDOFF.md` mục 0.13 + mục 7.
 
 ---
 
@@ -177,7 +177,7 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 | 9-10 | Fused AdamW | `tv/training/adamw.tkv` + throughput ↑30% |
 | 11-12 | Cache-blocking linear bwd | `tv/training/linear_bwd.tkv` + throughput ↑15-20% |
 | 13-14 | Policy adaptiv + mixed precision | `tv/training/dispatch.tkv`, `tv/training/precision.tkv` |
-| 15 | Báo cáo KPI + quyết định P6 | Cập nhật file này + `HANDOFF.md` |
+| 15 | Báo cáo KPI + quyết định P6 | Cập nhật file này + `docs/HANDOFF.md` |
 
 **Quy tắc bắt buộc:** mỗi tuần đo lại **cả 3 seq** (8/256/1024) và chạy lại **5 gate**. Chỉ giữ thay đổi nếu **net win trên cả 3 seq** và **84/84 vẫn xanh**. Mặc định vẫn `simd=0` cho tới khi chứng minh được.
 
@@ -334,7 +334,7 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 **Quyết định cần chủ khoa / compiler team:**
 
 - ⓐ **tkvc có primitive thread không?** → **ĐÃ TRẢ LỜI 2026-10-21: CÓ** — `thread_spawn(fn[, 1 arg])`/`thread_join` (Task<T>, không GIL); record field chỉ nhận scalar/container/class-cùng-file (phải truyền `list[f32]`, KHÔNG truyền được `Tensor` qua record); native `simd_gemm` có thread pool riêng nhưng `tkv_run_mt` **không có lock** → chỉ an toàn khi 1 thread gọi hoặc n < 96 (`gemm_rows` trực tiếp, bp thread-local). P6 GĐ1/GĐ2 đã song song `attention_bwd` + `attention` FWD theo head (row P6): hợp đồng số giữ nguyên bằng **own-list + merge** (tích lũy từng phần tử giữ nguyên thứ tự).
-- ⓑ **Parity so ở precision nào?** fp32-vs-fp32 (fair fight) hay tkv-bf16 vs torch-fp32 (torch CPU fp32 không dùng AMX — tkv bf16+VNNI/AVX512 có thể thắng, nhưng phải sửa numerics-contract + thêm gate AMP riêng). → **ĐÃ TRẢ LỜI 2026-10-22: fp32-vs-fp32 — GIỮ NGUYÊN contract 2.4e-7.** Lý do (đo, không phải lý thuyết): máy này **không có phần cứng f16/bf16** ⇒ mixed precision chỉ còn đường làm tròn f16 **bằng phần mềm** ⇒ lỗi số học **1.08e-3** (×2.1e5 cửa sổ parity) + chi phí làm tròn **378-458 ns/ptu** ⇒ AMP best-case **0.047-0.108×**. Chi tiết: dòng P7 + `HANDOFF.md` §0.27.
+- ⓑ **Parity so ở precision nào?** fp32-vs-fp32 (fair fight) hay tkv-bf16 vs torch-fp32 (torch CPU fp32 không dùng AMX — tkv bf16+VNNI/AVX512 có thể thắng, nhưng phải sửa numerics-contract + thêm gate AMP riêng). → **ĐÃ TRẢ LỜI 2026-10-22: fp32-vs-fp32 — GIỮ NGUYÊN contract 2.4e-7.** Lý do (đo, không phải lý thuyết): máy này **không có phần cứng f16/bf16** ⇒ mixed precision chỉ còn đường làm tròn f16 **bằng phần mềm** ⇒ lỗi số học **1.08e-3** (×2.1e5 cửa sổ parity) + chi phí làm tròn **378-458 ns/ptu** ⇒ AMP best-case **0.047-0.108×**. Chi tiết: dòng P7 + `docs/HANDOFF.md` §0.27.
 - ⓒ **"Nhanh hơn" cụ thể bao nhiêu, giữ bao nhiêu gate?** Đề xuất: ≤0.8× full step cả 3 seq, 84/84 fp32 giữ nguyên + gate AMP mới (nếu ⓑ = mixed).
 
 **Rủi ro riêng P6/P7:** xem §8 (blocked threads, thermal drift, contract precision).
@@ -372,7 +372,7 @@ Probe AQ chạy lại **2026-10-22** (sau GĐ8/GĐ10, `out/audit_aq.log`) + ADAM
 - **Bit-exact**: maxdiff 0.0 với đường cũ, hoặc loss khớp exact 7 chữ số; saves **append CUỐI + len guard** (saves cũ vẫn đọc được — tiền lệ GĐ7).
 - **Gate mỗi GĐ**: 135/135 + `trainer_tests` 15/15 + bench A/B 3 seq best-of-3 cùng phiên (ghi drift nhiệt).
 - **Wire đồng bộ mirror** (gpt2_ref ×5, trainer ×4) — bench import `tv.training.gpt2_ref124` + `tv.training.trainer`.
-- Ghi kết quả: dòng §12 ladder + `HANDOFF.md` §0.x + **commit từng GĐ**.
+- Ghi kết quả: dòng §12 ladder + `docs/HANDOFF.md` §0.x + **commit từng GĐ**.
 
 ### 13.3 Các hạng mục — xếp theo lợi nhuận × độ tin cậy
 

@@ -15,7 +15,7 @@ chua 124M tham so. Kien truc giong HF `gpt2` y nguyen:
 
 Thu nho chi de fixture nho (duoc check-in), con thuat toan thi y nguyen.
 
-Che do 124M (KHONG check-in git, xem HANDOFF.md 0.6 + 0.9):
+Che do 124M (KHONG check-in git, xem docs/HANDOFF.md 0.6 + 0.9):
 
     python tools/gen_gpt2_fixture.py --full          # mac dinh: tv/tests/fixtures-124m (da gitignore)
     python tools/gen_gpt2_fixture.py --full --out D:/tv-gpt2-124m   # cho phep ngoai repo
@@ -59,7 +59,7 @@ if FULL:
         OUT = OUT_OK
         print("  (mac dinh --full OUT = %s)" % OUT)
     # GUARD 1: khong ghi vao repo ngoai thu muc da gitignore (fixture 124M
-    # 2.3 GB text, GitHub khong nhan file >100 MB; xem HANDOFF.md 0.6).
+    # 2.3 GB text, GitHub khong nhan file >100 MB; xem docs/HANDOFF.md 0.6).
     _out_r = os.path.realpath(OUT)
     _root_r = os.path.realpath(ROOT)
     _ok_r = os.path.realpath(OUT_OK)
@@ -80,7 +80,7 @@ if FULL:
 
 # ---- cau hinh GPT-2 thu nho (giong HF, chi giam kich thuoc) ---------------
 # (Ban 124M that su bi chan lam fixture check-in: wte ~425 MB text; dung bang
-# che do --full ngoai repo. Xem HANDOFF.md 0.6 + docs/handoff-gpt2-124m.)
+# che do --full ngoai repo. Xem docs/HANDOFF.md 0.6 + docs/handoff-gpt2-124m.)
 VOCAB = 256
 N_EMBD = 64
 N_HEAD = 4

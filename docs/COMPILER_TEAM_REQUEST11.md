@@ -1,4 +1,4 @@
-**TRẠNG THÁI 2026-11-11:** Giả thuyết khóa (lock hypothesis §8.1) **đã bị bác** — 328 → 312 ms, trong nhiễu. Các Ask A′/B′/C′ chưa ghi nhận delivered. Hướng xử lý hiện nay xem `BENCHMARKS.md` §9.22 (backward 2328 vs 2357.0 ms — ngang torch). Giữ file làm hồ sơ; không thực thi.
+**TRẠNG THÁI 2026-11-11:** Giả thuyết khóa (lock hypothesis §8.1) **đã bị bác** — 328 → 312 ms, trong nhiễu. Các Ask A′/B′/C′ chưa ghi nhận delivered. Hướng xử lý hiện nay xem `benchmark/BENCHMARKS.md` §9.22 (backward 2328 vs 2357.0 ms — ngang torch). Giữ file làm hồ sơ; không thực thi.
 
 # YÊU CẦU COMPILER TEAM #11 — bỏ serialize GEMM giữa các worker: `attention_bwd` 4116 → ~1200 ms/12 block
 

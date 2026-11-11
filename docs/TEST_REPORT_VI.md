@@ -7,7 +7,7 @@
 > (**22 pass / 4 fail — giống hệt baseline**; 4 fail do thiếu
 > `System.Runtime.Intrinsics` trên .NET Framework; `gap_tests` PASS khi chạy
 > .NET 10 như `gate_f32.sh` làm). Loss EXACT trên cả ba sequence, determinism
-> kiểm chứng bit. Chi tiết: `BENCHMARKS.md` §9.21. Hai suite 26/16 bên dưới
+> kiểm chứng bit. Chi tiết: `benchmark/BENCHMARKS.md` §9.21. Hai suite 26/16 bên dưới
 > là tàn dư của bản port 2026-09-28, không thay đổi; `run_cases.ps1` vẫn chạy
 > được nhưng số lượng của nó có trước cuộc chuyển .NET 10 — đừng trích dẫn làm số hiện tại.
 

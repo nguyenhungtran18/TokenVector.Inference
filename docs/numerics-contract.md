@@ -2,7 +2,7 @@
 
 Ngay chot: **2026-10-17** · Trang thai: **DA DUYET (2026-10-17)**
 Ap dung cho: moi thuat toan huan luyen LLM trong `TokenVector.Inference`
-Lien quan: `ROADMAP_TRAIN.md`
+Lien quan: `docs/ROADMAP_TRAIN.md`
 
 Muc dich: chot truoc cac quyet dinh so hoc, vi sau nay doi la phai sinh lai
 fixture va sua lai moi kernel.

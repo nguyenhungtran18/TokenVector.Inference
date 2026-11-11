@@ -1,7 +1,7 @@
 # How to Benchmark TokenVector.Inference vs PyTorch
 
 Practical recipe for apples-to-apples comparison on the GPT-2 124M training step
-(the benchmark we publish). Data journal: `BENCHMARKS.md` (latest: §9.22).
+(the benchmark we publish). Data journal: `benchmark/BENCHMARKS.md` (latest: §9.22).
 Results directory: `benchmark/` (gitignored, except the two files of each recorded run).
 
 ## What you need
@@ -79,11 +79,11 @@ Loss must print **EXACT** values: `10.572291` / `10.756927` / `10.760399`
 
 1. Run the matrix above; save the raw log to
    `benchmark/_bench_matrix_<tag>_<yyyyMMdd_HHmmss>.log`.
-2. Append a `§9.x` section to `BENCHMARKS.md` with: host CPU, compiler path +
+2. Append a `§9.x` section to `benchmark/BENCHMARKS.md` with: host CPU, compiler path +
    sha256, torch version + threads, same/cross-session note, tables of TKV vs
    torch (mode 1 best-of-3, mode 2 TONG, tier `d`/`e`), loss EXACT line, note
    on variance (`mode 1` is noisy — `mode 2` is the number to trust).
-3. Note it in `HANDOFF.md` (append-only).
+3. Note it in `docs/HANDOFF.md` (append-only).
 
 ## Gotchas
 

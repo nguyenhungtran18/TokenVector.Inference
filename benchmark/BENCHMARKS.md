@@ -5,8 +5,8 @@
 > loss EXACT, gate 135/135.  Bang do moi nhat: **§9.21-§9.22**.
 > Suite doi thu `compare_rivals.tkv` (§2) la **smoke suite legacy** - cac
 > hang so ORT/Torch trong no la literal co dinh, khong phai phep do tren may
-> nay; dung dung trich dan. ``HANDOFF.md` la nhat ky ky thuat dung sau moi con so.
-Huong dan chi tiet tung buoc: **`BENCHMARKING.md` / `BENCHMARKING_VI.md`**.
+> nay; dung dung trich dan. ``docs/HANDOFF.md` la nhat ky ky thuat dung sau moi con so.
+Huong dan chi tiet tung buoc: **`benchmark/BENCHMARKING.md` / `benchmark/BENCHMARKING_VI.md`**.
 
 ## 1. Cach do (recipe hien hanh)
 

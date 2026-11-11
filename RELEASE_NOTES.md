@@ -7,16 +7,16 @@
 > phần v1.0.0 bên dưới là **ảnh chụp 2026-09-28, đã lỗi thời**.
 
 **Training (GPT-2 124M, CPU):**
-- Full train step @seq1024: **4016 ms** vs PyTorch 2.14.0+cpu cùng phiên **4061.1 ms** → **0.989×** (`BENCHMARKS.md` §9.22); loss **EXACT** (`10.760399`).
+- Full train step @seq1024: **4016 ms** vs PyTorch 2.14.0+cpu cùng phiên **4061.1 ms** → **0.989×** (`benchmark/BENCHMARKS.md` §9.22); loss **EXACT** (`10.760399`).
 - Request #14 (COMPILER_TEAM): `adamw_step_glm` nhận thêm tham số `coef` — `opt.step` 781 → ~438–469 ms; không còn đường clip chậm (clip hoạt động hay không đều cùng một call).
-- Gate f32 **135/135** (`tools/gate_f32.sh`), `trainer_tests` **15/15**, `gpt2_full_tests` **33/33** (`BENCHMARKS.md` §9.21).
+- Gate f32 **135/135** (`tools/gate_f32.sh`), `trainer_tests` **15/15**, `gpt2_full_tests` **33/33** (`benchmark/BENCHMARKS.md` §9.21).
 - Numerics so với PyTorch: không hứa bit-exact ngoài nội bộ (matmul/reduction lệch 1–3 ulp; xem `docs/numerics-contract.md`). Loss khớp tuyệt đối trên fixture HF vì cùng cấu hình.
 
 **Native & hiệu năng:**
 - Hot kernels (GEMM, fused backward, AdamW) P/Invoke `tkv_simd_native.dll` (compiler repo `D:\TokenVector`, AVX2+FMA). Không có mã C/C++ trong repo này; đường scalar `.tkv` vẫn là tham chiếu ngữ nghĩa.
 - Compiler tự phát lớp IL `TkvSimd` cho builtin `simd_*`.
 
-**Docs:** README(-VI) viết lại hoàn toàn; `BENCHMARKS_VI.md` thay bằng bản tóm tắt hiện hành; các kế hoạch đã xong chuyển vào `docs/archive/`.
+**Docs:** README(-VI) viết lại hoàn toàn; `benchmark/BENCHMARKS_VI.md` thay bằng bản tóm tắt hiện hành; các kế hoạch đã xong chuyển vào `docs/archive/`.
 
 **Còn lại:** seq8/seq256 chậm hơn torch một chút (1.067×/1.027×); arena chưa zero-GC; GPU/NPU không có; working set ~7.2 GB @seq1024.
 
@@ -48,8 +48,8 @@ in-process micro-batcher.
 
 ## What is not ready yet
 - **Not zero-GC.** The arena is `dict[i64, list[f32]]` and `native_arena_alloc` is a stub
-  returning `0`, so tensors are managed allocations. `SIMD_NOTES.md` §7 has the fix.
-- **No SIMD.** `VEC_W = 8` blocked loops are scalar. `SIMD_NOTES.md` has the compiler
+  returning `0`, so tensors are managed allocations. `docs/SIMD_NOTES.md` §7 has the fix.
+- **No SIMD.** `VEC_W = 8` blocked loops are scalar. `docs/SIMD_NOTES.md` has the compiler
   requirements.
 - **No ONNX file loading.** `parser_read_bytes` is a stub, so `parse_file` returns nothing.
   `parse_bytes` on an in-memory buffer does work.
@@ -62,4 +62,4 @@ in-process micro-batcher.
 ## Verification
 `tv/tests/inference_tests.tkv` 26/26 and `tv/tests/gap_tests.tkv` 16/16 as of 2026-09-28,
 run with `powershell -File tools\run_cases.ps1`. Known coverage gaps are listed in
-`TEST_REPORT.md`.
+`docs/TEST_REPORT.md`.

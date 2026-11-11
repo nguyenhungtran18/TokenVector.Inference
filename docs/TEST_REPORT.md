@@ -8,7 +8,7 @@
 > 4 failures are `System.Runtime.Intrinsics` missing under .NET Framework;
 > `gap_tests` PASS when run under .NET 10, as `gate_f32.sh` does).
 > Loss EXACT on all three sequences, determinism verified bit-for-bit.
-> Details: `BENCHMARKS.md` §9.21. The 26/16 suites below remain from the
+> Details: `benchmark/BENCHMARKS.md` §9.21. The 26/16 suites below remain from the
 > 2026-09-28 port and are unchanged; `run_cases.ps1` still works but its
 > counts predate the .NET 10 migration — do not quote them as current.
 

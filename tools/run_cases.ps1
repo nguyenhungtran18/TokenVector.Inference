@@ -100,7 +100,7 @@ if ($gapOut -match "gap tests: PASS") {
 
 # [4/4] parity_tests: doi chieu thuat toan voi PyTorch bang fixture tinh san.
 # Fixture sinh boi tools\gen_fixtures.py (chay tren may co torch), check-in san
-# vao tv\tests\fixtures\ nen test khong can torch. Xem ROADMAP_TRAIN.md muc 5.
+# vao tv\tests\fixtures\ nen test khong can torch. Xem docs/ROADMAP_TRAIN.md muc 5.
 $parSrc = Join-Path $root "tv\tests\parity_tests.tkv"
 $parExe = Join-Path $WorkDir "parity_cases.exe"
 Write-Host ""
@@ -118,7 +118,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # [5/5] grad_tests: doi chieu BACKWARD tung op voi PyTorch autograd (fixture
-# tinh san). Xem ROADMAP_TRAIN.md G1.
+# tinh san). Xem docs/ROADMAP_TRAIN.md G1.
 $grSrc = Join-Path $root "tv\tests\grad_tests.tkv"
 $grExe = Join-Path $WorkDir "grad_cases.exe"
 Write-Host ""

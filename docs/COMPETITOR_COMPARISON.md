@@ -6,7 +6,7 @@
 > for hot kernels — there is no C/C++ in this repository. The pure-`.tkv` scalar path remains as the semantic
 > reference. Host intrinsics remain only for raw allocation, OS/HTTP/JSON/time-threads, file/network IO, and
 > byte codecs (protobuf/utf8/FP8/FP16-bitcast).
-> Measure speed only via the recipe in `BENCHMARKS.md` §1 (124M fwd/bwd/step; same-session torch) —
+> Measure speed only via the recipe in `benchmark/BENCHMARKS.md` §1 (124M fwd/bwd/step; same-session torch) —
 > `tv/benchmarks/compare_rivals.tkv` is a legacy smoke suite, not a measurement source.
 
 Legend: ✅ supported · ⚠️ partial/limited · ❌ missing
@@ -25,7 +25,7 @@ If/Loop (unrolled), LSTM/GRU/RNN (unrolled, bidir, Y/Y_h/Y_c), `StringConcat`/`S
 error (never silent)** + static shape inference. Still missing: first-class Sequence*/image data
 ops (need sequence dtype in `tv.numerics`) and Scan with runtime trip count | **200+ ops**, full ONNX opset, spec validation | LLM-arch native (Llama/Qwen/Gemma/Phi/…), not general ONNX | Full ATen + custom ops, autograd |
 | Dynamic shapes | ✅ symbolic dimensions, shape specialization, and request-time concrete-shape execution (`runtime/dynamic_shapes.tkv`) | ✅ symbolic dims | ✅ variable context, `--cont-batching` | ✅ dynamic shapes, `torch.compile` |
-| Training | ✅ GPT-2 124M full-model training (`training/gpt2_ref124.tkv`: fwd/bwd/AdamW/clip/checkpoint, loss EXACT vs HF fixture; full step @seq1024 = **4016 ms** vs torch 4061.1, same session, 0.989× — `BENCHMARKS.md` §9.22) + MLP+AdamW reference (`trainer_tests` 15/15) + LoRA | ✅ on-device training | ✗ inference-only | ✅ full training |
+| Training | ✅ GPT-2 124M full-model training (`training/gpt2_ref124.tkv`: fwd/bwd/AdamW/clip/checkpoint, loss EXACT vs HF fixture; full step @seq1024 = **4016 ms** vs torch 4061.1, same session, 0.989× — `benchmark/BENCHMARKS.md` §9.22) + MLP+AdamW reference (`trainer_tests` 15/15) + LoRA | ✅ on-device training | ✗ inference-only | ✅ full training |
 
 ## 2. LLM inference features
 
@@ -74,7 +74,7 @@ ops (need sequence dtype in `tv.numerics`) and Scan with runtime trip count | **
 
 ## 6. Speed references
 
-Speed numbers live in `BENCHMARKS.md` §9 (current: §9.22, same-session vs torch). No historical backend figures are kept in this document.
+Speed numbers live in `benchmark/BENCHMARKS.md` §9 (current: §9.22, same-session vs torch). No historical backend figures are kept in this document.
 
 ## 7. Coverage status (closed list + remaining items with technical reasons)
 
@@ -91,11 +91,11 @@ Closed:
 
 Remaining — each with its precise technical reason:
 
-1. **LLM-scale pretraining.** GPT-2 124M trains end-to-end (fwd/bwd/AdamW/clip, loss EXACT vs HF fixture, 0.989× torch @seq1024 step time — `BENCHMARKS.md` §9.21–§9.22). At larger scale CPU pretraining remains 10–100x too slow; it only makes sense together with item 2.
+1. **LLM-scale pretraining.** GPT-2 124M trains end-to-end (fwd/bwd/AdamW/clip, loss EXACT vs HF fixture, 0.989× torch @seq1024 step time — `benchmark/BENCHMARKS.md` §9.21–§9.22). At larger scale CPU pretraining remains 10–100x too slow; it only makes sense together with item 2.
 2. **GPU/NPU compute.** The `.tkv` language as defined has no GPU constructs: no thread blocks, shared memory, tensor-core MMA, or kernel-launch API — every existing `extern def` is scalar/host-side (alloc, IO, codecs, time). A GPU backend means extending the tv **compiler** itself (TokenVector main repo, not this one) plus vendor SDK shims (CUDA/TensorRT/QNN). `device.tkv` / `hal.tkv` stubs exist so this fails loudly instead of silently; `HalDispatch` is the registration seam once a backend exists.
 3. **Full sequence container + image data ops + dynamic Scan.** String tensors ride `str_values` + UTF-8 byte pools (`string_tensor.tkv`); static `Scan` unrolls when trip ≤ 128 (`_expand_scan`). Remaining: first-class variable-length **sequence** type for Sequence* ops, image tensor codecs, and Scan whose trip depends on runtime data (needs a real loop primitive or compiler support).
 4. **IQ/TQ dequant + vision encoder weights + GGUF-shard mmap.** Q2_K/Q3_K/Q6_K are now decoded from bit-exact ggml layouts behind a self-gate; IQ/TQ nonlinear layouts still lack a checked reference vector set in-tree (silent-corruption risk remains — loud error is correct). Vision needs actual ViT/CLIP **weights** (graph builder exists). Sharded mmap needs a memory-mapped-file host intrinsic plus multi-shard index resolution.
-5. **Re-measured benchmarks.** Training latency numbers live in `BENCHMARKS.md` §9 (current: §9.21–§9.22 — `benchmark/bseq_post14.exe` built by `D:\TokenVector\Release\dist\tkvc-tv.exe`, torch measured same-session). `tv/benchmarks/compare_rivals.tkv` remains a legacy smoke suite — its ORT/TORCH constants are literals, not measurements.
+5. **Re-measured benchmarks.** Training latency numbers live in `benchmark/BENCHMARKS.md` §9 (current: §9.21–§9.22 — `benchmark/bseq_post14.exe` built by `D:\TokenVector\Release\dist\tkvc-tv.exe`, torch measured same-session). `tv/benchmarks/compare_rivals.tkv` remains a legacy smoke suite — its ORT/TORCH constants are literals, not measurements.
 
 ## 8. When to pick whom
 
@@ -118,6 +118,6 @@ dotnet benchmark/quickstart.exe   # Y[0] = 2.25 / quickstart: OK
 The API is graph-based — there is no `tv.inference.load_onnx()`, no `NDArray` and no
 `tensor.zeros`. Build an `ExecutionGraph`, then `session_from_graph(g, 1)` and
 `session.run_single(x, "X", "Y")`. See `USER_GUIDE.md` and `tv/examples/quickstart.tkv`
-for the full snippet, and `HANDOFF.md` for the stubs that are not wired up.
+for the full snippet, and `docs/HANDOFF.md` for the stubs that are not wired up.
 
-The CPU row describes what the code *is* today (native AVX2/FMA via the companion DLL; scalar `.tkv` as fallback and semantic reference; arena not zero-GC). For measured numbers see `BENCHMARKS.md` §9.22 (same-session vs torch; full step 0.989× @seq1024).
+The CPU row describes what the code *is* today (native AVX2/FMA via the companion DLL; scalar `.tkv` as fallback and semantic reference; arena not zero-GC). For measured numbers see `benchmark/BENCHMARKS.md` §9.22 (same-session vs torch; full step 0.989× @seq1024).
