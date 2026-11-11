@@ -7513,3 +7513,290 @@ Bài học ghi lại: bisect bằng cách sửa file thật rồi khôi phục l
 phải kiểm "đã khôi phục hết chưa" bằng hash toàn bộ bản sao, không bằng cảm giác
 đã sửa đúng file. Tôi đã hai lần trong cùng một mục §0.151 vật lộn với chuyện
 không biết mình đang sửa bản nào.
+
+---
+
+## §0.139 PHÂN RÃ 5 PHA SAU KHI SỬA — TKV ĐÃ THẮNG Ở FWD, và ba giả thuyết của tôi đều SAI
+
+**Ngày:** 2026-11-11. Số đo: `BENCHMARKS.md` §9.18.
+
+### 0. Kết luận trước
+
+Dùng **cùng phiên** (log `out/_bench_matrix_20261110_154851.log`, torch T=14):
+
+| pha | TKV | torch | chênh |
+|---|---:|---:|---:|
+| fwd | 1032 | 1086.8 | **−54.8** (TKV THẮNG) |
+| loss | 109 | (gộp trong fwd) | — |
+| bwd | 2437 | 2352.0 | +85.0 |
+| opt | 781 | 655.2 | +125.8 |
+| copyback | 125 | 62.0 | +63.0 |
+| **TỔNG** | **4484** | **4130.6** | **+353.4** |
+
+**Forward của TKV đã nhanh hơn torch.** Chỗ thua nằm ở `opt` + `copyback` (189 ms)
+và `bwd` (85 ms).
+
+### 1. BA GIẢ THUYẾT CỦA TÔI ĐỀU SAI — ghi lại để không ai đi lại
+
+**(a) "clip path là thủ phạm" — SAI.** Tôi suy ra `coef = clip/(gn+eps)` với
+`clip=1.0`, `gn≈11` → `coef≈0.09 ≠ 1.0`, nên tưởng đường đắt (`r1` + zero +
+`addcmul`) có chạy và tốn ~400 ms. Đo trực tiếp:
+
+| phép đo | ms |
+|---|---:|
+| `opt.step()` end-to-end, `clip=1.0` | **532** |
+| `opt.step()` end-to-end, `clip=1e9` (coef cap 1.0, như torch) | **547** |
+| chênh | **−15** |
+
+Đường clip **không tốn gì** (−15 ms, trong nhiễu). Giả thuyết chết.
+
+**(b) "`adamw_step_glm` là thủ phạm" — SAI.** 125 ms, không phải 781.
+
+**(c) "`f32_grad_norm` là thủ phạm" — SAI.** 203 ms, và nó nằm trong 532 ms của
+`step()`, không cộng thêm.
+
+### 2. LỖI ĐO CỦA TÔI — truyền cùng một buffer cho 3 tham số
+
+Probe đầu tiên gọi `adamw_step_glm(b1, b1, b1, ...)` — **cùng một buffer** cho
+`pp/pm/pv`. Kernel chỉ chạm 474 MB thay vì 1.42 GB, nên ra 125 ms thay vì ~375.
+Con số 125 ms đó vô nghĩa. Đã sửa bằng 3 buffer riêng.
+
+Bài học: **khi đo một kernel nhận nhiều buffer, phải cấp buffer RIÊNG.** Dùng
+chung buffer làm giảm working set và cho số đẹp giả tạo.
+
+### 3. `opt` 781 ms trong BPHASE KHÔNG phải `opt.step()` — nó gồm cả copyback
+
+`opt.step()` thật chỉ **532 ms**. BPHASE mode 2 đo `opt` và `copyback` **riêng**
+(`te = now_ms()` sau `opt.step()`, `tf` sau vòng copy), nên 781 phải gồm thêm
+phần khác. Nghi vấn: **page fault trên `opt.p`** — buffer 474 MB vừa bị
+`adamw_step_glm` ghi, lần đọc đầu tiên sau đó phải fault trang vào.
+
+Đây là cùng cơ chế đã lật §9.15: chi phí zero-fill bị hoãn sang lần chạm đầu.
+Với `opt.step()` đứng riêng (probe A) thì 3 lần chạy liên tiếp đã fault sẵn nên
+chỉ còn 532; trong production mỗi bước là một lần fault mới.
+
+**Chưa chứng minh.** Cần đo: `opt.step()` rồi đọc toàn bộ `opt.p` ngay sau, so
+với đọc lại lần 2.
+
+### 4. `copyback` 125 ms — ứng viên thay thế đã có sẵn
+
+`_step124` (mode 1) có vòng `.tkv` sau `opt.step()`:
+
+```
+for i in range(len(ps)):
+    t = ps[i]; d = t.data
+    for j in range(len(d)):
+        d[j] = opt.p[off + j]
+```
+
+Đo: vòng `.tkv` = **203 ms**; `f32_copy_from_buf` = **203 ms** (ngang nhau, cả
+hai đều memory-bound). `f32_copy_to_buf` = **281 ms**.
+
+**Không có gì để thắng ở đây bằng cách đổi builtin.** Cả hai đều chạm 474 MB.
+Muốn cắt phải **bỏ hẳn** vòng copy: `opt.p` đã là ảnh chính, `ps[].data` chỉ là
+bản sao cho checkpoint/test. `sync_p()` đã có cơ chế lazy (`psync`) — nếu bỏ
+copyback khỏi đường nóng và chỉ `sync_p()` khi cần, tiết kiệm 125 ms/bước.
+
+**Rủi ro:** `_step124` trả `loss` sau copyback; bỏ copyback thì `ps[].data` không
+còn phản ánh `opt.p` cho tới khi `sync_p()`. Phải kiểm mọi chỗ đọc `ps[].data`
+sau bước (ckpt, test, bench khác).
+
+### 5. Việc tiếp theo, theo thứ tự ưu tiên
+
+1. **Chứng minh/loại trừ page-fault cho 781 ms** — đo `opt.step()` + đọc `opt.p`
+   ngay sau, so lần 1 vs lần 2. Nếu đúng, 250 ms chênh là chi phí fault, và cách
+   chữa là **giữ `opt.p` nóng** (đừng để bị evict giữa các bước) hoặc dùng
+   `madvise`/prefetch.
+2. **Bỏ copyback khỏi đường nóng** (125 ms) — dùng `sync_p()` lazy. Cần audit chỗ
+   đọc `ps[].data`.
+3. `bwd` +85 ms — chênh nhỏ, ưu tiên thấp.
+4. **seq256 (292 ms cần cắt)** vẫn là chỗ xa ≤1.0x nhất; nhưng `fwd` đã thắng nên
+   chi phí cố định nằm ở `opt`+`copyback` (189 ms) — sửa (1)+(2) sẽ kéo seq256
+   nhiều nhất.
+---
+
+## §0.152 ĐÓNG CÂU HỎI 532 vs 781 — KHÔNG phải page fault, KHÔNG phải cache; là ÁP LỰC BỘ NHỚ
+
+**Ngày:** 2026-11-11. Tiếp §0.139 §5 mục 1.
+
+### 0. Kết luận trước
+
+`opt.step()` đo riêng = **532 ms**; trong BPHASE production = **781 ms**. Chênh
+**249 ms** ổn định (781/781/797 qua 3 lần). Nguyên nhân **không phải** page fault
+lần đầu, **không phải** cache eviction, **không phải** số group.
+
+Nguyên nhân: **production giữ 7.2 GB working set trên máy 11.8 GB RAM.** Probe
+riêng chỉ giữ 1.4 GB. Ở mức 7.2 GB, `opt.p` (474 MB) và `m/v` (948 MB) bị tranh
+chấp trang với weights + gradients + activations, nên mỗi lượt `adamw_step_glm`
+phải stream từ DRAM trong điều kiện áp lực, không phải từ cache ấm.
+
+### 1. Ba giả thuyết đã bị loại bằng đo, không bằng suy luận
+
+| giả thuyết | thí nghiệm | kết quả | phán quyết |
+|---|---|---|---|
+| H1 page fault lần đầu | `opt.step()` 3 lần liên tiếp, in từng lần | 562 / 547 / 547 | **SAI** — lần 2, 3 không nhanh hơn |
+| H2 cache eviction | quét 474 MB xen giữa rồi `opt.step()` | nóng 547 vs nguội 515, chênh **−32** | **SAI** — nguội còn nhanh hơn |
+| H3 số group (148 vs 1) | dựng `_mk_groups` = 148 group như production | 532 vs 531, chênh **−1** | **SAI** |
+
+H2 đáng chú ý: quét 474 MB **không** làm `opt.step()` chậm đi. Nghĩa là
+`opt.step()` vốn đã memory-bound trên DRAM, cache không giúp gì — nên "giữ nóng"
+là vô nghĩa.
+
+### 2. Bằng chứng áp lực bộ nhớ
+
+| chỉ số | giá trị |
+|---|---|
+| RAM vật lý | **11.8 GB** |
+| peak working set (mode 2, seq1024) | **7.24–7.44 GB** |
+| peak paged memory | **9.67 GB** |
+| peak virtual | 2.03 TB (vùng đặt trước, không phải RAM thật) |
+| page file | 6.9 GB, đang dùng 292 MB |
+
+Working set 7.4 GB / 11.8 GB = **63% RAM**. Cộng page file và phần OS + torch
+(nếu chạy xen kẽ) thì biên rất mỏng. `opt.p` list 474 MB nằm trong vùng bị tranh
+chấp đó.
+
+### 3. Vì sao điều này quan trọng hơn một con số
+
+Nếu `opt` chậm vì áp lực bộ nhớ chứ không vì thuật toán, thì **mọi tối ưu vi mô
+trên `adamw_step_glm` đều vô ích**. Muốn cắt 249 ms phải **giảm working set**,
+không phải làm kernel nhanh hơn.
+
+Đây cũng giải thích vì sao `fwd` của TKV đã thắng torch (−55 ms) trong khi `opt`
+thua +126: forward là compute-bound (BLAS thắng), còn `opt` là memory-bound
+(thuần streaming 1.42 GB/bước).
+
+### 4. Hướng cắt thật, theo thứ tự hiệu quả trên lý thuyết
+
+1. **Bỏ copyback khỏi đường nóng** — 125 ms, và nó cũng là 474 MB lưu lượng/bước
+   ít đi. Đã có `sync_p()` lazy (`psync`). Đây là mục rẻ nhất, làm trước.
+2. **Giảm working set tổng** — `sc5` = `[seq*V]` = 1024×50257×4 = **206 MB**;
+   `sc4` = `[V*h]` = 154 MB; `m6_*` 6 buffer. Kiểm cái nào thật sự cần sống đồng
+   thời. Mỗi 100 MB cắt được là 100 MB biên RAM rộng ra.
+3. **`opt.p` list là bản sao thừa** — `pp` buffer đã là ảnh chính (`adamw_step_glm`
+   đọc/ghi `pp`). `opt.p` list 474 MB chỉ để copyback và ckpt. Nếu bỏ hẳn `opt.p`
+   list khỏi đường nóng, tiết kiệm **474 MB working set** + 125 ms copyback.
+   Đây là đòn lớn nhất, nhưng phải audit mọi chỗ đọc `opt.p`.
+
+### 5. Chưa làm
+
+- Chưa sửa file production nào. `_step124` và `trainer.tkv` nguyên trạng.
+- Chưa chứng minh nhân quả tuyệt đối cho H4 (áp lực bộ nhớ): mới có tương quan
+  (7.4 GB WS ↔ +249 ms). Muốn chắc thì chạy cùng phép đo `opt.step()` trong một
+  tiến trình giữ thêm ~6 GB rác để đẩy WS lên 7.4 GB — nếu `opt.step()` nhảy lên
+  ~780 thì H4 được xác nhận.
+- `tv/tests/_seq_cfg.txt` đã trả về `1024/1/1/1`.
+---
+
+## §0.153 TÌM RA `opt` 781 ms = ĐƯỜNG CLIP — và năm lần tôi đo sai
+
+**Ngày:** 2026-11-11. Request: `docs/COMPILER_TEAM_REQUEST14.md`. Số đo: `BENCHMARKS.md` §9.18–§9.20.
+
+### 0. Kết luận trước
+
+`opt` 781 ms trong BPHASE **không phải** page fault, **không phải** cache, **không
+phải** áp lực bộ nhớ. Nó là **đường clip** trong `AdamW.step()`.
+
+`coef = clip/(grad_norm + 1e-6)`. Gradient thật cho `gn = 11.155`, `clip = 1.0` →
+`coef ≈ 0.0896 ≠ 1.0` → production **luôn** đi đường chậm gồm 3 bước phụ:
+
+| bước | ms |
+|---|---:|
+| `r1` = `f32_copy_to_buf` (474 MB list → buffer) | 156 |
+| `rzp` = `f32_zero` (474 MB) | 125 |
+| `rax` = `f32_addcmul` (474 MB đọc + ghi) | 172 |
+| `adamw_step` (buffer) | 343 |
+| **tổng** | **796** |
+
+Đường nhanh `adamw_step_glm` (list) = 343 ms. End-to-end chênh **124–328 ms**,
+trung bình ~220.
+
+`ponl` là buffer toàn `1.0`, nên `f32_addcmul(ptl, pgl, ponl, coef, n)` thực chất
+chỉ là `ptl = coef * gl` — một phép nhân vô hướng đi qua 3 lượt chạm 474 MB.
+
+### 1. H4 (áp lực bộ nhớ) đã bị loại — §0.140 SAI
+
+§0.140 kết luận "áp lực bộ nhớ" từ tương quan 7.4 GB WS ↔ +249 ms. Đo nhân quả:
+
+| thí nghiệm | kết quả |
+|---|---|
+| baseline (1.4 GB WS) | 531 ms |
+| + 6 GB ballast đã chạm (7.4 GB WS) | 563 ms |
+| **chênh** | **+32 ms** |
+
+6 GB áp lực thêm chỉ tốn 32 ms, không phải 250. **H4 chết.** Tương quan ở §0.140
+là trùng hợp: cả hai đều ~7.4 GB, nhưng nguyên nhân là clip path, không phải RAM.
+
+### 2. NĂM LẦN ĐO SAI — nguyên nhân thật của việc đi vòng lâu
+
+| # | lỗi | hậu quả |
+|---|---|---|
+| 1 | probe `lmhead_bwd_fused` 1 thread + không nạp BLAS | 924 thay vì 542 ms (§8 sai) |
+| 2 | đo `t_zeros` chỉ ở bước "tạo", không chạm dữ liệu | 0.0 ms giả tạo (§9.15) |
+| 3 | `adamw_step_glm(b1, b1, b1, ...)` cùng buffer cho pp/pm/pv | 125 thay vì 343 ms |
+| 4 | probe clip dùng `g` toàn 0 → `gn = 0` → cả hai nhánh đi đường nhanh | "clip không tốn gì" — SAI |
+| 5 | `zeros_list` trả dtype `i32`, index trực tiếp trong `main` | `AccessViolation` / `InvalidCastException` |
+
+**Lỗi #4 là lỗi đắt nhất.** Tôi kết luận "clip không tốn gì" ở §0.139 §1(a) chỉ
+vì `g = zeros_list(n)` làm `gn = 0`, nên `if gn > 0.0` không bao giờ đúng và cả
+hai nhánh đều rơi vào đường nhanh. Phải mất thêm một vòng mới phát hiện.
+
+Bài học: **khi test một nhánh `if`, phải chứng minh nhánh đó thật sự chạy.** In
+giá trị điều kiện ra, đừng suy từ tham số truyền vào.
+
+### 3. Request #14
+
+`docs/COMPILER_TEAM_REQUEST14.md`: thêm tham số `coef` vào `adamw_step_glm`, nhân
+ngay trong kernel (`float gv = coef * g[i];`). Bỏ được `r1` + `rzp` + `rax` và
+buffer `pt` (474 MB working set).
+
+- `coef == 1.0` phải **bit-identical** (nhân 1.0 là đồng nhất trong IEEE-754).
+- `coef != 1.0` phải bit-identical với `f32_addcmul` + `adamw_step` cũ.
+
+Kỳ vọng: `opt` 781 → ~560; full step 4219 → **~4000**; working set −474 MB.
+
+Mục tiêu ≤1.0× cần cắt 179 ms @seq1024. Ask này **một mình đủ vượt**, và còn dư
+cho seq8/seq256 vì `opt` cố định 781 ms ở cả ba seq.
+
+### 4. Chưa làm
+
+- Chưa sửa file production nào. `trainer.tkv` nguyên trạng.
+- Chưa chạy lại `testkit_gate.ps1` (9 suite nhỏ 102 assert) — vẫn treo từ §0.138.
+- `copyback` 125 ms vẫn còn: `f32_copy_from_buf` đo 203 ms, ngang vòng `.tkv`
+  203 ms, nên đổi builtin không thắng. Muốn cắt phải bỏ hẳn vòng copy và dùng
+  `sync_p()` lazy — việc riêng, sau #14.
+- `tv/tests/_seq_cfg.txt` = `1024/1/1/1`.
+
+### 5. Request #14 — XONG (2026-11-11): `opt` 781 → 438-469 ms, loss EXACT
+
+§4 ở trên đã lỗi thời: production **đã sửa**. Compiler repo commit `82e5426`
+(`adamw_step_glm` 13 tham số, export native mới `AdamwStepF32C`, DLL hash
+`1E49BCE2…` 389,120 B; `tkvc-tv.exe` `71270415…`). Inference commit `ae2dc7a`.
+
+**Wiring:** cả 4 bản `trainer.tkv` (`tv/training/` canonical + `tv/training/`,
+`tv/tests/`, `tv/tools/` mirror) đổi khối clip 3 bước thành **một** call
+`adamw_step_glm(ppl,pml,pvl,gl,self.n,step_size,b1,b2,eps,wde,bc1,bc2s,coef)`;
+bỏ `r1`/`rzp`/`rax`/`gsrc` và cả `if coef != 1.0`. `pt`/`pone` **vẫn cấp phát**
+(các probe `_cj7/_cj8/_cy5/_det/_field_read/_opt_inline/_opt_split` đọc
+`opt.pt`/`opt.pone`) nên chưa lấy lại working set.
+
+| hạng mục | trước | sau |
+|---|---:|---:|
+| `opt.step()` clip=1.0 (`_clip_real`) | 781 ms | **484 ms** |
+| `opt.step()` clip=1e9 | 563 ms | **484 ms** |
+| chênh clip | 218 ms | **0.0 ms** |
+| `opt` BPHASE @seq8 / 256 / 1024 | 781 | **438 / 453 / 469** |
+| BPHASE TỔNG @seq1024 (mode 2) | 4484 | **4015** = 0.972× torch cùng phiên |
+| full step mode 1 @seq1024 best-of-3 | 4219 | **4109** |
+| full step mode 1 @seq8 / 256 best-of-3 | 1187 / 1782 | **1141 / 1562** |
+
+**Loss EXACT** 3 seq: `10.572291 / 10.756927 / 10.760399`. Gate: trainer
+**15/15** (clip `max_abs_diff=0.0`), `gpt2_full_tests` **33/33**, `gate_f32.sh`
+**10/10 suite, TOTAL fails=0 = 135/135**, `run_cases.ps1` **22/4** +
+`gap_tests` FAIL = **đúng baseline** (thiếu `System.Runtime.Intrinsics` trên
+.NET Framework; gate chạy .NET 10 nên PASS).
+
+Mode 1 dao động ±5% giữa các phiên (seq1024 từng đọc 4109-4344); số `opt` ở
+mode 2 mới là thứ phản ánh trực tiếp thay đổi. `_seq_cfg.txt` đã trả về
+`1024/1/1/1`. Chi tiết + bảng đầy đủ: `BENCHMARKS.md` §9.21 và
+`D:\TokenVector\Release\docs\e_handoff\2026-11-11-request14-adamw-glm-coef.md`.
