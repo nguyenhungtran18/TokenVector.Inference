@@ -7484,3 +7484,32 @@ A/B 4 cặp xen kẽ, `out/ab_q151_20261111.log`:
 - Bug compiler nên báo cho nhóm compiler: (a) list literal vào tham số kiểu số,
   (b) `append(<hàm trả về list>)`. Cả hai đều **im lặng lúc build**, chỉ chết ở JIT.
 - 14 bản `tv.runtime.session.tkv` là nợ cấu trúc: sửa một chỗ phải sửa 14 nơi.
+
+
+### 8. Đính chính §0.151 — commit `b6d3016` mang theo một lỗi của chính tôi
+
+Viết mục này vì nếu để nguyên thì handoff đang ca ngợi "11/11 PASS" trong khi
+trong repo có code hỏng do tôi tạo ra.
+
+Trong lúc bisect bug `InvalidProgramException`, tôi đổi `def run` → `def run_x`
+ở `IGraphPass` và `ConstantFoldingPass` để kiểm giả thuyết trùng tên method.
+Bước khôi phục sau đó chỉ trả lại bản `tv/tests/tv.runtime.session.tkv` — **bỏ sót
+2 bản trong `tv/runtime/`**. Commit `b6d3016` vì thế chứa `tv/runtime/session.tkv`
+và `tv/runtime/tv.runtime.session.tkv` với method tên `run_x`, không còn `run`.
+
+Gate vẫn 11/11 PASS vì không ai import từ hai file đó (import resolve theo vị trí
+file — chính cái bẫy ở §3). Nhưng đó đúng là loại nợ §0.150 vừa trả xong: code
+hỏng nằm trong repo, che sau một gate xanh.
+
+Đã sửa, commit `53545d4`:
+- khôi phục `def run` ở cả 2 file (2 method mỗi file)
+- chuẩn hóa line ending: script Python của tôi sinh 2 dòng LF-only trong 2 file
+  đó, sửa về CRLF cho khớp 11 bản còn lại
+
+Kiểm chứng: **13/13 bản `tv.runtime.session.tkv` cùng MD5**, 0 `run_x` còn lại,
+gate chạy lại **11/11 PASS**.
+
+Bài học ghi lại: bisect bằng cách sửa file thật rồi khôi phục là cách nhanh nhưng
+phải kiểm "đã khôi phục hết chưa" bằng hash toàn bộ bản sao, không bằng cảm giác
+đã sửa đúng file. Tôi đã hai lần trong cùng một mục §0.151 vật lộn với chuyện
+không biết mình đang sửa bản nào.
