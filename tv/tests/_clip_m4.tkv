@@ -1,0 +1,23 @@
+# PROBE CLIP BREAKDOWN m4 — adamw_step tren buffer (duong cham dung cai nay)
+import tv.training.gpt2_ref124
+import tv.training.trainer
+
+
+def main() -> 'i32':
+    print("=== CLIP BREAKDOWN: adamw_step (buffer) ===")
+    n: "i32" = 124439808
+    print("n = " + str(n) + "  (" + str(float(n * 4) / 1048576.0) + " MB)")
+    b1 = alloc_bytes(n * 4)
+    b2 = alloc_bytes(n * 4)
+    b3 = alloc_bytes(n * 4)
+    b4 = alloc_bytes(n * 4)
+    f32_zero(b1, n)
+    f32_zero(b2, n)
+    f32_zero(b3, n)
+    f32_zero(b4, n)
+    t0 = now_ms()
+    r: "i64" = adamw_step(b1, b2, b3, b4, n,
+                          0.0001, 0.9, 0.999, 0.00000001, 0.01, 0.1, 0.9995)
+    t1 = now_ms()
+    print("adamw_step (buffer) = " + str(t1 - t0) + " ms  rc=" + str(r))
+    return 0

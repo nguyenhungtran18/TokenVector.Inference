@@ -1,0 +1,34 @@
+# PROBE CLIP BREAKDOWN m3 — rax f32_addcmul (474 MB doc + 474 MB ghi)
+import tv.training.gpt2_ref124
+import tv.training.trainer
+
+
+def fill_g(g: "list[f32]", n: "i32") -> "f64":
+    i: "i32" = 0
+    while i < n:
+        g[i] = 0.001
+        i = i + 1
+    return float(g[0])
+
+
+def do_addcmul(g: "list[f32]", n: "i32") -> "i32":
+    fg: "f64" = fill_g(g, n)
+    print("g[0] = " + str(fg))
+    pgl = alloc_bytes(n * 4)
+    ptl = alloc_bytes(n * 4)
+    ponl = alloc_bytes(n * 4)
+    f32_copy_to_buf(g, pgl, n)
+    f32_zero(ptl, n)
+    f32_zero(ponl, n)
+    t0 = now_ms()
+    r: "i64" = f32_addcmul(ptl, pgl, ponl, 0.0896, n)
+    t1 = now_ms()
+    print("rax f32_addcmul = " + str(t1 - t0) + " ms  rc=" + str(r))
+    return 0
+
+
+def main() -> 'i32':
+    print("=== CLIP BREAKDOWN: rax f32_addcmul ===")
+    n: "i32" = 124439808
+    print("n = " + str(n) + "  (" + str(float(n * 4) / 1048576.0) + " MB)")
+    return do_addcmul(zeros_list(n), n)

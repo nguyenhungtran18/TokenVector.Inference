@@ -1,0 +1,35 @@
+# PROBE CLIP BREAKDOWN m5 — adamw_step_glm doc gl list truc tiep (duong nhanh)
+import tv.training.gpt2_ref124
+import tv.training.trainer
+
+
+def fill_g(g: "list[f32]", n: "i32") -> "f64":
+    i: "i32" = 0
+    while i < n:
+        g[i] = 0.001
+        i = i + 1
+    return float(g[0])
+
+
+def do_glm(g: "list[f32]", n: "i32") -> "i32":
+    fg: "f64" = fill_g(g, n)
+    print("g[0] = " + str(fg))
+    b1 = alloc_bytes(n * 4)
+    b2 = alloc_bytes(n * 4)
+    b3 = alloc_bytes(n * 4)
+    f32_zero(b1, n)
+    f32_zero(b2, n)
+    f32_zero(b3, n)
+    t0 = now_ms()
+    r: "i64" = adamw_step_glm(b1, b2, b3, g, n,
+                              0.0001, 0.9, 0.999, 0.00000001, 0.01, 0.1, 0.9995)
+    t1 = now_ms()
+    print("adamw_step_glm (list) = " + str(t1 - t0) + " ms  rc=" + str(r))
+    return 0
+
+
+def main() -> 'i32':
+    print("=== CLIP BREAKDOWN: adamw_step_glm (list) ===")
+    n: "i32" = 124439808
+    print("n = " + str(n) + "  (" + str(float(n * 4) / 1048576.0) + " MB)")
+    return do_glm(zeros_list(n), n)

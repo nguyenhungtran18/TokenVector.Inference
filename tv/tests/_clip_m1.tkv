@@ -1,0 +1,31 @@
+# PROBE CLIP BREAKDOWN m1 — r1 f32_copy_to_buf (474 MB list -> buffer)
+#
+# zeros_list tra dtype 'i32' nen phai truyen QUA THAM SO HAM moi la list[f32].
+import tv.training.gpt2_ref124
+import tv.training.trainer
+
+
+def fill_g(g: "list[f32]", n: "i32") -> "f64":
+    i: "i32" = 0
+    while i < n:
+        g[i] = 0.001
+        i = i + 1
+    return float(g[0])
+
+
+def do_copy(g: "list[f32]", n: "i32") -> "i32":
+    fg: "f64" = fill_g(g, n)
+    print("g[0] = " + str(fg))
+    pgl = alloc_bytes(n * 4)
+    t0 = now_ms()
+    r: "i64" = f32_copy_to_buf(g, pgl, n)
+    t1 = now_ms()
+    print("r1 f32_copy_to_buf = " + str(t1 - t0) + " ms  rc=" + str(r))
+    return 0
+
+
+def main() -> 'i32':
+    print("=== CLIP BREAKDOWN: r1 f32_copy_to_buf ===")
+    n: "i32" = 124439808
+    print("n = " + str(n) + "  (" + str(float(n * 4) / 1048576.0) + " MB)")
+    return do_copy(zeros_list(n), n)

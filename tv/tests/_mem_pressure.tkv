@@ -1,0 +1,108 @@
+# PROBE MEM PRESSURE CAUSALITY (2026-11-11) — H4 co dung khong?
+#
+# §0.140 moi co TUONG QUAN: production giu 7.4 GB WS thi opt.step() = 781 ms;
+# probe rieng giu 1.4 GB thi opt.step() = 532 ms. Chua chung minh NHAN QUA.
+#
+# Thi nghiem: do opt.step() tren CUNG mot AdamW, hai lan:
+#   A: baseline            (WS ~ 1.4 GB)
+#   B: sau khi cap + cham 6 GB ballast  (WS ~ 7.4 GB, giong production)
+#
+# Neu B - A ~ +250 ms  -> H4 DUNG: ap luc bo nho la nguyen nhan.
+# Neu B ~ A            -> H4 SAI: 781 den tu cho khac, phai tim tiep.
+#
+# Ballast phai duoc CHAM (f32_zero ghi 0) thi trang moi that su commit;
+# alloc_bytes khong cham thi chi dat truoc vung dia chi (da do: 154 MB = 0.0 ms).
+import tv.training.gpt2_ref124
+import tv.training.trainer
+
+
+def mk_opt(n: "i64", groups: "list[i64]") -> "AdamW":
+    return new_adamw_g(n, groups, 2, 1000, 0.05, 0.0025, 0.9, 0.999,
+                       0.00000001, 0.0, 1.0)
+
+
+def mk_groups(n: "i32") -> "list[i64]":
+    """148 group nhu production (_groups(ps): moi tensor 1 group)."""
+    out: "list[i64]" = []
+    k: "i32" = 0
+    while k < 147:
+        out.append(768)
+        k = k + 1
+    out.append(n - 147 * 768)
+    return out
+
+
+def step_min(opt: "AdamW", reps: "i32") -> "f64":
+    """opt.step() reps lan, tra ve min."""
+    best: "f64" = 1.0e9
+    k: "i32" = 0
+    while k < reps:
+        t0 = now_ms()
+        lr = opt.step()
+        t1 = now_ms()
+        if float(t1 - t0) < best:
+            best = float(t1 - t0)
+        k = k + 1
+    return best
+
+
+def baseline(opt: "AdamW") -> "f64":
+    print("--- A: baseline (WS ~ 1.4 GB) ---")
+    d: "f64" = step_min(opt, 3)
+    print("  opt.step() min = " + str(d) + " ms")
+    return d
+
+
+def under_pressure(opt: "AdamW") -> "f64":
+    """Cap + cham 6 GB ballast roi do opt.step(). Ballast la local nen song
+    suot thoi gian do (native alloc, GC khong thu hoi)."""
+    print("--- B: sau khi cap + cham 6 GB ballast ---")
+    gb: "i32" = 268435456          # so float32 trong 1 GB
+    a1 = alloc_bytes(gb * 4)
+    a2 = alloc_bytes(gb * 4)
+    a3 = alloc_bytes(gb * 4)
+    a4 = alloc_bytes(gb * 4)
+    a5 = alloc_bytes(gb * 4)
+    a6 = alloc_bytes(gb * 4)
+    tz0 = now_ms()
+    f32_zero(a1, gb)
+    f32_zero(a2, gb)
+    f32_zero(a3, gb)
+    f32_zero(a4, gb)
+    f32_zero(a5, gb)
+    f32_zero(a6, gb)
+    tz1 = now_ms()
+    print("  cham 6 GB ballast = " + str(tz1 - tz0) + " ms")
+    d: "f64" = step_min(opt, 3)
+    print("  opt.step() min = " + str(d) + " ms")
+    return d
+
+
+def report(da: "f64", db: "f64") -> "i32":
+    print("")
+    print("--- tong hop ---")
+    print("A baseline (1.4 GB WS) = " + str(da) + " ms")
+    print("B ap luc   (7.4 GB WS) = " + str(db) + " ms")
+    print("chenh B - A            = " + str(db - da) + " ms")
+    print("")
+    print("--- doc ---")
+    print("B - A ~ +250 ms -> H4 DUNG: ap luc bo nho la nguyen nhan cua 781.")
+    print("B - A ~ 0       -> H4 SAI: 781 den tu cho khac trong production.")
+    return 0
+
+
+def main() -> 'i32':
+    print("=== PROBE MEM PRESSURE CAUSALITY ===")
+    n: "i32" = 124439808
+    print("n = " + str(n) + "  (" + str(float(n * 4) / 1048576.0) + " MB)")
+    print("")
+    groups: "list[i64]" = mk_groups(n)
+    opt = mk_opt(n, groups)
+    w: "f64" = step_min(opt, 1)
+    print("warm = " + str(w) + " ms")
+    print("")
+    da: "f64" = baseline(opt)
+    print("")
+    db: "f64" = under_pressure(opt)
+    print("")
+    return report(da, db)

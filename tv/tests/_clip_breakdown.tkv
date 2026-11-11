@@ -1,0 +1,128 @@
+﻿# PROBE CLIP BREAKDOWN (2026-11-11) â€” 218 ms cua duong clip gom nhung gi
+#
+# Duong clip trong AdamW.step() khi coef != 1.0:
+#   r1  = f32_copy_to_buf(gl, pgl, n)          <- chep 474 MB list -> buffer
+#   rzp = f32_zero(ptl, n)                     <- zero 474 MB
+#   rax = f32_addcmul(ptl, pgl, ponl, coef, n) <- 474 MB doc + 474 MB ghi
+#   stw = adamw_step(ppl, pml, pvl, ptl, ...)  <- kernel buffer (KHONG phai glm)
+#   gsrc = ptl
+#
+# Duong nhanh (coef == 1.0):
+#   stw = adamw_step_glm(ppl, pml, pvl, gl, ...)  <- doc gl list truc tiep
+#
+# Do tung manh de biet cai nao dang gia.
+import tv.training.gpt2_ref124
+import tv.training.trainer
+
+
+def fill_g(g: "list[f32]", n: "i32") -> "f64":
+    i: "i32" = 0
+    while i < n:
+        g[i] = 0.001
+        i = i + 1
+    return float(g[0])
+
+
+def m_r1(g: "list[f32]", n: "i32") -> "f64":
+    """r1: f32_copy_to_buf list -> buffer (474 MB)."""
+    pgl = alloc_bytes(n * 4)
+    t0 = now_ms()
+    r: "i64" = f32_copy_to_buf(g, pgl, n)
+    t1 = now_ms()
+    print("  r1  f32_copy_to_buf   : " + str(t1 - t0) + " ms")
+    return float(t1 - t0)
+
+
+def m_zero(n: "i32") -> "f64":
+    """rzp: f32_zero tren buffer 474 MB."""
+    ptl = alloc_bytes(n * 4)
+    t0 = now_ms()
+    r: "i64" = f32_zero(ptl, n)
+    t1 = now_ms()
+    print("  rzp f32_zero          : " + str(t1 - t0) + " ms")
+    return float(t1 - t0)
+
+
+def m_addcmul(g: "list[f32]", n: "i32") -> "f64":
+    """rax: f32_addcmul 474 MB doc + 474 MB ghi."""
+    pgl = alloc_bytes(n * 4)
+    ptl = alloc_bytes(n * 4)
+    ponl = alloc_bytes(n * 4)
+    f32_copy_to_buf(g, pgl, n)
+    f32_zero(ptl, n)
+    f32_zero(ponl, n)
+    t0 = now_ms()
+    r: "i64" = f32_addcmul(ptl, pgl, ponl, 0.0896, n)
+    t1 = now_ms()
+    print("  rax f32_addcmul       : " + str(t1 - t0) + " ms")
+    return float(t1 - t0)
+
+
+def m_adamw_buf(n: "i32") -> "f64":
+    """adamw_step tren buffer (duong cham dung cai nay)."""
+    b1 = alloc_bytes(n * 4)
+    b2 = alloc_bytes(n * 4)
+    b3 = alloc_bytes(n * 4)
+    b4 = alloc_bytes(n * 4)
+    f32_zero(b1, n)
+    f32_zero(b2, n)
+    f32_zero(b3, n)
+    f32_zero(b4, n)
+    t0 = now_ms()
+    r: "i64" = adamw_step(b1, b2, b3, b4, n,
+                          0.0001, 0.9, 0.999, 0.00000001, 0.01, 0.1, 0.9995)
+    t1 = now_ms()
+    print("  adamw_step (buffer)   : " + str(t1 - t0) + " ms")
+    return float(t1 - t0)
+
+
+def m_adamw_glm(g: "list[f32]", n: "i32") -> "f64":
+    """adamw_step_glm doc gl list truc tiep (duong nhanh)."""
+    b1 = alloc_bytes(n * 4)
+    b2 = alloc_bytes(n * 4)
+    b3 = alloc_bytes(n * 4)
+    f32_zero(b1, n)
+    f32_zero(b2, n)
+    f32_zero(b3, n)
+    t0 = now_ms()
+    r: "i64" = adamw_step_glm(b1, b2, b3, g, n,
+                              0.0001, 0.9, 0.999, 0.00000001, 0.01, 0.1, 0.9995)
+    t1 = now_ms()
+    print("  adamw_step_glm (list) : " + str(t1 - t0) + " ms")
+    return float(t1 - t0)
+
+
+def report(tr1: "f64", tz: "f64", tax: "f64", tab: "f64", tag: "f64") -> "i32":
+    print("")
+    print("--- tong hop ---")
+    print("duong CHAM = r1 + zero + addcmul + adamw_step")
+    print("           = " + str(tr1) + " + " + str(tz) + " + " + str(tax) + " + " + str(tab)
+          + " = " + str(tr1 + tz + tax + tab) + " ms")
+    print("duong NHANH = adamw_step_glm = " + str(tag) + " ms")
+    print("chenh = " + str((tr1 + tz + tax + tab) - tag) + " ms")
+    print("")
+    print("--- doc ---")
+    print("Neu r1+zero+addcmul chiem phan lon chenh -> go 3 buoc do la du.")
+    return 0
+
+
+def main() -> 'i32':
+    print("=== PROBE CLIP BREAKDOWN ===")
+    n: "i32" = 124439808
+    print("n = " + str(n) + "  (" + str(float(n * 4) / 1048576.0) + " MB)")
+    print("")
+    return one(n)
+
+
+def one(n: "i32") -> 'i32':
+    g = zeros_list(n)
+    fg: "f64" = fill_g(g, n)
+    print("g[0] = " + str(fg))
+    print("")
+    print("--- tung manh ---")
+    tr1: "f64" = m_r1(g, n)
+    tz: "f64" = m_zero(n)
+    tax: "f64" = m_addcmul(g, n)
+    tab: "f64" = m_adamw_buf(n)
+    tag: "f64" = m_adamw_glm(g, n)
+    return report(tr1, tz, tax, tab, tag)

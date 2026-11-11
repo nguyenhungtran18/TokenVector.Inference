@@ -1,0 +1,99 @@
+﻿# PROBE OPT END2END (2026-11-11) â€” opt.step() 781 ms gom nhung gi
+#
+# BPHASE: opt=781 ms, copyback=125 ms, GIONG HET o seq8/256/1024 -> chi phi co dinh.
+# torch cung pha opt.step = 655.2 ms.
+#
+# Probe nay do:
+#   C: f32_grad_norm tren n=124M (step() goi VO DIEU KIEN o dong dau)
+#   D: duong clip (r1=copy_to_buf + zero + addcmul)
+#   A: opt.step() END-TO-END, clip=1.0  (nhu bench)
+#   A2: opt.step() END-TO-END, clip=1e9 (coef cap ve 1.0 -> di duong nhanh, nhu torch)
+#
+# A - A2 = gia that cua duong clip.
+import tv.training.gpt2_ref124
+import tv.training.trainer
+
+
+def mk_opt(n: "i64", groups: "list[i64]", clip: "f64") -> "AdamW":
+    return new_adamw_g(n, groups, 2, 1000, 0.05, 0.0025, 0.9, 0.999,
+                       0.00000001, 0.0, clip)
+
+
+def a_end2end(opt: "AdamW") -> "f64":
+    """opt.step() that, 3 lan, lay min."""
+    best: "f64" = 1.0e9
+    k: "i32" = 0
+    while k < 3:
+        t0 = now_ms()
+        lr = opt.step()
+        t1 = now_ms()
+        if float(t1 - t0) < best:
+            best = float(t1 - t0)
+        k = k + 1
+    print("  opt.step() END2END    : " + str(best) + " ms  (min/3)")
+    return best
+
+
+def c_gradnorm(g: "list[f32]", n: "i32") -> "f64":
+    t0 = now_ms()
+    gn: "f32" = f32(f32_grad_norm(g, n))
+    t1 = now_ms()
+    print("C f32_grad_norm         : " + str(t1 - t0) + " ms  gn=" + str(gn))
+    return float(t1 - t0)
+
+
+def d_clippath(g: "list[f32]", n: "i32") -> "f64":
+    """Duong clip: copy_to_buf + zero + addcmul."""
+    pgl = alloc_bytes(n * 4)
+    ptl = alloc_bytes(n * 4)
+    ponl = alloc_bytes(n * 4)
+    f32_zero(ponl, n)
+    t0 = now_ms()
+    r1: "i64" = f32_copy_to_buf(g, pgl, n)
+    rzp: "i64" = f32_zero(ptl, n)
+    rax: "i64" = f32_addcmul(ptl, pgl, ponl, 0.5, n)
+    t1 = now_ms()
+    print("D duong clip (r1+zero+ac): " + str(t1 - t0) + " ms  r1=" + str(r1) + " ac=" + str(rax))
+    return float(t1 - t0)
+
+
+def run_a1(n: "i32", groups: "list[i64]") -> "f64":
+    print("--- A: opt.step() clip=1.0 (nhu bench) ---")
+    opt1 = mk_opt(n, groups, 1.0)
+    return a_end2end(opt1)
+
+
+def run_a2(n: "i32", groups: "list[i64]") -> "f64":
+    print("--- A2: opt.step() clip=1e9 (coef cap 1.0, nhu torch) ---")
+    opt2 = mk_opt(n, groups, 1000000000.0)
+    return a_end2end(opt2)
+
+
+def summary(tc: "f64", td: "f64", ta1: "f64", ta2: "f64") -> "i32":
+    print("--- tong hop ---")
+    print("C+D           = " + str(tc + td) + " ms")
+    print("A  (clip=1.0) = " + str(ta1) + " ms")
+    print("A2 (clip=1e9) = " + str(ta2) + " ms")
+    print("chenh A - A2  = " + str(ta1 - ta2) + " ms  <- gia cua duong clip")
+    print("")
+    print("--- doc ---")
+    print("Neu A ~ 781 thi probe khop BPHASE.")
+    print("Neu A << 781 thi 781 con gom phan khac (page fault tren buffer vua ghi).")
+    return 0
+
+
+def main() -> 'i32':
+    print("=== PROBE OPT END2END — 781 ms gom nhung gi ===")
+    n: "i32" = 124439808
+    print("n = " + str(n) + "  (" + str(float(n * 4) / 1048576.0) + " MB)")
+    print("")
+    tc: "f64" = c_gradnorm(zeros_list(n), n)
+    print("")
+    td: "f64" = d_clippath(zeros_list(n), n)
+    print("")
+    groups: "list[i64]" = [n]
+    ta1: "f64" = run_a1(n, groups)
+    print("")
+    ta2: "f64" = run_a2(n, groups)
+    print("")
+    return summary(tc, td, ta1, ta2)
