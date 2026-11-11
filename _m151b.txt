@@ -1,0 +1,19 @@
+fix(tv): khoi phuc ten method `run` o 2 ban tv/runtime - sot tu vong bisect
+
+Commit b6d3016 mang theo mot loi cua chinh toi: trong luc bisect tim bug
+InvalidProgramException, toi da doi `def run` -> `def run_x` o IGraphPass va
+ConstantFoldingPass de kiem gia thuyet trung ten method. Buoc khoi phuc chi
+tra lai ban tv/tests/tv.runtime.session.tkv, bo sot 2 ban trong tv/runtime/.
+
+Hau qua: tv/runtime/session.tkv va tv/runtime/tv.runtime.session.tkv nam trong
+repo voi method ten `run_x`, khong con `run`. Gate van 11/11 PASS vi khong ai
+import tu 2 file do (import resolve theo vi tri file), nhung do la code hong
+nam trong repo - dung loai no ma §0.150 vua tra xong.
+
+Sua:
+- khoi phuc `def run` o ca 2 file (2 method moi file)
+- chuan hoa line ending: 2 dong LF-only do script Python sinh ra -> CRLF,
+  khop 11 ban con lai
+
+Kiem: 13/13 ban tv.runtime.session.tkv cung MD5; 0 `run_x` con lai;
+gate 11/11 PASS chay lai sau khi sua.

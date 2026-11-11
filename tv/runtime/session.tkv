@@ -3633,7 +3633,7 @@ class IGraphPass:
     def name(self) -> 'str':
         return ""
 
-    def run_x(self, graph: 'ExecutionGraph') -> 'i32':
+    def run(self, graph: 'ExecutionGraph') -> 'i32':
         return 0
 
 class ConstantFoldingPass(IGraphPass):
@@ -3641,7 +3641,7 @@ class ConstantFoldingPass(IGraphPass):
     def name(self) -> 'str':
         return "ConstantFoldingPass"
 
-    def run_x(self, graph: 'ExecutionGraph') -> 'i32':
+    def run(self, graph: 'ExecutionGraph') -> 'i32':
         modified = 0
         doomed = []
         for _ni in range(len(graph.nodes)):
