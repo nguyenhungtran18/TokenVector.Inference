@@ -1,4 +1,4 @@
-﻿# TokenVector.Inference Benchmark Journal
+# TokenVector.Inference Benchmark Journal
 
 > **Trang thai 2026-11-11 (§9.22, cung phien):** full train step GPT-2 124M
 > @seq1024 = **4016 ms** vs torch 2.14.0+cpu **4061.1 ms** -> **0.989x**,
@@ -124,14 +124,14 @@ Best-of-3: lặp 3 lần, lấy min. Log pattern: `BSEQ full-step simd seq=... m
 Trước mọi kết luận "torch nhanh hơn vì ISA", chạy 2 probe này:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools/simd_native/run_cpuid.ps1    # AVX2/AVX-512, XCR0
-powershell -ExecutionPolicy Bypass -File tools/simd_native/run_avx512.ps1   # 0xC000001D = không dùng được
+# (các probe này đã bị XÓA 2026-11-11 cùng tools/simd_native/ — số đo lịch sử giữ nguyên)
+# CPU feature AVX2/FMA + AVX-512: kiểm bằng repo compiler D:\TokenVector (out/m1/, or xem HANDOFF §0.156)
 ```
 
 Máy hiện tại: **AVX2 + FMA, KHÔNG AVX-512** (`AVX512F=0`, `/arch:AVX512` → illegal instruction),
 14 logical = **7 core vật lý + SMT**. Đỉnh đo được: **75.5 GFLOP/s 1 luồng**, **~515 GFLOP/s 14 luồng**
 (torch 76.2/476.6; numpy OpenBLAS 75.7). tkv GEMM đạt 34.5 GFLOP/s (46% đỉnh) ở 1 luồng và scale 4.52×.
-Micro-kernel: `tools/simd_native/bench_micro.c` (4 biến thể, có kiểm bit-exact bằng `memcmp`).
+Micro-kernel: `tools/simd_native/bench_micro.c` (4 biến thể, bit-exact bằng `memcmp`) — **file đã xóa 2026-11-11** (probe scratch; số đo 34.5 GFLOP/s / scale 4.52× là lịch sử).
 
 ### 5.1c Phân rã 1 bước theo pha, seq1024 (2026-11-05)
 

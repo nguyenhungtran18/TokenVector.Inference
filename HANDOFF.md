@@ -7854,3 +7854,22 @@ toàn bộ fixture + gate suites (`gate_f32.sh` 135/135 không đụng), `tools/
 và mọi docs — BENCHMARKS/HANDOFF vẫn trích dẫn số liệu; các file probe referenced trong
 nhật ký nằm trong git history (commit này). Gate chưa chạy lại trong phiên này (§9.21 xác
 nhận 135/135, không đổi code).
+
+## §0.156 XÓA SẠCH NỐT: TODO_M9, stdlib/, tools/simd_native/, _gen_bench.py (2026-11-11)
+
+**Ngày:** 2026-11-11. Vòng rà soát thứ hai ("file cần thiết cho repo mới giữ lại"):
+
+xóa 4 nhóm, tất cả đều nằm trong git history:
+
+| Nhóm | Số file | Lý do |
+|---|---|---|
+| `TODO_M9.md` | 1 | Mốc M9 đã xong; nội dung lỗi thời (không phải gate nào trỏ tới) |
+| `stdlib/` | 33 | Mirror của các module trong `tv/` (identical); `tv/inference.tkv` chỉ có ở đây nhưng stdlib-only và không ai import; `stdlib/tv/inference/tv.runtime.session.tkv` **stale, thiếu fix §0.151**, không có gì trong repo reference |
+| `tools/simd_native/` | 36 | Toàn bộ là probe/scratch C+ps1 của các thí nghiệm M1 OpenBLAS / AVX-512 / CPUID / flash-attn; production dùng `tkv_simd_native.dll` từ repo compiler D:\TokenVector; `tools/simd_native/*.{obj,exp,lib}` đã xóa ở §0.155 |
+| `_gen_bench.py` | 1 | Orphan, không nơi nào reference |
+
+**Giữ nguyên:** docs/archive/, `simd_bench*.tkv`, fixtures-124m/ (out-of-git), gate suites,
+`tools/*.py` diagnostics, README(-VI) (đã bỏ mục stdlib + TODO_M9), BENCHMARKS §5.1b
+chú thích các probe đã xóa (số đo lịch sử giữ nguyên).
+
+Không có thay đổi nào trong `tv/` — gate 135/135 (§9.21) vẫn nguyên giá trị.

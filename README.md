@@ -1,4 +1,4 @@
-﻿# 🚀 TokenVector.Inference: Pure-`.tkv` Deep Learning Runtime & Training Engine
+# 🚀 TokenVector.Inference: Pure-`.tkv` Deep Learning Runtime & Training Engine
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Language: TokenVector .tkv](https://img.shields.io/badge/Language-TokenVector%20.tkv-blue.svg)](https://github.com/nguyenhungtran18/TokenVector)
@@ -57,7 +57,6 @@ tv/            TokenVector sources
   training/    autograd, AdamW/clip, GPT-2 124M reference (.tkv)
   tests/       gate suites (fixtures not committed; see below)
   tools/       CLI, trainer demo
-stdlib/        standard library sources (.tkv)
 tools/         host-side tooling: bench_torch.py, test runners, generators
 docs/          engineering docs;  docs/archive/ = completed/superseded plans
 reports/       dated parity & benchmark reports
@@ -135,7 +134,6 @@ Latest same-session results (2026-11-11, `BENCHMARKS.md` §9.22):
 - `docs/archive/` — completed/superseded plans (do not execute)
 - `RELEASE_NOTES(_VI).md` — release history
 - `ROADMAP_TRAIN.md` — training roadmap (campaign complete)
-- `TODO_M9.md` — M9 milestone status (complete)
 
 ## Ecosystem
 

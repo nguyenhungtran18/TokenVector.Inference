@@ -1,4 +1,4 @@
-﻿# 🚀 TokenVector.Inference: Runtime Deep Learning & Engine huấn luyện viết thuần `.tkv`
+# 🚀 TokenVector.Inference: Runtime Deep Learning & Engine huấn luyện viết thuần `.tkv`
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Language: TokenVector .tkv](https://img.shields.io/badge/Language-TokenVector%20.tkv-blue.svg)](https://github.com/nguyenhungtran18/TokenVector)
@@ -53,7 +53,6 @@ engine huấn luyện GPT-2 124M có thời gian một bước ngang PyTorch (đ
 
 ```
 tv/            Nguồn .tkv (runtime/, training/, tests/, tools/)
-stdlib/        Nguồn thư viện chuẩn (.tkv)
 tools/         Công cụ phía host: bench_torch.py, test runners, generators
 docs/          Tài liệu kỹ thuật;  docs/archive/ = kế hoạch đã xong/hết hiệu lực
 reports/       Báo cáo parity & benchmark theo ngày
@@ -130,7 +129,6 @@ Kết quả cùng phiên mới nhất (2026-11-11, `BENCHMARKS.md` §9.22):
 - `docs/archive/` — kế hoạch đã xong/hết hiệu lực (đừng thực thi)
 - `RELEASE_NOTES_VI.md` — lịch sử release
 - `ROADMAP_TRAIN.md` — lộ trình huấn luyện (chiến dịch đã hoàn thành)
-- `TODO_M9.md` — trạng thái mốc M9 (đã xong)
 
 ## Hệ sinh thái
 
