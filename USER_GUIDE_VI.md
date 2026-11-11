@@ -90,7 +90,70 @@ b.dispose()
 Embedded REST server chưa listen: `http_listen()` là stub trả `0`. CLI có sẵn nhưng
 `argv()` là stub, nên luôn chỉ in usage và không nhận tham số.
 
-## 7. Toolchain
+## 7. Dùng package NuGet từ .NET
+
+`TokenVector.Inference` kèm managed assembly (`lib/net10.0/TokenVector.Inference.dll`)
+build từ nguồn `.tkv`, plus toàn bộ source `.tkv`. Consumer .NET 10 tham chiếu như mọi
+package khác, NHƯNG hai native DLL phải đặt cạnh output — NuGet **không** tự copy:
+
+```
+your-app/
+  your-app.csproj          # thêm <PackageReference Include="TokenVector.Inference" Version="1.0.1" />
+  bin/Debug/net10.0/
+    TokenVector.Inference.dll       # từ package (tự copy)
+    tkv_simd_native.dll             # native AVX2 kernels — copy từ tools/runtime/ của package TokenVector
+    System.Numerics.Vectors.dll     # copy từ tools/runtime/ của package TokenVector
+```
+
+> `TokenVector` (compiler package) ships hai DLL này trong `tools/runtime/`;
+> copy chúng cạnh app (hoặc publish folder). Thiếu chúng, hot kernels rơi về scalar
+> (hoặc lỗi) ở P/Invoke.
+
+Ví dụ tối thiểu graph → session → run (cùng mã có trong `packaging/smoke-test/`):
+
+```csharp
+using System;
+using System.Collections.Generic;
+
+class Demo
+{
+    static int Main()
+    {
+        var g = new ExecutionGraph(1, "smoke", 0);
+        g.inputs.Add("X");
+        g.outputs.Add("Y");
+
+        var w = TKVApp._nd_f32(32);
+        for (int i = 0; i < 32; i++) w[i] = 0.5f;
+        var b = TKVApp._nd_f32(8);
+        for (int i = 0; i < 8; i++) b[i] = 0.25f;
+        g.initializers["W"] = w;
+        g.initializers["B"] = b;
+        g.get_or_create_tensor("X", new List<long> { 1, 4 }, 0);
+        g.get_or_create_tensor("W", new List<long> { 8, 4 }, 0);
+        g.get_or_create_tensor("B", new List<long> { 8 }, 0);
+        g.get_or_create_tensor("Y", new List<long> { 1, 8 }, 0);
+
+        var node = TKVApp.new_node("gemm", 2);   // OperatorType_FusedLinear
+        node.activation = 1;                     // ActivationFunction_Relu
+        node.inputs.Add("X"); node.inputs.Add("W"); node.inputs.Add("B");
+        node.outputs.Add("Y");
+        g.nodes.Add(node);
+
+        var session = TKVApp.session_from_graph(g, 1);
+        var x = TKVApp._nd_f32(4);
+        for (int i = 0; i < 4; i++) x[i] = 1.0f;
+        var y = session.run_single(x, "X", "Y");
+        Console.WriteLine("Y[0] = " + y[0] + "  (expect 2.25)");
+        session.close();
+        return 0;
+    }
+}
+```
+
+Ghi chú API (mức IL `.tkv`): class + helpers của `TKVApp` là kiểu global, `ExecutionGraph(1, name, 0)` nhận sentinel `_ok` đầu tiên, constants (`OperatorType_*`, `ActivationFunction_*`) là số nguyên thô, tensor là `List<float>` / shape là `List<long>`.
+
+## 8. Toolchain
 ```powershell
 $tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
 & $tkvc <entry-point.tkv> app.exe main

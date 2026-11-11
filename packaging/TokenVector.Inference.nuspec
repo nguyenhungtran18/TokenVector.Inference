@@ -30,6 +30,7 @@
     <file src="..\USER_GUIDE.md" target="USER_GUIDE.md" />
     <!-- Logo TokenVector (bản 2026-10-18, cùng bộ với package TokenVector) -->
     <file src="..\assets\icon.png" target="icon.png" />
+    <file src="..\assets\tokenvector-logo.png" target="assets\tokenvector-logo.png" />
     <file src="..\tv\**" target="src\tv\" exclude="..\tv\tests\fixtures-124m\**" />
     <file src="..\tools\**" target="src\tools\" />
     <file src="..\docs\**" target="src\docs\" exclude="..\docs\archive\**" />

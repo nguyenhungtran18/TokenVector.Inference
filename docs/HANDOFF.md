@@ -7978,3 +7978,16 @@ Root hiện còn: README(-VI), RELEASE_NOTES(-VI), USER_GUIDE(-VI), LICENSE, `.g
 - `.gitignore`: `packaging/smoke-test/bin/`, `packaging/smoke-test/obj/`.
 
 **Lưu ý:** API .tkv mức IL (global namespace, `TKVApp.*`, constants kiểu số, record ctor nhận `_ok` sentinel); chưa có ví dụ C# idiomatic nào trong docs cho tới bản này.
+
+## §0.163 CONSUMER GUIDE + PACKAGE README CÓ LOGO (2026-11-11)
+
+**Ngày:** 2026-11-11. Hoàn thiện phần "consumer experience" trước khi push:
+
+- **USER_GUIDE.md §7** (EN) + **USER_GUIDE_VI.md §7** (VI) — mục mới **"Using the NuGet package from .NET"**:
+  - Cách cài: `PackageReference`, **2 native DLL phải copy cạnh app** (`tkv_simd_native.dll`, `System.Numerics.Vectors.dll` từ `tools/runtime/` của package `TokenVector`) — NuGet không tự copy; thiếu → P/Invoke lỗi / fallback scalar.
+  - Ví dụ C# tối thiểu đầy đủ (graph → session → run_single, `Y[0] = 2.25`), cùng mã trong `packaging/smoke-test/`.
+  - Ghi chú API mức IL (global namespace, `_ok` sentinel, constants số nguyên, shape `List<long>`).
+  - Renumber: Toolchain thành §8.
+- **Nuspec**: thêm `assets/tokenvector-logo.png` vào package — link logo trong README trên nuget.org hoạt động (trước đó trỏ tới file không tồn tại trong package).
+- **Rebuild package**: `TokenVector.Inference.1.0.1.nupkg` mới (3.47 MB) — lib/net10.0 + src + logo + dependency `TokenVector ≥ 1.0.12` (net10.0).
+- Hạn chế còn lại: chưa có ví dụ end-to-end ngoài smoke test trong package; consumer phải tự copy native DLLs (giới hạn của P/Invoke qua package tools/runtime/).
