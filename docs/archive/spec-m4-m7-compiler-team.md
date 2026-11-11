@@ -1,7 +1,7 @@
 # SPEC M4-M7 — Yêu cầu builtin/ABI mới giao compiler team
 
 Ngày lập: **2026-10-24** · Nguồn: số đo 8 chu trình đo TRIZ repo-local (CG/CH/CB/CI/CU/CW/M1/CX),
-`docs/perf-plan-triz-roadmap.md` §13-§14, `HANDOFF.md` §0.35-§0.44.
+`docs/archive/perf-plan-triz-roadmap.md` §13-§14, `HANDOFF.md` §0.35-§0.44.
 Đối tượng: **compiler/native team** — người có quyền thêm builtin + sửa ABI trong `tkvc`.
 
 ---

@@ -47,7 +47,7 @@ HEADER = '''# BENCH P53 — A/B/C attention 124M: P5.1 vs P5.1+P5.2+P5.3 vs scal
 # def) -> chan sai so copy. Doi bang cach chay lai _gen_bench.py (co pin SHA; KHONG
 # dung `HEAD` vi sau khi commit P5.3 thi HEAD = ma moi).
 # Timing dat toan bo trong main (bug compiler #8: now_ms() trong local ham
-# doc SAI) — xem docs/perf-plan-simd-vs-pytorch.md.
+# doc SAI) — xem docs/archive/perf-plan-simd-vs-pytorch.md.
 #
 # Nguon seq: tv/tests/_seq_cfg.txt dong 1.
 #   printf "1024\\n0\\n1\\n" > tv/tests/_seq_cfg.txt

@@ -146,7 +146,7 @@ def tier_d(seq=1024):
 
 
 def tier_e(seq=8):
-    """PHASE A — doi chuan 2 phia (docs/PLAN_TO_PARITY.md): tach tung phase
+    """PHASE A — doi chuan 2 phia (docs/archive/PLAN_TO_PARITY.md): tach tung phase
     (zero / fwd / bwd / opt) va chay ca 1T + 14T de so bucket voi CJ8 tkv.
     Goi: python tools/bench_torch.py e <seq>"""
     from transformers import GPT2Config

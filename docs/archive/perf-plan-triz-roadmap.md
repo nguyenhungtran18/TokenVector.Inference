@@ -4,7 +4,7 @@
 **Máy:** Xeon E5-2695 v3 14C · **Cùng ngày, cùng máy, cùng token/config** cho mọi phép đo.
 **Mục tiêu (CẬP NHẬT 2026-10-20, chủ khoa):** seq1024 full step phải **BẰNG rồi NHANH HƠN PyTorch** (≤3.542 s = 1.0×, rồi ≤0.8×) trên **cả 3 seq**, vẫn giữ 84/84 parity assertions. Mốc dọc đường (đã đạt): 154.234 s (43.5×) → 141.219 (P5.4) → **118.641 s (33.5×, P5.5)**. Ladder + phân tích sàn đơn/đa luồng: **§12** (mục ~20× bên dưới bị thay thế).
 
-Chi tiết số đo gốc: `docs/perf-plan-simd-vs-pytorch.md` (mục P5.2 + P5.3). Bàn giao: `HANDOFF.md` mục 0.13 + mục 7.
+Chi tiết số đo gốc: `docs/archive/perf-plan-simd-vs-pytorch.md` (mục P5.2 + P5.3). Bàn giao: `HANDOFF.md` mục 0.13 + mục 7.
 
 ---
 
@@ -219,7 +219,7 @@ tkv `simd_bench_124m_seq` (warmup 1 + 1 bước, `out/bseq.exe` build lại từ
 
 | File | Vai trò |
 |---|---|
-| `docs/perf-plan-triz-roadmap.md` | File này — roadmap + KPI |
+| `docs/archive/perf-plan-triz-roadmap.md` | File này — roadmap + KPI |
 | `tv/training/layernorm_bwd.tkv` | LN backward FMA tiled |
 | `tv/training/gelu_bwd.tkv` | GELU erf backward |
 | `tv/training/proj_bwd.tkv` | Fusion proj_bwd + dw_proj |
