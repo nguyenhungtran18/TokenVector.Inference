@@ -3657,7 +3657,12 @@ class ConstantFoldingPass(IGraphPass):
             sdesc = graph.tensors[node.inputs[0]]
             src = graph.initializers[node.inputs[0]]
             if node.op_type == OperatorType_Transpose and len(sdesc.shape) == 2:
-                folded = _nd_f32([_shp_at_sd(sdesc, 1), _shp_at_sd(sdesc, 0)])
+                # BUG COMPILER (2026-11-11, §0.151): `_nd_f32` nhan i64, nhung call site
+                # truyen list literal [_shp_at_sd(..), _shp_at_sd(..)] -> kieu sai,
+                # compiler KHONG bao loi, JIT nem InvalidProgramException.
+                # Sua: tinh so phan tu ra bien i64 truoc.
+                _nfd = _shp_at_sd(sdesc, 1) * _shp_at_sd(sdesc, 0)
+                folded = _nd_f32(_nfd)
                 for r in range(_shp_at_sd(sdesc, 0)):
                     for c in range(_shp_at_sd(sdesc, 1)):
                         folded[c * _shp_at_sd(sdesc, 0) + r] = src[r * _shp_at_sd(sdesc, 1) + c]
@@ -3667,7 +3672,11 @@ class ConstantFoldingPass(IGraphPass):
             elif node.op_type == OperatorType_Reshape:
                 if out_name in graph.tensors:
                     desc = graph.tensors[out_name]
-                    folded = _nd_f32(desc.shape)
+                    # BUG COMPILER (§0.151): `_nd_f32` nhan i64, `desc.shape` la list.
+                    _nfd2 = 1
+                    for _sd in desc.shape:
+                        _nfd2 = _nfd2 * _sd
+                    folded = _nd_f32(_nfd2)
                     _nsrc = len(src)
                     _nfold = len(folded)
                     n = min(_nsrc, _nfold)

@@ -107,7 +107,11 @@ def main() -> 'i32':
     docs = []
     for i in range(len(dl)):
         _dln = dl[i]
-        docs.append(_ints(_dln))
+        # BUG COMPILER (2026-11-11, §0.151): `list.append(<ham tra ve list>)`
+        # sinh IL sai -> JIT nem InvalidProgramException. Gan ra bien tam truoc
+        # thi chay dung. Repro toi gian o tv/tests/_bz_*.tkv.
+        _dr = _ints(_dln)
+        docs.append(_dr)
 
     # --- [1] packing: seqs + doc_ids tung phan khop reference ---------------
     pk = pack_sequences(docs, seq_len, eos)
@@ -137,8 +141,11 @@ def main() -> 'i32':
     # tao pk2 de cat tail -> token thanh 0,1,0. Fixture khong co tail le nen
     # chi ca nay moi bat duoc.
     _td = []
-    _td.append(_shift([1, 2, 3]))
-    _td.append(_shift([4]))
+    # BUG COMPILER (2026-11-11, §0.151): append(<ham tra ve list>) -> IL sai.
+    _s1 = _shift([1, 2, 3])
+    _td.append(_s1)
+    _s2 = _shift([4])
+    _td.append(_s2)
     _tpk = pack_sequences(_td, 4, 99)
     ok1b = 1
     _want_tpk = [1001, 0, 1002, 0, 1003, 0, 99, 0]

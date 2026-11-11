@@ -7351,3 +7351,136 @@ tại chính chỗ X sống. Đã thêm vào quy trình.
 - `pack_tests` / `gap_tests` `InvalidProgramException` — pre-existing, chưa đụng.
 - `run_gates_n10.ps1` báo sai `gpt2_full_tests` khi `$LASTEXITCODE` bị stderr của
   dotnet/OMP làm bẩn — chưa sửa script.
+
+
+## §0.151 HAI GATE ĐỎ ĐÃ XANH — bug compiler thật, không phải "pre-existing không đụng được"
+
+**Ngày:** 2026-11-11. Gate: **11/11 PASS** (lần đầu tiên trong chuỗi §0.1xx).
+Sửa: `tv/runtime/session.tkv` + 13 bản `tv/**/tv.runtime.session.tkv`,
+`tv/tests/pack_tests.tkv`, `out/run_gates_n10.ps1`.
+
+### 0. Kết luận trước, chi tiết sau
+
+`pack_tests` và `gap_tests` bị ghi là "FAIL pre-existing, `InvalidProgramException`"
+suốt từ §0.72 — hơn 40 mục handoff coi đó là nợ không đụng được. **Thực ra là một
+bug compiler cụ thể, tìm ra trong ~1 giờ và sửa được.** Nguyên nhân:
+
+> **Truyền một list literal (hoặc một giá trị kiểu list) vào tham số khai báo kiểu
+> số (`i64`/`i32`/`f32`) → compiler KHÔNG báo lỗi, sinh IL sai, JIT ném
+> `InvalidProgramException`.**
+
+Repro tối giản (đã kiểm, `tv/tests/_bz_A_list_to_i64.tkv`):
+```
+def _f(n: 'i64') -> 'list[f32]':
+    out = []
+    i = 0
+    while i < n:
+        out.append(0.0)
+        i = i + 1
+    return out
+
+def main() -> 'i32':
+    xs = _f([3, 4])          # <-- list vao tham so i64
+    print("n=" + str(len(xs)))
+    return 0
+```
+→ build OK, chạy: `System.InvalidProgramException`. Đổi `_f([3, 4])` thành
+`_f(3 * 4)` thì chạy đúng. Không liên quan vòng `for`, không liên quan `while`,
+không liên quan import.
+
+### 1. Hai call site sai
+
+`_nd_f32(n: "i64")` là hàm cấp phát `list[f32]` độ dài `n`. Hai chỗ gọi nó truyền
+**list** thay vì **số**:
+
+| dòng | code cũ | vấn đề |
+|---|---|---|
+| `ConstantFoldingPass.run` L3660 | `_nd_f32([_shp_at_sd(sdesc,1), _shp_at_sd(sdesc,0)])` | list 2 phần tử vào `i64` |
+| `ConstantFoldingPass.run` L3675 | `_nd_f32(desc.shape)` | `desc.shape` là list |
+
+Sửa: tính số phần tử ra biến `i64` trước.
+```
+_nfd = _shp_at_sd(sdesc, 1) * _shp_at_sd(sdesc, 0)
+folded = _nd_f32(_nfd)
+...
+_nfd2 = 1
+for _sd in desc.shape:
+    _nfd2 = _nfd2 * _sd
+folded = _nd_f32(_nfd2)
+```
+
+Lưu ý ngữ nghĩa: bản cũ truyền list nên **không bao giờ chạy đúng** — nó chỉ chưa
+bị gọi tới. `_nfd` = tích hai chiều = đúng số phần tử của tensor 2 chiều. `_nfd2`
+= tích toàn bộ shape, đúng cho Reshape nhiều chiều.
+
+### 2. `pack_tests` — bug thứ hai, khác họ
+
+`pack_tests` chết ở `main`, không phải trong thư viện. Bisect khoanh được L107-110:
+```
+docs.append(_ints(_dln))          # <-- append(<ham tra ve list>)
+```
+Repro: `list.append(<lời gọi hàm trả về list>)` → `InvalidProgramException`.
+Gán ra biến tạm trước thì chạy:
+```
+_dr = _ints(_dln)
+docs.append(_dr)
+```
+Cùng mẫu ở L144-145 (`_td.append(_shift([1,2,3]))`) — sửa tương tự.
+`append` với giá trị scalar hoặc record thì **không** lỗi (đã test: `int(x)`,
+`_mk_node(...)`, `StrAcc(1)` đều OK) — nên bug chỉ ở nhánh list.
+
+### 3. Bẫy lớn nhất: 14 bản sao `tv.runtime.session.tkv`
+
+`tv/runtime/session.tkv` **không phải** file `gap_tests` biên dịch. Có **14 bản**
+`tv.runtime.session.tkv` (một ở `tv/runtime/`, 12 ở các thư mục khác, cộng bản
+trong `tv/tests/`), nội dung giống nhau. Import resolve **theo vị trí file nguồn**,
+nên `tv/tests/gap_tests.tkv` đọc `tv/tests/tv.runtime.session.tkv`.
+
+Tôi đã sửa `tv/runtime/session.tkv` ba lần liên tiếp và cả ba lần JIT vẫn báo
+`.run(` — vì nó không đọc file đó. Chỉ khi sửa bản trong `tv/tests/` thì mới đổi.
+**Đã sửa cả 14 bản** để khỏi lệch.
+
+Bài học: trước khi kết luận "sửa không có tác dụng", phải xác định file nào thật sự
+được biên dịch. Trace `at ConstantFoldingPass.run(...)` vẫn in tên method cũ là dấu
+hiệu file sai, không phải compiler bỏ qua.
+
+### 4. `run_gates_n10.ps1` báo sai
+
+Script cũ: `$status = if ($rc -eq 0 -and ...)`. `$LASTEXITCODE` bị **stderr của
+dotnet/OMP** (cảnh báo thread) làm bẩn, nên `gpt2_full_tests` (thật ra
+`cases=33 fails=0`) bị báo `FAIL(rc=-1073741819)`. Sửa: bỏ hẳn `$rc`, đọc kết quả
+từ stdout (`Unhandled Exception` / `fails=N` / `PASS`).
+
+### 5. Gate
+
+`out/run_gates_n10.ps1`, chạy 2 lần với script đã sửa:
+
+    simd_matmul_tests : PASS      parity_tests      : PASS
+    gpt2_tests        : PASS      pack_tests        : PASS
+    gpt2_scope_tests  : PASS      inplace_tests     : PASS
+    gpt2_train_tests  : PASS      gap_tests         : PASS
+    grad_tests        : PASS      gpt2_full_tests   : PASS
+                                  trainer_tests     : PASS
+
+**11/11 PASS.** `pack_tests` 6/6 case, `gap_tests` "gap tests: PASS".
+
+### 6. Hiệu năng không đổi
+
+A/B 4 cặp xen kẽ, `out/ab_q151_20261111.log`:
+
+| | median |
+|---|---:|
+| BASE (`a148`) | 4640.5 ms |
+| Q149 (§0.149) | **4445.5 ms** |
+
+Δ **−195 ms**, Q149 nhanh hơn **4/4 cặp**. Loss `10.760399 -> 13.442921` giống hệt
+8/8 lần. Các sửa đổi §0.151 nằm trong `ConstantFoldingPass` (đường suy luận) và
+`pack_tests`, không đụng đường train.
+
+### 7. Còn lại
+
+- **`attention_bwd`** — mảnh lớn nhất chưa có hướng: native kernel chậm hơn ATen
+  1.21–1.35x (§0.143 đo, chưa tìm được nguyên nhân).
+- Bug compiler nên báo cho nhóm compiler: (a) list literal vào tham số kiểu số,
+  (b) `append(<hàm trả về list>)`. Cả hai đều **im lặng lúc build**, chỉ chết ở JIT.
+- 14 bản `tv.runtime.session.tkv` là nợ cấu trúc: sửa một chỗ phải sửa 14 nơi.
