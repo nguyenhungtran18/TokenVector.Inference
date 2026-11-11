@@ -52,13 +52,20 @@ engine huấn luyện GPT-2 124M có thời gian một bước ngang PyTorch (đ
 ## Bố cục repo
 
 ```
-tv/            Nguồn .tkv (runtime/, training/, tests/, tools/)
-tools/         Công cụ phía host: bench_torch.py, test runners, generators
+tv/            Nguồn .tkv (engine)
+  runtime/     graph runtime, session, arena, SIMD matmul (.tkv)
+  training/    autograd, AdamW/clip, GPT-2 124M reference (.tkv)
+  tests/       gate suites (fixtures không commit; xem dưới)
+  tools/       CLI, trainer demo
+tools/         Công cụ kiểm chứng phía host: gate_f32.sh (135/135), run_cases.ps1,
+               verify_*.ps1 (parity), sinh fixture (gen_*.py)
+benchmark/     Công cụ & scratch benchmark: bench_torch.py (đối chiếu PyTorch),
+               _bench_matrix.ps1 (matrix runner), probes, logs;
+               binary/dump gitignored, script & log được track
 docs/          Tài liệu kỹ thuật;  docs/archive/ = kế hoạch đã xong/hết hiệu lực
 reports/       Báo cáo parity & benchmark theo ngày
+BENCHMARKING_VI.md  Hướng dẫn benchmark (VI + EN)
 BENCHMARKS.md  Nhật ký benchmark chính (hiện tại: §9.22)
-BENCHMARKING_VI.md  Hướng dẫn benchmark vs PyTorch (+ EN)
-BENCHMARKING_VI.md  Hướng dẫn benchmark (+ EN)
 HANDOFF.md     Nhật ký kỹ thuật (append-only)
 ```
 
@@ -93,8 +100,8 @@ powershell -File tools\run_cases.ps1 -Compiler $tkvc
 bash tools/gate_f32.sh
 
 # Cổng trainer (MLP, AdamW vs reference PyTorch): kỳ vọng 15/15
-& $tkvc tv/tests/trainer_tests.tkv out\trainer_tests.exe main
-dotnet out\trainer_tests.exe
+& $tkvc tv/tests/trainer_tests.tkv benchmark\trainer_tests.exe main
+dotnet benchmark\trainer_tests.exe
 ```
 
 ## Benchmark vs PyTorch

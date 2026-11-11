@@ -52,17 +52,20 @@ a GPT-2 124M training engine whose step time is now at parity with PyTorch
 ## Repository layout
 
 ```
-tv/            TokenVector sources
+tv/            TokenVector sources (engine)
   runtime/     graph runtime, session, arena, SIMD matmul (.tkv)
   training/    autograd, AdamW/clip, GPT-2 124M reference (.tkv)
   tests/       gate suites (fixtures not committed; see below)
   tools/       CLI, trainer demo
-tools/         host-side tooling: bench_torch.py, test runners, generators
+tools/         host-side verification: gate_f32.sh (135/135), run_cases.ps1,
+               verify_*.ps1 (parity), fixture generators (gen_*.py)
+benchmark/     benchmark tooling & scratch: bench_torch.py (PyTorch reference),
+               _bench_matrix.ps1 (matrix runner), probes, logs;
+               binaries & dumps gitignored, scripts & logs tracked
 docs/          engineering docs;  docs/archive/ = completed/superseded plans
 reports/       dated parity & benchmark reports
-BENCHMARKS.md  master benchmark journal (current: §9.22)
 BENCHMARKING.md step-by-step benchmark guide (EN + VI)
-BENCHMARKING.md step-by-step benchmark guide (+ VI)
+BENCHMARKS.md  master benchmark journal (current: §9.22)
 HANDOFF.md     engineering journal (append-only)
 ```
 
@@ -97,8 +100,8 @@ powershell -File tools\run_cases.ps1 -Compiler $tkvc
 bash tools/gate_f32.sh
 
 # Trainer gate (MLP, AdamW vs PyTorch reference): 15/15 expected
-& $tkvc tv/tests/trainer_tests.tkv out\trainer_tests.exe main
-dotnet out\trainer_tests.exe
+& $tkvc tv/tests/trainer_tests.tkv benchmark\trainer_tests.exe main
+dotnet benchmark\trainer_tests.exe
 ```
 
 ## Benchmark vs PyTorch
