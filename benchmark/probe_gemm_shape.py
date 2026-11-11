@@ -1,5 +1,5 @@
 # Reference PyTorch cho tv/tests/_gm.tkv — cung 3 shape, T=1 va T=14.
-# Chay: python tools/probe_gemm_shape.py [seq]
+# Chay: python benchmark/probe_gemm_shape.py [seq]
 import sys
 import time
 

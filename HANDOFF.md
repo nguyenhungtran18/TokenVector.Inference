@@ -7899,3 +7899,25 @@ Không có thay đổi nào trong `tv/` — gate 135/135 (§9.21) vẫn nguyên 
    logo mới); trước đó file bất ngờ biến mất khỏi working tree và đã được
    restore một lần từ HEAD — nguồn gốc bên ngoài repo can thiệp chưa rõ
    (xem ghi chú §0.155–§0.157).
+
+## §0.158 GOM TOÀN BỘ BENCHMARK VỀ MỘT FOLDER `benchmark/` (2026-11-11)
+
+**Ngày:** 2026-11-11. Sau §0.156–0.157, gom hết công cụ benchmark từ `tools/`
+về `benchmark/` theo yêu cầu ("cùng để benchmark thì gom lại 1 folder"):
+
+| File | Vai trò |
+|---|---|
+| `bench_torch.py` | bench phía PyTorch (tier a/b/c/d/e) — là nguồn của mọi bảng so sánh torch trong nhật ký |
+| `_bench_matrix.ps1` | runner matrix: TKV best-of-3 vs torch cùng phiên + mode 2; ghi `benchmark/_bench_matrix_*.log` |
+| `p7b_gemm_torch.py` | probe GEMM vs torch.matmul (P7b) |
+| `probe_gemm_shape.py` | probe shape GEMM |
+| `probe_accumulation_order.py` | kiểm thứ tự tích lũy fp32 vs torch (dùng bởi `tools/verify_parity.ps1`) |
+| `probe_threads.py` | đo số luồng thực sự đang chạy (CPU time / wall time) |
+| `_bench_matrix_post14_20261111_145719.log` | bằng chứng §9.22 (tracked) |
+| `bseq_post14.exe`, `bseq_post14.runtimeconfig.json` | binary bench post-#14 (gitignored) |
+
+- `.gitignore`: `/benchmark/` → whitelist `*.py`, `*.ps1`, `*.md`, `*.log`; binary/dump vẫn ignore.
+- Cập nhật tham chiếu trong toàn bộ docs đang dùng (journal HANDOFF/BENCHMARKS §4+ giữ nguyên).
+- `tools/` chỉ còn: gate/verify (`gate_f32.sh`, `run_cases.ps1`, `verify_*.ps1`),
+  sinh fixture (`gen_*.py`), `compare_fixtures.py` — QA/đồ thị không liên quan benchmark.
+- BENCHMARKING guides cập nhật lệnh thành `python benchmark/bench_torch.py ...`.

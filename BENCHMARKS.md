@@ -24,12 +24,12 @@ dotnet benchmark/bseq.exe                                # can .runtimeconfig.js
 Torch side (cung phien - LUON do lai torch, khong muon so lieu phien truoc):
 
 ```powershell
-python tools/bench_torch.py d 1024   # tier d: fwd+bwd & full step
-python tools/bench_torch.py e 1024   # tier e: phan ra pha, T=1 va T=14
+python benchmark/bench_torch.py d 1024   # tier d: fwd+bwd & full step
+python benchmark/bench_torch.py e 1024   # tier e: phan ra pha, T=1 va T=14
 ```
 
 Log goc cua lan do moi nhat: `benchmark/_bench_matrix_post14_20261111_145719.log`
-(script `tools/_bench_matrix.ps1`, thu muc `benchmark/` khong commit tru 2 file cua phien do). Log danh so
+(script `benchmark/_bench_matrix.ps1`, thu muc `benchmark/` khong commit tru 2 file cua phien do). Log danh so
 cu: `out/_bench_matrix_*.log`.
 
 Hardware note: production chay kernel native AVX2/FMA (`tkv_simd_native.dll`,
@@ -160,8 +160,8 @@ Tỷ lệ GEMM/non-GEMM (suy ra từ 410 GF): 1 luồng ≈ 35/65, **14 luồng 
 ### 5.2 PyTorch
 
 ```powershell
-python tools/bench_torch.py e <seq>      # phase breakdown T=1 và T=14
-python tools/bench_torch.py d <seq>      # fwd+bwd và full step
+python benchmark/bench_torch.py e <seq>      # phase breakdown T=1 và T=14
+python benchmark/bench_torch.py d <seq>      # fwd+bwd và full step
 ```
 So sánh apple-to-apple:
 - TKV mode 0 (fwd+bwd) ↔ Torch `fwd(+CE)+bwd`.
@@ -206,7 +206,7 @@ Build đo: `dotnet out/bseq_p10_n10.dll` với `tv/tests/_seq_cfg.txt` = `<seq> 
 
 Máy: **Intel Xeon E5-2695 v3 @ 2.30 GHz**, 14 core vật lý / 28 logical, Windows 10 19045,
 .NET 10.0.402, PyTorch **2.14.0+cpu threads=14**. TKV: `out/bseq.exe` build **15:26:27**,
-git HEAD `38bfb04`. Script: `tools/_bench_matrix.ps1`, log `out/_bench_matrix_20261110_154851.log`.
+git HEAD `38bfb04`. Script: `benchmark/_bench_matrix.ps1`, log `out/_bench_matrix_20261110_154851.log`.
 TKV = best-of-3 (min). Torch = median of 2 (harness `tier_d` chạy `timeit(fb,1,2)`).
 
 ### 7.1 Bảng chính
@@ -825,8 +825,8 @@ lại 948 MB. Muốn bỏ phải sửa cả các probe đó — việc riêng, k
 Benchmark lai toan bo matrix sau khi trainer dung `adamw_step_glm(..., coef)`
 (request #14, commit ae2dc7a) va compiler build moi (12:45:58, sha256=712704151A996917).
 TKV binary: `benchmark/bseq_post14.exe` (build 14:56:12 tu HEAD `6b9d56f`, `tv/tests/simd_bench_124m_seq.tkv`).
-Log goc: `benchmark/_bench_matrix_post14_20261111_145719.log`. Script: `tools/_bench_matrix.ps1`
-(bien the cua `tools/_bench_matrix.ps1`, them mode 2).
+Log goc: `benchmark/_bench_matrix_post14_20261111_145719.log`. Script: `benchmark/_bench_matrix.ps1`
+(bien the cua `benchmark/_bench_matrix.ps1`, them mode 2).
 
 May: Xeon E5-2695 v3 @2.30GHz (14C/28T), Win10 19045, dotnet 10.0.402,
 torch 2.14.0+cpu threads=14.
@@ -903,6 +903,6 @@ nay la cung phien nen chac chan hon.
 - Mode 1 seq1024 dao dong manh (4016/4078/4719) - mode 2 (min-of-2) la
   so tin duoc cho phase; mode 1 chi de so tong voi lich su.
 - Mode 0 best: 453/985/3375 (log raw; parser best-of-3 cua script in
-  `best=0` do bug `-match` tren array - da fix trong `tools/_bench_matrix.ps1`).
+  `best=0` do bug `-match` tren array - da fix trong `benchmark/_bench_matrix.ps1`).
 - Chua chay lai gate trong phien nay; gate 135/135 + trainer 15/15 + loss
   EXACT da xac nhan o 9.21 (khong doi code tu do).

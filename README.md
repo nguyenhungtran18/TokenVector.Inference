@@ -105,8 +105,8 @@ dotnet out\trainer_tests.exe
 
 ```powershell
 # PyTorch side (needs python + torch 2.14+cpu + transformers)
-python tools/bench_torch.py d 1024   # fwd+bwd and full step
-python tools/bench_torch.py e 1024   # phase breakdown T=1 / T=14
+python benchmark/bench_torch.py d 1024   # fwd+bwd and full step
+python benchmark/bench_torch.py e 1024   # phase breakdown T=1 / T=14
 
 # TokenVector side (124M, _seq_cfg.txt picks seq/mode/steps/warmup)
 Set-Content tv/tests/_seq_cfg.txt "1024`n1`n1`n1"

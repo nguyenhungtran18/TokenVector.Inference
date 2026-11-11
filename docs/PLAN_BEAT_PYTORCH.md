@@ -111,7 +111,7 @@ Con thieu ~415 ms de dat win condition seq1024 (muc 3) ma KHONG dung bit-exact.
   hien co pack nao da cache (pack pool §0.119) truoc de khong doi lap. Bit-exact (pure copy).
 
 **P1d. Do lai head-to-head cung may + ghi HANDOFF §0.122 — DA LAM (xem Muc 0 + HANDOFF §0.122)** §0.122**:
-- Chay: mode 0 x3 seq + mode 1 seq512 + `tools/bench_torch.py` (seq8/256/1024).
+- Chay: mode 0 x3 seq + mode 1 seq512 + `benchmark/bench_torch.py` (seq8/256/1024).
 - Cap nhat Muc 0 baseline + bang gap; gate 9/10 + trainer 15/15 bat buoc.
 
 **Du kien Pha 1:** seq1024 full step ~4860-5100 ms (van chua dat 4148.4), opt ~600.

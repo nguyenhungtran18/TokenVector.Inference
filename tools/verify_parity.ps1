@@ -4,7 +4,7 @@
 #   [1/3] FIXTURE ORACLE : sinh lai fixture tu PyTorch vao thu muc tam,
 #                          diff o moi dong voi ban da check-in.
 #                          Phat hien: fixture drift, torch upgrade doi bai doi chieu.
-#   [2/3] BANG THU TU TICH LUY: chay tools\probe_accumulation_order.py,
+#   [2/3] BANG THU TU TICH LUY: chay benchmark\probe_accumulation_order.py,
 #                          so cac so bit-diff voi BASELINE da chot.
 #                          Phat hien: MKL/torch dispatch doi (AVX2 -> AVX512...).
 #   [3/3] GATE TOLERANCE  : chay tools\run_cases.ps1 (test tu kiem tol 1e-5).
@@ -107,7 +107,7 @@ $pyCmd2 = Get-Command $Python -ErrorAction SilentlyContinue
 if (-not $pyCmd2) {
     Add-Result "2-order" "SKIP" "khong tim thay python: $Python"
 } else {
-    $probeOut = (& $Python (Join-Path $root "tools\probe_accumulation_order.py") 2>&1 | Out-String)
+    $probeOut = (& $Python (Join-Path $root "benchmark\probe_accumulation_order.py") 2>&1 | Out-String)
     $probeExit = $LASTEXITCODE
     $lines += ($FO + $probeOut.Trim() + $FC)
     if ($probeExit -ne 0) {

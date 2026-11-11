@@ -11,7 +11,7 @@
 # S5 logits   [1024, 50257]= xf[1024,768] @ wteT[768,50257]   k=768
 # (S5 la transpose-nhan: torch dung @, tkv dung smm_dot — cung flop huu ich.)
 #
-# Chay (tu goc repo):  python tools/p7b_gemm_torch.py
+# Chay (tu goc repo):  python benchmark/p7b_gemm_torch.py
 import statistics
 import sys
 import time

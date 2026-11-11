@@ -36,7 +36,12 @@ $RECYCLE.BIN/
 /tv/tests/_thr_cfg.txt
 
 # Build output cua probe/bench (exe + IL + log), 25 MB
-/benchmark/
+# Benchmark scratch — tracked: scripts (.py/.ps1) + committed logs; everything else ignored
+/benchmark/*
+!/benchmark/*.py
+!/benchmark/*.ps1
+!/benchmark/*.md
+!/benchmark/*.log
 
 # Distribution output: a full duplicate of the source tree plus a bundled
 # compiler .exe (which *.exe already excludes, so committing it would produce

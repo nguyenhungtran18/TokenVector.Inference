@@ -2,8 +2,8 @@
 #   A: linear 768->2304 fwd+bwd, 256 token        (GEMM lon — giong gate simd [9])
 #   B: GPT-2 nho  2/4/64  vocab256 seq8 train step (giong gate simd [8])
 #   C: GPT-2 124M (12/12/768) train step, cung 8 token fixture
-#   D: GPT-2 124M o seq thuc (P4): python tools/bench_torch.py d [seq=1024]
-# Chay (tu goc repo):  python tools/bench_torch.py [a|b|c|d|all] [seq]
+#   D: GPT-2 124M o seq thuc (P4): python benchmark/bench_torch.py d [seq=1024]
+# Chay (tu goc repo):  python benchmark/bench_torch.py [a|b|c|d|all] [seq]
 # Hop dong so: fp32, dropout=0, AdamW eps=1e-8 betas=(0.9,0.999) wd=0 — cung
 # tham so hop dong cua tkv (_mk_opt). Moi lan do = forward + backward (+ step).
 import sys
@@ -148,7 +148,7 @@ def tier_d(seq=1024):
 def tier_e(seq=8):
     """PHASE A — doi chuan 2 phia (docs/archive/PLAN_TO_PARITY.md): tach tung phase
     (zero / fwd / bwd / opt) va chay ca 1T + 14T de so bucket voi CJ8 tkv.
-    Goi: python tools/bench_torch.py e <seq>"""
+    Goi: python benchmark/bench_torch.py e <seq>"""
     from transformers import GPT2Config
     from transformers import GPT2LMHeadModel
     ids_l = [(i * 37 + 11) % 50257 for i in range(seq)]

@@ -30,8 +30,8 @@ Xem `BENCHMARKS.md` §1. Tóm tắt:
   `mode=1` full step best-of-3, `mode=2` phân rã 5 pha min-of-2), chạy bằng
   `dotnet benchmark/bseq.exe` (cần `.runtimeconfig.json` cạnh exe — xem §9.17 của
   bản tiếng Anh).
-- torch: `python tools/bench_torch.py d <seq>` (fwd+bwd & full step) và
-  `python tools/bench_torch.py e <seq>` (phân rã pha, T=1 và T=14).
+- torch: `python benchmark/bench_torch.py d <seq>` (fwd+bwd & full step) và
+  `python benchmark/bench_torch.py e <seq>` (phân rã pha, T=1 và T=14).
 - **Luôn đo lại torch trong cùng phiên** khi công bố số mới; đánh dấu rõ
   so với §9.21 (khac phiên).
 

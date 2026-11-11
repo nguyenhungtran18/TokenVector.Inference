@@ -73,14 +73,14 @@ Say ""
 
 Say "=== PYTORCH (bench_torch d: fwd+bwd and full step) ==="
 foreach ($seq in 8, 256, 1024) {
-  $out = & python tools/bench_torch.py d $seq 2>$null
+  $out = & python benchmark/bench_torch.py d $seq 2>$null
   $out | Where-Object { $_ -match "^BENCH" } | ForEach-Object { Say $_ }
 }
 Say ""
 
 Say "=== PYTORCH PHASE (bench_torch e, T=1 and T=14) ==="
 foreach ($seq in 8, 256, 1024) {
-  $out = & python tools/bench_torch.py e $seq 2>$null
+  $out = & python benchmark/bench_torch.py e $seq 2>$null
   $out | Where-Object { $_ -match "^BENCH" } | ForEach-Object { Say $_ }
 }
 Say ""

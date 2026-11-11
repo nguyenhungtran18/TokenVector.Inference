@@ -1,4 +1,4 @@
-# BENCH tkv — scalar vs SIMD, doi chieu tools/bench_torch.py (cung config/data)
+# BENCH tkv — scalar vs SIMD, doi chieu benchmark/bench_torch.py (cung config/data)
 #   A: linear fwd+bwd 256x768->2304 (giong gate [9] + backward)
 #   B: train step GPT-2 nho seq8 (giong gate [8])
 # LUU Y timing (probe W, bug compiler #8): now_ms() la f64 — doc DUNG o main,

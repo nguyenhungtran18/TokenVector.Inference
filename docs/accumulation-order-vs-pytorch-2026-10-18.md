@@ -6,7 +6,7 @@ và nếu không thì vì sao — kèm bằng chứng đo được, không suy d
 
 Môi trường đo: `torch 2.14.0+cpu`, **Intel oneAPI MKL 2026.1 + MKL-DNN v3.12**,
 `CPU capability usage: AVX2` (xem `torch.__config__.show()`).
-Tái lập: `python tools/probe_accumulation_order.py`.
+Tái lập: `python benchmark/probe_accumulation_order.py`.
 
 ## 1. Bảng kết quả (bit-diff = số phần tử khác DUY NHẤT bit, so với torch)
 

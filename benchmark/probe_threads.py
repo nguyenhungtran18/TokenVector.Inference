@@ -5,7 +5,7 @@
 # Cach dung (tu goc repo):
 #   printf "0\n" > tv/tests/_thr_cfg.txt     # 0=pure gemm 1=scalar 2=1 buoc
 #   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/simd_probe_ao.tkv out/ao.exe main
-#   python tools/probe_threads.py out/ao.exe [reps=3]
+#   python benchmark/probe_threads.py out/ao.exe [reps=3]
 #
 # Windows: os.times() KHONG dem CPU cua con (0) -> poll psutil.Process.cpu_times()
 # trong khi tien trinh chay, lay mau cuoi truoc khi no ket thuc.

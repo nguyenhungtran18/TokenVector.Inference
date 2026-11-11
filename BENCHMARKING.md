@@ -49,14 +49,14 @@ dotnet benchmark/bseq.exe
 Matrix driver (TKV best-of-3 + torch both tiers, logs to `benchmark/`):
 
 ```powershell
-powershell -File tools/_bench_matrix.ps1
+powershell -File benchmark/_bench_matrix.ps1
 ```
 
 ## Measure PyTorch (always re-measure, same session)
 
 ```powershell
-python tools/bench_torch.py d 1024   # tier d: fwd+bwd and full step
-python tools/bench_torch.py e 1024   # tier e: zero/fwd/bwd/opt breakdown, T=1 and T=14
+python benchmark/bench_torch.py d 1024   # tier d: fwd+bwd and full step
+python benchmark/bench_torch.py e 1024   # tier e: zero/fwd/bwd/opt breakdown, T=1 and T=14
 ```
 
 **Never quote a cross-session torch number.** §9.21 borrowed

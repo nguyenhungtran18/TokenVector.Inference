@@ -123,7 +123,7 @@ Mục tiêu: Yêu cầu compiler team cung cấp builtin/ABI f32 mới trong `tk
 | **Week 1** | Compiler team cung cấp builtin f32 + ABI update |
 | **Week 2** | `.tkv` test builtin (smoke test `_cy0`, `_cj2` với f32 path) |
 | **Week 3** | Run gate 135/135 + trainer 15/15 + loss exact |
-| **Week 4** | A/B so sánh vs PyTorch 1-thread/14-thread (`tools/bench_torch.py d 8/256/1024`) |
+| **Week 4** | A/B so sánh vs PyTorch 1-thread/14-thread (`benchmark/bench_torch.py d 8/256/1024`) |
 | **Week 5** | Nếu pass: commit + tag version; nếu fail: iterate spec |
 
 ---

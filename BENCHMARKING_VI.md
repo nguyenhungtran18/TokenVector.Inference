@@ -47,14 +47,14 @@ dotnet benchmark/bseq.exe
 Script matrix (TKV best-of-3 + torch cả hai tier, ghi log vào `benchmark/`):
 
 ```powershell
-powershell -File tools/_bench_matrix.ps1
+powershell -File benchmark/_bench_matrix.ps1
 ```
 
 ## Đo PyTorch (luôn đo lại cùng phiên)
 
 ```powershell
-python tools/bench_torch.py d 1024   # tier d: fwd+bwd và full step
-python tools/bench_torch.py e 1024   # tier e: phân rã zero/fwd/bwd/opt, T=1 và T=14
+python benchmark/bench_torch.py d 1024   # tier d: fwd+bwd và full step
+python benchmark/bench_torch.py e 1024   # tier e: phân rã zero/fwd/bwd/opt, T=1 và T=14
 ```
 
 **Không bao giờ trích dẫn số torch khác phiên.** §9.21 từng mượn `4130.6`

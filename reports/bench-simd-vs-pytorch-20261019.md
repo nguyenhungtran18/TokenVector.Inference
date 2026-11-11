@@ -12,7 +12,7 @@ Chạy lại (tkv ổn định <5% giữa 2 lần; torch A dao động 4.3–5.6
 lần — số trong bảng là lần đo ghi ở mục "Số đo thô"):
 
 ```
-python tools/bench_torch.py [a|b|c|all]   # hop "ab"/"bc" cung duoc
+python benchmark/bench_torch.py [a|b|c|all]   # hop "ab"/"bc" cung duoc
 tkvc tv/tests/simd_bench.tkv %TEMP%/simd_bench.exe main      && %TEMP%/simd_bench.exe
 tkvc tv/tests/simd_bench_124m.tkv %TEMP%/b124.exe main       && %TEMP%/b124.exe
 ```
