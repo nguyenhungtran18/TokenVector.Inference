@@ -7934,3 +7934,14 @@ về `benchmark/` theo yêu cầu ("cùng để benchmark thì gom lại 1 folde
   thuộc nhóm host tooling như `gate_f32.sh`, `run_cases.ps1`. Cập nhật USER_GUIDE(-VI).
 
 Root hiện còn: README(-VI), RELEASE_NOTES(-VI), USER_GUIDE(-VI), LICENSE, `.gitignore`.
+
+## §0.160 DÓNG GÓI NUGET `TokenVector.Inference` 1.0.1 (2026-11-11)
+
+**Ngày:** 2026-11-11. Đăng ký phát hành NuGet + cập nhật logo mới (`D:\TokenVector\Release\assets\`, 2026-10-18).
+
+- **Logo mới**: `assets/icon.png` (128×128, NuGet icon) + `assets/tokenvector-logo.png` (512×512, README) — cả hai copy từ assets repo compiler (cùng bộ logo với package TokenVector). README(-VI) tham chiếu `assets/tokenvector-logo.png` (trước đây trỏ tới file .svg đã bị xóa).
+- **Package**: `packaging/TokenVector.Inference.nuspec` (id `TokenVector.Inference`, version **1.0.1**, source-only: `src/tv/`, `src/tools/`, `src/docs/`, + README/RELEASE_NOTES/USER_GUIDE/icon/release-notes; loại `tv/tests/fixtures-124m/` và `docs/archive/`). `packaging/pack.ps1` tải `nuget.exe` và build package, in sẵn lệnh push.
+- **Build thử**: `TokenVector.Inference.1.0.1.nupkg` tạo thành công (3.24 MB, 531 entries, fixtures/archive đã loại). NU5110/NU5111 chỉ là cảnh báo vô hại (.ps1 trong `src/tools/` không phải install script).
+- **Release notes**: `RELEASE_NOTES.md`/`RELEASE_NOTES_VI.md` đổi thành mục **v1.0.1 — 2026-11-11** (source package, logo mới, nội dung 2026-11-11); v1.0.0 (2026-09-28) giữ làm historical.
+- **`.gitignore`**: `/packaging/*.nupkg` (artifact tái tạo được).
+- Người dùng tự push: `nuget push packaging/TokenVector.Inference.1.0.1.nupkg -ApiKey <KEY> -Source https://api.nuget.org/v3/index.json`.

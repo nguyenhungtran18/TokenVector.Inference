@@ -1,10 +1,18 @@
 # Release Notes — TokenVector.Inference (Tiếng Việt)
 
-## 2026-11-11 — trạng thái hiện tại (chưa đánh số bản phát hành)
+## v1.0.1 — 2026-11-11
 
-> Bản ghi này thay cho việc phát hành v1.0.0 như ghi cuối trang. Các claim
-> "Chưa có SIMD", "không DLL kèm theo", "`argv()` stub", "`http_listen()` stub"
-> trong phần v1.0.0 bên dưới là **ảnh chụp 2026-09-28, đã lỗi thời**.
+> Bản phát hành **source package** `TokenVector.Inference` 1.0.1 (NuGet, source-only).
+> Bản này thay cho v1.0.0 như ghi cuối trang. Các claim "Chưa có SIMD", "không DLL
+> kèm theo", "`argv()` stub", "`http_listen()` stub" trong phần v1.0.0 bên dưới là
+> **ảnh chụp 2026-09-28, đã lỗi thời**.
+
+**Đóng gói:** source package (không kèm binary). Người dùng tự biên dịch `.tkv`
+bằng compiler `tkvc-tv` (từ package `TokenVector` trên NuGet). Package gồm:
+nguồn `.tkv` (`tv/`), công cụ verify (`tools/`), tài liệu kỹ thuật (`docs/`),
+hướng dẫn benchmark (`BENCHMARKING.md` / `BENCHMARKING_VI.md`), và hướng dẫn sử
+dụng (`USER_GUIDE.md` / `USER_GUIDE_VI.md`). Logo mới (2026-10-18).
+
 
 **Huấn luyện (GPT-2 124M, CPU):**
 - Full train step @seq1024: **4016 ms** so với PyTorch 2.14.0+cpu cùng phiên **4061.1 ms** → **0.989×** (`benchmark/BENCHMARKS.md` §9.22); loss **EXACT** (`10.760399`).

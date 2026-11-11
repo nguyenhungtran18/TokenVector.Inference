@@ -4,7 +4,7 @@
 [![Language: TokenVector .tkv](https://img.shields.io/badge/Language-TokenVector%20.tkv-blue.svg)](https://github.com/nguyenhungtran18/TokenVector)
 [![Compiler: tkvc](https://img.shields.io/badge/Compiler-tkvc--tv-orange.svg)](https://github.com/nguyenhungtran18/TokenVector)
 
-<img src="assets/tokenvector-logo.svg" alt="TokenVector logo" width="96" height="96">
+<img src="assets/tokenvector-logo.png" alt="TokenVector logo" width="96" height="96">
 
 **TokenVector.Inference** is a deep learning runtime written in **TokenVector
 (`.tkv`)** — inference (graph optimization, quantization, micro-serving) **and**
@@ -63,6 +63,7 @@ benchmark/     benchmark tooling & scratch: bench_torch.py (PyTorch reference),
                _bench_matrix.ps1 (matrix runner), probes, logs;
                binaries & dumps gitignored, scripts & logs tracked
 docs/          engineering docs;  docs/archive/ = completed/superseded plans
+packaging/     NuGet packaging (TokenVector.Inference.nuspec, pack.ps1) — build via packaging/pack.ps1
 reports/       dated parity & benchmark reports
 benchmark/BENCHMARKING.md step-by-step benchmark guide (EN + VI)
 benchmark/BENCHMARKS.md  master benchmark journal (current: §9.22)

@@ -4,7 +4,7 @@
 [![Language: TokenVector .tkv](https://img.shields.io/badge/Language-TokenVector%20.tkv-blue.svg)](https://github.com/nguyenhungtran18/TokenVector)
 [![Compiler: tkvc](https://img.shields.io/badge/Compiler-tkvc--tv-orange.svg)](https://github.com/nguyenhungtran18/TokenVector)
 
-<img src="assets/tokenvector-logo.svg" alt="TokenVector logo" width="96" height="96">
+<img src="assets/tokenvector-logo.png" alt="TokenVector logo" width="96" height="96">
 
 **TokenVector.Inference** là runtime deep learning viết bằng **TokenVector
 (`.tkv`)** — inference (tối ưu graph, quantization, micro-serving) **và**
@@ -63,6 +63,7 @@ benchmark/     Công cụ & scratch benchmark: bench_torch.py (đối chiếu Py
                _bench_matrix.ps1 (matrix runner), probes, logs;
                binary/dump gitignored, script & log được track
 docs/          Tài liệu kỹ thuật;  docs/archive/ = kế hoạch đã xong/hết hiệu lực
+packaging/     Đóng gói NuGet (TokenVector.Inference.nuspec, pack.ps1) — build bằng packaging/pack.ps1
 reports/       Báo cáo parity & benchmark theo ngày
 benchmark/BENCHMARKING_VI.md  Hướng dẫn benchmark (VI + EN)
 benchmark/BENCHMARKS.md  Nhật ký benchmark chính (hiện tại: §9.22)

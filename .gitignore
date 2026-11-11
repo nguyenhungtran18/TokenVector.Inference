@@ -63,3 +63,6 @@ tv/tests/fixtures-124m/
 /_flash_work/
 /_fw2/
 /_fw3/
+
+# NuGet build artifacts (packaging/*.nupkg regenerable via packaging/pack.ps1)
+/packaging/*.nupkg
