@@ -7963,3 +7963,18 @@ Root hiện còn: README(-VI), RELEASE_NOTES(-VI), USER_GUIDE(-VI), LICENSE, `.g
 - RELEASE_NOTES(-VI) v1.0.1: mô tả package kép (source + managed assembly) + dependency.
 
 **Chưa làm / lưu ý:** chưa có ví dụ sử dụng C# trong docs (API .tkv IL-level, chưa verify call từ C# end-to-end); dependency `TokenVector` ≥ 1.0.12 phải được publish trước (hoặc song song) trên NuGet.org; `NU5110/NU5111` (.ps1 trong `src/tools/`) là cảnh báo vô hại; ILasm warnings vô hại (assembly load verified).
+
+## §0.162 C# SMOKE TEST: `TokenVector.Inference.dll` GỌI ĐƯỢC TỪ .NET (2026-11-11)
+
+**Ngày:** 2026-11-11. Trước khi push, xác nhận managed assembly dùng được từ .NET 10:
+
+**Đã làm:**
+- `packaging/smoke-test/` — app console net10.0 tối thiểu (Y[0] = 2.25 — ReLU(X[1]@W^T+B), W=0.5, B=0.25):
+  - `smoke.csproj` — Reference `TokenVector.Inference.dll` (do `packaging\pack.ps1` sinh ra).
+  - `Program.cs` — build graph (`ExecutionGraph`), `session_from_graph(g, 1)`, `run_single`, in `Y[0] = 2.25` + `SMOKE OK`.
+  - `run.ps1` — build + copy `tkv_simd_native.dll` từ `D:\TokenVector\Release\runtime\` (mặc định) + chạy; `-RuntimeNativeDir <path>` để override. **ASCII-only** vì PS 5.1 đọc không BOM.
+  - `README.md` — API table (mức IL, global namespace, constants kiểu số).
+- Kết quả: build 0 warning/0 error, chạy `Y[0] = 2.25  (expect 2.25)` + `SMOKE OK`.
+- `.gitignore`: `packaging/smoke-test/bin/`, `packaging/smoke-test/obj/`.
+
+**Lưu ý:** API .tkv mức IL (global namespace, `TKVApp.*`, constants kiểu số, record ctor nhận `_ok` sentinel); chưa có ví dụ C# idiomatic nào trong docs cho tới bản này.
