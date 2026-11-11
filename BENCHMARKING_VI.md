@@ -47,7 +47,7 @@ dotnet benchmark/bseq.exe
 Script matrix (TKV best-of-3 + torch cả hai tier, ghi log vào `benchmark/`):
 
 ```powershell
-powershell -File benchmark\_bench_post14.ps1   # hoặc theo mẫu tools/_bench_matrix.ps1
+powershell -File tools/_bench_matrix.ps1
 ```
 
 ## Đo PyTorch (luôn đo lại cùng phiên)

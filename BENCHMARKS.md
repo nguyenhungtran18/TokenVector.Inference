@@ -29,7 +29,7 @@ python tools/bench_torch.py e 1024   # tier e: phan ra pha, T=1 va T=14
 ```
 
 Log goc cua lan do moi nhat: `benchmark/_bench_matrix_post14_20261111_145719.log`
-(script `benchmark/_bench_post14.ps1`, thu muc `benchmark/` khong commit tru 2 file cua phien do). Log danh so
+(script `tools/_bench_matrix.ps1`, thu muc `benchmark/` khong commit tru 2 file cua phien do). Log danh so
 cu: `out/_bench_matrix_*.log`.
 
 Hardware note: production chay kernel native AVX2/FMA (`tkv_simd_native.dll`,
@@ -825,7 +825,7 @@ lại 948 MB. Muốn bỏ phải sửa cả các probe đó — việc riêng, k
 Benchmark lai toan bo matrix sau khi trainer dung `adamw_step_glm(..., coef)`
 (request #14, commit ae2dc7a) va compiler build moi (12:45:58, sha256=712704151A996917).
 TKV binary: `benchmark/bseq_post14.exe` (build 14:56:12 tu HEAD `6b9d56f`, `tv/tests/simd_bench_124m_seq.tkv`).
-Log goc: `benchmark/_bench_matrix_post14_20261111_145719.log`. Script: `benchmark/_bench_post14.ps1`
+Log goc: `benchmark/_bench_matrix_post14_20261111_145719.log`. Script: `tools/_bench_matrix.ps1`
 (bien the cua `tools/_bench_matrix.ps1`, them mode 2).
 
 May: Xeon E5-2695 v3 @2.30GHz (14C/28T), Win10 19045, dotnet 10.0.402,
@@ -903,6 +903,6 @@ nay la cung phien nen chac chan hon.
 - Mode 1 seq1024 dao dong manh (4016/4078/4719) - mode 2 (min-of-2) la
   so tin duoc cho phase; mode 1 chi de so tong voi lich su.
 - Mode 0 best: 453/985/3375 (log raw; parser best-of-3 cua script in
-  `best=0` do bug `-match` tren array - da fix trong `benchmark/_bench_post14.ps1`).
+  `best=0` do bug `-match` tren array - da fix trong `tools/_bench_matrix.ps1`).
 - Chua chay lai gate trong phien nay; gate 135/135 + trainer 15/15 + loss
   EXACT da xac nhan o 9.21 (khong doi code tu do).

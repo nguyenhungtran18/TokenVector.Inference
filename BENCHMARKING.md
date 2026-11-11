@@ -49,7 +49,7 @@ dotnet benchmark/bseq.exe
 Matrix driver (TKV best-of-3 + torch both tiers, logs to `benchmark/`):
 
 ```powershell
-powershell -File benchmark\_bench_post14.ps1   # or copy the pattern from tools/_bench_matrix.ps1
+powershell -File tools/_bench_matrix.ps1
 ```
 
 ## Measure PyTorch (always re-measure, same session)

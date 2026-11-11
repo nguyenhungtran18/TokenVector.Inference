@@ -7881,7 +7881,7 @@ Không có thay đổi nào trong `tv/` — gate 135/135 (§9.21) vẫn nguyên 
 1. **`out/` → `benchmark/`**: 1.24 GB / 3577 file trong `out/` đã được dọn còn
    4 file (~0.22 MB) gắn với §9.22, rồi đổi tên thư mục thành `benchmark/`.
    `.gitignore`: `/out/` → `/benchmark/`. Hai file được track (force-add):
-   `benchmark/_bench_post14.ps1` (script bench) và
+   `tools/_bench_matrix.ps1` (script bench) và
    `benchmark/_bench_matrix_post14_20261111_145719.log` (bằng chứng §9.22).
    Các file khác trong `benchmark/` vẫn gitignored.
 
@@ -7891,7 +7891,7 @@ Không có thay đổi nào trong `tv/` — gate 135/135 (§9.21) vẫn nguyên 
 
 3. **Tham chiếu `out/` → `benchmark/`** trong README(-VI), USER_GUIDE(-VI),
    TEST_REPORT(-VI), COMPETITOR_COMPARISON(-VI), BENCHMARKS §1 + §9.21/9.22,
-   HANDOFF, tools/_bench_matrix.ps1, benchmark/_bench_post14.ps1,
+   HANDOFF, tools/_bench_matrix.ps1, tools/_bench_matrix.ps1,
    docs/COMPILER_TEAM_REQUEST14.md. Các mục lịch sử trong BENCHMARKS (§4–§20)
    và HANDOFF giữ nguyên đường dẫn `out/` (journal không viết lại).
 
