@@ -230,27 +230,22 @@ class AdamW:
         #   -> native tinh (lr/bc1)*(m*bc2s)/(sqrt(v)+eps*bc2s) + (lr/bc1)*(wd*bc1)*p
         #   = step_size*bc2s*m/(...) + lr*wd*p  — DUNG gia tri vong cu.
         # Lech ulp (thu tu nhan/phep tru ~1e-7) — trong TOL 1e-5 trainer_tests.
-        # coef != 1.0 (clip hoat dong): toan tu g bang f32_addcmul scratch
-        # (pt = coef*g*1) vi kernel khong co tham so coef.
+        # coef != 1.0 (clip hoat dong): truyen thang gl + coef vao
+        # adamw_step_glm, kernel tu nhan coef (request #14, 2026-11-11).
+        # Bo han 3 buoc phu f32_copy_to_buf + f32_zero + f32_addcmul.
         gl = self.g
         pl = self.p
         pgl = self.pg
         ppl = self.pp
         pml = self.pm
         pvl = self.pv
-        ptl = self.pt
-        ponl = self.pone
         # Phase B2 (2026-10-27): thu adamw_step_glm (bo copy r1, doc gl list
         # truc tiep) — bench A/B tu choi: +3.2s/buoc @seq1024 (n=124M, cong
         # them alloc/marshal 496MB duoi ap luc RAM) → giu nguyen duong copy + adamw_step.
         # Phase B2 (2026-10-27) + compiler fix (2026-11-06): bo r1 khi clip khong
         # hoat dong (coef == 1.0) - adamw_step_glm doc gl list truc tiep.
-        gsrc: "i64" = 0
-        if coef != 1.0:
-            r1 = f32_copy_to_buf(gl, pgl, self.n)
-            rzp = f32_zero(ptl, self.n)
-            rax = f32_addcmul(ptl, pgl, ponl, coef, self.n)
-            gsrc = ptl
+        # Request #14 (2026-11-11): coef nhan trong kernel -> bo ca duong clip
+        # 3 buoc (r1/rzp/rax), dung MOT call cho ca hai coef.
         # M5-opt (probe CJ7 bit-exact): BO r2 moi buoc - p day 1 lan luc setup
         # (pdirty=1 tu __init__; site ghi opt.p ngoai setup thi push_p()).
         # r3 van giu p list = anh chinh doc boi unflatten/bench/ckpt.
@@ -264,12 +259,8 @@ class AdamW:
                 self.pdirty = 0
             self.psync = 0
         wde = self.wd * bc1
-        if coef != 1.0:
-            stw = adamw_step(ppl, pml, pvl, gsrc, self.n,
-                             step_size, self.b1, self.b2, self.eps, wde, bc1, bc2s)
-        else:
-            stw = adamw_step_glm(ppl, pml, pvl, gl, self.n,
-                                 step_size, self.b1, self.b2, self.eps, wde, bc1, bc2s)
+        stw = adamw_step_glm(ppl, pml, pvl, gl, self.n,
+                             step_size, self.b1, self.b2, self.eps, wde, bc1, bc2s, coef)
         self.psync = 1
         # r3 (copy-back) BO - p list dong bo lazy qua sync_p()
         # M5-opt: BO r4/r5 (+188ms/buoc @124M — do _cj8) — m/v song TRUC TIEP

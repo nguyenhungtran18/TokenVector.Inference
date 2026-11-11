@@ -671,3 +671,129 @@ compiler hay loi agent**.
 
 **De nghi:** `tkvc-tv.exe` nen sinh `.runtimeconfig.json` canh `.exe`, hoac
 `testkit_gate.ps1` nen tu tao no. Hien tai moi test deu phai copy tay.
+
+### 9.18 PHÂN RÃ 5 PHA SAU KHI SỬA (2026-11-11)
+
+Cùng phiên với torch (`out/_bench_matrix_20261110_154851.log`, torch T=14):
+
+| pha | TKV | torch | chênh |
+|---|---:|---:|---:|
+| fwd | 1032 | 1086.8 | **−54.8** (TKV THẮNG) |
+| loss | 109 | (gộp trong fwd) | — |
+| bwd | 2437 | 2352.0 | +85.0 |
+| opt | 781 | 655.2 | +125.8 |
+| copyback | 125 | 62.0 | +63.0 |
+| **TỔNG** | **4484** | **4130.6** | **+353.4** |
+
+**Forward của TKV đã nhanh hơn torch.** Chỗ thua nằm ở `opt` + `copyback` (189 ms)
+và `bwd` (85 ms). `opt`=781 và `copyback`=125 **giống hệt ở cả seq8/256/1024** →
+chi phí cố định, không co giãn theo seq.
+
+### 9.19 `opt` 781 ms = ĐƯỜNG CLIP — tìm ra sau 5 lần đo sai (2026-11-11)
+
+`AdamW.step()` có hai đường theo `coef = clip/(grad_norm+1e-6)`:
+
+- `coef == 1.0` → `adamw_step_glm` đọc `gl` list trực tiếp (NHANH)
+- `coef != 1.0` → `r1 = f32_copy_to_buf` + `f32_zero` + `f32_addcmul` + `adamw_step` (CHẬM)
+
+Gradient thật cho `gn = 11.155` → `coef ≈ 0.0896 ≠ 1.0` → **production LUÔN đi
+đường chậm**. Đường nhanh chỉ chạy khi gradient bằng 0.
+
+Đo từng mảnh (`tv/tests/_clip_m1..m5.tkv`), n = 124,439,808 (474.7 MB/buffer):
+
+| mảnh | ms |
+|---|---:|
+| `r1` = `f32_copy_to_buf` | **156** |
+| `rzp` = `f32_zero` | **125** |
+| `rax` = `f32_addcmul` | **172** |
+| `adamw_step` (buffer) | 343 |
+| `adamw_step_glm` (list) | 343 |
+
+Đường chậm = 156+125+172+343 = **796 ms**; đường nhanh = 343 ms.
+
+End-to-end `opt.step()` với gradient thật (`_clip_real.tkv`):
+
+| lần | clip=1.0 (chậm) | clip=1e9 (nhanh) | chênh |
+|---|---:|---:|---:|
+| 1 | 781 | 563 | −218 |
+| 2 | 875 | 547 | −328 |
+| 3 | 781 | 657 | −124 |
+
+Chênh 124–328 ms, trung bình **~220 ms**.
+
+`ponl` là buffer toàn `1.0`, nên `f32_addcmul(ptl, pgl, ponl, coef, n)` thực chất
+chỉ là `ptl = coef * gl` — một phép nhân vô hướng đi qua 3 lượt chạm 474 MB.
+
+**Request #14** (`docs/COMPILER_TEAM_REQUEST14.md`): thêm tham số `coef` vào
+`adamw_step_glm`, nhân ngay trong kernel. Bỏ được `r1`+`rzp`+`rax` và buffer `pt`
+(474 MB working set). Kỳ vọng `opt` 781 → ~560, full step 4219 → ~4000.
+
+### 9.20 NĂM LẦN ĐO SAI TRONG HAI PHIÊN — ghi để không lặp
+
+| # | lỗi | hậu quả |
+|---|---|---|
+| 1 | probe `lmhead_bwd_fused` chạy 1 thread softmax + không nạp BLAS | 924 ms thay vì 542 (§8 sai, §9 sửa) |
+| 2 | đo `t_zeros` chỉ ở bước "tạo", không chạm dữ liệu | 0.0 ms giả tạo (§9.15) |
+| 3 | `adamw_step_glm(b1, b1, b1, ...)` cùng buffer cho pp/pm/pv | 125 ms thay vì 343 |
+| 4 | probe clip dùng `g` toàn 0 → `gn = 0` → cả hai nhánh đi đường nhanh | "clip không tốn gì" — SAI |
+| 5 | `zeros_list` trả dtype `i32`, index trực tiếp trong `main` | `AccessViolation` / `InvalidCastException` |
+
+Bài học chung: **mỗi phép đo phải chạm đúng đường production, đúng số buffer, đúng
+dữ liệu thật.** Con số đẹp thường là dấu hiệu đo sai, không phải tối ưu tốt.
+
+---
+
+### 9.21 KẾT QUẢ SAU REQUEST #14 (2026-11-11) — `opt` 781 → 438-469 ms
+
+Compiler: repo `D:\TokenVector` commit `82e5426`; `tkv_simd_native.dll` hash
+`1E49BCE2…` (thêm export `AdamwStepF32C`); 4 bản `trainer.tkv` đổi sang
+**một** call `adamw_step_glm(..., coef)`, bỏ `r1` + `rzp` + `rax` + `gsrc`.
+
+**Bit-exact (điều kiện bắt buộc của request):**
+
+| phép kiểm | kết quả |
+|---|---|
+| `coef == 1.0` vs `adamw_step` (buffer) | **0/0/0** phần tử lệch p/m/v (`f32_list_ops_test`, n=64/37) |
+| `coef != 1.0` vs `f32_zero`+`f32_addcmul`+`adamw_step` | **0/0/0** (`f32_list_ops_test` + probe n=131072 → đường thread-pool mode 8) |
+| loss 3 seq | **EXACT**: `10.572291 / 10.756927 / 10.760399` |
+| `gpt2_full_tests` | **33/33, fails=0, exit 0** |
+
+**Phân rã 5 pha (mode 2), cùng phiên, `_seq_cfg = <seq>/2/1/1`:**
+
+| seq | fwd | loss | bwd | **opt** | copyback | TỔNG | opt trước |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 94 | 0 | 375 | **438** | 141 | **1048** | 781 |
+| 256 | 297 | 31 | 641 | **453** | 141 | **1563** | 781 |
+| 1024 | 1016 | 125 | 2296 | **469** | 109 | **4015** | 781 |
+
+`opt` giảm **−312 … −343 ms** và **không còn phụ thuộc clip** — `clip=1.0`
+(production, `coef≈0.0896`) giờ bằng đúng `clip=1e9`:
+
+```
+_clip_real.tkv:  A clip=1.0 = 484 ms   B clip=1e9 = 484 ms   chênh = 0.0
+```
+
+**Full step mode 1, best-of-3:**
+
+| seq | trước | sau (3 lần) | best |
+|---|---:|---|---:|
+| 8 | 1187 | 1547 / 1157 / 1141 | **1141** |
+| 256 | 1782 | 1656 / 1562 / 1656 | **1562** |
+| 1024 | 4219 | 4125 / 4109 / 4281 | **4109** |
+
+Mode 1 dao động lớn trên phiên này (seq8: 1141–1547; seq1024: 4109–4344 ở lần
+đo trước), nên **mode 2 là số tin được** cho phần `opt`; mode 1 chỉ dùng để
+so tổng với baseline cũ. TỔNG mode 2 @seq1024 = **4015** so với torch cùng
+phiên §9.18 (`4130.6`) = **0.972×** — đạt ≤1.0×.
+
+**Gate/regression:**
+
+| gate | kết quả |
+|---|---|
+| Trainer | **15/15, fails=0** (clip `max_abs_diff=0.0`) |
+| `tools/gate_f32.sh` | **10/10 suite PASS, TOTAL fails=0 = 135/135** |
+| `tools/run_cases.ps1` | **pass=22 fail=4**, gap_tests FAIL — **giống hệt baseline** (`System.Runtime.Intrinsics` thiếu trên .NET Framework; `gap_tests` PASS khi chạy .NET 10 trong gate) |
+
+**Working set:** `pt`/`pone` **vẫn còn cấp phát** (nhiều probe `_cj7/_cj8/_cy5/
+_det/_field_read/_opt_inline/_opt_split` đọc `opt.pt`/`opt.pone`) → chưa lấy
+lại 948 MB. Muốn bỏ phải sửa cả các probe đó — việc riêng, không thuộc #14.

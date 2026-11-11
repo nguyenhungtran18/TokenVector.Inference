@@ -232,12 +232,8 @@ class AdamW:
         # Phase B2 (2026-10-27): thu adamw_step_glm (bo copy r1, doc gl list
         # truc tiep) — bench A/B tu choi: +3.2s/buoc @seq1024 (n=124M, cong
         # them alloc/marshal 496MB duoi ap luc RAM) → giu nguyen duong copy + adamw_step.
-        r1 = f32_copy_to_buf(gl, pgl, self.n)
-        gsrc: "i64" = pgl
-        if coef != 1.0:
-            rzp = f32_zero(ptl, self.n)
-            rax = f32_addcmul(ptl, pgl, ponl, coef, self.n)
-            gsrc = ptl
+        # Request #14 (2026-11-11): coef nhan trong kernel -> bo r1 + duong clip
+        # 3 buoc, dung MOT call adamw_step_glm cho ca coef == 1.0 va != 1.0.
         # M5-opt (probe CJ7 bit-exact): BO r2 moi buoc — p day 1 lan luc setup
         # (pdirty=1 tu __init__; site ghi opt.p ngoai setup thi push_p()).
         # r3 van giu p list = anh chinh doc boi unflatten/bench/ckpt.
@@ -245,8 +241,8 @@ class AdamW:
             r2 = f32_copy_to_buf(pl, ppl, self.n)
             self.pdirty = 0
         wde = self.wd * bc1
-        stw = adamw_step(ppl, pml, pvl, gsrc, self.n,
-                         step_size, self.b1, self.b2, self.eps, wde, bc1, bc2s)
+        stw = adamw_step_glm(ppl, pml, pvl, gl, self.n,
+                             step_size, self.b1, self.b2, self.eps, wde, bc1, bc2s, coef)
         r3 = f32_copy_from_buf(ppl, pl, self.n)
         # M5-opt: BO r4/r5 (+188ms/buoc @124M — do _cj8) — m/v song TRUC TIEP
         # o buffer; ckpt_save/test doc qua sync_mv() (lazy cap phat list).
