@@ -1,7 +1,0 @@
-# PROBE TAM (xoa sau) — resolve import `tv.training.trainer`
-import tv.training.tensor
-import tv.training.trainer
-
-def main() -> 'i32':
-    print("IMPB trainer VocabSize=" + str(VocabSize))
-    return 0

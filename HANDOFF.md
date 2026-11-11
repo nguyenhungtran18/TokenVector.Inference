@@ -7838,3 +7838,19 @@ Loss EXACT cả 3 seq ở mọi run. Mode 1 seq1024 dao động mạnh (4016/407
 - Torch **luôn được đo lại cùng phiên** khi công bố số mới — §9.21 từng mượn torch 4130.6 của §9.18; §9.22 đo lại cùng phiên: 4061.1 (tier d) / 4097.6 (tier e T=14).
 - BOM: file `.md` gốc có BOM hoặc không — không quan trọng với git.
 - Console cp1252: luôn đọc/ghi `.md` qua python `encoding="utf-8-sig"`, in bằng escape unicode; `PLAN_BEAT_PYTORCH.md` suýt hỏng vì repair theo index — đã fix và verify lại toàn bộ file (console chỉ hiển thị lỗi; file là UTF-8 hợp lệ).
+
+## §0.155 XÓA SẠCH CÁC PROBE MỘT LẦN (2026-11-11)
+
+**Ngày:** 2026-11-11. Sau khi bench §9.22 xong, dọn nốt phần "bằng chứng đo" còn lại:
+
+xóa **291 file** probe/scratch — toàn bộ `tv/tests/simd_probe_*`, `tv/tests/_*.tkv`
+(kể cả `_clip_m1..m5`, `_clip_real`, `_opt_*`, `_zeros_*`, P6/P14 family),
+`tv/tests/_p6v/`, `tv/training/_probe_fla.tkv`, `_probe_il.tkv`,
+`simd_probe_{aa,ae,af,b,c,n,w}.tkv` ở root, và `tools/simd_native/*.{obj,exp,lib}`
+(build artifacts bị commit nhầm từ trước).
+
+**GIỮ:** `simd_bench*.tkv` (harness benchmark, `simd_bench_124m_seq.tkv` dùng hằng ngày),
+toàn bộ fixture + gate suites (`gate_f32.sh` 135/135 không đụng), `tools/*.py` diagnostics,
+và mọi docs — BENCHMARKS/HANDOFF vẫn trích dẫn số liệu; các file probe referenced trong
+nhật ký nằm trong git history (commit này). Gate chưa chạy lại trong phiên này (§9.21 xác
+nhận 135/135, không đổi code).
