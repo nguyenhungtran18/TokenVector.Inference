@@ -1,0 +1,112 @@
+# _a148.tkv — §0.148: do truc tiep lmhead_bwd_fused_list (pha3+4+5 = ATen addmm_out)
+# A/B: doi out/tkv_torch_fused.dll (moi co TkvTorchAddmmTaOut vs cu khong co)
+#      -> cung exe, cung input, tach dung phan ATen.
+# n=1024, h=768, V=50257 (shape production seq1024). best-of-5.
+# Input KHAC 0 de checksum co nghia (logits/wte/xf deu la hang so khac 0).
+#
+# Chay:
+#   D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/_a148.tkv out/a148.exe main
+#   copy -> out/a148_n10.dll + runtimeconfig ; dotnet out/a148_n10.dll
+import tv.training.gpt2_ref124
+import tv.training.trainer
+import tv.training.simd_matmul
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    V = VocabSize
+
+    print("=== A148 lmhead_bwd_fused_list n=" + str(n) + " h=" + str(h) + " V=" + str(V) + " ===")
+
+    # Input KHAC 0. Vong interpreted 51.5M se rat cham -> dung pattern lap ngan:
+    # gan theo khoi de tranh 51.5M vong (moi vong interpreted ~us).
+    logits = t_zeros([n, V])
+    # chi can logits khac 0 va deterministic: dung t_zeros roi set vai diem + scale
+    # qua native f32_addcmul khong co -> dung vong ngan tren tung hang dau.
+    wte = t_zeros([V, h])
+    xf = t_zeros([n, h])
+    dxf = t_zeros([n, h])
+    dwte = t_zeros([V, h])
+
+    # wte: 38.6M -> set theo khoi bang vong ngoai nho (V/64 hang) van cham.
+    # Thay vao do: dung t_zeros nhung KHONG can khac 0 tuyet doi —
+    # dwte = dlT @ xf, voi xf != 0 thi dwte != 0. Chi can xf khac 0 (786K diem).
+    i = 0
+    while i < n * h:
+        xf.data[i] = float((i % 97)) * 0.01 - 0.5
+        i = i + 1
+    # wte khac 0 -> dxf = dl @ wte khac 0 (38.6M diem, nhung chi can vai hang)
+    i = 0
+    while i < h * 8:
+        wte.data[i] = float((i % 89)) * 0.01 - 0.4
+        i = i + 1
+
+    ids = []
+    i = 0
+    while i < n:
+        ids.append((i * 37 + 11) % V)
+        i = i + 1
+
+    m6_pids = alloc_bytes(n * 4)
+    m6_i = 0
+    while m6_i < n:
+        _w = write_i32(m6_pids, m6_i * 4, ids[m6_i])
+        m6_i = m6_i + 1
+
+    _lgd = logits.data
+    _wtd = wte.data
+    _xfd = xf.data
+    _dd = dxf.data
+    _dw = dwte.data
+    m6_sc: "f32" = 1.0 / float(n)
+
+    # warm 1 luot
+    st = lmhead_bwd_fused_list(_lgd, m6_pids, _wtd, _xfd, _dd, _dw, n, 1, h, V, m6_sc)
+    print("warm st=" + str(st))
+
+    best1 = 1.0e9
+    kk = 0
+    while kk < 5:
+        t0 = now_ms()
+        st = lmhead_bwd_fused_list(_lgd, m6_pids, _wtd, _xfd, _dd, _dw, n, 1, h, V, m6_sc)
+        dt = now_ms() - t0
+        if dt < best1:
+            best1 = dt
+        kk = kk + 1
+    print("lmhead_bwd_fused_list best-of-5 ms=" + str(best1) + "  st=" + str(st))
+
+    # checksum dwte + dxf -> so sanh giua 2 DLL (bit-exact hay lech ~1e-7)
+    sdw = 0.0
+    i = 0
+    while i < V * h:
+        sdw = sdw + dwte.data[i]
+        i = i + 1
+    sdd = 0.0
+    i = 0
+    while i < n * h:
+        sdd = sdd + dxf.data[i]
+        i = i + 1
+    print("sum_dwte=" + str(sdw))
+    print("sum_dxf=" + str(sdd))
+
+    # checksum KHONG khu: sum|dwte| va sum(dwte^2) -> dinh luong that
+    saw = 0.0
+    i = 0
+    while i < V * h:
+        v = dwte.data[i]
+        if v < 0.0:
+            v = -v
+        saw = saw + v
+        i = i + 1
+    ssq = 0.0
+    i = 0
+    while i < V * h:
+        v = dwte.data[i]
+        ssq = ssq + v * v
+        i = i + 1
+    print("sum_abs_dwte=" + str(saw))
+    print("sum_sq_dwte=" + str(ssq))
+
+    fb = free_bytes(m6_pids)
+    print("=== DONE ===")
+    return 0

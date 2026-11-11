@@ -6967,3 +6967,154 @@ thấy loss lệch ở chữ số thứ 7.
    chưa có hướng mới.
 3. **ĐỪNG** materialize `dlT` (−236 ms, tệ hơn).
 4. **ĐỪNG** đổi `TKV_GEMM_THREADS` để lấy tốc độ — không có tốc độ để lấy.
+
+
+## §0.148 WIRE `addmm_out` CHO `lmhead` PHA3+4+5 — −156 ms/step, numerics lệch 5.3e-9, gate giữ nguyên
+
+Ngày 2026-11-11. Làm theo work order §0.147 §6 mục 1. **Có sửa code production** (C, không phải `.tkv`).
+
+### 1. Chỗ sửa thật ra không nằm ở `.tkv`
+
+§0.147 §3 nói "pha3 262.3 + pha4 36.5" như thể là code `.tkv`. Không phải. Production gọi
+`lmhead_bwd_fused_list` (`tv.training.gpt2_ref124.tkv` L2183), và **cả 4 pha nằm trong C**:
+`lmhead_bwd_fused` ở `tkv_simd_native.c` L1690. Pha 3+4+5 là:
+
+    run_rect_ta_shaped(dl, V, xf, E, tmp, E, V, E, T);   /* tmp = dlT @ xf, openblas */
+    tkv_run_aux(nta, 5, tmp, NULL, dwte, E, 0, 0.0f, V); /* dwte += tmp, AVX2 */
+
+kèm `malloc` 147 MB cho `tmp`.
+
+### 2. BLOCKER phải xử lý trước: source C chính KHÔNG nằm trong git
+
+| file | trong git? |
+|---|---|
+| `tools/simd_native/tkv_flash_attn.c` | **có** (tracked) |
+| `tools/simd_native/tkv_simd_native.c` (124 KB — source của DLL chính) | **KHÔNG** |
+| `tools/simd_native/tkv_bwd_ops.c` | **KHÔNG** |
+| `tools/simd_native/tkv_linear_dw.c` | **KHÔNG** |
+| `torch_fused.cpp` (bridge ATen) | **KHÔNG** |
+
+`git ls-files '*.c' '*.cpp'` chỉ ra 19 file, toàn probe + `tkv_flash_attn.c` + `tkv_simd_native_m1.c`.
+Source thật sống ở `D:\TokenVector\Release\tools\simd_native\`. Đã backup 5 file vào
+`D:\TokenVector\Release\tools\simd_native\_bak_20261111_addmm\` trước khi sửa.
+
+**Việc cần làm (chưa làm):** đưa 4 file C/C++ này vào git. Không có chúng thì repo không
+build lại được DLL, và mọi "sửa kernel" trong repo là sửa một bản khác với bản đang chạy.
+
+### 3. Thay đổi
+
+**`torch_fused.cpp`** — thêm export:
+
+    TKV_TORCH_EXPORT int TkvTorchAddmmTaOut(const float* dl, const float* xf, float* dwte,
+                                            int64_t T, int64_t V, int64_t E)
+    {
+        auto t_dl = wrap_in(dl, T, V);
+        auto t_xf = wrap_in(xf, T, E);
+        auto t_dw = wrap_in(dwte, V, E);
+        at::addmm_out(t_dw, t_dw, t_dl.t(), t_xf, 1.0, 1.0);
+    }
+
+`dl.t()` là view, không transpose vật lý. `beta=1` nên `dwte` tích lũy tại chỗ.
+
+**`tkv_simd_native.c`** — 4 chỗ: typedef `tkv_addmm_ta_fn`, con trỏ `p_addmm_ta`,
+`GetProcAddress("TkvTorchAddmmTaOut")`, forward declaration trước `lmhead_bwd_fused`,
+và thay pha 3+4+5 bằng:
+
+    int rc_addmm = TkvTorchAddmmTaOut(dl, xf, dwte, T, V, E);
+    if (rc_addmm == 0) { free(dl); return 0; }
+    /* ---- fallback: duong cu nguyen van ---- */
+
+Đường openblas cũ giữ nguyên làm fallback (bridge cũ / thiếu torch → `rc != 0` → rơi xuống).
+Soft-fail, cùng pattern với mọi chỗ khác.
+
+### 4. Build
+
+`build_torch_fused.ps1` → `tkv_torch_fused.dll` 119808 B (trước 119296).
+`build.ps1` → `tkv_simd_native.dll` 388608 B (không đổi kích thước).
+`dumpbin /exports` xác nhận `TkvTorchAddmmTaOut` có trong **cả hai** DLL.
+
+### 5. Numerics — lệch 5.3e-9, đúng dự đoán waiver
+
+Probe `tv/tests/_a148.tkv` (mới), gọi thẳng `lmhead_bwd_fused_list`, n=1024 h=768 V=50257,
+best-of-5, A/B bằng cách đổi `out/tkv_torch_fused.dll`:
+
+| | NEW (addmm_out) | OLD (openblas) |
+|---|---:|---:|
+| ms | **406.0** | 500.0 |
+| `sum_dxf` | 0.004864394926489021 | 0.004864394926489021 (**giống hệt**) |
+| `sum_abs_dwte` | 1209.5115281520548 | 1209.5115217364582 |
+| `sum_sq_dwte` | 2.1273829630654246 | 2.127382958460427 |
+
+`sum_abs_dwte` lệch tương đối **5.3e-9**; `sum_sq_dwte` lệch **2.2e-9**. `dxf` bit-identical
+vì pha 2 không đổi. Đúng mức khác thư viện tích lũy, không phải lỗi.
+
+**Lưu ý phương pháp:** lần đo đầu dùng input toàn 0 → `sum_dwte = 0.0` ở cả hai bên, trông
+như "bit-exact" nhưng vô nghĩa. Phải có input khác 0 mới kết luận được. Và `sum_dwte` (tổng
+có dấu) lệch 8% chỉ vì nó gần khử về 0 — phải dùng `sum_abs` / `sum_sq`.
+
+### 6. Full step seq1024 mode 1 — −156 ms
+
+A/B xen kẽ 6 cặp, đổi cả hai DLL (A = cả hai bản cũ, C = cả hai bản mới):
+
+| | ms (6 lần) | median |
+|---|---|---:|
+| A (cũ) | 4843 / 4750 / 4781 / 4828 / 4718 / 4750 | **4765.5** |
+| C (mới) | 4625 / 4734 / 4547 / 4594 / 4593 / 5015 | **4609.5** |
+
+**−156 ms/step.** Một lượt A/B 4 cặp trước đó cho −164 ms. Hai lần khớp nhau.
+
+Loss `10.760399 -> 13.442921` **không đổi một chữ số nào** ở cả 12 lần chạy. Đây là chỗ
+đáng chú ý: §0.147 dự đoán loss lệch ~1e-7, nhưng trên full step loss **không đổi**. Lý do:
+loss ở bench là **loss của forward trước khi optimizer bước**, còn `dwte` chỉ ảnh hưởng
+bước cập nhật kế tiếp — mà bench `steps=1`. Nên loss không phải thước đo cho thay đổi này;
+`sum_abs_dwte` ở mục 5 mới là.
+
+**Cũng phải nói rõ:** mức −156 ms trên full step LỚN HƠN −94 ms đo trên probe (406 vs 500).
+Probe chỉ đo 1 lần gọi; full step có thêm việc bỏ `malloc` 147 MB và bỏ một lượt đọc/ghi
+`tmp` 147 MB trong ngân sách bộ nhớ, nên tiết kiệm thật cao hơn phần GEMM.
+
+### 7. Gate
+
+`out/run_gates_n10.ps1`:
+
+| suite | kết quả |
+|---|---|
+| simd_matmul / gpt2 / gpt2_scope / gpt2_train / grad / parity / inplace / trainer | **PASS** (8) |
+| `gpt2_full_tests` | **cases=33 fails=0 — PASS** |
+| `pack_tests` | `InvalidProgramException` |
+| `gap_tests` | `InvalidProgramException` |
+
+**`gpt2_full_tests` script báo FAIL là SAI.** Chạy tay: `=== GPT-2 full cases=33 fails=0 ===`,
+toàn bộ 33 case PASS (hidden h0..h12, logits, loss, grad wte, ln1_g, attn_w, mlp_w1, lnf_g,
+SIMD vs PyTorch, P5.2/P5.3). Script kết luận FAIL vì `$LASTEXITCODE` bị nhiễu bởi stderr
+của `dotnet` (OMP warning), không phải vì test fail.
+
+**`pack_tests` + `gap_tests` là pre-existing, không do thay đổi này.** Đã chạy lại **cả hai
+với DLL CŨ** (`_bak_simd_20261110.dll` + `_bak_torch_20261109.dll`): vẫn
+`InvalidProgramException` y hệt. Đây là lỗi JIT/IL (`TKVApp.session_from_graph` →
+`test_optimized_session_terminates`), cùng họ với `gap_tests` exit=82 đã ghi từ lâu.
+
+**Trạng thái gate thật: 9/11 PASS + `gpt2_full` 33/33 PASS; 2 suite fail pre-existing.**
+
+### 8. Việc nên làm tiếp
+
+1. **Đưa 4 file C/C++ vào git** (mục 2). Đây là nợ lớn nhất: hiện repo không tái tạo được DLL.
+2. **`attention_bwd` 953 ms** — vẫn là mảnh lớn nhất, chưa có hướng (§0.143/§0.145/§0.147 §6).
+3. **`mlp_bwd` 781 ms** — đã ở 358–489 GFLOP/s, không còn dư địa rõ.
+4. **ĐỪNG** materialize `dlT` (§0.147 §2: B+copy = 494 ms, tệ hơn A).
+5. **ĐỪNG** đổi `TKV_GEMM_THREADS` để lấy tốc độ (§0.147 §4).
+6. Cân nhắc: `lmhead` pha2 (`dxf = dl @ wte`, `run_rect_shaped`) cũng đang đi openblas.
+   Cùng shape `m=1024, n=768, k=50257`. Nếu ATen nhanh hơn 1.24x như pha3 thì còn ~50 ms nữa.
+   **Chưa đo** — đừng giả định.
+
+### 9. File tạo/sửa
+
+- `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp` (+export `TkvTorchAddmmTaOut`)
+- `D:\TokenVector\Release\tools\simd_native\tkv_simd_native.c` (+5 chỗ, pha3+4+5)
+- `D:\TokenVector\Release\runtime\tkv_torch_fused.dll` (119808 B), `tkv_simd_native.dll` (388608 B)
+- Backup: `D:\TokenVector\Release\tools\simd_native\_bak_20261111_addmm\` (5 file)
+- Probe mới: `tv/tests/_a148.tkv`
+- Log: `out/bseq_a148_20261111.log`, `out/ab_a148_20261111.log`, `out/ab3_a148_20261111.log`,
+  `out/ab6_a148_20261111.log`
+- `out/` DLL cũ backup: `_bak_simd_20261110.dll`, `_bak_torch_20261109.dll`
+- `_seq_cfg.txt` vẫn `1024 / 1 / 1 / 1`

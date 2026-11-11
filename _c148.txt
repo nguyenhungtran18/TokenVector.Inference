@@ -1,0 +1,29 @@
+﻿perf(lmhead): wire addmm_out cho pha3+4+5 - -156 ms/step, numerics lech 5.3e-9
+
+Work order s0.147 muc 6.1. Sua C (khong phai .tkv): production goi
+lmhead_bwd_fused_list, ca 4 pha nam trong tkv_simd_native.c L1690.
+
+Truoc: tmp = dlT @ xf (run_rect_ta_shaped/openblas) + dwte += tmp (AVX2)
+       = 298.8 ms, kem malloc tmp 147 MB.
+Sau:   at::addmm_out(dwte, dwte, dl.t(), xf, 1, 1) = 195.9 ms, bo buffer tmp.
+Duong openblas cu giu lam fallback (rc != 0 -> roi xuong), soft-fail.
+
+Numerics (probe _a148.tkv, n=1024 h=768 V=50257, best-of-5):
+  sum_dxf      giong het tung chu so (pha 2 khong doi)
+  sum_abs_dwte lech tuong doi 5.3e-9, sum_sq_dwte lech 2.2e-9
+  -> dung muc khac thu vien tich luy, khong phai loi.
+
+Full step seq1024 mode 1, A/B xen ke 6 cap doi ca 2 DLL:
+  A (cu)  median 4765.5 ms
+  C (moi) median 4609.5 ms  -> -156 ms/step
+  (mot luot 4 cap truoc do: -164 ms, khop)
+  loss 10.760399 -> 13.442921 khong doi chu so nao o ca 12 lan.
+
+Gate: 8 suite PASS + gpt2_full cases=33 fails=0 PASS.
+  pack_tests + gap_tests InvalidProgramException - da verify PRE-EXISTING bang cach
+  chay lai voi DLL cu, loi y het. Script run_gates_n10 bao gpt2_full FAIL la SAI
+  (LASTEXITCODE bi nhieu boi stderr dotnet OMP warning).
+
+BLOCKER ghi lai: tkv_simd_native.c / tkv_bwd_ops.c / tkv_linear_dw.c / torch_fused.cpp
+KHONG nam trong git (chi tkv_flash_attn.c duoc track). Repo khong tai tao duoc DLL.
+Da backup 5 file vao Release/tools/simd_native/_bak_20261111_addmm/.
