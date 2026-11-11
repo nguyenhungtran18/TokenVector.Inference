@@ -13,10 +13,15 @@
     <readme>README.md</readme>
     <description>TokenVector.Inference - the inference runtime and GPT-2 124M training engine written in pure TokenVector (.tkv). Graph optimization, INT8/FP8 quantization, ONNX reader, paged KV-cache, micro-batcher, and an end-to-end GPT-2 124M trainer (loss EXACT vs HF fixture, 135/135 f32 gate, full step @seq1024 on par with PyTorch). Compiled with the tkvc-tv compiler (package 'TokenVector').</description>
     <summary>Pure .tkv inference runtime and GPT-2 124M training engine for the TokenVector ecosystem.</summary>
-    <releaseNotes>v1.0.1 - 2026-11-11: GPT-2 124M full train step @seq1024 = 4016 ms vs torch 4061.1 (0.989x, same session); loss EXACT; gate_f32 135/135; trainer 15/15; gpt2_full 33/33; request #14 (adamw_step_glm coef param) and docs/repository cleanup (archive, benchmark/ folder, new logo).</releaseNotes>
+    <releaseNotes>v1.0.1 - 2026-11-11: GPT-2 124M full train step @seq1024 = 4016 ms vs torch 4061.1 (0.989x, same session); loss EXACT; gate_f32 135/135; trainer 15/15; gpt2_full 33/33; request #14; ships a managed assembly TokenVector.Inference.dll (net10.0, built from the .tkv sources) with a dependency on the 'TokenVector' package (compiler + native runtime).</releaseNotes>
     <copyright>Copyright (c) 2026 Nguyen Hung Tran</copyright>
     <tags>tokenvector dotnet cil aot gpt2 inference training llm pytorch quantization</tags>
     <repository type="git" url="https://github.com/nguyenhungtran18/TokenVector.Inference" />
+    <dependencies>
+      <group targetFramework="net10.0">
+        <dependency id="TokenVector" version="1.0.12" />
+      </group>
+    </dependencies>
   </metadata>
   <files>
     <file src="..\README.md" target="README.md" />
@@ -34,5 +39,7 @@
     <file src="..\benchmark\BENCHMARKS_VI.md" target="src\docs\benchmarks\BENCHMARKS_VI.md" />
     <file src="..\benchmark\_bench_matrix.ps1" target="src\tools\_bench_matrix.ps1" />
     <file src="..\benchmark\bench_torch.py" target="src\tools\bench_torch.py" />
+    <!-- Managed assembly built from source by packaging/pack.ps1 (lib/ is gitignored) -->
+    <file src="lib\net10.0\TokenVector.Inference.dll" target="lib/net10.0/TokenVector.Inference.dll" />
   </files>
 </package>

@@ -1,0 +1,50 @@
+﻿# TKV library root for the NuGet package (compiled to TokenVector.Inference.dll).
+# Compile from tv/tests/ (import resolution needs mirrors next to the entry).
+import tv.runtime.session
+import tv.runtime.backend
+import tv.runtime.kv_cache
+import tv.runtime.paged_kv
+import tv.runtime.prefix_skip
+import tv.runtime.string_tensor
+import tv.runtime.dynamic_shapes
+import tv.runtime.hal
+import tv.runtime.simt
+import tv.runtime.f32_bits
+import tv.optimization.kernels
+import tv.quantization.engine
+import tv.quantization.int4
+import tv.quantization.matmul
+import tv.quantization.types
+import tv.numerics.tensor
+import tv.onnx.models
+import tv.onnx.parser
+import tv.onnx.protobuf_reader
+import tv.onnx.safetensors
+import tv.onnx.string_ops
+import tv.onnx.translator
+import tv.onnx.writer
+import tv.text.beam
+import tv.text.chat_template
+import tv.text.generate
+import tv.text.grammar
+import tv.text.sampling
+import tv.text.speculative
+import tv.text.tokenizer
+import tv.text.tools
+import tv.text.tree_speculative
+import tv.vision.preprocess
+import tv.vision.vit
+import tv.vision.vit_weights
+import tv.server.batcher
+import tv.training.autograd
+import tv.training.gpt2_ref124
+import tv.training.kernels_reg
+import tv.training.simd_matmul
+import tv.training.trainer
+import tv.training.backend
+import tv.format.gguf
+import tv.data.dataset
+
+def main() -> "i32":
+    print("TokenVector.Inference library (1.0.1)")
+    return 0

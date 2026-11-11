@@ -2,16 +2,16 @@
 
 ## v1.0.1 — 2026-11-11
 
-> Bản phát hành **source package** `TokenVector.Inference` 1.0.1 (NuGet, source-only).
-> Bản này thay cho v1.0.0 như ghi cuối trang. Các claim "Chưa có SIMD", "không DLL
-> kèm theo", "`argv()` stub", "`http_listen()` stub" trong phần v1.0.0 bên dưới là
-> **ảnh chụp 2026-09-28, đã lỗi thời**.
+> Bản phát hành `TokenVector.Inference` 1.0.1 (NuGet). Bản này thay cho v1.0.0
+> như ghi cuối trang. Các claim "Chưa có SIMD", "không DLL kèm theo", "`argv()` stub",
+> "`http_listen()` stub" trong phần v1.0.0 bên dưới là **ảnh chụp 2026-09-28, đã lỗi thời**.
 
-**Đóng gói:** source package (không kèm binary). Người dùng tự biên dịch `.tkv`
-bằng compiler `tkvc-tv` (từ package `TokenVector` trên NuGet). Package gồm:
-nguồn `.tkv` (`tv/`), công cụ verify (`tools/`), tài liệu kỹ thuật (`docs/`),
-hướng dẫn benchmark (`BENCHMARKING.md` / `BENCHMARKING_VI.md`), và hướng dẫn sử
-dụng (`USER_GUIDE.md` / `USER_GUIDE_VI.md`). Logo mới (2026-10-18).
+**Đóng gói:** package kép: (1) nguồn `.tkv` đầy đủ (`src/tv/`, `src/tools/`,
+`src/docs/`, benchmark-docs) + (2) managed assembly `lib/net10.0/TokenVector.Inference.dll`
+(build từ `.tkv` bằng compiler tu-host). **Dependency:** `TokenVector` ≥ 1.0.12
+(compiler tu-host + native runtime `tkv_simd_native.dll`). Package gồm: nguồn `.tkv`
+(`tv/`), công cụ verify (`tools/`), tài liệu kỹ thuật (`docs/`), hướng dẫn benchmark,
+hướng dẫn sử dụng. Logo mới (2026-10-18).
 
 
 **Huấn luyện (GPT-2 124M, CPU):**

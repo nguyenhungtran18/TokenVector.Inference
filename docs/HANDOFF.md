@@ -7945,3 +7945,21 @@ Root hiện còn: README(-VI), RELEASE_NOTES(-VI), USER_GUIDE(-VI), LICENSE, `.g
 - **Release notes**: `RELEASE_NOTES.md`/`RELEASE_NOTES_VI.md` đổi thành mục **v1.0.1 — 2026-11-11** (source package, logo mới, nội dung 2026-11-11); v1.0.0 (2026-09-28) giữ làm historical.
 - **`.gitignore`**: `/packaging/*.nupkg` (artifact tái tạo được).
 - Người dùng tự push: `nuget push packaging/TokenVector.Inference.1.0.1.nupkg -ApiKey <KEY> -Source https://api.nuget.org/v3/index.json`.
+
+## §0.161 NUGET PACKAGE KÉP: SOURCE + MANAGED ASSEMBLY (2026-11-11)
+
+**Ngày:** 2026-11-11. Nâng package từ source-only lên package kép theo lựa chọn của user:
+
+**Managed assembly** `TokenVector.Inference.dll` (net10.0) build từ chính nguồn `.tkv`:
+- Root `tv/tests/_lib_root.tkv` import các module engine chính (runtime/optimization/quantization/numerics/onnx/text/vision/server/training/format/data) — compile ra `TokenVector.Inference.il` (5.38 MB) rồi `ilasm /DLL` thành `TokenVector.Inference.dll`.
+- IL được patch `.assembly TKVApp {}` → `.assembly TokenVector.Inference { .ver 1:0:1:0 }` và `.module TKVApp.exe` → `.module TokenVector.Inference.dll` để assembly có tên/version chuẩn.
+- **124+ public types** (`ExecutionGraph`, `InferenceSession`, `AdamW`, `Sampler`, `Tensor`, `PagedKVPool`, `ConstantFoldingPass`…), load được qua reflection, `TokenVector.Inference v1.0.1.0`.
+- ILasm v4.0 cảnh báo `System.Runtime.Intrinsics`/`System.Numerics.Vectors` không tự detect được (net10.0) — vô hại: assembly vẫn load đúng (ghi nhận, không block).
+
+**Packaging:**
+- `packaging/pack.ps1`: [1/4] build DLL từ source qua `tkvc-tv.exe` + patch IL + ilasm → `packaging/lib/net10.0/`; [2/4] tải `nuget.exe` nếu thiếu; [3/4] `nuget pack`; [4/4] in lệnh push. `packaging/lib/` gitignored.
+- `TokenVector.Inference.nuspec`: `<dependencies><group targetFramework="net10.0"><dependency id="TokenVector" version="1.0.12" /></group></dependencies>`; `<file src="lib\net10.0\TokenVector.Inference.dll" target="lib/net10.0/TokenVector.Inference.dll" />`; releaseNotes cập nhật.
+- Final: `TokenVector.Inference.1.0.1.nupkg` (3.41 MB): `lib/net10.0/TokenVector.Inference.dll` (616 KB), `src/tv|tools|docs`, dependency `TokenVector ≥ 1.0.12` (net10.0).
+- RELEASE_NOTES(-VI) v1.0.1: mô tả package kép (source + managed assembly) + dependency.
+
+**Chưa làm / lưu ý:** chưa có ví dụ sử dụng C# trong docs (API .tkv IL-level, chưa verify call từ C# end-to-end); dependency `TokenVector` ≥ 1.0.12 phải được publish trước (hoặc song song) trên NuGet.org; `NU5110/NU5111` (.ps1 trong `src/tools/`) là cảnh báo vô hại; ILasm warnings vô hại (assembly load verified).

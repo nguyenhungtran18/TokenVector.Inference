@@ -66,3 +66,4 @@ tv/tests/fixtures-124m/
 
 # NuGet build artifacts (packaging/*.nupkg regenerable via packaging/pack.ps1)
 /packaging/*.nupkg
+/packaging/lib/
