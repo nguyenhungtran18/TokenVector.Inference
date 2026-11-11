@@ -7118,3 +7118,127 @@ với DLL CŨ** (`_bak_simd_20261110.dll` + `_bak_torch_20261109.dll`): vẫn
   `out/ab6_a148_20261111.log`
 - `out/` DLL cũ backup: `_bak_simd_20261110.dll`, `_bak_torch_20261109.dll`
 - `_seq_cfg.txt` vẫn `1024 / 1 / 1 / 1`
+
+
+## §0.149 BỎ GEMM `qkv` TRÙNG Ở NHÁNH ATEN — −125 ms/step; VÀ MỐC "1.03x" KHÔNG TÁI LẬP ĐƯỢC
+
+**Ngày:** 2026-11-11. Sửa: `tv/training/tv.training.gpt2_ref124.tkv` và
+`tv/tests/tv.training.gpt2_ref124.tkv` (2 bản, cùng 2497 dòng, patch y hệt).
+Bench: `out/bseq_q149_n10.dll` (base = `out/bseq_a148_n10.dll`). Log:
+`out/ab_q149_20261111.log`, `out/ab_q149b_20261111.log`, `out/ab_q149c_20261111.log`.
+
+### 0. Kết luận trước, chi tiết sau
+
+Production `gpt2_attention_bwd` khi `simd==1` + `gflat` có data thì gọi
+`torch_attention_bwd` rồi **return sớm**. Nhưng dòng `qkv = gpt2_linear(...)` nằm
+**trước** nhánh đó và luôn chạy — trong khi `TkvTorchAttentionBwd` **tự recompute
+qkv bên trong** (`at::addmm(t_bq, t_x, t_wq)`). Tức là GEMM `[n,h]×[h,3h]`
+= **3.62 GFLOP bị tính 2 lần mỗi layer, 12 layer mỗi bước**. Guard lại: **−125 ms/step**.
+
+Đây là lần đầu tiên trong chuỗi §0.14x tìm được chi phí **thuần lãng phí**, không
+phải "kernel chậm hơn ATen". §0.143 kết luận đúng rằng đường native chậm hơn ATen,
+nhưng không ai kiểm tra rằng **cả hai** đang chạy.
+
+### 1. Chỗ sửa
+
+Trước:
+```
+    qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h, simd, _ab_pool_k(abuf, 6, n, 3 * h))
+    inv = 1.0 / sqrt(float(hd))
+    ...
+    if simd == 1:
+        if gflat != None:
+            if len(gflat) > 0:
+                ... torch_attention_bwd(...)
+                if _aat == 0:
+                    return [dx, t_zeros([0]), ...]   # <-- qkv vừa tính bị vứt
+```
+
+Sau:
+```
+    _qkv_ready = 0
+    if simd == 1:
+        if gflat != None:
+            if len(gflat) > 0:
+                _qkv_ready = 1
+    qkv = _ab_pool_k(abuf, 6, n, 3 * h)
+    if _qkv_ready == 0:
+        qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h, simd, qkv)
+```
+
+Mọi đường **không phải** ATen (scalar `simd==0`, `_amm_rc`, `n<128`, thread pool)
+vẫn tính `qkv` y nguyên: cùng buffer pool idx 6, cùng tham số, cùng thứ tự → BIT-EXACT.
+
+### 2. Lần sửa đầu SAI — ghi lại vì nó suýt lọt
+
+Bản đầu tôi **chuyển hẳn** dòng `qkv = gpt2_linear(...)` xuống dưới nhánh fallback.
+Build OK, bench OK (−156 ms), nhưng `gpt2_full_tests` chết:
+`System.NullReferenceException` trong `gpt2_attention_bwd`.
+
+Nguyên nhân: nhánh scalar `simd==0` (L1751, L1756 đọc `qkv.data`) và nhánh
+`_amm_rc` (12 `thread_spawn` truyền `qkv.data`) **không** đi qua ATen nên cần
+`qkv`, mà biến đã bị dời vào trong `if simd == 1:`. Bench `simd_bench_124m_seq`
+chạy `simd=1` nên không lộ.
+
+Bài học: bench A/B xanh **không** chứng minh đúng. Phải chạy `gpt2_full_tests`
+(mode `simd=0` + `simd=1`) trước khi tin bất kỳ con số nào.
+
+Cũng ghi lại: lần chạy gate đầu tiên báo `gpt2_full_tests : FAIL(rc=-1073741819)`
+(access violation) nhưng đó là **DLL cũ** — `run_gates_n10.ps1` build lại từ
+`tv/tests/*.tkv`, còn tôi chạy tay `out/g_gpt2_full_tests_n10.dll` chưa rebuild.
+Sau khi build lại: `cases=33 fails=0`.
+
+### 3. Đo — A/B xen kẽ, cùng phiên, 2 exe
+
+`out/ab_q149b_20261111.log`, 6 cặp, seq1024 mode 1:
+
+| | min | max | median | spread |
+|---|---:|---:|---:|---:|
+| BASE (`a148`) | 4531 | 4610 | **4546.5** | 79 (1.7%) |
+| Q149 | 4390 | 4781 | **4421.5** | 391 (8.8%) |
+
+Δ median **−125.0 ms (−2.75%)**. Q149 nhanh hơn **5/6 cặp**:
+−30, −172, −141, −220, −109, **+250**.
+
+Cặp cuối +250 ms là outlier, cùng loại nhiễu đã thấy ở §0.148 (NEW spread 18.4%).
+Một lượt 6 cặp trước đó (`ab_q149_20261111.log`, bản patch sai nhưng phần guard
+giống hệt) cho −156 ms, 6/6 cặp thắng. Hai lượt khớp nhau trong khoảng 125–156 ms.
+
+**Loss không đổi một chữ số** ở cả 12 lần: `10.760399 -> 13.442921`. Đúng như
+§0.148 đã giải thích — loss bench là loss forward *trước* optimizer step, `steps=1`,
+nên thay đổi ở backward không thể hiện. Loss **không phải** thước đo ở đây.
+
+### 4. Gate
+
+`out/run_gates_n10.ps1`: **9/11 PASS** — simd_matmul, gpt2, gpt2_scope, gpt2_train,
+grad, parity, inplace, gpt2_full (`cases=33 fails=0`), trainer.
+`pack_tests` + `gap_tests` FAIL `rc=-532462766` (`InvalidProgramException`) —
+đã xác minh **pre-existing** ở §0.148 bằng cách chạy lại với DLL cũ, lỗi y hệt.
+
+### 5. MỐC "1.03x" KHÔNG TÁI LẬP ĐƯỢC — phải nói rõ
+
+Người dùng chốt lấy **best-vs-best 1.032x** (§0.148: 4172 / 4041.4) làm mốc và đi
+tiếp. Tôi đã làm theo, nhưng phải ghi lại rằng **con số đó không tái lập được hôm nay**:
+
+| phiên | TKV | torch | tỉ lệ |
+|---|---:|---:|---:|
+| §0.144 ghi | 4351 | 4181 | 1.041x |
+| §0.148 best-vs-best | 4172 | 4041.4 | **1.032x** |
+| §0.149 median (4 vòng đồng bộ) | 4476.5 | 4054.6 | 1.104x |
+| §0.149 best-vs-best | 4390 | 4040.6 | **1.086x** |
+
+TKV **best** hôm nay là 4390, tệ hơn best của §0.148 (4172) **218 ms** — trong khi
+code chỉ nhanh hơn. Nghĩa là máy hôm nay chậm hơn, và **mọi so sánh chéo phiên
+đều vô nghĩa**. Chỉ so sánh **trong cùng phiên** mới đáng tin.
+
+Hệ quả: mốc 1.03x là số đo trên một trạng thái máy khác. Giữ nó làm mốc là hợp lý
+về *mục tiêu*, nhưng không được dùng nó để nói "sắp tới đích". Con số trung thực
+hôm nay là **1.086x best / 1.104x median**, còn thiếu **~340–420 ms**.
+
+### 6. Còn lại
+
+- `attention_bwd` đã hết phần lãng phí rõ ràng. Phần còn lại là native kernel
+  (109–121 ms/layer) chậm hơn ATen (85.75–90) — §0.143 đã đo, chưa có hướng.
+- `mlp_bwd` 781 ms ở 358–489 GFLOP/s — gần trần, ít dư địa.
+- Nợ chưa trả: `tkv_simd_native.c`, `tkv_bwd_ops.c`, `tkv_linear_dw.c`,
+  `torch_fused.cpp` **vẫn không có trong git** (xem §0.148 §5).

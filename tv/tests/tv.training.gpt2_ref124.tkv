@@ -1449,7 +1449,24 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                        abuf: 'list[Tensor]' = None) -> 'list[Tensor]':
     h = HiddenSize
     hd = HeadDim
-    qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h, simd, _ab_pool_k(abuf, 6, n, 3 * h))
+    # §0.149 (2026-11-11): KHONG tinh qkv khi di nhanh ATen.
+    # Truoc day `qkv = gpt2_linear(...)` luon chay o day, nhung khi simd==1 va
+    # gflat co data thi ham return som qua torch_attention_bwd — va ATen TU
+    # recompute qkv ben trong (at::addmm(t_bq, t_x, t_wq)). Nghia la GEMM
+    # [n,h]x[h,3h] = 3.62 GFLOP bi tinh 2 lan moi layer, 12 layer moi buoc.
+    # Lan sua dau (2026-11-11) chuyen han dong xuong duoi -> SAI: nhanh scalar
+    # (simd==0) va nhanh _amm_rc deu can qkv, gay NullReferenceException o
+    # gpt2_full_tests. Giu nguyen VI TRI, chi guard bang co _qkv_ready.
+    # Moi duong khong phai ATen van tinh y nguyen (cung buffer pool idx 6,
+    # cung tham so, cung thu tu) -> BIT-EXACT.
+    _qkv_ready = 0
+    if simd == 1:
+        if gflat != None:
+            if len(gflat) > 0:
+                _qkv_ready = 1
+    qkv = _ab_pool_k(abuf, 6, n, 3 * h)
+    if _qkv_ready == 0:
+        qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h, simd, qkv)
     inv = 1.0 / sqrt(float(hd))
     dqkv = _ab_pool_k(abuf, 7, n, 3 * h)
     dw_proj = t_zeros([h, h])
