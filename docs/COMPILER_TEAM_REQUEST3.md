@@ -3,7 +3,7 @@
 ## Ngày: 2026-10-26
 ## Đối tượng: Compiler Team (tkvc native/ABI)
 ## Trạng thái: Phase A (đối chuẩn 2 phía) XONG — HANDOFF §0.52, log `out/bench_torch_e.log`. Yêu cầu #2 (`simd_gemm_full`) đã giao + wire m≤256 (§0.50–0.51).
-## Bối cảnh: full step seq8 = 7187 ms vs torch 14T = 1190 ms (6.1–7.7×). Mục tiêu ≤1× theo `PLAN_TO_PARITY.md` — Phase B = native data plane, ước tiết kiệm ~2.3–2.4 s/step.
+## Bối cảnh: full step seq8 = 7187 ms vs torch 14T = 1190 ms (6.1–7.7×). Mục tiêu ≤1× theo `docs/archive/PLAN_TO_PARITY.md` — Phase B = native data plane, ước tiết kiệm ~2.3–2.4 s/step.
 
 ---
 

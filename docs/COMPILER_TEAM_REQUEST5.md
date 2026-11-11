@@ -1,6 +1,6 @@
 # YÊU CẦU COMPILER TEAM #5 — PHASE C: CODEGEN VÒNG `list[f32]` NHANH (tkvc)
 
-**Ngày:** 2026-10-27 · **Nguồn:** `docs/PLAN_TO_PARITY.md` Phase C (C1)
+**Ngày:** 2026-10-27 · **Nguồn:** `docs/archive/PLAN_TO_PARITY.md` Phase C (C1)
 **Đối tượng:** Compiler team (tkvc codegen) · **Ưu tiên:** cao — đòn bẩy ước 40–50% theo plan
 **Bằng chứng chính:** HANDOFF §0.49 (probe `_f32p`) + §0.52 (phân rã BWD) + §0.53 (Phase B mới wire)
 

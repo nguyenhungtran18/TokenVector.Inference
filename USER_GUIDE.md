@@ -3,13 +3,14 @@
 ## 1. Overview
 `TokenVector.Inference` is a pure TokenVector (`.tkv`) graph runtime: graph optimization,
 INT8/INT4/FP8 quantization, and an in-process micro-batcher. Everything below is the
-**verified** API. `HANDOFF.md` lists the gaps, `SIMD_NOTES.md` covers vectorization.
+**verified** API. `HANDOFF.md` lists the gaps, `SIMD_NOTES.md` summarizes the three SIMD layers in use.
 
 ## 2. Build and run the quickstart
 ```powershell
-$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
-& $tkvc build tv/examples/quickstart.tkv --out quickstart.exe
-.\quickstart.exe      # Y[0] = 2.25 / quickstart: OK
+$tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
+& $tkvc tv/examples/quickstart.tkv out/quickstart.exe main
+Set-Content out/quickstart.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
+dotnet out/quickstart.exe      # Y[0] = 2.25 / quickstart: OK
 ```
 
 ## 3. Constructing and running a graph
@@ -92,10 +93,13 @@ arguments.
 
 ## 7. Toolchain
 ```powershell
-$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
-& $tkvc build <entry-point.tkv> --out app.exe
+$tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
+& $tkvc <entry-point.tkv> app.exe main
+Set-Content app.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
+dotnet app.exe
 
-powershell -File tools\run_cases.ps1 -Compiler $tkvc     # 26 cases + 16 gap cases
+powershell -File tools\run_cases.ps1 -Compiler $tkvc     # 22 pass / 4 fail (baseline; .NET Framework gap)
+bash tools/gate_f32.sh                               # 135/135 — the number that must stay green
 powershell -File build_inference.ps1 -SkipBenchmarks     # build + test
 ```
 

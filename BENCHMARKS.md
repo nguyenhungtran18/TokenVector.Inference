@@ -1,34 +1,49 @@
-﻿# TokenVector.Inference Competitor Benchmark & Stress Test Report
+﻿# TokenVector.Inference Benchmark Journal
 
-## 1. Executive Summary
-Benchmark and stress suites target the pure **TokenVector (`.tkv`)** engine only. Results
-must be measured with the `tkvc` toolchain on the hardware under test — **do not quote
-numbers from any previous backend**.
+> **Trang thai 2026-11-11 (§9.22, cung phien):** full train step GPT-2 124M
+> @seq1024 = **4016 ms** vs torch 2.14.0+cpu **4061.1 ms** -> **0.989x**,
+> loss EXACT, gate 135/135.  Bang do moi nhat: **§9.21-§9.22**.
+> Suite doi thu `compare_rivals.tkv` (§2) la **smoke suite legacy** - cac
+> hang so ORT/Torch trong no la literal co dinh, khong phai phep do tren may
+> nay; dung dung trich dan. `HANDOFF.md` la nhat ky ky thuat dung sau moi con so.
+
+## 1. Cach do (recipe hien hanh)
+
+TKV side (GPT-2 124M; `tv/tests/_seq_cfg.txt` chon `<seq> / <mode> / <steps> / <warmup>`):
 
 ```powershell
-$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
-& $tkvc build tv/benchmarks/compare_rivals.tkv --out compare_rivals.exe
-.\compare_rivals.exe
-# or, with the whole pipeline:
-powershell -File build_inference.ps1 -BenchmarkTimeoutSeconds 300
+$tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
+& $tkvc tv/tests/simd_bench_124m_seq.tkv out/bseq.exe main
+Set-Content tv/tests/_seq_cfg.txt "1024`n1`n1`n1"   # seq=1024, mode=1, steps=1
+dotnet out/bseq.exe                                # can .runtimeconfig.json canh exe (xem §9.17)
 ```
 
-**Read this before quoting any number.** As of 2026-09-28 the timing helpers in
-`compare_rivals.tkv` (`now_ms`, `now_us`, `gc_allocated_bytes`, `gc_counts`) are still
-stubs returning `0`, so the suite prints `0.0 ms`, `0 B` and `req/s` values derived from
-a division by zero. **No timing number in this suite is currently meaningful.** The
-`QUICK-RUN SCALE` banner in the output says so too. Wire up real timing helpers before
-recording anything.
+`mode=0` = fwd+bwd (doi chieu torch phan d) | `mode=1` = full step (best-of-3, dao dong manh) | `mode=2` = phan ra 5 pha (min-of-2, tin cay cho quyet dinh theo pha).
 
-Hardware note: there is **no SIMD**. `tv/optimization/kernels.tkv` uses a hand-rolled
-8-wide blocked loop (`VEC_W = 8`) that is still scalar, so a machine with AVX2/FMA gains
-nothing today. See `SIMD_NOTES.md` for why and what the compiler would need.
+Torch side (cung phien - LUON do lai torch, khong muon so lieu phien truoc):
 
----
+```powershell
+python tools/bench_torch.py d 1024   # tier d: fwd+bwd & full step
+python tools/bench_torch.py e 1024   # tier e: phan ra pha, T=1 va T=14
+```
 
-## 2. Suite Structure (compare_rivals.tkv)
+Log goc cua lan do moi nhat: `out/_bench_matrix_post14_20261111_145719.log`
+(script `out/_bench_post14.ps1`, thu muc `out/` khong commit). Log danh so
+cu: `out/_bench_matrix_*.log`.
 
-The suite has six scenarios. The first four are benchmarks, the last two are stress.
+Hardware note: production chay kernel native AVX2/FMA (`tkv_simd_native.dll`,
+build tu repo compiler `D:\TokenVector`, P/Invoke tu IL). Duong scalar `.tkv`
+thuan van ton tai lam tham chieu ngu nghia. Khong bench voi compiler build
+thieu native export; `opt` (AdamW) khong con nhanh noi xet theo clip, xem
+§9.19-§9.21.
+
+Quy tac trinh bay: moi bang phai chi ro **cung phien hay khac phien**
+(§9.21 muon torch 4130.6 cua §9.18; §9.22 do lai cung phien -> 4061.1).
+Mode 1 chi de so voi lich su; mode 2 la so tin cay.
+
+## 2. Legacy suite (compare_rivals.tkv) - chi de smoke
+
+Sau 6 kich ban; 4 dau la benchmark, 2 cuoi la stress:
 
 | Scenario | What it measures |
 | :--- | :--- |
@@ -41,25 +56,31 @@ The suite has six scenarios. The first four are benchmarks, the last two are str
 
 Iteration counts are deliberately small (latency 500, heap 500, throughput 200,
 endurance 2000, burst 500) so the suite finishes in CI. These are smoke/regression
-gates, not a performance comparison against the C# SIMD baseline.
+gates, not a performance comparison against rivals.
 
 `stress_concurrent` reports `ok=` and `err=`: an `err` count above zero means requests
 failed rather than merely ran slowly.
 
----
+**Caution:** the `now_ms`/`now_us` helpers compile and run today, but the `gc_*`
+arena counters in that suite are unverified stubs - do NOT quote its arena/heap
+numbers. ORT_*/TORCH_* constants are fixed literals, not measurements. The suite
+prints a `QUICK-RUN SCALE` banner saying the same.
 
-## 3. Recording Results
+## 3. Recording results
 
 When you run the suite, append a dated table here with:
 
 - Host CPU model and flags
 - `tkvc` build id / commit hash
-- Scenario, metric, median ± spread
+- Scenario, metric, median ~ spread
 - Rival baseline command lines for the same machine (ONNX Runtime, llama.cpp, PyTorch) if compared
+- Whether the comparison is same-session or cross-session
 
 Until a fresh run is recorded, leave result cells empty rather than copying historical
 figures. Same rule for the hardcoded ORT/Torch constants in the source: they are
 literals in the file, not measurements from this machine.
+
+---
 
 
 ## 4. Kết quả H4 (2026-11-04) — TokenVector vs PyTorch (best-of-3)
@@ -797,3 +818,90 @@ phiên §9.18 (`4130.6`) = **0.972×** — đạt ≤1.0×.
 **Working set:** `pt`/`pone` **vẫn còn cấp phát** (nhiều probe `_cj7/_cj8/_cy5/
 _det/_field_read/_opt_inline/_opt_split` đọc `opt.pt`/`opt.pone`) → chưa lấy
 lại 948 MB. Muốn bỏ phải sửa cả các probe đó — việc riêng, không thuộc #14.
+
+### 9.22 TAI DO VOI PYTORCH SAU #14 - Cung phien, cung may (2026-11-11 14:57)
+
+Benchmark lai toan bo matrix sau khi trainer dung `adamw_step_glm(..., coef)`
+(request #14, commit ae2dc7a) va compiler build moi (12:45:58, sha256=712704151A996917).
+TKV binary: `out/bseq_post14.exe` (build 14:56:12 tu HEAD `6b9d56f`, `tv/tests/simd_bench_124m_seq.tkv`).
+Log goc: `out/_bench_matrix_post14_20261111_145719.log`. Script: `out/_bench_post14.ps1`
+(bien the cua `tools/_bench_matrix.ps1`, them mode 2).
+
+May: Xeon E5-2695 v3 @2.30GHz (14C/28T), Win10 19045, dotnet 10.0.402,
+torch 2.14.0+cpu threads=14.
+
+**Loss EXACT ca 3 seq o moi run:** `10.572291 / 10.756927 / 10.760399`.
+
+**Mode 0 (fwd+bwd), best-of-3:**
+
+| seq | runs (ms) | best | loss |
+|---|---|---:|---|
+| 8 | 453.0 / 547.0 / 469.0 | **453.0** | EXACT |
+| 256 | 985.0 / 1000.0 / 1000.0 | **985.0** | EXACT |
+| 1024 | 3437.0 / 3516.0 / 3375.0 | **3375.0** | EXACT |
+
+**Mode 1 (full step), best-of-3:**
+
+| seq | runs (ms) | best | loss |
+|---|---|---:|---|
+| 8 | 1125.0 / 1047.0 / 1172.0 | **1047.0** | 10.572291 -> 7.011912 EXACT |
+| 256 | 1625.0 / 1610.0 / 1594.0 | **1594.0** | 10.756927 -> 11.807263 EXACT |
+| 1024 | 4016.0 / 4078.0 / 4719.0 | **4016.0** | 10.760399 -> 13.442921 EXACT |
+
+**Mode 2 (5 pha, min-of-2):**
+
+| seq | fwd | loss | bwd | opt | copyback | TONG |
+|---|---:|---:|---:|---:|---:|---:|
+| 8 | 94 | 0 | 515 | **468** | 141 | **1218** |
+| 256 | 266 | 32 | 671 | **469** | 140 | **1578** |
+| 1024 | 1016 | 109 | 2328 | **453** | 141 | **4047** |
+
+`opt` 468/469/453 - khong phu thuoc seq, khong phu thuoc clip (giong H4
+ch o 9.21: 438/453/469). `copyback` van ~140.
+
+**PyTorch cung phien (tier d, T=14):**
+
+| seq | fwd+bwd | full step |
+|---|---:|---:|
+| 8 | 320.1 | 981.4 |
+| 256 | 873.4 | 1551.4 |
+| 1024 | 3395.3 | 4061.1 |
+
+**PyTorch phase (tier e, T=14; T=1 trong log):**
+
+| pha | seq8 | seq256 | seq1024 |
+|---|---:|---:|---:|
+| zero_grad | 21.7 | 12.1 | 52.5 |
+| fwd(+CE) | 82.9 | 282.9 | 1024.7 |
+| bwd | 289.2 | 585.3 | 2357.0 |
+| opt.step | 651.2 | 668.9 | 646.4 |
+| TOTAL | 1049.7 | 1636.7 | 4097.6 |
+
+(T=1 TOTAL: 1348.7 / 4244.7 / 14741.6.)
+
+**TKV vs torch, cung phien (ti le TKV/torch, nho hon = TKV nhanh hon):**
+
+| phep do | seq8 | seq256 | seq1024 |
+|---|---:|---:|---:|
+| mode 1 best vs torch d full step | 1.067x | 1.027x | **0.989x** |
+| mode 1 best vs torch e T=14 TOTAL | **0.998x** | **0.974x** | **0.980x** |
+| mode 0 best vs torch d fwd+bwd | 1.416x | 1.128x | **0.994x** |
+| mode 2 TONG vs torch e T=14 TOTAL | 1.160x | **0.964x** | **0.988x** |
+
+Phase @seq1024 (mode 2 vs e T=14): fwd 1016 vs 1024.7 (-8.7); bwd 2328 vs
+2357.0 (-29); **opt 453 vs 646.4 (-193.4)**; copyback 141 (torch khong co
+khai niem tuong duong). @seq256: opt 469 vs 668.9 (-200). @seq8: opt 468
+vs 651.2 (-183).
+
+**So voi 9.21 (torch khac phien 4130.6):** torch cung phien hom nay =
+4061.1 (d) / 4097.6 (e T=14 TOTAL). TKV mode 2 TONG 4047 -> **0.988x**
+so voi torch cung phien - giu nguyen ket luan "<=1.0x o seq1024", nhung
+nay la cung phien nen chac chan hon.
+
+**Luu y do:**
+- Mode 1 seq1024 dao dong manh (4016/4078/4719) - mode 2 (min-of-2) la
+  so tin duoc cho phase; mode 1 chi de so tong voi lich su.
+- Mode 0 best: 453/985/3375 (log raw; parser best-of-3 cua script in
+  `best=0` do bug `-match` tren array - da fix trong `out/_bench_post14.ps1`).
+- Chua chay lai gate trong phien nay; gate 135/135 + trainer 15/15 + loss
+  EXACT da xac nhan o 9.21 (khong doi code tu do).

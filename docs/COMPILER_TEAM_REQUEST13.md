@@ -1,7 +1,9 @@
-# YASU COMPILER TEAM #13 — `ZeroListF32` cấp phát 2 lần + vòng scalar thừa
+**TRẠNG THÁI 2026-11-11: ĐÃ DELIVERED** — compiler sửa IL của `ZeroListF32`; xem `BENCHMARKS.md` §9.14 và §9.21 (opt 781 → 438–469 ms/bước).
+
+# YÊU CẦU COMPILER TEAM #13 — `ZeroListF32` cấp phát 2 lần + vòng scalar thừa
 
 **Ngày:** 2026-11-10
-**Nhị:** HANDOFF §0.137 + `BENCHMARKS.md` §9.3/§9.8/§9.9
+**Nguồn:** HANDOFF §0.137 + `BENCHMARKS.md` §9.3/§9.8/§9.9
 **Đối tượng:** Compiler team (`compiler_bootstrap/compiler/il_features/slicing.tkv` + `build/selfhost/tv_gop.tkv`)
 **Ưu tiên:** cao — đây là **~220 ms/bước** trên seq1024, và là hạng mục lớn nhất còn lại sau khi đã bỏ hướng trans-A.
 **Khác #10/#11/#12:** lần này **không phải** thêm native op mới. Chỉ sửa **IL thân của một method có sẵn** (`TkvSlice::ZeroListF32`). Không đổi ABI, không đổi builtin signature, không đổi ngữ nghĩa `.tkv`.

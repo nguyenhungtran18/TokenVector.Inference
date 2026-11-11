@@ -1,12 +1,13 @@
-# Feature Comparison: TokenVector.Inference (pure `.tkv`) vs ONNX Runtime vs llama.cpp vs PyTorch
+# Feature Comparison: TokenVector.Inference vs ONNX Runtime vs llama.cpp vs PyTorch
 
-> Scope: **functional** comparison (what each stack can do), not speed. Repo is 100% TokenVector —
-> 43 source `.tkv` modules, 14,278 lines. All compute and clients are pure `.tkv`;
-> host intrinsics remain only for raw allocation, OS/HTTP/JSON/time-threads, file/network IO, and
+> Scope: **functional** comparison (what each stack can do), not speed. All sources in this repo are
+> TokenVector (`.tkv`, 640+ files incl. generated dotted import copies, ~205k LOC); compiled binaries
+> P/Invoke the companion native SIMD library `tkv_simd_native.dll` (built by the compiler repo `D:\TokenVector`)
+> for hot kernels — there is no C/C++ in this repository. The pure-`.tkv` scalar path remains as the semantic
+> reference. Host intrinsics remain only for raw allocation, OS/HTTP/JSON/time-threads, file/network IO, and
 > byte codecs (protobuf/utf8/FP8/FP16-bitcast).
-> Measure speed only with `tkvc build tv/benchmarks/compare_rivals.tkv` on the pure engine.
-> Rival snapshots as of **2026-09**: ONNX Runtime **1.29** (CUDA 13 default, plugin EPs),
-> llama.cpp **v0.4.0** (semver; v0.3.0 2026-08), PyTorch **2.14** + torchao **0.18**.
+> Measure speed only via the recipe in `BENCHMARKS.md` §1 (124M fwd/bwd/step; same-session torch) —
+> `tv/benchmarks/compare_rivals.tkv` is a legacy smoke suite, not a measurement source.
 
 Legend: ✅ supported · ⚠️ partial/limited · ❌ missing
 
@@ -24,7 +25,7 @@ If/Loop (unrolled), LSTM/GRU/RNN (unrolled, bidir, Y/Y_h/Y_c), `StringConcat`/`S
 error (never silent)** + static shape inference. Still missing: first-class Sequence*/image data
 ops (need sequence dtype in `tv.numerics`) and Scan with runtime trip count | **200+ ops**, full ONNX opset, spec validation | LLM-arch native (Llama/Qwen/Gemma/Phi/…), not general ONNX | Full ATen + custom ops, autograd |
 | Dynamic shapes | ✅ symbolic dimensions, shape specialization, and request-time concrete-shape execution (`runtime/dynamic_shapes.tkv`) | ✅ symbolic dims | ✅ variable context, `--cont-batching` | ✅ dynamic shapes, `torch.compile` |
-| Training | ⚠️ small-model training (`training/autograd.tkv`: LinHead+SGD, MLP + Adam, softmax-CE, grad-checked) — no full-model pretraining | ✅ on-device training | ❌ inference-only | ✅ full training |
+| Training | ✅ GPT-2 124M full-model training (`training/gpt2_ref124.tkv`: fwd/bwd/AdamW/clip/checkpoint, loss EXACT vs HF fixture; full step @seq1024 = **4016 ms** vs torch 4061.1, same session, 0.989× — `BENCHMARKS.md` §9.22) + MLP+AdamW reference (`trainer_tests` 15/15) + LoRA | ✅ on-device training | ✗ inference-only | ✅ full training |
 
 ## 2. LLM inference features
 
@@ -64,17 +65,16 @@ ops (need sequence dtype in `tv.numerics`) and Scan with runtime trip count | **
 
 | Capability | TokenVector `.tkv` | ONNX Runtime | llama.cpp | PyTorch |
 |---|---|---|---|---|
-| CPU | ? pure `.tkv`, 8-wide blocked loops that are still scalar (VEC_W=8), liveness-based slot reuse; **no SIMD, arena not zero-GC** |
+| CPU | ✅ native AVX2/FMA kernels via companion `tkv_simd_native.dll` + pure-`.tkv` scalar fallback (semantic reference); liveness-based slot reuse; **arena not zero-GC** |
 | GPU | ❌ | ✅ CUDA/TensorRT/DirectML/ROCm/Metal | ✅ CUDA/HIP/Metal/Vulkan/SYCL/offload split | ✅ CUDA/ROCm/XPU |
 | NPU / edge | ❌ | ✅ QNN, OpenVINO, CoreML, NNAPI | ⚠️ Snapdragon Hexagon | ⚠️ ExecuTorch |
-| Footprint | ✅ pure `.tkv`, no native DLLs | ⚠️ ~100 MB+ with EPs | ✅ single binary | ❌ GB-scale |
+| Footprint | ✅ `.tkv` sources + 1 native DLL (companion, compiler repo) | ⚠️ ~100 MB+ with EPs | ✅ single binary | ❌ GB-scale |
 | Provider API | ✅ `device.tkv` (CPU live; CUDA/ROCm/Metal/Vulkan/NPU stubs fail loudly, never silent) | ✅ EP plugin API | N/A (built-in backends) | ✅ device/dispatch |
 | Ecosystem | ✅ HF-hub download+cache (`tools/hub.tkv`), CLI (`serve/gen/export/calibrate/latency`), HTTP clients over the OpenAI-compatible API, vision preprocess frontend (resize/normalize/patchify) | ✅ Olive, Model Zoo, Azure | ✅ HF GGUF ecosystem, server distributions | ✅ package index, model hub, accelerator wheels |
 
 ## 6. Speed references
 
-Speed numbers live only in a dated run of `tv/benchmarks/compare_rivals.tkv` (see `BENCHMARKS.md`).
-No historical backend figures are kept in this document.
+Speed numbers live in `BENCHMARKS.md` §9 (current: §9.22, same-session vs torch). No historical backend figures are kept in this document.
 
 ## 7. Coverage status (closed list + remaining items with technical reasons)
 
@@ -85,17 +85,17 @@ Closed:
 - [x] **Quantization** (INT8 per-tensor/per-channel/dynamic, grouped INT4 sym + AWQ-asym + act-order, FP8/FP16 compute, 4 calibrations, QDQ folding; quantized int8/int32 IO + int8 initializers; **gated Q2_K/Q3_K/Q6_K dequant** from ggml reference layouts with structural checks + discrete roundtrip self-gate).
 - [x] **Formats & ecosystem** (ONNX reader + writer/serializer, SafeTensors, GGUF container + verified quants, HF-hub cache, CLI, vision preprocess frontend + **ViT graph builder** `vision/vit.tkv`, micro-training with grad-checked autograd + **LoRA adapters + checkpoint arena** `training/lora.tkv`, **HAL lane-abstract kernels** `runtime/hal.tkv`).
 - [x] **TRIZ groups implemented this pass** — (1) LoRA + CheckpointArena, (2) HAL + lane-abstract kernels, (3) String-as-bytes + Scan driver/unroll, (4) Gated K-quants + ViT graph, (5) Tree-speculative + prefix-skip + beam.
-- [x] **TokenVector backend seam** (`runtime/backend.tkv`): provider selection and CPU/SIMT dispatch over pure-`.tkv` kernels. `backend_status()` distinguishes `available`, `simulated`, and `unavailable`. CUDA and OpenCL are reported as **unavailable** — there is no GPU backend in the pure-TokenVector runtime, and no native bridge ships with the package.
-- [x] **Zero native dependencies**: no C/C++ sources, no `__tkv_extern_pinvoke__`, no companion DLLs. IEEE-754 binary32 bit reinterpretation and byte codecs are implemented in TokenVector (`runtime/f32_bits.tkv`). The earlier CUDA/OpenCL/OpenVINO bridge files were removed on 2026-09-26 after IL inspection showed their `__init__` bodies were never emitted, so no P/Invoke call site existed and they were unreachable dead code.
+- [x] **TokenVector backend seam** (`runtime/backend.tkv`): provider selection and CPU/SIMT dispatch over pure-`.tkv` kernels. `backend_status()` distinguishes `available`, `simulated`, and `unavailable`. CUDA and OpenCL are reported as **unavailable** — there is no GPU backend in this runtime.
+- [x] **No C/C++ in this repository.** IEEE-754 binary32 bit reinterpretation and byte codecs are implemented in TokenVector (`runtime/f32_bits.tkv`). Hot kernels (GEMM, fused backward, AdamW) are P/Invoked from the compiled IL into the companion native SIMD library `tkv_simd_native.dll` (compiler repo, not shipped inside this repo); the pure-`.tkv` scalar kernels remain the semantic reference and run wherever the native exports are missing. The earlier CUDA/OpenCL/OpenVINO bridge files were removed on 2026-09-26 after IL inspection showed their `__init__` bodies were never emitted (unreachable dead code).
 - [x] **Four-gap regression coverage** (`tv/tests/gap_tests.tkv`): SIMT matmul, dynamic-shape specialization, ViT SafeTensors name remapping, pretrain gradient clipping, and backend dispatch; the runner builds and executes successfully.
 
 Remaining — each with its precise technical reason:
 
-1. **Full-model pretraining.** Our autograd covers `LinHead` + ReLU + softmax-CE only; LoRA adapters + `CheckpointArena` give a second allocation policy for adapter fine-tunes, not full backward for all ops. Pretraining needs backward kernels for every forward op **plus** multi-GB weight streaming. CPU pretraining at LLM scale is 10–100x too slow — it only makes sense together with item 2.
+1. **LLM-scale pretraining.** GPT-2 124M trains end-to-end (fwd/bwd/AdamW/clip, loss EXACT vs HF fixture, 0.989× torch @seq1024 step time — `BENCHMARKS.md` §9.21–§9.22). At larger scale CPU pretraining remains 10–100x too slow; it only makes sense together with item 2.
 2. **GPU/NPU compute.** The `.tkv` language as defined has no GPU constructs: no thread blocks, shared memory, tensor-core MMA, or kernel-launch API — every existing `extern def` is scalar/host-side (alloc, IO, codecs, time). A GPU backend means extending the tv **compiler** itself (TokenVector main repo, not this one) plus vendor SDK shims (CUDA/TensorRT/QNN). `device.tkv` / `hal.tkv` stubs exist so this fails loudly instead of silently; `HalDispatch` is the registration seam once a backend exists.
 3. **Full sequence container + image data ops + dynamic Scan.** String tensors ride `str_values` + UTF-8 byte pools (`string_tensor.tkv`); static `Scan` unrolls when trip ≤ 128 (`_expand_scan`). Remaining: first-class variable-length **sequence** type for Sequence* ops, image tensor codecs, and Scan whose trip depends on runtime data (needs a real loop primitive or compiler support).
 4. **IQ/TQ dequant + vision encoder weights + GGUF-shard mmap.** Q2_K/Q3_K/Q6_K are now decoded from bit-exact ggml layouts behind a self-gate; IQ/TQ nonlinear layouts still lack a checked reference vector set in-tree (silent-corruption risk remains — loud error is correct). Vision needs actual ViT/CLIP **weights** (graph builder exists). Sharded mmap needs a memory-mapped-file host intrinsic plus multi-shard index resolution.
-5. **Re-measured benchmarks.** Every published latency number must come from `tv/benchmarks/compare_rivals.tkv` on this pure engine (`tkvc` at `D:\TokenVector\3.code\dist\tkvc.exe build …`). Algorithm work (tree/beam/prefix-skip) is in-tree; measurement is the remaining gap.
+5. **Re-measured benchmarks.** Training latency numbers live in `BENCHMARKS.md` §9 (current: §9.21–§9.22 — `out/bseq_post14.exe` built by `D:\TokenVector\Release\dist\tkvc-tv.exe`, torch measured same-session). `tv/benchmarks/compare_rivals.tkv` remains a legacy smoke suite — its ORT/TORCH constants are literals, not measurements.
 
 ## 8. When to pick whom
 
@@ -109,9 +109,10 @@ Remaining — each with its precise technical reason:
 ## 9. Quick start (`.tkv`)
 
 ```powershell
-$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
-& $tkvc build tv/examples/quickstart.tkv --out quickstart.exe
-.\quickstart.exe      # Y[0] = 2.25 / quickstart: OK
+$tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
+& $tkvc tv/examples/quickstart.tkv out/quickstart.exe main
+Set-Content out/quickstart.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
+dotnet out/quickstart.exe   # Y[0] = 2.25 / quickstart: OK
 ```
 
 The API is graph-based — there is no `tv.inference.load_onnx()`, no `NDArray` and no
@@ -119,6 +120,4 @@ The API is graph-based — there is no `tv.inference.load_onnx()`, no `NDArray` 
 `session.run_single(x, "X", "Y")`. See `USER_GUIDE.md` and `tv/examples/quickstart.tkv`
 for the full snippet, and `HANDOFF.md` for the stubs that are not wired up.
 
-Because there is no SIMD and the arena is not zero-GC, the CPU and footprint rows above
-describe what the code *is* (pure `.tkv`, no native DLLs in the package), not a measured
-advantage. Benchmark numbers are currently unusable: see `BENCHMARKS.md`.
+The CPU row describes what the code *is* today (native AVX2/FMA via the companion DLL; scalar `.tkv` as fallback and semantic reference; arena not zero-GC). For measured numbers see `BENCHMARKS.md` §9.22 (same-session vs torch; full step 0.989× @seq1024).

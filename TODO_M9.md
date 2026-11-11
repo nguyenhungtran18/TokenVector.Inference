@@ -1,3 +1,7 @@
+# TODO_M9.md — TRANG THAI 2026-11-11: DA XONG / HET HIEU LUC
+
+> Banner (2026-11-11): cả 3 task của mốc M9 đã xong (Task 3 `zeros_list` được giải quyết bởi fix `ZeroListF32` của compiler — request #13, xem `BENCHMARKS.md` Mục 9.14). Các số "tỉ lệ 3.69x/3.88x", "16719 ms" là ảnh chụp trước 2026-11. Trạng thái hiện tại xem `BENCHMARKS.md` Mục 9.22. Giữ file để tra cứu lịch sử; không thực thi checklist bên dưới.
+
 # TODO — TokenVector · P9 → M9 (2026-10-31)
 
 Quy tắc giữ nguyên cho mọi mục dưới đây:

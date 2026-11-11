@@ -136,7 +136,7 @@ này thay nó.
 
 ## 6. NGUỒN SỐ LIỆU
 
-- `docs/spec-m4-m7-compiler-team.md` §1 (bảng CG) + §3 (ràng buộc cứng)
+- `docs/archive/spec-m4-m7-compiler-team.md` §1 (bảng CG) + §3 (ràng buộc cứng)
 - `HANDOFF.md` §0.36 (CG), §0.49 (f32 BUST), §0.47 (M4+M6 wire), §0.48 (M5-opt + PyTorch)
 - Probe: `tv/tests/simd_probe_cg.tkv` (phân rã wrapper), `tv/tests/_f32p.tkv` (f32 locals BUST)
 - `docs/COMPILER_TEAM_REQUEST.md` §10 (kết quả đo yêu cầu #1)

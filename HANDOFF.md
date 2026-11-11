@@ -8,7 +8,7 @@ hien tai cua G3 nam o muc 0 ngay duoi day.
 **Dinh huong hien tai (2026-10-20, MUC TIEU MOI — chu khoa):** phai dat
 BANG roi NHANH HON PyTorch (1.0× roi ≤0.8×) tren CA 3 seq, van giu 84/84
 parity — KHONG dung o muc ~20× nua. Sàn don luong ~37s > 3.542s -> da luong
-la dieu kien can (P6). Ladder + phan tich: `docs/perf-plan-triz-roadmap.md`
+la dieu kien can (P6). Ladder + phan tich: `docs/archive/perf-plan-triz-roadmap.md`
 §12. Duong di da di: 154.234 -> 141.219 (P5.4) -> **118.641 s (33.5×, P5.5)**.
 **P5.4 (2026-10-20) da ha 154.234 -> 141.219 s (39.9x), 84/84 gate — xem 0.14
 (5 file gpt2_ref sua chua commit, 4 probe untracked, chua push).**
@@ -404,7 +404,7 @@ Bao cao day du: **`reports/bench-simd-vs-pytorch-20261019.md`**. So chinh
   - So cu + 2 buoc toi uu ban dau (chua lam): cache/reuse tile, vectorize
     AdamW + grad-copy (498M cham/step) — doc bao cao + plan.
 - Timing trong tkv PHAI o `main` (bug #8, xem 0.4).
-- **Nguyen nhan co so (do duoc) + plan uu tien: `docs/perf-plan-simd-vs-pytorch.md`**
+- **Nguyen nhan co so (do duoc) + plan uu tien: `docs/archive/perf-plan-simd-vs-pytorch.md`**
   — cham that = dung tile (probe X: build 43.8ms vs gemm 7.8ms/fwd), BWD 63%
   buoc 124M, plumbing flat ~27%, AdamW 5s scalar. Moc: P0 cat dung tile
   (simd_matmul), P1 bo grad materialization + fuse unflatten + f32 AdamW,
@@ -505,7 +505,7 @@ D:/TokenVector/Release/dist/tkvc-tv.exe tv/tests/<gate>.tkv out/<gate>.exe main
 | `gpt2_full_tests` | 20/20 | **33/33** (+`SIMD logits/loss` 124M = 2.6e-6 / 0.0; +attention **n=192** da o 3×3 fwd/bwd simd-vs-scalar ≤3.6e-5; +**backward TOAN BO 124M `simd=1` vs fixture PyTorch** — 5 grad ≤8.3e-7) |
 **Diem quan trong cho nguoi ke:** truoc P5.2/P5.3 **khong gate nao chay
 attention GEMM voi `simd=1`** — nen ban draft hong van “xanh” vi khong ai do no.
-So chi tiet: `docs/perf-plan-simd-vs-pytorch.md` (muc **P5.2 + P5.3**),
+So chi tiet: `docs/archive/perf-plan-simd-vs-pytorch.md` (muc **P5.2 + P5.3**),
 `ROADMAP_TRAIN.md` (dong “SIMD train”).
 ### 0.14 P5.4 — ATTACK ATTENTION BWD (2026-10-20) — XANH 84/84, −8.8%
 **Vi sao:** probe AQ (muc 1/TRIZ truoc do ghi "chua do duoc") tach duoc
@@ -1347,7 +1347,7 @@ gió như P7 đã chỉ).
   UNFLATTEN 734 ms — 3 bucket GEMM = **24.1 s = 66%** bước. (Artifact cần
   nhớ: GRAD_ACC 1232 ms là của bench — đường thật ghi thẳng vào `opt.g`;
   RESIDUAL −10438 ms do probe gọi library không gflat, đo tuần tự.)
-- **Plan đầy đủ ghi tại `docs/perf-plan-triz-roadmap.md` §13** (mới) — 4 hạng
+- **Plan đầy đủ ghi tại `docs/archive/perf-plan-triz-roadmap.md` §13** (mới) — 4 hạng
   mục xếp theo lợi nhuận × tin cậy, bảng kỳ vọng, trình tự + gates, danh sách
   đã-bác-bỏ:
   1. **GĐ11** — song song softmax-grad lm-head bwd (còn serial 1.33 s @1024,
@@ -1668,7 +1668,7 @@ alloc 12 Ct (T=768) = **46-47 ms/call** (đã nằm trong số variant). Run 1 (
 5. **Chu trình đo thứ 8 (CX) khép chương trình:** mục treo cuối biến mất → chương trình đo TRIZ repo-local kết thúc: M3a-pipeline ❌ (CH), M3a-ACC-variant ❌ (CW), M3b ❌×2 (CB SUM-grid + CX wrapper thật), M3c ✅ (CI, wired), M1 ❌ (OpenBLAS shim) — mọi lever repo-local đã có số đo; parity 1.0× chỉ còn đi qua compiler team (M4-M7 builtin/ABI, §14.9).
 **Trạng thái git:** probe `simd_probe_cx.tkv` (mới) + `out/cx_run.log` + HANDOFF §0.44 + roadmap §14.6 patch/§14.9 patch/§14.10 + ROADMAP_TRAIN — working tree, chưa commit. **3 phiên trước ĐÃ commit `e7a3eb4`** (§0.41-§0.43 + §14.8/§14.9 — dòng “chưa commit” trong §0.43 là trạng thái lúc viết). 0 thay đổi code train → không cần gate 84/84.
 ### 0.45 NHẬN BÀN GIAO COMPILER (M4-M7) + CHẠY LẠI BENCHMARK — 135/135, LOSS EXACT, FULL STEP KHÔNG ĐỔI (2026-10-24)
-**Bối cảnh:** spec `docs/spec-m4-m7-compiler-team.md` giao compiler team (2026-10-24 buổi sáng) → buổi tối compiler team bàn giao: `dist/tkvc-tv.exe` build **24/10 16:12**, `runtime/tkv_simd_native.dll` build **24/10 18:39**, `docs/REFERENCE.md` cập nhật **24/10 16:05**, kèm 4 test mới trong repo compiler: `simd_gemm_packed_test.tkv` (M4), `adamw_step_test.tkv` (M5), `lmhead_bwd_fused_test.tkv` (M6), `gemm_dispatch_test.tkv` (M7 — **REFERENCE chưa có entry M7**).
+**Bối cảnh:** spec `docs/archive/spec-m4-m7-compiler-team.md` giao compiler team (2026-10-24 buổi sáng) → buổi tối compiler team bàn giao: `dist/tkvc-tv.exe` build **24/10 16:12**, `runtime/tkv_simd_native.dll` build **24/10 18:39**, `docs/REFERENCE.md` cập nhật **24/10 16:05**, kèm 4 test mới trong repo compiler: `simd_gemm_packed_test.tkv` (M4), `adamw_step_test.tkv` (M5), `lmhead_bwd_fused_test.tkv` (M6), `gemm_dispatch_test.tkv` (M7 — **REFERENCE chưa có entry M7**).
 **Builtin mới theo REFERENCE (repo này CHƯA dùng):**
 | Mục | Builtin |
 |---|---|
@@ -1735,7 +1735,7 @@ alloc 12 Ct (T=768) = **46-47 ms/call** (đã nằm trong số variant). Run 1 (
 1. **M4:** `simd_gemm_packed_create`/`simd_gemm_packed` cần nhận **`List[Double]`** (hoặc builtin convert native bulk f64 list → f32 list/buf) — Tensor production toàn bộ là List[Double], ABI f32-only khiến chi phí convert interpreted ăn hết gain (số đo CJ ở trên). Với ABI f64, M4 được chờ 1.6-2× ở S1/S3/S5 (số CY).
 2. **M6:** chuẩn hóa **1/n** trong `lmhead_bwd_fused` (thêm param scale hoặc chia trong kernel) — hợp đồng `(p−onehot)/n` của GĐ10; đồng thời đo perf v1 (naive single-thread).
 3. **M7:** bổ sung REFERENCE entry (cơ chế dispatch, env `TKV_GEMM_DISPATCH`?) để repo này dùng được.
-**Trạng thái git:** working tree = patch M5 (4 mirror trainer) + HANDOFF §0.45+§0.46 + ROADMAP_TRAIN + spec `docs/spec-m4-m7-compiler-team.md` + probe mới (`_cy0`-`_cy7`, `_cj`, `_impa/b`, `simd_probe_cy`) — **chưa commit**. `out/` gitignore. 0 thay đổi số liệu bench §0.45 (M4/M6 không wire → bench hiện tại = số M5 ở (b)).
+**Trạng thái git:** working tree = patch M5 (4 mirror trainer) + HANDOFF §0.45+§0.46 + ROADMAP_TRAIN + spec `docs/archive/spec-m4-m7-compiler-team.md` + probe mới (`_cy0`-`_cy7`, `_cj`, `_impa/b`, `simd_probe_cy`) — **chưa commit**. `out/` gitignore. 0 thay đổi số liệu bench §0.45 (M4/M6 không wire → bench hiện tại = số M5 ở (b)).
 ### 0.47 M4+M6 ĐÃ WIRE SAU KHI COMPILER GIAO ĐÚNG SPEC §6 — FIX t_zeros list[f32], BENCH −28% ĐẾN −37% (2026-10-25)
 **Bối cảnh:** compiler team bàn giao `docs/e_handoff/2026-10-25-m4-f64-m6-scale-ban-giao.md` đáp đúng 3 ask §6: (1) M4 ABI f64 (`SgemmPackedCreate64`/`SgemmPacked64`, convert double→float trong pack), (2) M6 thêm param `scale` = 1/n hợp đồng `(p−onehot)/n` + v2 blocked/threaded đo 1.40-1.51 s, (3) M7 dispatch env `TKV_GEMM_DISPATCH` ghi vào REFERENCE. DLL mới (`runtime/tkv_simd_native.dll` 25/10 10:48) đã copy vào `out/`.
 **(a) PHÁT HIỆN CẤU TRÚC DỮ LIỆU QUYẾT ĐỊNH CẢ PHIÊN — M4 f64 ABI THỰC TẾ KHÔNG DÙNG ĐƯỢC CHO PRODUCTION:**
@@ -1798,7 +1798,7 @@ alloc 12 Ct (T=768) = **46-47 ms/call** (đã nằm trong số variant). Run 1 (
 `tv/training/*.tkv`: 5 canonical files (`tensor.tkv` 165 lines; `ops.tkv` 321; `tape.tkv` 426; `kernels_reg.tkv` 47; `gpt2_ref.tkv` 83 lines — G2 skeleton).
 `tools/gen_fixtures.py`: 185 lines (fixture generator from torch autograd, fp32, seed 0).
 `docs/linux-portability-spike.md`: WSL/mono test results.
-`docs/G1_RESULT_STATE.md`: G1 verification results.
+`docs/archive/G1_RESULT_STATE.md`: G1 verification results.
 `docs/numerics-contract.md`: updated from proposal to verified (DUYET).
 `ROADMAP_TRAIN.md` (repo root): updated status + next steps.
 `ROADMAP_TRAIN.md`: included in commit message.
@@ -1863,7 +1863,7 @@ Remaining compiler issues (documented in `docs/e_handoff/`):
 | `5d8a270` | compare_rivals: pool type, list-field, race |
 | `8129c73` | docs: official compiler-notes update + handoff |
 | `6f8ee13` | G1 core + fixtures + docs update |
-Working tree (after `git rm --cached` leftover `docs/G1_RESULT_STATE.md`): all tracked/added; untracked: fixtures dir + mirror copies (`tv.training.*.tkv`) + `COMPILER-NOTES-2026-10-16.md` (official compiler team file, not ours) + `docs/linux-portability-spike.md`.
+Working tree (after `git rm --cached` leftover `docs/archive/G1_RESULT_STATE.md`): all tracked/added; untracked: fixtures dir + mirror copies (`tv.training.*.tkv`) + `COMPILER-NOTES-2026-10-16.md` (official compiler team file, not ours) + `docs/linux-portability-spike.md`.
 ---
 ## 6. Next — G2 full architecture (GPT-2 124M)
 Skeleton complete; fixtures exist for 4 parity + 20 gradient + 8 tape + 7 gradcheck cases. Next steps (user to approve or proceed):
@@ -1918,7 +1918,7 @@ ty le 18.1x / 21.2x / 28.2x. Chi tiet: 0.16.**
   — tuc "thua nang" sang "khac duoc".
 - **CAP NHAT 2026-10-20 (chu khoa): MUC TIEU MOI = Bang roi NHANH HON PyTorch
   (1.0× roi <1.0×) tren ca 3 seq** — ke hoach 3 phase ~20× ben tren bi thay bo
-  boi ladder toi parity: `docs/perf-plan-triz-roadmap.md` §12 (P5.6 cache
+  boi ladder toi parity: `docs/archive/perf-plan-triz-roadmap.md` §12 (P5.6 cache
   block-fwd → P5.7 lm-head → P5.8 kernel → **P6 da luong (bat buoc — san don
   luong ~37s > 3.542s)** → P7 mixed precision). Hien tai 33.5× @seq1024 (P5.5).
 ### 7.5 Parity phai giu (khong duoc break)
@@ -1938,8 +1938,8 @@ ty le 18.1x / 21.2x / 28.2x. Chi tiet: 0.16.**
 | Policy adaptiv them latency kiem tra moi call | Do chi phi policy; neu qua lon, bake policy vao hang compile-time constant |
 ---
 *Cap nhat 2026-10-20 · Hanh dong tiep theo: Phase 1 — trien khai `layernorm_bwd` FMA tiled.
-Chi tiet day du: `docs/perf-plan-simd-vs-pytorch.md` (muc P5.2 + P5.3) va
-`docs/perf-plan-triz-roadmap.md`.*
+Chi tiet day du: `docs/archive/perf-plan-simd-vs-pytorch.md` (muc P5.2 + P5.3) va
+`docs/archive/perf-plan-triz-roadmap.md`.*
 ### 0.48 M5-OPT WIRE + BENCHMARK VỚI PYTORCH (2026-10-25)
 **M5-opt** — bộ tối ưu step() bỏ r2/r4/r5 (state m/v chỉ ở buffer, lazy list sync),
 giảm 234ms/buoc @124M + ~1GB RAM so với M5 mặc định.
@@ -2064,7 +2064,7 @@ i0, đơn 2 §6) rồi đo lại toàn bộ.
 **Trạng thái git:** thêm `tv/tests/_gf2.tkv` + HANDOFF §0.51 — **0 dòng code train đổi**
 (không cần gate lại). Chưa commit.
 ### 0.52 PHASE A XONG — BUDGET 2 PHÍA (TORCH TIER E + PHÂN RÃ BWD) + 2 BUG COMPILER (2026-10-26)
-**Mục tiêu** theo `docs/PLAN_TO_PARITY.md` Phase A: đối chuẩn 2 phía, **0 dòng code
+**Mục tiêu** theo `docs/archive/PLAN_TO_PARITY.md` Phase A: đối chuẩn 2 phía, **0 dòng code
 train đổi**. Deliverable = bảng budget cho Phase B-F.
 **A1 — PyTorch tier E** (`python tools/bench_torch.py e <seq>`, log
 `out/bench_torch_e.log`, torch 2.14.0+cpu, median ms, n=3):
@@ -2730,7 +2730,7 @@ chạy) → không cần gate vì wire; log nằm trong `out/` (gitignore). Vi�
 (`grep zeros_list` trong `dist/tkvc-tv.il` = 0 hit, xác minh 31/10).
 ---
 ## §0.59 H1 — BẢNG BUDGET 2 PHÍA ĐO XEN KẼ CÙNG PHIÊN: TỈ LỆ THẬT 3.69-3.88×, GAP 100% LÀ THREADING + `block_bwd` (2026-10-31)
-Thực hiện lever **H1** của [docs/PLAN_TO_LE_1X.md](docs/PLAN_TO_LE_1X.md) — lần đo **đầu tiên
+Thực hiện lever **H1** của [docs/archive/PLAN_TO_LE_1X.md](docs/archive/PLAN_TO_LE_1X.md) — lần đo **đầu tiên
 torch và tkv chạy xen kẽ trong cùng một phiên** (Phase F của `PLAN_TO_PARITY`). Mọi số dưới
 đây **ghi ra file** (`out/h1_*.log`), không đọc từ terminal.
 - Compiler: `D:/TokenVector/Release/dist/tkvc-tv.exe` build 31/10 09:19; native
@@ -2811,9 +2811,9 @@ còn nợ §0.58 §5 (48 lệnh `TkvInt::`). `_p6ms` cùng phiên vẫn xanh: **
 3. Ở **seq8/256** còn phải diệt **578 ms chi phí cố định** (m6 344 + `op_embed_bwd` 234) —
    đây là lever **H4 (pack/scratch cache)**: hiện mỗi bước vẫn alloc + copy 38.6M×4 B
    nhiều lần. Đó là lý do seq8 chỉ đạt 3.69× trong khi fwd+bwd thuần là 7.99×.
-**Thứ tự thực thi đã đổi so với `PLAN_TO_LE_1X.md` ban đầu:** H2 trước H3 (H2 là điều kiện
+**Thứ tự thực thi đã đổi so với `docs/archive/PLAN_TO_LE_1X.md` ban đầu:** H2 trước H3 (H2 là điều kiện
 để H3 có trần đủ), H4 chen vào giữa cho seq nhỏ. Chi tiết cập nhật ở
-[docs/PLAN_TO_LE_1X.md](docs/PLAN_TO_LE_1X.md) §H1.
+[docs/archive/PLAN_TO_LE_1X.md](docs/archive/PLAN_TO_LE_1X.md) §H1.
 **Trạng thái:** 0 dòng code `.tkv`/C đổi trong lần đo này — chỉ build lại probe + chạy.
 Log: `out/h1_tkv_m0.log`, `out/h1_tkv_m1.log`, `out/h1_torch_e.log`, `out/h1_torch_d.log`,
 `out/h1_bd2.log`, `out/h1_p6ms.log`, `out/h1_am.log`.
@@ -7800,3 +7800,41 @@ Mode 1 dao động ±5% giữa các phiên (seq1024 từng đọc 4109-4344); s�
 mode 2 mới là thứ phản ánh trực tiếp thay đổi. `_seq_cfg.txt` đã trả về
 `1024/1/1/1`. Chi tiết + bảng đầy đủ: `BENCHMARKS.md` §9.21 và
 `D:\TokenVector\Release\docs\e_handoff\2026-11-11-request14-adamw-glm-coef.md`.
+
+## §0.154 DỌN REPO + ĐO LẠI CÙNG PHIÊN VỚI PYTORCH (2026-11-11)
+
+**Ngày:** 2026-11-11. Compiler request #14 đã xong (§0.153). Phiên này:
+(1) đo lại TKV vs torch **cùng phiên** (không mượn số phiên trước);
+(2) dọn repo (xóa rác, archive docs, viết lại docs lỗi thời).
+
+### 1. Kết quả đo cùng phiên (`BENCHMARKS.md` §9.22, log `out/_bench_matrix_post14_20261111_145719.log`)
+
+TKV binary: `out/bseq_post14.exe` (build 2026-11-11 14:56 từ `6b9d56f`, compiler
+`D:\TokenVector\Release\dist\tkvc-tv.exe` 2026-11-11 12:45:58, sha256=712704151A996917).
+Host: Xeon E5-2695 v3 (14C/28T), torch 2.14.0+cpu threads=14.
+
+| phép đo | TKV | torch | TKV/torch |
+|---|---:|---:|---:|
+| full step mode 1 seq8 / 256 / 1024 (best-of-3) | 1047 / 1594 / 4016 | 981.4 / 1551.4 / 4061.1 | 1.067x / 1.027x / **0.989x** |
+| mode 0 fwd+bwd seq1024 | 3375.0 | 3395.3 | **0.994x** |
+| mode 2 TONG seq1024 (min-of-2) | **4047** | 4097.6 (e, T=14) | **0.988x** |
+
+Phase @seq1024 (mode 2 vs torch e): fwd 1016 vs 1024.7 (-8.7); bwd 2328 vs
+2357.0 (-29); **opt 453 vs 646.4 (-193)**; copyback 141. `opt` cố định
+468/469/453 không phụ thuộc seq — nhất quán với §9.21.
+Loss EXACT cả 3 seq ở mọi run. Mode 1 seq1024 dao động mạnh (4016/4078/4719)
+— mode 2 là số tin cậy; mode 1 chỉ để so với lịch sử.
+
+### 2. Dọn repo
+
+- **Xóa:** thư mục rác (`C?UsersAdmin/`, `out?/`, `_chk/`, `_p6ms_n10/`, `build/` — đều rỗng/không tracked); 13 probe root không ai tham chiếu (`simd_probe{.tkv,d,e,f,g,h,i,j,k,l,m,ab,ac}.tkv`, `git rm`, còn trong history).
+- **Archive:** 10 kế hoạch/spec đã xong chuyển vào `docs/archive/` (+ `docs/archive/README.md` giải thích); tham chiếu trong 13 file được cập nhật đường dẫn (`docs/archive/<name>`).
+- **Viết lại docs:** README(-VI), `BENCHMARKS.md` §1–3 (recipe mới, pointer §9.22), `BENCHMARKS_VI.md` (tóm tắt VI), `SIMD_NOTES.md` (trạng thái hiện tại), `RELEASE_NOTES(-VI)` (2026-11-11 status + v1.0.0 historical), `TEST_REPORT(-VI)` (gate hiện tại + đường compiler đúng), `USER_GUIDE(-VI)` (quickstart mới; các claim stub verified còn đúng — giữ), `COMPETITOR_COMPARISON(-VI)` (các claim lỗi thời: training GPT-2 124M 0.989×, native DLL P/Invoke, CPU row), `PLAN_BEAT_PYTORCH.md` (banner WIN CONDITION ĐÃ ĐẠT + sửa mojibake §6), REQUEST11/12 (banner trạng thái), REQUEST13/14 (banner delivered), ROADMAP_TRAIN / TODO_M9 / COMPILER-NOTES-2026-10-16 (banner `TRẠNG THÁI 2026-11-11` ở đầu; giữ nội dung lịch sử).
+- **Giữ nguyên:** `_flash_work/`, `_fw2/`, `_fw3/` (gitignored, giữ theo yêu cầu), `release/`, `out/`, `fixtures-124m/`, BENCHMARKS §4+, `TOKENVECTOR_SYNTAX_SPEC*`, HANDOFF (append-only).
+- **12 probe `tv/tests/_*.tkv`** (bằng chứng request #14): được commit theo yêu cầu.
+
+### 3. Ghi chú phương pháp
+
+- Torch **luôn được đo lại cùng phiên** khi công bố số mới — §9.21 từng mượn torch 4130.6 của §9.18; §9.22 đo lại cùng phiên: 4061.1 (tier d) / 4097.6 (tier e T=14).
+- BOM: file `.md` gốc có BOM hoặc không — không quan trọng với git.
+- Console cp1252: luôn đọc/ghi `.md` qua python `encoding="utf-8-sig"`, in bằng escape unicode; `PLAN_BEAT_PYTORCH.md` suýt hỏng vì repair theo index — đã fix và verify lại toàn bộ file (console chỉ hiển thị lỗi; file là UTF-8 hợp lệ).

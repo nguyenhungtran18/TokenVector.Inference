@@ -1,6 +1,17 @@
-﻿# Báo cáo Kiểm thử TokenVector.Inference (Tiếng Việt)
+# Báo cáo Kiểm thử TokenVector.Inference (Tiếng Việt)
 
-## 1. Tổng kết
+> **Trạng thái 2026-11-11:** các cổng quan trọng hiện nay là `tools/gate_f32.sh`
+> (**135/135**, 10 suite f32), `tv/tests/trainer_tests.tkv` (**15/15**),
+> `tv/tests/gpt2_full_tests.tkv` (**33/33**, cần fixture 124M ngoài repo —
+> `python tools/gen_gpt2_fixture.py --full`), và `tools/run_cases.ps1`
+> (**22 pass / 4 fail — giống hệt baseline**; 4 fail do thiếu
+> `System.Runtime.Intrinsics` trên .NET Framework; `gap_tests` PASS khi chạy
+> .NET 10 như `gate_f32.sh` làm). Loss EXACT trên cả ba sequence, determinism
+> kiểm chứng bit. Chi tiết: `BENCHMARKS.md` §9.21. Hai suite 26/16 bên dưới
+> là tàn dư của bản port 2026-09-28, không thay đổi; `run_cases.ps1` vẫn chạy
+> được nhưng số lượng của nó có trước cuộc chuyển .NET 10 — đừng trích dẫn làm số hiện tại.
+
+## 1. Tổng kết (lịch sử, 2026-09-28)
 - **Hai suite:** `tv/tests/inference_tests.tkv` (26 case) và `tv/tests/gap_tests.tkv` (16 case)
 - **Ngôn ngữ đích:** TokenVector (`.tkv`)
 - **Runner:** `powershell -File tools\run_cases.ps1`
@@ -43,8 +54,14 @@ hồi quy cho lỗi treo và cho các pass tối ưu hóa.
 ## 5. Cách chạy
 
 ```powershell
-$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
+$tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
 powershell -File tools\run_cases.ps1 -Compiler $tkvc
+# cổng f32 (số phải giữ 135/135):
+bash tools/gate_f32.sh
+# cổng trainer (15/15):
+& $tkvc tv/tests/trainer_tests.tkv out\trainer_tests.exe main
+Set-Content out/trainer_tests.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
+dotnet out/trainer_tests.exe
 # hoặc build trực tiếp
 & $tkvc build tv/tests/inference_tests.tkv --out inference_tests.exe
 & $tkvc build tv/tests/gap_tests.tkv        --out gap_tests.exe

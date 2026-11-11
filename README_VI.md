@@ -1,185 +1,145 @@
-﻿# 🚀 TokenVector.Inference: Động cơ Phục vụ Suy luận Mô hình & Lượng tử hóa Siêu nhẹ
+﻿# 🚀 TokenVector.Inference: Runtime Deep Learning & Engine huấn luyện viết thuần `.tkv`
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Language: TokenVector .tkv](https://img.shields.io/badge/Language-TokenVector%20.tkv-blue.svg)](https://github.com/nguyenhungtran18/TokenVector)
-[![Compiler: tkvc](https://img.shields.io/badge/Compiler-tkvc-orange.svg)](https://github.com/nguyenhungtran18/TokenVector)
-[![Pure TokenVector](https://img.shields.io/badge/Backend-100%25%20.tkv-brightgreen.svg)]()
+[![Compiler: tkvc](https://img.shields.io/badge/Compiler-tkvc--tv-orange.svg)](https://github.com/nguyenhungtran18/TokenVector)
 
-<img src="assets/tokenvector-logo.svg" alt="Logo TokenVector" width="96" height="96">
+<img src="assets/tokenvector-logo.svg" alt="TokenVector logo" width="96" height="96">
 
-**TokenVector.Inference** là động cơ runtime đồ thị học sâu thuần **TokenVector (`.tkv`)** — tối ưu hóa đồ thị, lượng tử hóa đa độ chính xác, và micro-batcher — xây cho hệ sinh thái TokenVector AI.
+**TokenVector.Inference** là runtime deep learning viết bằng **TokenVector
+(`.tkv`)** — inference (tối ưu graph, quantization, micro-serving) **và**
+engine huấn luyện GPT-2 124M có thời gian một bước ngang PyTorch (đo
+2026-11-11, xem bên dưới). Xem bản tiếng Anh: `README.md`.
 
-> **Trạng thái, đã kiểm chứng 2026-09-28:** 26/26 case trong `tv/tests/inference_tests.tkv` và 16/16 trong `tv/tests/gap_tests.tkv` đều PASS. Runtime **100% TokenVector, không có mã native trong gói này** — không C/C++, không P/Invoke, không DLL kèm theo. CPU chạy được, TokenVector SIMT là mô phỏng xác định, CUDA/OpenCL/OpenVINO được báo cáo trung thực là unavailable.
+> **Trạng thái hiện tại, kiểm chứng 2026-11-11:**
+> - Full train step GPT-2 124M @seq1024: **4016 ms** so với PyTorch
+>   2.14.0+cpu (cùng phiên, 14 luồng) **4061.1 ms** → **0.989×**, loss
+>   **EXACT** (`10.760399`), `gate_f32.sh` **135/135**, `trainer_tests`
+>   **15/15**, `gpt2_full_tests` **33/33**. Chi tiết: `BENCHMARKS.md` §9.21–§9.22.
+> - Nguồn là `.tkv`; pipeline tối ưu sinh IL P/Invoke thư viện native SIMD
+>   (`tkv_simd_native.dll`, build bởi repo compiler) cho các kernel nóng.
+>   Đường CPU là đường được hỗ trợ.
+> - Còn lại: seq8/seq256 vẫn chậm hơn torch một chút (1.067×/1.027×);
+>   working set ~7.2 GB @seq1024; mode-1 đo dao động — dùng mode-2 (phân rã
+>   5 pha) khi ra quyết định.
 >
-> Hãy đọc các giới hạn trước khi dựa vào nó: arena tensor **chưa** zero-GC (xem bên dưới), **không có SIMD**, và nhiều entry point vẫn là stub. `HANDOFF.md` liệt kê mọi lỗ hổng đã biết; `SIMD_NOTES.md` nói về vector hoá.
+> `HANDOFF.md` là nhật ký kỹ thuật (append-only). Mọi lỗ hổng đã biết —
+> và mọi lần đo sai trên đường đi — đều được ghi ở đó.
 
-### Trạng thái backend
+## Cái gì đã có
 
-| Backend | Trạng thái |
+| Hạng mục | Trạng thái |
 |---|---|
-| CPU | Khả dụng — kernel scalar thuần `.tkv` (`hal.tkv`) |
-| TokenVector SIMT | Mô phỏng lane xác định (`simt.tkv`) |
-| CUDA | **Unavailable** — runtime thuần TokenVector không có backend GPU |
-| OpenCL | **Unavailable** — runtime thuần TokenVector không có backend GPU |
-| OpenVINO NPU | **Unavailable** — runtime thuần TokenVector không có backend NPU |
+| Inference runtime (graph, PTQ INT8/FP8, ONNX reader, batcher) | Chạy được, có test; xem `TEST_REPORT_VI.md` |
+| Huấn luyện GPT-2 124M (fwd/bwd/AdamW/clip/checkpoint) | Chạy được; xem `BENCHMARKS.md` §9 |
+| Kernel native SIMD (GEMM, fused bwd, AdamW) | Ship qua repo compiler (`tkv_simd_native.dll`) |
+| GPU / NPU | **Không có** — chỉ CPU |
 
-Huấn luyện (`tv/training/autograd.tkv`) chạy trên đường CPU: forward, backward, gradcheck và Adam đều thuần `.tkv`. Nó chưa bao giờ phụ thuộc backend GPU.
+## Yêu cầu
 
----
+- **Compiler TokenVector**, bản self-host hiện hành (ở đây gọi là `$tkvc`).
+  Bản tham chiếu: `D:\TokenVector\Release\dist\tkvc-tv.exe`.
+- **.NET 10 runtime** để chạy exe đã biên dịch. `tkvc-tv` **không** sinh
+  `.runtimeconfig.json` cạnh output — thiếu nó sẽ báo
+  `hostpolicy.dll not found`. Tạo một file:
 
-## 🌐 Tổng quan Hệ sinh thái TokenVector AI
+  ```json
+  {"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}
+  ```
 
-**TokenVector** là hệ sinh thái AI và Điện toán Hiệu năng cao (HPC) thế hệ mới dựa trên **ngôn ngữ TokenVector (`.tkv`)** và **trình biên dịch `tkvc`**, hướng tới suy luận CPU hiệu năng cao với **0% chi phí thu gom rác (Zero-GC)**:
+  (chi tiết: `BENCHMARKS.md` §9.17).
+
+## Bố cục repo
 
 ```
-                         ╔══════════════════════════════════════════════╗
-                         ║         THE TOKENVECTOR AI ECOSYSTEM         ║
-                         ╚══════════════════════════════════════════════╝
-                                                │
-         ┌────────────────────────┬─────────────┴────────────┬────────────────────────┐
-         ▼                        ▼                          ▼                        ▼
-┌──────────────────┐    ┌──────────────────┐       ┌──────────────────┐     ┌──────────────────┐
-│TokenVector.Vision│    │TokenVector.Numerics│     │ TokenVector.Text │     │ TokenVector.Data │
-│(Computer Vision  │    │  (Linear Algebra │       │(Text, Tokenizer, │     │ (Data Pipeline & │
-│  2D & 3D Voxel)  │    │  & NDArray Core) │       │ Embeddings & LLM)│     │  Double-Buffer)  │
-└────────┬─────────┘    └────────┬─────────┘       └────────┬─────────┘     └────────┬─────────┘
-         │                       │                          │                        │
-         └───────────────────────┼──────────────────────────┴────────────────────────┘
-                                 ▼
-                     ┌────────────────────────┐
-                     │ TokenVector.Inference  │
-                     │  (Embedded Inference:  │
-                     │  Serving, Opt & Quant) │
-                     └────────────────────────┘
+tv/            Nguồn .tkv (runtime/, training/, tests/, tools/)
+stdlib/        Nguồn thư viện chuẩn (.tkv)
+tools/         Công cụ phía host: bench_torch.py, test runners, generators
+docs/          Tài liệu kỹ thuật;  docs/archive/ = kế hoạch đã xong/hết hiệu lực
+reports/       Báo cáo parity & benchmark theo ngày
+BENCHMARKS.md  Nhật ký benchmark chính (hiện tại: §9.22)
+HANDOFF.md     Nhật ký kỹ thuật (append-only)
 ```
 
-### Các Thành phần Cốt lõi trong Hệ sinh thái:
-1. **[`TokenVector`](https://github.com/nguyenhungtran18/TokenVector)**: Ngôn ngữ lập trình và trình biên dịch TokenVector chính thức (`.tkv`, `tkvc`) với thư viện chuẩn (`stdlib/tv/inference`).
-2. **[`TokenVector.Numerics`](https://github.com/nguyenhungtran18/TokenVector.Numerics)**: Hạt nhân đại số tuyến tính và mảng đa chiều (`NDArray<T>`) với tương tác zero-copy.
-3. **[`TokenVector.Vision`](https://github.com/nguyenhungtran18/TokenVector.Vision)**: Động cơ thị giác máy tính 2D & 3D Voxel, biến đổi ảnh fused, YOLO Letterbox, NMS và ImagePainter.
-4. **[`TokenVector.Text`](https://github.com/nguyenhungtran18/TokenVector.Text)**: Xử lý văn bản tốc độ cao, tách từ (BPE, WordPiece, SentencePiece), embeddings và pipeline LLM.
-5. **[`TokenVector.Data`](https://github.com/nguyenhungtran18/TokenVector.Data)**: Pipeline prefetching đa luồng bộ đệm kép loại bỏ nút thắt I/O.
-6. **[`TokenVector.Inference`](https://github.com/nguyenhungtran18/TokenVector.Inference)**: Động cơ suy luận độ trễ cực thấp, pass tối ưu đồ thị, lượng tử hóa INT8/FP8 và micro-serving nhúng — **100% `.tkv`**.
+Fixture parity GPT-2 124M (~2.3 GB) **không nằm trong git**; sinh lại bằng
+`python tools/gen_gpt2_fixture.py` (xem `docs/handoff-gpt2-124m-fixture-design.md`).
 
----
-
-## 🌟 Các Tính năng Nổi bật
-
-1. **Phân tích vòng đời tensor** (tái sử dụng arena, *chưa* zero-GC):
-   - `ExecutionGraph.analyze_liveness_and_allocate_offsets()` tính khoảng sống và tái dùng slot scratch.
-   - Arena là `dict[i64, list[f32]]` — lưu trữ phần tử dạng hộp, và `native_arena_alloc` vẫn là stub trả `0`. Nên mỗi tensor vẫn tốn phân bổ managed. Mục tiêu 0 byte ở hot path **chưa** đạt; xem `SIMD_NOTES.md` §7.
-2. **Bộ Parser ONNX & Protobuf Nhị phân Zero-Copy:**
-   - Reader protobuf thuần `.tkv` giải mã ONNX từ danh sách byte thô, không tạo chuỗi/đối tượng trung gian.
-3. **Pipeline Tối ưu hóa Đồ thị Tính toán:**
-   - `ConstantFoldingPass`: Gộp trước Reshape/Transpose/Permute tĩnh vào trọng số.
-   - `DeadCodeEliminationPass`: Cắt tỉa node và buffer không tham gia tạo output.
-   - `OperatorFusionPass`: Gộp kernel (`FusedLinear`, `FusedConv2D`, `FusedRMSNorm`) tận dụng cache.
-4. **Động cơ Lượng tử hóa Đa độ chính xác (INT8 & FP8):**
-   - PTQ tĩnh (MinMax, KL, percentile, MSE) và lượng tử hóa động.
-   - INT8 đối xứng/asymmetric, INT4 grouped (kiểu AWQ), GEMM per-channel.
-   - FP8 `E4M3`/`E5M2` và đường compute FP16 cho kiến trúc Transformer.
-5. **Cấu trúc phục vụ trong process (chưa listen):**
-   - `EmbeddedServer` và `DynamicBatcher` đã có, và đường đồng bộ của batcher chạy được; nhưng `http_listen()` là stub trả `0` và `spawn()` không tạo worker thread, nên không có socket nào được bind và không có micro-batching đa luồng.
-   - Paged KV + prefix skip đã hiện thực và có test.
-6. **Runtime thuần TokenVector — không có mã native trong gói này:**
-   - Compute, graph execution, lượng tử hóa và test là nguồn `.tkv` biên dịch bằng `tkvc`.
-   - **Không mã C/C++ trong repo, không `__tkv_extern_pinvoke__`, không DLL kèm theo.** Byte codec và chuyển đổi bit IEEE-754 float được viết bằng `.tkv` (`tv/runtime/f32_bits.tkv`), nên ONNX writer không cần gì nào bên cạnh executable của nó.
-   - Muốn có GPU/NPU thì phải đóng gói thành tiện ích native riêng, không phải thư viện mà mọi executable phải mang theo.
-
----
-
-## 📊 Bộ Benchmark
-
-Số latency/throughput **phải đo trên engine `.tkv` này** — không trích số của backend cũ.
+## Bắt đầu nhanh
 
 ```powershell
-tkvc build tv/benchmarks/compare_rivals.tkv
+$tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
+
+# Inference quickstart (graph -> session -> một forward pass)
+& $tkvc tv/examples/quickstart.tkv out/quickstart.exe main
+Set-Content out/quickstart.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
+dotnet out/quickstart.exe      # in ra: Y[0] = 2.25  /  quickstart: OK
 ```
 
-Xem `BENCHMARKS.md` / `BENCHMARKS_VI.md` (cấu trúc suite) và `COMPETITOR_COMPARISON.md` (so sánh chức năng, không so tốc độ).
+API theo dạng graph; không có `tv.inference.load_onnx()` cũng như `NDArray`.
+Xem `USER_GUIDE_VI.md` cho hướng dẫn API và `TOKENVECTOR_SYNTAX_SPEC_VI.md`
+cho các quy tắc ngôn ngữ hay cắn (hằng số cấp module không import được;
+`__init__` của record bị bỏ qua; `TkvInt` …).
 
----
-
-## ⚡ Hướng dẫn Sử dụng Nhanh (`.tkv`)
-
-Ví dụ chạy được — `tv/examples/quickstart.tkv` dựng graph, tạo session và chạy
-một forward pass:
+## Build & test
 
 ```powershell
-$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
-& $tkvc build tv/examples/quickstart.tkv --out quickstart.exe
-.\quickstart.exe      # in ra: Y[0] = 2.25  /  quickstart: OK
-```
+$tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
 
-API làm việc trên **graph**; không có `tv.inference.load_onnx()` và không có `NDArray`:
-
-```tokenvector
-import tv.runtime.session
-# Hằng số cấp module KHÔNG import được - phải khai báo lại (giá trị lấy từ
-# tv/runtime/session.tkv và tv/optimization/kernels.tkv).
-OperatorType_FusedLinear = 2
-ActivationFunction_Relu = 1
-
-g = ExecutionGraph(1, "quickstart", 0)
-g.inputs.append("X")
-g.outputs.append("Y")
-g.initializers["W"] = w          # list[f32] dài n*k
-g.initializers["B"] = b          # list[f32] dài n
-g.get_or_create_tensor("X", [1, 4])
-g.get_or_create_tensor("W", [8, 4])
-g.get_or_create_tensor("B", [8])
-g.get_or_create_tensor("Y", [1, 8])
-
-node = new_node("gemm", OperatorType_FusedLinear)
-node.activation = ActivationFunction_Relu
-node.inputs.append("X")          # node.inputs.append("W"), append("B")
-node.outputs.append("Y")
-g.nodes.append(node)
-
-session = session_from_graph(g, 1)   # 1 = chạy các pass tối ưu
-y = session.run_single(x, "X", "Y")  # x là list[f32] phẳng
-session.close()
-```
-
-Những thứ **chưa** hoạt động (là stub, đừng đưa vào hướng dẫn nhanh):
-
-| API | Trạng thái |
-| :--- | :--- |
-| `tv.inference.load_onnx()` | `tv.inference` là stub tự sinh; module này không tồn tại |
-| `tensor.zeros(...)` | không có ký hiệu này; tensor là `list[f32]` |
-| `parse_file("m.onnx")` | `parser_read_bytes` là stub trả `""`, chưa implement đọc file |
-| `cli.tkv serve ...` | `argv()` là stub trả `[]`, CLI luôn chỉ in usage |
-| `http_listen()` (embedded server) | stub trả `0`; không có socket nào được bind |
-
----
-
-## Biên dịch, kiểm thử và đóng gói
-
-```powershell
-# TokenVector compiler
-$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
-
-# Test: 26 case (mỗi case một process riêng), rồi 16 case của gap suite
+# Hai suite inference (mỗi case chạy trong một process riêng)
 powershell -File tools\run_cases.ps1 -Compiler $tkvc
-#   TOTAL: pass=26 fail=0 crash=0
-#   gap tests: PASS (16/16)
 
-# Build + test + benchmark trong một lệnh
-powershell -File build_inference.ps1 -SkipBenchmarks
+# Cổng f32, 10 suite, 135 assert
+bash tools/gate_f32.sh
+
+# Cổng trainer (MLP, AdamW vs reference PyTorch): kỳ vọng 15/15
+& $tkvc tv/tests/trainer_tests.tkv out\trainer_tests.exe main
+dotnet out\trainer_tests.exe
 ```
 
-**Đừng biên dịch từng module một.** `tkvc build <một module>` sẽ ghi lại các bản
-sao import dạng `tv.*.tkv`, và đã quan sát thấy 9 file bị ghi đầy byte NUL (khôi
-phục bằng `git checkout HEAD -- <file>`). Chỉ build entry point:
+## Benchmark vs PyTorch
 
 ```powershell
-& $tkvc build tv/tests/inference_tests.tkv --out inference_tests.exe
-& $tkvc build tv/tests/gap_tests.tkv        --out gap_tests.exe
-& $tkvc build tv/examples/quickstart.tkv    --out quickstart.exe
-& $tkvc build tv/benchmarks/compare_rivals.tkv --out compare_rivals.exe
+# Phía PyTorch (cần python + torch 2.14+cpu + transformers)
+python tools/bench_torch.py d 1024   # fwd+bwd và full step
+python tools/bench_torch.py e 1024   # phân rã pha, T=1 / T=14
+
+# Phía TokenVector (124M, _seq_cfg.txt chọn seq/mode/steps/warmup)
+Set-Content tv/tests/_seq_cfg.txt "1024`n1`n1`n1"
+& $tkvc tv/tests/simd_bench_124m_seq.tkv out/bseq.exe main
+dotnet out/bseq.exe
 ```
 
-Nguồn canonical là các file **không** tên `tv.*.tkv` — đó là bản sao import được
-sinh ra; sau khi sửa file canonical phải copy sang mọi `tv.*.tkv` tương ứng.
+Kết quả cùng phiên mới nhất (2026-11-11, `BENCHMARKS.md` §9.22):
 
-Executable sinh ra là tự chứa: không cần DLL nào nằm bên cạnh.
+| phép đo | TKV | PyTorch | TKV/torch |
+|---|---:|---:|---:|
+| full step @seq1024 | **4016** | 4061.1 | **0.989×** |
+| full step @seq256 | 1594 | 1551.4 | 1.027× |
+| full step @seq8 | 1047 | 981.4 | 1.067× |
+| fwd+bwd @seq1024 | 3375.0 | 3395.3 | **0.994×** |
+| opt.step @seq1024 (pha) | **453** | 646.4 | **−193 ms** |
+
+## Bản đồ tài liệu
+
+- `BENCHMARKS.md` / `BENCHMARKS_VI.md` — nhật ký benchmark
+- `HANDOFF.md` — nhật ký kỹ thuật, mọi điều tra và ngõ cụt
+- `USER_GUIDE_VI.md` — hướng dẫn API
+- `TOKENVECTOR_SYNTAX_SPEC_VI.md` — quy tắc cú pháp ngôn ngữ
+- `docs/numerics-contract.md` — hợp đồng số học fp32 (cái gì bit-exact với PyTorch, cái gì không)
+- `docs/COMPILER_TEAM_REQUEST*.md` — các request gửi compiler team (#1–#14)
+- `docs/archive/` — kế hoạch đã xong/hết hiệu lực (đừng thực thi)
+- `RELEASE_NOTES_VI.md` — lịch sử release
+- `ROADMAP_TRAIN.md` — lộ trình huấn luyện (chiến dịch đã hoàn thành)
+- `TODO_M9.md` — trạng thái mốc M9 (đã xong)
+
+## Hệ sinh thái
+
+**TokenVector** là hệ sinh thái AI/HPC thế hệ mới xây trên ngôn ngữ `.tkv`
+và compiler `tkvc`:
+
+- [`TokenVector`](https://github.com/nguyenhungtran18/TokenVector) — ngôn ngữ & compiler
+- [`TokenVector.Numerics`](https://github.com/nguyenhungtran18/TokenVector.Numerics) — NDArray / đại số tuyến tính
+- [`TokenVector.Vision`](https://github.com/nguyenhungtran18/TokenVector.Vision) — vision 2D & 3D
+- [`TokenVector.Text`](https://github.com/nguyenhungtran18/TokenVector.Text) — tokenization, embeddings, tiền xử lý LLM
+- [`TokenVector.Data`](https://github.com/nguyenhungtran18/TokenVector.Data) — pipeline dữ liệu double-buffer
+- **TokenVector.Inference** — repo này: runtime inference + huấn luyện GPT-2 124M

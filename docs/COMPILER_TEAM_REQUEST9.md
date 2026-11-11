@@ -1,6 +1,6 @@
 # YÊU CẦU COMPILER TEAM #9 — H2 block_bwd + H4b zero-copy managed data
 
-**Ngày:** 2026-11-01 · **Nguồn:** PLAN_TO_LE_1X.md §1 (H2, H4) + HANDOFF §0.59 + docs/PLAN_TO_LE_1X_TASKS.md
+**Ngày:** 2026-11-01 · **Nguồn:** docs/archive/PLAN_TO_LE_1X.md §1 (H2, H4) + HANDOFF §0.59 + docs/archive/PLAN_TO_LE_1X_TASKS.md
 **Đối tượng:** Compiler team (tkvc codegen P6 + native runtime) · **Ưu tiên:** cao — bucket lớn nhất còn lại
 
 ## 1. Bối cảnh

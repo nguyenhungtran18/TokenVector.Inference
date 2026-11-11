@@ -1,3 +1,12 @@
+# PLAN BEAT PYTORCH — TRẠNG THÁI 2026-11-11: WIN CONDITION ĐÃ ĐẠT
+
+> Banner (2026-11-11): mục tiêu "full step seq1024 ≤ torch" **đã đạt**:
+> **4016 ms** vs torch 4061.1 (cùng phiên, `BENCHMARKS.md` §9.22); loss EXACT;
+> gate 135/135. Bảng "torch re-measure" bên dưới (3986.1/4985…) đã lỗi thời —
+> đừng dùng. Phần lớn kế hoạch này đã thực thi; các mảnh còn giá trị nay nằm
+> ở `docs/COMPILER_TEAM_REQUEST11-14.md` và `BENCHMARKS.md`. Giữ file làm hồ
+> sơ quyết định; không thực thi.
+
 # PLAN: TokenVector.Inference beat PyTorch (GPT-2 124M full train step)
 
 Ngay: 2026-11-04 (cap nhat 2026-11-09; them muc 5 - lo trinh toi uu tiep)
@@ -62,8 +71,8 @@ Muc tieu: full step <= PyTorch 14T (1042.7 / 1572.7 / 4148.4 ms) o ca 3 seq, gat
 - Gate 135/135 sau moi thay doi.
 - Ghi so vao HANDOFF/report sau moi phase.
 - Xem COMPILER_TEAM_REQUEST12.md cho ask chi tiet (native non-GEMM + opt.step).
-## 5. Lo trinh toi uu tiep (2026-11-09, sau HANDOFF �0.115-�0.121)
-Nguon so: HANDOFF �0.115-�0.121 + bench transcripts 2026-11-09 (seq1024 mode 0).
+## 5. Lo trinh toi uu tiep (2026-11-09, sau HANDOFF §0.115-§0.121)
+Nguon so: HANDOFF §0.115-§0.121 + bench transcripts 2026-11-09 (seq1024 mode 0).
 Gap con lai vs PyTorch (cung may, torch 2.14.0+cpu MKL 2026.1): ~1.27x.
 Con thieu ~415 ms de dat win condition seq1024 (muc 3) ma KHONG dung bit-exact.
 
@@ -93,15 +102,15 @@ Con thieu ~415 ms de dat win condition seq1024 (muc 3) ma KHONG dung bit-exact.
 - Verify: test_adamw.c van PASS; adamw_mt_check.c maxdiff ~ULP; loss EXACT seq8/256/512/1024;
   mode 1 seq512 bite-ident ca 2 pool.
 
-**P1b. `_save_a` — DA KIEM TRA: da pool qua sa_bufs (production); non-saved da co obuf (§0.121). Khong co viec.** (nhanh NON-saved `gpt2_mlp` chung mach �0.117/�0.120):
+**P1b. `_save_a` — DA KIEM TRA: da pool qua sa_bufs (production); non-saved da co obuf (§0.121). Khong co viec.** (nhanh NON-saved `gpt2_mlp` chung mach §0.117/§0.120):
 - Hien moi goi t_zeros [n,4h] cho _save_a; production (saved path) khong anh huong nhieu,
   nhung nhanh non-saved + 2 mirror file can don. Du kien: vai chuc ms. Bit-exact (doc/ghi khong doi).
 
 **P1c. Cache transposition - DA KIEM TRA: production hot path khong transpose (chi n<128 fallback); khong co viec.** (cung 1 step):
 - dqkv/dctx re-pack moi lan; luu transpose 1 lan dung lai. Du kien: vai chuc ms. Kiem tra
-  hien co pack nao da cache (pack pool �0.119) truoc de khong doi lap. Bit-exact (pure copy).
+  hien co pack nao da cache (pack pool §0.119) truoc de khong doi lap. Bit-exact (pure copy).
 
-**P1d. Do lai head-to-head cung may + ghi HANDOFF §0.122 — DA LAM (xem Muc 0 + HANDOFF §0.122)** �0.122**:
+**P1d. Do lai head-to-head cung may + ghi HANDOFF §0.122 — DA LAM (xem Muc 0 + HANDOFF §0.122)** §0.122**:
 - Chay: mode 0 x3 seq + mode 1 seq512 + `tools/bench_torch.py` (seq8/256/1024).
 - Cap nhat Muc 0 baseline + bang gap; gate 9/10 + trainer 15/15 bat buoc.
 
@@ -139,57 +148,57 @@ Neu dua seq1024 ve < 4600 ma PyTorch re-measure van ~4190 thi con thieu ~400 ms 
 
 ### 5.5 Rui ro nhat ky
 - Luu y: "mode 2" loss_val khac mode 0 (duong bench rieng); khong ket luan win tu mode 2 mot minh.
-- A/B phai xen ke 0/1 trong CUNG binary, best-of-3, may dao dong (observed �5%).
+- A/B phai xen ke 0/1 trong CUNG binary, best-of-3, may dao dong (observed ±5%).
 - mode 1 la gate gradient: mode 0 co the xanh loss ma gradient van sai; luon chay mode 1 (seq512).
 - PyTorch ref 2026-11-06 cu; moi pha PHAI re-run bench_torch de co cap so cung phien.
 - `_seq_cfg.txt` line 4 = pool bit; pool=0 cho ra duong t_zeros cu y nhu truoc (A/B trong cung binary).
 
 
-## 6. Dá»± Ã¡n: Fused SDPA backward AVX2 (2026-11-09, Ä‘á»ƒ thay PyTorch/ATen)
-Má»¥c tiÃªu: viáº¿t/cáº£i thiá»‡n native SDPA backward trÃªn AVX2+FMA Ä‘á»§ nhanh Ä‘á»ƒ s0.125+ cÃ³ thá»ƒ thay tháº¿ ATen `scaled_dot_product_attention(is_causal)`, Ä‘Ã³ng tráº§n hiá»‡u nÄƒng backward (attention_bwd hiá»‡n ~1.1 s/step
+## 6. Dự án: Fused SDPA backward AVX2 (2026-11-09, để thay PyTorch/ATen)
+Mục tiêu: viết/cải thiện native SDPA backward trên AVX2+FMA đủ nhanh để (waiver) §0.125, có thể thay thế ATen `scaled_dot_product_attention(is_causal)`, đóng trần hiệu năng backward (attention_bwd hiện ~1.1 s/step
 
-### 6.0 Baseline hiá»‡n táº¡i (Ä‘o thá»±c táº¿)
-- **ATen path (production)**: 6 iters = 579-685 ms â†’ ~94-114 ms/layer @seq1024. Loss EXACT, mode-1 bite-ident 10.764943 -> 12.684581.
-- **Native flash (tkv_flash_attn.c, hiá»‡n Ä‘Ã£ AVX2 hÃ³a)**: 12 iters = 2125-2578 ms â†’ ~177-215 ms/layer. Loss EXACT, mode-1 bite-ident (giÃ¡ trá»‹ tÆ°Æ¡ng Ä‘Æ°Æ¡ng â€” cáº£ hai Ä‘á»u váº«n EXACT).
-- **ChÃªnh lá»‡ch**: ATen khoáº£ng 2x nhanh hÆ¡n â€” Ä‘Ã¢y lÃ  má»¥c tiÃªu pháº£i thu háº¹p.
+### 6.0 Baseline hiện tại (đo thực tế)
+- **ATen path (production)**: 6 iters = 579-685 ms → ~94-114 ms/layer @seq1024. Loss EXACT, mode-1 bite-ident 10.764943 -> 12.684581.
+- **Native flash (tkv_flash_attn.c, hiện đã AVX2 hóa)**: 12 iters = 2125-2578 ms → ~177-215 ms/layer. Loss EXACT, mode-1 bite-ident (giá trị tương đương — cả hai đều vẫn EXACT).
+- **Chênh lệch**: ATen khoảng 2x nhanh hơn — đây là mục tiêu phải thu hẹp.
 
-### 6.1 ÄÃ£ lÃ m (Phase 1 â€” vectorize transcendental)
-- `static inline __m256 m256_exp_ps(__m256)` â€” fast expf AVX2 polynomial (deg-6), clamp [-87.3, 88.7], scalef qua `slli_epi32(+127, 23)`. KHÃ”NG cáº§n bit-exact (waiver s0.125).
-- `static inline void exp_row_fast(float* qk, float newmax, int kvb)` â€” vectorize `qk[j] = expf(qk[j] - newmax)`.
-- `static inline float exp_sum_row_fast(float* qk, float newmax, int kvb)` â€” vectorize `bsum += e` reduction + store.
-- `dot64`, `fma_row`, `mul_row` Ä‘Ã£ AVX2 (cÃ³ sáºµn tá»« trÆ°á»›c).
-- Thay tháº¿ 2 bsum-loop (pass 1 recompute + pass 2 recompute attn) qua helper.
-- **Sá»‘ liá»‡u sÆ¡ bá»™**: native ~177-215 ms/layer (dao Ä‘á»™ng Â±10% (noise); ATen ~94-114 ms/layer â€” ATen váº«n tháº¯ng).
-- **Production váº«n Ä‘i ATen** (`torch_attention_bwd`); native chá»‰ lÃ  fallback (`attention_bwd_fused` IL builtin).
+### 6.1 Đã làm (Phase 1 — vectorize transcendental)
+- `static inline __m256 m256_exp_ps(__m256)` — fast expf AVX2 polynomial (deg-6), clamp [-87.3, 88.7], scalef qua `slli_epi32(+127, 23)`. KHÔNG cần bit-exact (waiver §0.125).
+- `static inline void exp_row_fast(float* qk, float newmax, int kvb)` — vectorize `qk[j] = expf(qk[j] - newmax)`.
+- `static inline float exp_sum_row_fast(float* qk, float newmax, int kvb)` — vectorize `bsum += e` reduction + store.
+- `dot64`, `fma_row`, `mul_row` đã AVX2 (có sẵn từ trước).
+- Thay thế 2 bsum-loop (pass 1 recompute + pass 2 recompute attn) qua helper.
+- **Số liệu sơ bộ**: native ~177-215 ms/layer (dao động ±10% (noise); ATen ~94-114 ms/layer — ATen vẫn thắng).
+- **Production vẫn đi ATen** (`torch_attention_bwd`); native chỉ là fallback (`attention_bwd_fused` IL builtin).
 
-### 6.2 Cáº§n lÃ m tiáº¿p
-- **Phase 2**: profile & loáº¡i bá» branch/throw/mask overhead trong hot loop:
-  - Vectorize causal mask (khÃ´ng branch `u > t`) báº±ng `_mm256_cmp_ps` + blend.
-  - Vectorize `gA = dotBN(d_row, V)` vÃ  `ds = attn * (gA - dsum)`.
-  - Pass 1 dÃ¹ng `_mm256_max_ps` theo chunk 8 Ä‘á»ƒ tÃ¬m `rmax`.
-  - Vectorize `_mm256_log_ps` náº¿u cáº§n cho `lse = mx + logf(sm)` (ln-1 láº§n/jalanc/row).
-- **Phase 3**: wire production â€” `TKV_FLASH_OFF=0` â†’ `attention_bwd_fused` native thay ATen trong `gpt2_attention_bwd` (Ä‘Ã£ cÃ³ dispatcher `_pt_flash_slots`).
-  - Quyáº¿t Ä‘á»‹nh dá»±a trÃªn benchmark cuá»‘i: giá»¯ ATen náº¿u native váº«n cháº­m hÆ¡n; switch production náº¿u native â‰¤ ATen.
+### 6.2 Cần làm tiếp
+- **Phase 2**: profile & loại bỏ branch/throw/mask overhead trong hot loop:
+  - Vectorize causal mask (không branch `u > t`) bằng `_mm256_cmp_ps` + blend.
+  - Vectorize `gA = dotBN(d_row, V)` và `ds = attn * (gA - dsum)`.
+  - Pass 1 dùng `_mm256_max_ps` theo chunk 8 để tìm `rmax`.
+  - Vectorize `_mm256_log_ps` nếu cần cho `lse = mx + logf(sm)` (ln-1 lần/jalanc/row).
+- **Phase 3**: wire production — `TKV_FLASH_OFF=0` → `attention_bwd_fused` native thay ATen trong `gpt2_attention_bwd` (đã có dispatcher `_pt_flash_slots`).
+  - Quyết định dựa trên benchmark cuối: giữ ATen nếu native vẫn chậm hơn; switch production nếu native ≤ ATen.
 - **Phase 4**: Re-baseline gate:
-  - loss EXACT (cÃ³ thá»ƒ drift á»Ÿ ULP level â€” waiver s0.125);
-  - mode 1 bite-ident â€” pháº£i Ä‘áº¡t giÃ¡ trá»‹ trÆ°á»›c Â§0.126 (10.764943 â†’ 12.684581) hoáº·c re-record;
-  - gate 9/10, trainer 15/15 pháº£i xanh.
-- **Phase 5** (tÃ¹y chá»n): Ã¡p dá»¥ng pattern cho cÃ¡c shape nhá» (seq8/256), nÆ¡i fixed overhead ATen dominates â€” native cÃ³ thá»ƒ tháº¯ng á»Ÿ Ä‘Ã³.
+  - loss EXACT (có thể drift ở ULP level — waiver s0.125);
+  - mode 1 bite-ident — phải đạt giá trị trước §0.126 (10.764943 → 12.684581) hoặc re-record;
+  - gate 9/10, trainer 15/15 phải xanh.
+- **Phase 5** (tùy chọn): áp dụng pattern cho các shape nhỏ (seq8/256), nơi fixed overhead ATen dominates — native có thể thắng ở đó.
 
-### 6.3 Rá»§i ro & rÃ ng buá»™c
-- Loss kommer trÃ´i vÄ©nh viá»…n náº¿u chuyá»ƒn production sang native â€” re-baseline báº¯t buá»™c.
-- MÃ£ C AVX2 dá»… bá»‹ dÃ­nh mmx/mxcsr; má»—i thay Ä‘á»•i pháº£i test loss EXACT + gate.
-- `m256_exp_ps` hiá»‡n ULP ~2 â€” Ä‘á»§ khi waiver; náº¿u return bit-exact cáº§n Sleef-style table lookup (thÃªm cÃ´ng).
+### 6.3 Rủi ro & ràng buộc
+- Loss kommer trôi vĩnh viễn nếu chuyển production sang native — re-baseline bắt buộc.
+- Mã C AVX2 dễ bị dính mmx/mxcsr; mỗi thay đổi phải test loss EXACT + gate.
+- `m256_exp_ps` hiện ULP ~2 — đủ khi waiver; nếu return bit-exact cần Sleef-style table lookup (thêm công).
 
 ### 6.4 Win condition Phase 2-3
-- Native â‰¤ ATen (bwd-attention portion): Ä‘Ã³ng â‰¥ 1.1s/step.
-- Loss EXACT (drift â‰¤ ULP tolerance) + mode-1 giá»¯ 12.684581 hoáº·c re-record.
-- Gate 9/10, trainer 15/15 giá»¯ nguyÃªn.
+- Native ≤ ATen (bwd-attention portion): đóng ≥ 1.1s/step.
+- Loss EXACT (drift ≤ ULP tolerance) + mode-1 giữ 12.684581 hoặc re-record.
+- Gate 9/10, trainer 15/15 giữ nguyên.
 
-### 6.5 Pháº¡m vi cÃ´ng viá»‡c (giáº¥y tá»)
-CÃ¡c file sáº½ cháº¡m:
-- `Release/tools/simd_native/tkv_flash_attn.c` â€”Å© fill exp_sum_row_fast selection + mask blending; cÃ³ thá»ƒ tÃ¡ch pass-2 thÃ nh 2-pass fused khi nháº£y sÃ n.
-- `tv/training/tv.training.gpt2_ref124.tkv` + `tv/tests/tv.training.gpt2_ref124.tkv` (mirror) â€” chá»‰ Phase 3.
-- `Release/runtime/tkv_simd_native.dll` â€” rebuild theo má»—i commit.
-- Commit series theo phase cho phÃ©p revert clean náº¿u Phase 2 fails quality gate.
+### 6.5 Phạm vi công việc (giấy tờ)
+Các file sẽ chạm:
+- `Release/tools/simd_native/tkv_flash_attn.c` — sẽ fill exp_sum_row_fast selection + mask blending; có thể tách pass-2 thành 2-pass fused khi nhảy sàn.
+- `tv/training/tv.training.gpt2_ref124.tkv` + `tv/tests/tv.training.gpt2_ref124.tkv` (mirror) — chỉ Phase 3.
+- `Release/runtime/tkv_simd_native.dll` — rebuild theo mỗi commit.
+- Commit series theo phase cho phép revert clean nếu Phase 2 fails quality gate.
 

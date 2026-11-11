@@ -3,13 +3,14 @@
 ## 1. Tổng quan
 `TokenVector.Inference` là runtime đồ thị thuần TokenVector (`.tkv`): tối ưu hóa đồ thị,
 lượng tử hóa INT8/INT4/FP8, và micro-batcher trong process. Mọi thứ dưới đây là API
-**đã kiểm chứng**. `HANDOFF.md` liệt kê lỗ hổng, `SIMD_NOTES.md` nói về vector hoá.
+**đã kiểm chứng**. `HANDOFF.md` liệt kê lỗ hổng, `SIMD_NOTES.md` tóm tắt ba tầng SIMD đang dùng.
 
 ## 2. Build và chạy ví dụ nhanh
 ```powershell
-$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
-& $tkvc build tv/examples/quickstart.tkv --out quickstart.exe
-.\quickstart.exe      # Y[0] = 2.25 / quickstart: OK
+$tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
+& $tkvc tv/examples/quickstart.tkv out/quickstart.exe main
+Set-Content out/quickstart.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
+dotnet out/quickstart.exe      # Y[0] = 2.25 / quickstart: OK
 ```
 
 ## 3. Dựng và chạy graph
@@ -91,10 +92,13 @@ Embedded REST server chưa listen: `http_listen()` là stub trả `0`. CLI có s
 
 ## 7. Toolchain
 ```powershell
-$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
-& $tkvc build <entry-point.tkv> --out app.exe
+$tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
+& $tkvc <entry-point.tkv> app.exe main
+Set-Content app.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
+dotnet app.exe
 
-powershell -File tools\run_cases.ps1 -Compiler $tkvc     # 26 case + 16 case gap
+powershell -File tools\run_cases.ps1 -Compiler $tkvc     # 22 pass / 4 fail (baseline; gap .NET Framework)
+bash tools/gate_f32.sh                               # 135/135 — con số phải xanh
 powershell -File build_inference.ps1 -SkipBenchmarks     # build + test
 ```
 

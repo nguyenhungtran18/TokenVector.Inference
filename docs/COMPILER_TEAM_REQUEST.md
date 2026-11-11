@@ -107,7 +107,7 @@ Mục tiêu: Yêu cầu compiler team cung cấp builtin/ABI f32 mới trong `tk
 
 ## 7. TÀI LIỆU THAM KHẢO (để compiler team inspect)
 
-- `docs/spec-m4-m7-compiler-team.md` — spec đầy đủ 4 mục M4–M7
+- `docs/archive/spec-m4-m7-compiler-team.md` — spec đầy đủ 4 mục M4–M7
 - `HANDOFF.md §0.45–§0.47` — kết quả đo round 2 (M4 f32 wire, M6 scale 1/n)
 - `tools/simd_native/tkv_simd_native_m1.c` — M1 OpenBLAS shim (đã bust, lý do: wrapper 76-89%)
 - `REFERENCE.md` section 2.13 — hàm builtin f32/adamw/lmhead_bwd_fused (đã register nhưng chưa enable f32 path)

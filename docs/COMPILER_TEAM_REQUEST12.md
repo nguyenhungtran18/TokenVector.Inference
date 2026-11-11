@@ -1,7 +1,9 @@
-# YASU COMPILER TEAM #12 — BWD non-GEMM native + opt.step copy-back (sau #10/#11)
+**TRẠNG THÁI 2026-11-11:** Gap mà doc này nhắm tới **đã đóng**: backward @seq1024 = 2328 ms (TKV mode 2) vs torch 2357.0 (e, T=14) — gần ngang torch; tổng 0.989× (`BENCHMARKS.md` §9.22). Giữ file làm hồ sơ yêu cầu; không thực thi.
 
-**Ngay:** 2026-11-05
-**Nhat:** HANDOFF §0.72 + PLAN_BEAT_PYTORCH §2c/§2d
+# YÊU CẦU COMPILER TEAM #12 — BWD non-GEMM native + opt.step copy-back (sau #10/#11)
+
+**Ngày:** 2026-11-05
+**Nguồn:** HANDOFF §0.72 + PLAN_BEAT_PYTORCH §2c/§2d
 **Đối tượng:** Compiler team (native runtime `tkv_simd_native.c` + builtin/ABI)
 **Ưu tiên:** cao — sau #10/#11, gap còn lại nằm ở non-GEMM interpreted + opt.step.
 **KHAC #10/#11:** #10 là `linear_*_fused`, #11 là thread-safety dispatcher. Lần này là **các op elementwise/reduction còn lại trong backward** và **copy `opt.step()`**.

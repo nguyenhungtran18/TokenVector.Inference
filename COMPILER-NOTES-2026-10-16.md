@@ -1,3 +1,7 @@
+# COMPILER-NOTES-2026-10-16.md — TRANG THAI 2026-11-11
+
+> Banner (2026-11-11): ghi chú gửi compiler team, 2026-10-16. Các mục "chưa chạy được" bên dưới (simd_* chưa nhận list[f32], argv() là stub, v.v.) **đều đã được xử lý**: compiler self-host hiện hành chạy lại pipeline thật (`tkvc-tv.exe`); SIMD production đi qua `tkv_simd_native.dll` (xem `SIMD_NOTES.md` và `BENCHMARKS.md` Mục 9). Giữ file làm lịch sử giao tiếp giữa hai team; đường dẫn đúng hiện nay là `D:\TokenVector\Release\dist\tkvc-tv.exe`.
+
 # THONG BAO COMPILER 2026-10-16 — Danh cho TokenVector.Inference
 
 Compiler `D:\TokenVector\Release\dist\tkvc-tv.exe` da duoc sua de bien dich

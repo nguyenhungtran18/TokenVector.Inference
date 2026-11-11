@@ -1,6 +1,19 @@
-﻿# TokenVector.Inference Test Suite Report
+# TokenVector.Inference Test Suite Report
 
-## 1. Summary
+> **2026-11-11 status:** gates that matter today are `tools/gate_f32.sh`
+> (**135/135**, 10 f32 suites), `tv/tests/trainer_tests.tkv` (**15/15**),
+> `tv/tests/gpt2_full_tests.tkv` (**33/33**, needs the out-of-repo 124M
+> fixture — `python tools/gen_gpt2_fixture.py --full`), and
+> `tools/run_cases.ps1` (**22 pass / 4 fail — identical to baseline**; the
+> 4 failures are `System.Runtime.Intrinsics` missing under .NET Framework;
+> `gap_tests` PASS when run under .NET 10, as `gate_f32.sh` does).
+> Loss EXACT on all three sequences, determinism verified bit-for-bit.
+> Details: `BENCHMARKS.md` §9.21. The 26/16 suites below remain from the
+> 2026-09-28 port and are unchanged; `run_cases.ps1` still works but its
+> counts predate the .NET 10 migration — do not quote them as current.
+
+## 1. Summary (historical, 2026-09-28)
+
 - **Suites:** `tv/tests/inference_tests.tkv` (26 cases) and `tv/tests/gap_tests.tkv` (16 cases)
 - **Target language:** TokenVector (`.tkv`)
 - **Runner:** `powershell -File tools\run_cases.ps1`
@@ -43,11 +56,14 @@ clipping, plus four regression tests for hangs and for the optimization passes.
 ## 5. How to run
 
 ```powershell
-$tkvc = "D:\TokenVector\3.code\dist\tkvc_patched.exe"
+$tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
 powershell -File tools\run_cases.ps1 -Compiler $tkvc
-# or build the suites directly
-& $tkvc build tv/tests/inference_tests.tkv --out inference_tests.exe
-& $tkvc build tv/tests/gap_tests.tkv        --out gap_tests.exe
+# f32 gate (the number that must stay 135/135):
+bash tools/gate_f32.sh
+# trainer gate (15/15):
+& $tkvc tv/tests/trainer_tests.tkv out\trainer_tests.exe main
+Set-Content out/trainer_tests.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
+dotnet out/trainer_tests.exe
 ```
 
 Paste dated results (counts, duration, commit hash) below when a full run is captured.
