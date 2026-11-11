@@ -7001,6 +7001,20 @@ Source thật sống ở `D:\TokenVector\Release\tools\simd_native\`. Đã backu
 **Việc cần làm (chưa làm):** đưa 4 file C/C++ này vào git. Không có chúng thì repo không
 build lại được DLL, và mọi "sửa kernel" trong repo là sửa một bản khác với bản đang chạy.
 
+**ĐÍNH CHÍNH (§0.150, 2026-11-11) — kết luận trên SAI.** Bảng này lập bằng
+`git ls-files` chạy trong `D:\TokenVector.Inference`, nhưng source C sống ở
+`D:\TokenVector\Release\`, mà `D:\TokenVector` là **một git repo KHÁC**
+(toplevel `D:/TokenVector`). Chạy đúng chỗ thì **cả 5 file đều đã được track**:
+
+    Release/tools/simd_native/tkv_simd_native.c   TRACKED
+    Release/tools/simd_native/tkv_bwd_ops.c       TRACKED
+    Release/tools/simd_native/tkv_linear_dw.c     TRACKED
+    Release/tools/simd_native/tkv_linear_dx.c     TRACKED
+    Release/tools/simd_native/torch_fused.cpp     TRACKED
+
+Nợ thật không phải "source ngoài git" mà là "source đã sửa nhưng chưa commit" —
+đã trả xong ở §0.150. Repo `D:\TokenVector` **build lại được** DLL từ commit.
+
 ### 3. Thay đổi
 
 **`torch_fused.cpp`** — thêm export:
@@ -7240,5 +7254,100 @@ hôm nay là **1.086x best / 1.104x median**, còn thiếu **~340–420 ms**.
 - `attention_bwd` đã hết phần lãng phí rõ ràng. Phần còn lại là native kernel
   (109–121 ms/layer) chậm hơn ATen (85.75–90) — §0.143 đã đo, chưa có hướng.
 - `mlp_bwd` 781 ms ở 358–489 GFLOP/s — gần trần, ít dư địa.
-- Nợ chưa trả: `tkv_simd_native.c`, `tkv_bwd_ops.c`, `tkv_linear_dw.c`,
-  `torch_fused.cpp` **vẫn không có trong git** (xem §0.148 §5).
+- Nợ chưa trả: ~~4 file C/C++ không có trong git~~ — **đã đính chính và
+  trả xong ở §0.150**. Chúng vốn đã được track trong repo `D:\TokenVector`;
+  cái thiếu là commit cho các sửa đổi.
+
+
+
+## §0.150 TRẢ NỢ — "SOURCE NGOÀI GIT" LÀ KẾT LUẬN SAI; nợ thật là commit, đã trả xong
+
+**Ngày:** 2026-11-11. Repo: `D:\TokenVector` (KHÔNG phải `D:\TokenVector.Inference`).
+Commit: `3e254ef`, `4439479`, `cb9fbe9`. Tree sạch sau khi xong.
+
+### 0. Kết luận trước, chi tiết sau
+
+§0.148 §5 và §0.149 §6 ghi rằng `tkv_simd_native.c`, `tkv_bwd_ops.c`,
+`tkv_linear_dw.c`, `torch_fused.cpp` **không có trong git**, và rằng "repo không
+build lại được DLL". **Sai.** Cả 5 file (thêm `tkv_linear_dx.c`) đã được track từ
+lâu. Cái thiếu chỉ là **commit cho các sửa đổi** — và đó mới là nợ thật.
+
+Sai ở đâu: tôi chạy `git ls-files '*.c' '*.cpp'` trong `D:\TokenVector.Inference`
+rồi kết luận về source nằm ở `D:\TokenVector\Release\`. Hai đường dẫn khác cây,
+và `D:\TokenVector` là **một git repo riêng** (toplevel `D:/TokenVector`). Lệnh
+đúng phải chạy trong repo đó. Đây là lần thứ hai trong chuỗi §0.14x tôi kết luận
+từ một lệnh chạy sai chỗ.
+
+### 1. Hiện trạng trước khi trả nợ
+
+`git status` trong `D:\TokenVector` có 12 dòng, nhưng chỉ **4 là source thật sự sửa**:
+
+| file | loại |
+|---|---|
+| `Release/tools/simd_native/tkv_simd_native.c` | source §0.148 (+34 dòng) |
+| `Release/tools/simd_native/torch_fused.cpp` | source §0.148 (+23 dòng) |
+| `Release/compiler_bootstrap/compiler/il_features/slicing.tkv` | source request #13 (+98/−15) |
+| `Release/dist/tkvc-tv.exe` | sản phẩm build lại của request #13 |
+
+8 dòng còn lại là rác che mất source: `Release/out/` (5 file scratch), `_bak_20261111_addmm/`
+(5 bản backup tay), `tkvc-tv.exe.bak_zl13` / `.new_zl13`, và 2 file request #13 chưa add.
+
+### 2. Kiểm chứng binary khớp source — trước khi commit
+
+Đây là câu hỏi quan trọng nhất: DLL trong `runtime/` có thật sự là sản phẩm của
+source sắp commit không? Nếu không thì commit source là commit một thứ chưa từng chạy.
+
+Đã build lại **cả hai** DLL từ source trong commit, rồi so byte với bản đang chạy:
+
+| DLL | kích thước | byte lệch |
+|---|---:|---|
+| `tkv_simd_native.dll` | 388608 = 388608 | **4 / 388608** |
+| `tkv_torch_fused.dll` | 119808 = 119808 | **4 / 119808** |
+
+4 byte đó nằm ở offset **264..265** và **215524..215525** (simd) / **76004..76005**
+(torch) — đúng cặp PE timestamp: header COFF và bản sao trong debug directory.
+Không một byte code nào lệch. Khớp với ghi chú đã có ở commit `16683a0`
+("byte-identical ngoài PE timestamp, 4 byte @264").
+
+Kết luận: source trong commit **chính là** source đã sinh ra DLL đang chạy.
+
+### 3. Ba commit
+
+**`3e254ef` — request #13 `zeros_list(n)`** (`slicing.tkv` + `tkvc-tv.exe` +
+`zeros_list_scale_test.tkv` + doc handoff). Nợ từ 2026-11-10, không liên quan
+§0.14x nhưng cùng nằm trong working tree. Chuỗi thời gian khớp: sửa 21:20 →
+build exe 21:27 → test 21:39 → doc 21:57. Nội dung: `TkvSlice::ZeroListF32`
+bỏ cấp phát hai lần (alloc + `Span.Fill`) bằng `List<float32>(TkvZeroSrc(n))`
+— 141.7→1.07 ms trên Framework 4.8, 92.2→16.7 ms trên .NET 10.
+
+**`4439479` — §0.148 `addmm_out`** (`tkv_simd_native.c`, `torch_fused.cpp`,
++ 2 DLL runtime). Đây là nợ chính: −156 ms/step đã đo từ lâu nhưng source chưa vào git.
+
+**`cb9fbe9` — `.gitignore`**: ignore `Release/out/`, `_bak_20261111_addmm/`,
+`tkvc-tv.exe.bak_*` / `.new_*`. Quy tắc phải nằm **sau** các dòng `!Release/...`
+ở trên, nếu không chúng bị bỏ lại. Trước khi thêm: 12 dòng `git status`, 8 là rác.
+Sau khi thêm: 0.
+
+### 4. Trạng thái sau khi trả nợ
+
+- `D:\TokenVector`: tree sạch, 3 commit mới, `git status` rỗng.
+- `D:\TokenVector.Inference`: tree sạch, commit `15a41ce`.
+- Repo **build lại được** DLL từ commit: `build.ps1` (4 translation unit, 12 s) và
+  `build_torch_fused.ps1` (42 s) đều chạy từ source đã commit.
+- Không còn bản backup tay nào cần giữ: `_bak_20261111_addmm/` đã đối chiếu, chỉ
+  khác đúng những gì patch §0.148 thêm vào.
+
+### 5. Bài học lặp lại lần thứ hai
+
+§0.149 §2 đã ghi "bench A/B xanh không chứng minh đúng". §0.150 là cùng loại lỗi ở
+tầng khác: **một lệnh chạy đúng cú pháp nhưng sai thư mục cho ra kết luận tự tin và sai**.
+Trước khi tuyên bố "X không có trong git", phải chạy `git rev-parse --show-toplevel`
+tại chính chỗ X sống. Đã thêm vào quy trình.
+
+### 6. Còn lại
+
+- `attention_bwd`: hết phần lãng phí rõ ràng (§0.149). Phần còn lại là native kernel
+  chậm hơn ATen 1.21–1.35x — §0.143 đã đo, chưa có hướng.
+- `pack_tests` / `gap_tests` `InvalidProgramException` — pre-existing, chưa đụng.
+- `run_gates_n10.ps1` báo sai `gpt2_full_tests` khi `$LASTEXITCODE` bị stderr của
+  dotnet/OMP làm bẩn — chưa sửa script.
