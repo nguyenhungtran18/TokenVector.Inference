@@ -17,7 +17,7 @@ Say ("dotnet: " + (dotnet --version))
 $tv = (& python -c "import torch;print(torch.__version__)" 2>$null | Select-Object -Last 1)
 $tt = (& python -c "import torch;print(torch.get_num_threads())" 2>$null | Select-Object -Last 1)
 Say ("torch: " + $tv + " threads=" + $tt)
-Say ("TKV binary: out/bseq.exe  " + (Get-Item out/bseq.exe).LastWriteTime)
+Say ("TKV binary: benchmark/bseq.exe  " + (Get-Item benchmark/bseq.exe).LastWriteTime)
 Say ("git HEAD: " + (git rev-parse --short HEAD))
 Say ""
 
@@ -28,7 +28,7 @@ foreach ($seq in 8, 256, 1024) {
     $lines = @()
     for ($r = 1; $r -le 3; $r++) {
       Set-Content -Path $cfg -Value "$seq`n$mode`n1`n1"
-      $out = & dotnet out/bseq.exe 2>$null
+      $out = & dotnet benchmark/bseq.exe 2>$null
       $ln = $out | Where-Object { $_ -match "BSEQ (full-step|fwd=)" }
       $lines += $ln
       $ms = $null

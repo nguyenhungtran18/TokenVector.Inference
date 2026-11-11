@@ -160,13 +160,13 @@ mặc định của hầu hết recipe GPT.
 
 ```powershell
 # 1) bit-identical cua coef=1.0 (phai 0.0)
-D:\TokenVector\Release\dist\tkvc-tv.exe tv/tests/_clip_real.tkv out/clipreal.exe
-Set-Content out/clipreal.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
-dotnet out/clipreal.exe
+D:\TokenVector\Release\dist\tkvc-tv.exe tv/tests/_clip_real.tkv benchmark/clipreal.exe
+Set-Content benchmark/clipreal.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
+dotnet benchmark/clipreal.exe
 
 # 2) full step 3 seq
 #    tv/tests/_seq_cfg.txt = "<seq> / 1 / 1 / 1"
-dotnet out/bseq_new.exe
+dotnet benchmark/bseq_new.exe
 
 # 3) parity
 dotnet out/gft2.exe

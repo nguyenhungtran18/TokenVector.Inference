@@ -57,6 +57,8 @@ tools/         Công cụ phía host: bench_torch.py, test runners, generators
 docs/          Tài liệu kỹ thuật;  docs/archive/ = kế hoạch đã xong/hết hiệu lực
 reports/       Báo cáo parity & benchmark theo ngày
 BENCHMARKS.md  Nhật ký benchmark chính (hiện tại: §9.22)
+BENCHMARKING_VI.md  Hướng dẫn benchmark vs PyTorch (+ EN)
+BENCHMARKING_VI.md  Hướng dẫn benchmark (+ EN)
 HANDOFF.md     Nhật ký kỹ thuật (append-only)
 ```
 
@@ -69,9 +71,9 @@ Fixture parity GPT-2 124M (~2.3 GB) **không nằm trong git**; sinh lại bằn
 $tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
 
 # Inference quickstart (graph -> session -> một forward pass)
-& $tkvc tv/examples/quickstart.tkv out/quickstart.exe main
-Set-Content out/quickstart.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
-dotnet out/quickstart.exe      # in ra: Y[0] = 2.25  /  quickstart: OK
+& $tkvc tv/examples/quickstart.tkv benchmark/quickstart.exe main
+Set-Content benchmark/quickstart.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
+dotnet benchmark/quickstart.exe      # in ra: Y[0] = 2.25  /  quickstart: OK
 ```
 
 API theo dạng graph; không có `tv.inference.load_onnx()` cũng như `NDArray`.
@@ -104,8 +106,8 @@ python tools/bench_torch.py e 1024   # phân rã pha, T=1 / T=14
 
 # Phía TokenVector (124M, _seq_cfg.txt chọn seq/mode/steps/warmup)
 Set-Content tv/tests/_seq_cfg.txt "1024`n1`n1`n1"
-& $tkvc tv/tests/simd_bench_124m_seq.tkv out/bseq.exe main
-dotnet out/bseq.exe
+& $tkvc tv/tests/simd_bench_124m_seq.tkv benchmark/bseq.exe main
+dotnet benchmark/bseq.exe
 ```
 
 Kết quả cùng phiên mới nhất (2026-11-11, `BENCHMARKS.md` §9.22):

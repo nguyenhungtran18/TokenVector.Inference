@@ -5,7 +5,8 @@
 > loss EXACT, gate 135/135.  Bang do moi nhat: **§9.21-§9.22**.
 > Suite doi thu `compare_rivals.tkv` (§2) la **smoke suite legacy** - cac
 > hang so ORT/Torch trong no la literal co dinh, khong phai phep do tren may
-> nay; dung dung trich dan. `HANDOFF.md` la nhat ky ky thuat dung sau moi con so.
+> nay; dung dung trich dan. ``HANDOFF.md` la nhat ky ky thuat dung sau moi con so.
+Huong dan chi tiet tung buoc: **`BENCHMARKING.md` / `BENCHMARKING_VI.md`**.
 
 ## 1. Cach do (recipe hien hanh)
 
@@ -13,9 +14,9 @@ TKV side (GPT-2 124M; `tv/tests/_seq_cfg.txt` chon `<seq> / <mode> / <steps> / <
 
 ```powershell
 $tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
-& $tkvc tv/tests/simd_bench_124m_seq.tkv out/bseq.exe main
+& $tkvc tv/tests/simd_bench_124m_seq.tkv benchmark/bseq.exe main
 Set-Content tv/tests/_seq_cfg.txt "1024`n1`n1`n1"   # seq=1024, mode=1, steps=1
-dotnet out/bseq.exe                                # can .runtimeconfig.json canh exe (xem §9.17)
+dotnet benchmark/bseq.exe                                # can .runtimeconfig.json canh exe (xem §9.17)
 ```
 
 `mode=0` = fwd+bwd (doi chieu torch phan d) | `mode=1` = full step (best-of-3, dao dong manh) | `mode=2` = phan ra 5 pha (min-of-2, tin cay cho quyet dinh theo pha).
@@ -27,8 +28,8 @@ python tools/bench_torch.py d 1024   # tier d: fwd+bwd & full step
 python tools/bench_torch.py e 1024   # tier e: phan ra pha, T=1 va T=14
 ```
 
-Log goc cua lan do moi nhat: `out/_bench_matrix_post14_20261111_145719.log`
-(script `out/_bench_post14.ps1`, thu muc `out/` khong commit). Log danh so
+Log goc cua lan do moi nhat: `benchmark/_bench_matrix_post14_20261111_145719.log`
+(script `benchmark/_bench_post14.ps1`, thu muc `benchmark/` khong commit tru 2 file cua phien do). Log danh so
 cu: `out/_bench_matrix_*.log`.
 
 Hardware note: production chay kernel native AVX2/FMA (`tkv_simd_native.dll`,
@@ -823,8 +824,8 @@ lại 948 MB. Muốn bỏ phải sửa cả các probe đó — việc riêng, k
 
 Benchmark lai toan bo matrix sau khi trainer dung `adamw_step_glm(..., coef)`
 (request #14, commit ae2dc7a) va compiler build moi (12:45:58, sha256=712704151A996917).
-TKV binary: `out/bseq_post14.exe` (build 14:56:12 tu HEAD `6b9d56f`, `tv/tests/simd_bench_124m_seq.tkv`).
-Log goc: `out/_bench_matrix_post14_20261111_145719.log`. Script: `out/_bench_post14.ps1`
+TKV binary: `benchmark/bseq_post14.exe` (build 14:56:12 tu HEAD `6b9d56f`, `tv/tests/simd_bench_124m_seq.tkv`).
+Log goc: `benchmark/_bench_matrix_post14_20261111_145719.log`. Script: `benchmark/_bench_post14.ps1`
 (bien the cua `tools/_bench_matrix.ps1`, them mode 2).
 
 May: Xeon E5-2695 v3 @2.30GHz (14C/28T), Win10 19045, dotnet 10.0.402,
@@ -902,6 +903,6 @@ nay la cung phien nen chac chan hon.
 - Mode 1 seq1024 dao dong manh (4016/4078/4719) - mode 2 (min-of-2) la
   so tin duoc cho phase; mode 1 chi de so tong voi lich su.
 - Mode 0 best: 453/985/3375 (log raw; parser best-of-3 cua script in
-  `best=0` do bug `-match` tren array - da fix trong `out/_bench_post14.ps1`).
+  `best=0` do bug `-match` tren array - da fix trong `benchmark/_bench_post14.ps1`).
 - Chua chay lai gate trong phien nay; gate 135/135 + trainer 15/15 + loss
   EXACT da xac nhan o 9.21 (khong doi code tu do).

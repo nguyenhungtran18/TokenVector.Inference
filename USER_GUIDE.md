@@ -8,9 +8,9 @@ INT8/INT4/FP8 quantization, and an in-process micro-batcher. Everything below is
 ## 2. Build and run the quickstart
 ```powershell
 $tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
-& $tkvc tv/examples/quickstart.tkv out/quickstart.exe main
-Set-Content out/quickstart.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
-dotnet out/quickstart.exe      # Y[0] = 2.25 / quickstart: OK
+& $tkvc tv/examples/quickstart.tkv benchmark/quickstart.exe main
+Set-Content benchmark/quickstart.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
+dotnet benchmark/quickstart.exe      # Y[0] = 2.25 / quickstart: OK
 ```
 
 ## 3. Constructing and running a graph

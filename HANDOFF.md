@@ -7807,9 +7807,9 @@ mode 2 mới là thứ phản ánh trực tiếp thay đổi. `_seq_cfg.txt` đ�
 (1) đo lại TKV vs torch **cùng phiên** (không mượn số phiên trước);
 (2) dọn repo (xóa rác, archive docs, viết lại docs lỗi thời).
 
-### 1. Kết quả đo cùng phiên (`BENCHMARKS.md` §9.22, log `out/_bench_matrix_post14_20261111_145719.log`)
+### 1. Kết quả đo cùng phiên (`BENCHMARKS.md` §9.22, log `benchmark/_bench_matrix_post14_20261111_145719.log`)
 
-TKV binary: `out/bseq_post14.exe` (build 2026-11-11 14:56 từ `6b9d56f`, compiler
+TKV binary: `benchmark/bseq_post14.exe` (build 2026-11-11 14:56 từ `6b9d56f`, compiler
 `D:\TokenVector\Release\dist\tkvc-tv.exe` 2026-11-11 12:45:58, sha256=712704151A996917).
 Host: Xeon E5-2695 v3 (14C/28T), torch 2.14.0+cpu threads=14.
 
@@ -7873,3 +7873,29 @@ xóa 4 nhóm, tất cả đều nằm trong git history:
 chú thích các probe đã xóa (số đo lịch sử giữ nguyên).
 
 Không có thay đổi nào trong `tv/` — gate 135/135 (§9.21) vẫn nguyên giá trị.
+
+## §0.157 ĐỔI TÊN `out/` THÀNH `benchmark/` + VIẾT HƯỚNG DẪN BENCHMARK (2026-11-11)
+
+**Ngày:** 2026-11-11. Công việc phiên này:
+
+1. **`out/` → `benchmark/`**: 1.24 GB / 3577 file trong `out/` đã được dọn còn
+   4 file (~0.22 MB) gắn với §9.22, rồi đổi tên thư mục thành `benchmark/`.
+   `.gitignore`: `/out/` → `/benchmark/`. Hai file được track (force-add):
+   `benchmark/_bench_post14.ps1` (script bench) và
+   `benchmark/_bench_matrix_post14_20261111_145719.log` (bằng chứng §9.22).
+   Các file khác trong `benchmark/` vẫn gitignored.
+
+2. **Hướng dẫn benchmark**: `BENCHMARKING.md` + `BENCHMARKING_VI.md` —
+   công thức đo so với PyTorch (build seq_cfg, best-of-3, mode 0/1/2, tier d/e,
+   luật cùng phiên, yêu cầu runtimeconfig, gotchas, cách thêm lần đo mới).
+
+3. **Tham chiếu `out/` → `benchmark/`** trong README(-VI), USER_GUIDE(-VI),
+   TEST_REPORT(-VI), COMPETITOR_COMPARISON(-VI), BENCHMARKS §1 + §9.21/9.22,
+   HANDOFF, tools/_bench_matrix.ps1, benchmark/_bench_post14.ps1,
+   docs/COMPILER_TEAM_REQUEST14.md. Các mục lịch sử trong BENCHMARKS (§4–§20)
+   và HANDOFF giữ nguyên đường dẫn `out/` (journal không viết lại).
+
+4. **Logo**: `assets/tokenvector-logo.svg` đã xóa theo yêu cầu (user sẽ copy
+   logo mới); trước đó file bất ngờ biến mất khỏi working tree và đã được
+   restore một lần từ HEAD — nguồn gốc bên ngoài repo can thiệp chưa rõ
+   (xem ghi chú §0.155–§0.157).

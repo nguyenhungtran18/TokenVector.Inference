@@ -87,7 +87,7 @@ Số đo tốc độ nằm ở `BENCHMARKS.md` §9 (hiện tại: §9.22, cùng 
 2. **Compute GPU/NPU.** `.tkv` không có cấu trúc GPU (thread block, shared memory, MMA, launch kernel). Backend GPU = mở rộng **compiler** tv (repo chính) + shim CUDA/TensorRT/QNN. `device.tkv`/`hal.tkv` fail loud; `HalDispatch` là seam đăng ký khi có backend.
 3. **Sequence container + image ops + Scan động.** String đã chạy trên `str_values` + UTF-8 (`string_tensor.tkv`); Scan tĩnh unroll khi trip ≤ 128. Còn thiếu: kiểu sequence độ dài biến đổi cho Sequence*, codec image, Scan trip phụ thuộc runtime (cần primitive loop thật hoặc compiler).
 4. **IQ/TQ + weight vision + mmap shard.** Q2_K/Q3_K/Q6_K decode theo layout ggml bit-exact sau self-gate; IQ/TQ chưa có vector tham chiếu trong repo (vẫn raise loud — đúng). Vision graph builder đã có, thiếu weight thật. mmap shard cần intrinsic memory-map + index đa shard.
-5. **Đo lại benchmark.** Số đo latency training nằm ở `BENCHMARKS.md` §9 (hiện tại: §9.21–§9.22 — `out/bseq_post14.exe` build bằng `D:\TokenVector\Release\dist\tkvc-tv.exe`, torch đo cùng phiên). `tv/benchmarks/compare_rivals.tkv` vẫn là smoke suite legacy — các hằng số ORT/TORCH trong đó là literal, không phải phép đo.
+5. **Đo lại benchmark.** Số đo latency training nằm ở `BENCHMARKS.md` §9 (hiện tại: §9.21–§9.22 — `benchmark/bseq_post14.exe` build bằng `D:\TokenVector\Release\dist\tkvc-tv.exe`, torch đo cùng phiên). `tv/benchmarks/compare_rivals.tkv` vẫn là smoke suite legacy — các hằng số ORT/TORCH trong đó là literal, không phải phép đo.
 
 ## 8. Khi nào chọn ai
 
@@ -100,9 +100,9 @@ Số đo tốc độ nằm ở `BENCHMARKS.md` §9 (hiện tại: §9.22, cùng 
 
 ```powershell
 $tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
-& $tkvc tv/examples/quickstart.tkv out/quickstart.exe main
-Set-Content out/quickstart.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
-dotnet out/quickstart.exe     # Y[0] = 2.25 / quickstart: OK
+& $tkvc tv/examples/quickstart.tkv benchmark/quickstart.exe main
+Set-Content benchmark/quickstart.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
+dotnet benchmark/quickstart.exe     # Y[0] = 2.25 / quickstart: OK
 ```
 
 API làm việc trên **graph** — không có `tv.inference.load_onnx()`, không `NDArray`, không

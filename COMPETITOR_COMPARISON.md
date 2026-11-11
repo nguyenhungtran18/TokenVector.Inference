@@ -95,7 +95,7 @@ Remaining — each with its precise technical reason:
 2. **GPU/NPU compute.** The `.tkv` language as defined has no GPU constructs: no thread blocks, shared memory, tensor-core MMA, or kernel-launch API — every existing `extern def` is scalar/host-side (alloc, IO, codecs, time). A GPU backend means extending the tv **compiler** itself (TokenVector main repo, not this one) plus vendor SDK shims (CUDA/TensorRT/QNN). `device.tkv` / `hal.tkv` stubs exist so this fails loudly instead of silently; `HalDispatch` is the registration seam once a backend exists.
 3. **Full sequence container + image data ops + dynamic Scan.** String tensors ride `str_values` + UTF-8 byte pools (`string_tensor.tkv`); static `Scan` unrolls when trip ≤ 128 (`_expand_scan`). Remaining: first-class variable-length **sequence** type for Sequence* ops, image tensor codecs, and Scan whose trip depends on runtime data (needs a real loop primitive or compiler support).
 4. **IQ/TQ dequant + vision encoder weights + GGUF-shard mmap.** Q2_K/Q3_K/Q6_K are now decoded from bit-exact ggml layouts behind a self-gate; IQ/TQ nonlinear layouts still lack a checked reference vector set in-tree (silent-corruption risk remains — loud error is correct). Vision needs actual ViT/CLIP **weights** (graph builder exists). Sharded mmap needs a memory-mapped-file host intrinsic plus multi-shard index resolution.
-5. **Re-measured benchmarks.** Training latency numbers live in `BENCHMARKS.md` §9 (current: §9.21–§9.22 — `out/bseq_post14.exe` built by `D:\TokenVector\Release\dist\tkvc-tv.exe`, torch measured same-session). `tv/benchmarks/compare_rivals.tkv` remains a legacy smoke suite — its ORT/TORCH constants are literals, not measurements.
+5. **Re-measured benchmarks.** Training latency numbers live in `BENCHMARKS.md` §9 (current: §9.21–§9.22 — `benchmark/bseq_post14.exe` built by `D:\TokenVector\Release\dist\tkvc-tv.exe`, torch measured same-session). `tv/benchmarks/compare_rivals.tkv` remains a legacy smoke suite — its ORT/TORCH constants are literals, not measurements.
 
 ## 8. When to pick whom
 
@@ -110,9 +110,9 @@ Remaining — each with its precise technical reason:
 
 ```powershell
 $tkvc = "D:\TokenVector\Release\dist\tkvc-tv.exe"
-& $tkvc tv/examples/quickstart.tkv out/quickstart.exe main
-Set-Content out/quickstart.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
-dotnet out/quickstart.exe   # Y[0] = 2.25 / quickstart: OK
+& $tkvc tv/examples/quickstart.tkv benchmark/quickstart.exe main
+Set-Content benchmark/quickstart.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
+dotnet benchmark/quickstart.exe   # Y[0] = 2.25 / quickstart: OK
 ```
 
 The API is graph-based — there is no `tv.inference.load_onnx()`, no `NDArray` and no

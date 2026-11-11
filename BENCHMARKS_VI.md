@@ -25,10 +25,10 @@ gpt2_full_tests **33/33**.
 
 Xem `BENCHMARKS.md` §1. Tóm tắt:
 
-- TKV: `& $tkvc tv/tests/simd_bench_124m_seq.tkv out/bseq.exe main`, cấu hình
+- TKV: `& $tkvc tv/tests/simd_bench_124m_seq.tkv benchmark/bseq.exe main`, cấu hình
   `tv/tests/_seq_cfg.txt` = `<seq>/<mode>/<steps>/<warmup>` (`mode=0` fwd+bwd,
   `mode=1` full step best-of-3, `mode=2` phân rã 5 pha min-of-2), chạy bằng
-  `dotnet out/bseq.exe` (cần `.runtimeconfig.json` cạnh exe — xem §9.17 của
+  `dotnet benchmark/bseq.exe` (cần `.runtimeconfig.json` cạnh exe — xem §9.17 của
   bản tiếng Anh).
 - torch: `python tools/bench_torch.py d <seq>` (fwd+bwd & full step) và
   `python tools/bench_torch.py e <seq>` (phân rã pha, T=1 và T=14).

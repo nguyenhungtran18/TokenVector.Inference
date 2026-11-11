@@ -62,8 +62,8 @@ powershell -File tools\run_cases.ps1 -Compiler $tkvc
 bash tools/gate_f32.sh
 # trainer gate (15/15):
 & $tkvc tv/tests/trainer_tests.tkv out\trainer_tests.exe main
-Set-Content out/trainer_tests.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
-dotnet out/trainer_tests.exe
+Set-Content benchmark/trainer_tests.runtimeconfig.json '{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}'
+dotnet benchmark/trainer_tests.exe
 ```
 
 Paste dated results (counts, duration, commit hash) below when a full run is captured.

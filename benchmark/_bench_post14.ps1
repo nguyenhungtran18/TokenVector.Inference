@@ -1,4 +1,4 @@
-# BENCH MATRIX post-#14 - TKV (out/bseq_post14.exe, compiler moi) vs PyTorch,
+# BENCH MATRIX post-#14 - TKV (benchmark/bseq_post14.exe, compiler moi) vs PyTorch,
 # cung phien, cung may. seq 8/256/1024. mode 0 (fwd+bwd) / mode 1 (full step,
 # best-of-3) / mode 2 (pha 5 buoc, 1 lan) + torch tier d / e.
 $ErrorActionPreference = "Continue"
@@ -6,7 +6,7 @@ $root = "D:\TokenVector.Inference"
 Set-Location $root
 
 $cfg = "tv/tests/_seq_cfg.txt"
-$exe = "out/bseq_post14.exe"
+$exe = "benchmark/bseq_post14.exe"
 $origCfg = Get-Content $cfg -Raw
 $log = "out/_bench_matrix_post14_$(Get-Date -Format yyyyMMdd_HHmmss).log"
 function Say($s) { $s | Tee-Object -FilePath $log -Append }
