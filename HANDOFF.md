@@ -6858,3 +6858,112 @@ lớn không tốn thêm so với pin mảng nhỏ — GC chỉ ghi nhận handl
 - Dải nhiễu một lần đo: 46–110 ms (6 mẫu, _attn_pin.tkv)
 - IL: out/attnwrap.il L1849 (pinvoke), L3960–4130 (TkvTorchAttentionBwdM thân hàm)
 - Không sửa code production; chỉ thêm probe
+
+## §0.147 ĐO LẠI BLOCK BẰNG BEST-OF-N (sửa §0.141), VÀ `lmhead` PHA3 KHÔNG PHẢI TRANSPOSE-BOUND — `addmm_out` GỘP PHA3+PHA4 TIẾT KIỆM 103 ms
+
+Ngày 2026-11-11. Probe: `tv/tests/_blk_best.tkv` (block), `tools/simd_native/probe_lmhead_pha3.cpp`
+(lmhead). Không sửa code production.
+
+### 1. Bảng phân bổ `bwd` của §0.141 SAI — và nó còn tự mâu thuẫn
+
+§0.141 cộng `mlp_bwd` 90 + `attention_bwd` 88.5 + ln 6 = **184.5 ms/layer**, nhưng chính nó
+đo `gpt2_block_bwd` = **165.3 ms/layer**. Tổng các mảnh **vượt** cái thùng chứa 19 ms/layer.
+Không ai để ý vì hai con số nằm ở hai bảng khác nhau.
+
+Đo lại đúng cách (best-of-5, 12 bộ weight thật 324 MB, cùng `gflat` 475 MB, `simd=1`):
+
+| mảnh | ms/layer | ×12 | số cũ §0.141 |
+|---|---:|---:|---:|
+| `gpt2_block_bwd` (thùng chứa) | **165.4** | 1985 | 165.3 ✓ |
+| `gpt2_attention_bwd` | **79.4** | 953 | 88.5 ✗ |
+| `gpt2_mlp_bwd` (`save_inner=None`) | **65.1** | 781 | 90 ✗ |
+| ln1 + ln2 + glue (phần dư) | **20.9** | 251 | 6 ✗ |
+
+Giờ cộng lại khớp: 781 + 953 + 251 = **1985**. Thùng chứa 1985. Sạch.
+
+**Hai con số cũ sai vì đo một mẫu.** `attention_bwd` 88.5 → 79.4 (thổi 11%),
+`mlp_bwd` 90 → 65.1 (thổi **38%**). Đây là lỗi phương pháp thứ **năm** trong chuỗi
+§0.133/§0.140/§0.141/§0.146 — cùng một gốc: so một lần đo với best-of-N, hoặc không
+best-of-N gì cả.
+
+**Hệ quả cho thứ tự ưu tiên:** `mlp_bwd` không còn là "mục số 1" như §0.141 tuyên bố.
+781 ms là chi phí thật của 2 GEMM ATen + 1 GEMM recompute + gelu, và nó đã ở 358–489
+GFLOP/s. `attention_bwd` 953 ms mới là mảnh lớn nhất trong 12 layer.
+
+**`attention_bwd` 79.4 vs 54.5 (§0.146) — cả hai đúng, khác điều kiện.** 54.5 đo với 4 bộ
+weight (36 MB); 79.4 đo với 12 bộ (324 MB) trong đúng thứ tự production. Chênh 24.9 ms/layer
+là working set, không phải wrapper. §0.146 vẫn đúng: không có chi phí pin.
+
+### 2. `lmhead` pha3: KHÔNG phải transpose-bound. Nút là THƯ VIỆN.
+
+§0.140 §2 nghi `dl` bị đọc lại theo cột-block vì `dlT @ xf` dùng `transA`. Đo trực tiếp
+(`probe_lmhead_pha3.exe 1024 768 50257 5`), cùng 79.0 GFLOP, best-of-5:
+
+| biến thể | ms | GFLOP/s |
+|---|---:|---:|
+| A) `cblas_sgemm` TransA (**production**) | 255.3 | 310 |
+| B) `cblas_sgemm` NoTrans trên `dlT` materialize | 258.3 | 306 |
+| E) copy `dl`→`dlT` (196 MB, vòng scalar) | 236.3 | — |
+| C) ATen `mm(dl.t(), xf)` | 206.4 | 383 |
+| D) ATen `mm(dlT, xf)` | 206.1 | 384 |
+| H) ATen `mm(xf.t(), dl)` → `tmpT[E,V]` | 270.9 | 292 |
+
+**A ≈ B (255 vs 258).** Transpose không tốn gì. Giả thuyết "đọc lại theo cột-block" của
+§0.140 **SAI**. Và B + copy = 494 ms, tệ hơn A — materialize `dlT` là ý tồi, đừng làm.
+
+Cùng shape, đổi thư viện: **ATen 383 vs openblas 310 = 1.24x**. Pha2 cùng thư viện openblas
+đạt 557 GFLOP/s (§0.140), nên 310 của pha3 không phải trần máy — đó là openblas xử lý
+shape `m=50257, n=768, k=1024` kém.
+
+### 3. `addmm_out` gộp pha3 + pha4 — tiết kiệm 103 ms, không cần buffer `tmp`
+
+Pha4 hiện tại là `dwte += tmp` (36.5 ms, đọc+ghi 294 MB). ATen `addmm` làm được cả hai
+trong một lệnh, `beta=1`:
+
+| biến thể | ms | GFLOP/s |
+|---|---:|---:|
+| production: pha3 262.3 + pha4 36.5 | **298.8** | — |
+| ATen `addmm` (cấp phát mới) | 265.8 | 297 |
+| ATen `mm_out(tmp, dl.t(), xf)` | 201.8 | 392 |
+| **ATen `addmm_out(dwte, dwte, dl.t(), xf, 1, 1)`** | **195.9** | **403** |
+
+**195.9 vs 298.8 = −102.9 ms/step**, và bỏ luôn được `malloc` 147 MB cho `tmp`.
+`addmm_out` còn nhanh hơn `mm_out` vì không phải zero-fill `C`.
+
+### 4. Số thread: không đổi tốc độ trên bench thật, NHƯNG ĐỔI LOSS
+
+Quét `TKV_GEMM_THREADS` (env có sẵn, `tkv_simd_native.c` L118) trên `out/bseq_n10.dll`,
+seq1024 mode 1, 3 lần mỗi mức:
+
+| thread | ms (3 lần) | loss |
+|---|---|---|
+| 14 | 4813 / 4797 / 4687 | 13.442935 |
+| 20 | 4719 / 4688 / 4937 | 13.442925 |
+| 28 (auto) | 5484 / 4828 / 4688 | 13.442921 |
+
+**Tốc độ: không khác** (nhiễu ±400 ms nuốt hết). Kết luận "28 thread chậm hơn 14" đo trên
+probe cô lập **không tái lập trên bench thật** — đừng đổi thread count để lấy tốc độ.
+
+**Nhưng loss đổi theo thread count** (13.442935 / 13.442925 / 13.442921). Nghĩa là tính
+"bit-exact" hiện tại đã phụ thuộc số thread. Ghi lại để phiên sau không ngạc nhiên khi
+thấy loss lệch ở chữ số thứ 7.
+
+### 5. Verify
+
+- `_blk_best.tkv`: 12 bộ weight 324.14 MB, `gflat` 474.70 MB, warm 1 lượt rồi best-of-5
+- `probe_lmhead_pha3.exe 1024 768 50257 5`: `dl` 196.3 MB, `tmp` 147.2 MB, 79.0 GFLOP
+- `max_abs(A − C) = 2.19` trên `|tmp|` tổng 8.35e7 → lệch tương đối 2.6e-8, đúng mức
+  khác thư viện, không phải lỗi probe
+- BLAS nạp qua symbol `scipy_cblas_sgemm` (KHÔNG phải `cblas_sgemm` / `cblas_sgemm64_`)
+- `_seq_cfg.txt` vẫn `1024 / 1 / 1 / 1`
+- Không sửa code production nào
+
+### 6. Việc nên làm tiếp
+
+1. **`addmm_out` cho pha3+pha4** — −102.9 ms/step, đã đo, không cần buffer mới.
+   Điều kiện: chấp nhận loss lệch ~1e-7 (khác thư viện tích lũy). Cần quyết định waiver.
+2. **`attention_bwd` 953 ms** — mảnh lớn nhất trong 12 layer, không phải `mlp_bwd`.
+   Đường native vẫn chậm hơn ATen 1.26–1.62x (§0.143/§0.145) nên hướng cũ đã chết;
+   chưa có hướng mới.
+3. **ĐỪNG** materialize `dlT` (−236 ms, tệ hơn).
+4. **ĐỪNG** đổi `TKV_GEMM_THREADS` để lấy tốc độ — không có tốc độ để lấy.

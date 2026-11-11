@@ -1,0 +1,158 @@
+import tv.training.gpt2_ref124
+
+# Do lai block_bwd / attention_bwd / mlp_bwd voi 12 BO WEIGHT THAT (324 MB),
+# best-of-5. Sua hai loi cua _blk_cmp.tkv:
+#   1) _blk_cmp do MOT luot 12 layer -> mot mau, khong best-of-N
+#   2) khong tach rieng attention_bwd / mlp_bwd trong cung dieu kien
+# Muc dich: attention_bwd la 88.5 (do trong block that) hay 54.5 (do co lap)?
+#           Neu trong dieu kien production ma van ~54 thi con so 88.5 la nhieu.
+
+def _offs(base: 'i64', h: 'i64') -> 'list[i64]':
+    lo = []
+    lo.append(base)
+    lo.append(base + h)
+    lo.append(base + h + h)
+    lo.append(base + h + h + 3 * h * h)
+    lo.append(base + h + h + 3 * h * h + 3 * h)
+    lo.append(base + h + h + 3 * h * h + 3 * h + h * h)
+    lo.append(base + h + h + 3 * h * h + 3 * h + h * h + h)
+    lo.append(base + h + h + 3 * h * h + 3 * h + h * h + h + h)
+    lo.append(base + h + h + 3 * h * h + 3 * h + h * h + h + h + h)
+    lo.append(base + h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h)
+    lo.append(base + h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h)
+    lo.append(base + h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h)
+    return lo
+
+
+def main() -> 'i32':
+    n = 1024
+    h = HiddenSize
+    ih = 4 * h
+    V = VocabSize
+    NL = NLayers
+    print("=== 12 bo weight THAT, best-of-5: block_bwd vs attention_bwd vs mlp_bwd ===")
+
+    npar = V * h + MaxPos * h + h + h
+    npar = npar + NL * (h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h + h)
+    gt = t_zeros([npar])
+    gflat = gt.data
+
+    w1s = []
+    w2s = []
+    wqkv = []
+    wproj = []
+    ln1g = []
+    ln1b = []
+    ln2g = []
+    ln2b = []
+    b1s = []
+    b2s = []
+    bqkv = []
+    bproj = []
+    i = 0
+    while i < NL:
+        w1s.append(t_zeros([h, ih]))
+        w2s.append(t_zeros([ih, h]))
+        wqkv.append(t_zeros([h, 3 * h]))
+        wproj.append(t_zeros([h, h]))
+        ln1g.append(t_zeros([h]))
+        ln1b.append(t_zeros([h]))
+        ln2g.append(t_zeros([h]))
+        ln2b.append(t_zeros([h]))
+        b1s.append(t_zeros([ih]))
+        b2s.append(t_zeros([h]))
+        bqkv.append(t_zeros([3 * h]))
+        bproj.append(t_zeros([h]))
+        i = i + 1
+
+    x = t_zeros([n, h])
+    gout = t_zeros([n, h])
+    ibuf = t_zeros([n, ih])
+    dbuf = t_zeros([n, ih])
+    save_r = t_zeros([n, h])
+    save_a = t_zeros([n, h])
+    save_m = t_zeros([n, h])
+    save_ag = t_zeros([n, ih])
+    abuf = []
+    abuf.append(t_zeros([n, ih]))
+    abuf.append(t_zeros([n, h]))
+    j = 2
+    while j < 12:
+        abuf.append(t_zeros([n, ih]))
+        j = j + 1
+
+    base = V * h + MaxPos * h + h + h
+    stride = h + h + 3 * h * h + 3 * h + h * h + h + h + h + 4 * h * h + 4 * h + 4 * h * h + h
+    wmb = NL * (2 * h * ih + 4 * h * h + 4 * h) * 4 / 1048576.0
+    print("12 bo weight = " + str(wmb) + " MB   gflat = " + str(len(gflat) * 4 / 1048576.0) + " MB")
+
+    # ---- warm ----
+    i = 0
+    while i < NL:
+        lo = _offs(base + i * stride, h)
+        rb = gpt2_block_bwd(x, ln1g[i], ln1b[i], wqkv[i], bqkv[i], wproj[i], bproj[i],
+                            ln2g[i], ln2b[i], w1s[i], b1s[i], w2s[i], b2s[i], gout, 1,
+                            gflat, lo, save_r, save_a, save_m, None, save_ag, ibuf, dbuf, abuf)
+        ra = gpt2_attention_bwd(x, wqkv[i], bqkv[i], wproj[i], bproj[i], n, gout, 1,
+                                gflat, lo[2], lo[3], lo[4], lo[5], abuf)
+        rm = gpt2_mlp_bwd(save_m, w1s[i], b1s[i], w2s[i], b2s[i], n, gout, 1,
+                          gflat, lo[8], lo[9], lo[10], lo[11], None, save_ag, ibuf, dbuf, abuf)
+        i = i + 1
+    print("warm xong")
+
+    # ---- A) block_bwd x 12, best-of-5 ----
+    bestA = 999999.0
+    r = 0
+    while r < 5:
+        t0 = now_ms()
+        i = 0
+        while i < NL:
+            lo = _offs(base + i * stride, h)
+            rb = gpt2_block_bwd(x, ln1g[i], ln1b[i], wqkv[i], bqkv[i], wproj[i], bproj[i],
+                                ln2g[i], ln2b[i], w1s[i], b1s[i], w2s[i], b2s[i], gout, 1,
+                                gflat, lo, save_r, save_a, save_m, None, save_ag, ibuf, dbuf, abuf)
+            i = i + 1
+        t = now_ms() - t0
+        if t < bestA:
+            bestA = t
+        r = r + 1
+    print("A) BLOCK_BWD x12   best-of-5 = " + str(bestA) + " ms   TB = " + str(bestA / NL) + " ms/layer")
+
+    # ---- B) attention_bwd x 12, best-of-5 ----
+    bestB = 999999.0
+    r = 0
+    while r < 5:
+        t0 = now_ms()
+        i = 0
+        while i < NL:
+            lo = _offs(base + i * stride, h)
+            ra = gpt2_attention_bwd(x, wqkv[i], bqkv[i], wproj[i], bproj[i], n, gout, 1,
+                                    gflat, lo[2], lo[3], lo[4], lo[5], abuf)
+            i = i + 1
+        t = now_ms() - t0
+        if t < bestB:
+            bestB = t
+        r = r + 1
+    print("B) ATTENTION_BWD x12 best-of-5 = " + str(bestB) + " ms   TB = " + str(bestB / NL) + " ms/layer")
+
+    # ---- C) mlp_bwd x 12, best-of-5 ----
+    bestC = 999999.0
+    r = 0
+    while r < 5:
+        t0 = now_ms()
+        i = 0
+        while i < NL:
+            lo = _offs(base + i * stride, h)
+            rm = gpt2_mlp_bwd(save_m, w1s[i], b1s[i], w2s[i], b2s[i], n, gout, 1,
+                              gflat, lo[8], lo[9], lo[10], lo[11], None, save_ag, ibuf, dbuf, abuf)
+            i = i + 1
+        t = now_ms() - t0
+        if t < bestC:
+            bestC = t
+        r = r + 1
+    print("C) MLP_BWD x12     best-of-5 = " + str(bestC) + " ms   TB = " + str(bestC / NL) + " ms/layer")
+
+    print("---")
+    print("A - B - C = " + str(bestA - bestB - bestC) + " ms  (ln1+ln2+glue con lai)")
+    print("so cu: block 1984 (165.3/layer), attn 88.5/layer, mlp 90/layer")
+    return 0
