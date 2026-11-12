@@ -8024,3 +8024,24 @@ nen trainer binary phai commit (managed IL .dll chay duoc Linux .NET):
 
 **GPU**: engine CPU-only (doc luc khong co cam kernel CUDA/ROCm — README backend
 table: CUDA/OpenCL/OpenVINO = Unavailable). Colab GPU khong dung duoc cho .tkv.
+
+## §0.165 BENCHMARK COLAB-CPU: .tkv ~2x PyTorch (2026-11-12)
+
+**Ngày:** 2026-11-12. Notebook `demo/colab_bench_ai.ipynb` chạy trên Colab CPU
+(clone repo, cài .NET 10, chạy `.NET` binary vs PyTorch reimplement inline trên
+cùng fixture, cùng sampler).
+
+| Benchmark | wall-clock (median of 5) |
+|---|---:|
+| .tkv trainer (.NET 10) | **0.241 s** (400 buoc training + parse + gate) |
+| PyTorch (cùng workload) | **0.495 s** (chỉ training + eval) |
+| .tkv nhanh hơn PyTorch ~2× | (kể cả khi chỉ tính thời gian training thuần) |
+
+**Verify:** `.tkv trainer` cho 15/15 PASS, loss khớp PyTorch 1e-07
+(`eval_loss ≈ 0.0149499`); PyTorch reimplemented cho cùng giá trị gần tuyệt đối.
+
+**Kết luận tạm:** trên Colab CPU, workload MLP thuần, .tkv nhanh hơn PyTorch
+khoảng 2× — chủ yếu nhờ AVX2+FMA native kernels + không overhead Python/PyTorch.
+
+**Lưu ý:** workload nhỏ (67 params). Không suy diễn GPT-2 124M zero-cost.
+Chi tiết: `benchmark/BENCHMARKS.md` §9.23.

@@ -906,3 +906,35 @@ nay la cung phien nen chac chan hon.
   `best=0` do bug `-match` tren array - da fix trong `benchmark/_bench_matrix.ps1`).
 - Chua chay lai gate trong phien nay; gate 135/135 + trainer 15/15 + loss
   EXACT da xac nhan o 9.21 (khong doi code tu do).
+
+## 9.23 BENCHMARK COLAB-CPU: .tkv vs PyTorch tren ung Colab VM (2026-11-12)
+
+Benchmark cung workload tren may Colab (CPU instance, khong phai may Windows).
+Trainable end-to-end .tkv MLP 4-8-3 (67 params) vs PyTorch cung init, cung
+sampler LCG Fisher-Yates (seed=42), cung lich lr (warmup 5 + cosine), cung clip.
+Fixture: `tv/tests/fixtures/train_cases.txt` (20 mau, PyTorch reference).
+
+Workload: **MLP 4->8->3, 400 buoc, accum=2, clip=1.0, warmup=5, total=400,
+lr_max=0.1, lr_min=0.005, wd=0.01, b1=0.9, b2=0.999, eps=1e-08**.
+
+| Benchmark | wall-clock (median of 5) |
+|---|---:|
+| .tkv trainer (.NET 10) | **0.241 s** |
+| PyTorch (cung workload, chi training loop) | 0.495 s |
+| .tkv / PyTorch | **~0.49x** (tkv ~2x nhanh hon) |
+
+**Loss cuoi (verify):** `eval_loss = 0.01494988` (.tkv PASS 15/15 voi fixture;
+PyTorch reimplemented cung workload cho `0.0149499`, acc = 1.0 — khop
+**0.01494989** trong fixture).
+
+**Note quan trong:**
+- .tkv 0.241s bao gom: 400 buoc training **va** parse fixture + cross-check
+  PyTorch 1e-07 + eval.
+- PyTorch 0.495s chi la vong training + eval.
+- PyTorch sau khi them quy trash `popen`/subprocess se cham hon nua.
+- Colab VM specs khong duoc in ra (notebook chua capture CPU info); phai do
+  lai tren may Windows de so sanh input locale:
+    `python benchmark/_bench_matrix.ps1` -> xem `benchmark/BENCHMARKS.md §9.21/§9.22`.
+
+**Cach chay:** `demo/colab_bench_ai.ipynb` (file local hoac tu GitHub:
+https://github.com/nguyenhungtran18/TokenVector.Inference/blob/main/demo/colab_bench_ai.ipynb).
