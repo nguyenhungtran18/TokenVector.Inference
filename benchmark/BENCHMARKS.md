@@ -992,3 +992,41 @@ trên **cùng một máy** (Windows native và WSL2 Ubuntu), GPT-2 124M random i
   sửa) → chưa chứng minh được cuBLAS dispatch thực sự được dùng.
 - Linux vẫn **không có SIMD cho op phần tử** (chỉ GEMM/attention/AdamW nằm trong C
   `.so`); đây là nội dung Phase B.
+
+## 9.25 COLAB T4: `.tkv` 124M CHẠY ĐƯỢC NHƯNG **CHẠM TRẦN CPU** (2026-11-12)
+
+Notebook `demo/colab_bench_ai_gpu.ipynb` chạy trên Colab GPU (Tesla T4 15 360 MiB,
+CUDA 13.0, driver 580.82.07), .NET SDK 10.0.404, Ubuntu 24.04, **2 vCPU**.
+seq1024, mode 0 (fwd+bwd, không optimizer), 1 warmup + 1 bước đo.
+
+| Bên | Thời gian | Ghi chú |
+|---|---:|---|
+| `.tkv` fwd | **9 674 ms** | CPU (C `.so`, 2 thread) |
+| `.tkv` bwd | **17 094 ms** | CPU |
+| `.tkv` fwd+bwd | **26 768 ms** | loss 10.760399 |
+| PyTorch **CPU** (cùng VM) | **10 540.5 ms** | `TKV_BENCH_DEVICE=cpu`, loss 9.8851 |
+| PyTorch "CUDA" (log cũ) | 10 540.5 ms | **thực chất là CPU** — xem bên dưới |
+
+**Hai sai lệch phải nói rõ (không tự sửa số):**
+
+1. **"PyTorch CUDA" trong log cũ KHÔNG phải CUDA.** `benchmark/bench_torch.py` thời
+   điểm đó không có `.cuda()`/`device` nào — model và tensor mặc định ở CPU. Vì vậy
+   con số 10 540 ms là **PyTorch CPU trên 2 vCPU**, không phải T4.
+   Đã thêm `TKV_BENCH_DEVICE=cpu|cuda` + `torch.cuda.synchronize()` (mặc định vẫn
+   `cpu` để không đổi số liệu cũ) để lần chạy sau mới có số CUDA thật.
+2. **cuBLAS nạp được nhưng GPU không được dùng.** `TkvCUDA_Available() = 1`, nhưng
+   hook nằm ở `SgemmF32(a,b,o,n)` — hàm này chỉ được gọi từ **kernel tile** bên trong
+   `SgemmRect`/`SgemmFull` với `n = T` (kích thước tile, `T < 512`), nên điều kiện
+   `n >= 512` **luôn sai** → `TkvCUDA_SgemmF32` trả 0 ngay, không `cudaMalloc`.
+   Ngoài ra ngay cả khi `n >= 512` thì mỗi lần gọi vẫn `cudaMalloc` 3 buffer + 2 H2D
+   + 1 D2H, nằm trong vòng lặp tile → không thể nhanh hơn CPU.
+
+**Kết luận trung thực:** sau Phase A, `.tkv` 124M **chạy được** trên Colab (hết crash
+kernel32) nhưng **chậm hơn PyTorch CPU ~2.54×** (26 768 / 10 540). Nguyên nhân:
+2 vCPU, không có kernel ASM AVX2 trên Linux (op phần tử vô hướng), GEMM C nội bộ so
+với MKL/oneDNN của torch. **Chưa có bằng chứng nào cho việc `.tkv` dùng GPU.**
+
+**Việc còn lại để có số GPU thật:** (a) chạy lại notebook với `TKV_BENCH_DEVICE=cuda`
+để có baseline T4; (b) muốn `.tkv` dùng GPU thì phải hook ở tầng GEMM đầy đủ
+(`SgemmRect`/`SgemmFull`/`SgemmPacked`) + giữ weight trên device (xem
+`docs/PLAN_GPU_BACKEND.md` §P1/P2).

@@ -7,6 +7,25 @@ step-time ≥ 2× so với CPU, và giữ nguyên parity/gate hiện tại.
 
 ---
 
+## 0. TRẠNG THÁI THỰC TẾ (2026-11-12) — hook P0 ĐÃ CÀI NHƯNG KHÔNG BAO GIỜ ĐƯỢC GỌI
+
+Bằng chứng từ Colab T4 (`BENCHMARKS.md` §9.25):
+
+- `TkvCUDA_Available() = 1` → dlopen `libcublas.so.12` + `libcudart.so.12` thành công.
+- Nhưng `TkvCUDA_SgemmF32(a,b,o,n)` **chưa từng thực thi GEMM trên GPU**, vì nó được
+  gọi từ `SgemmF32(a,b,o,T)` — hàm này chỉ là **kernel tile T×T** bên trong
+  `SgemmRect` / `SgemmFull` / `SgemmPacked`, với `T` là tile size (< 512). Điều kiện
+  `n >= 512` trong hook luôn sai.
+- Ngoài ra, kể cả nếu điều kiện đúng, mỗi lần gọi vẫn `cudaMalloc` 3 buffer + 2 H2D
+  + 1 D2H → nằm trong vòng lặp tile thì chắc chắn chậm hơn CPU.
+
+**Hệ quả cho kế hoạch:** P0 (hook `SgemmF32`) coi như *chưa đạt*. Muốn GPU có tác dụng
+phải làm đúng P1/P2: hook ở tầng GEMM **đầy đủ** (có `m,n,k`, `transA/transB`) và
+**giữ weight/activation trên device** (device-resident), chỉ copy phần thay đổi.
+Cần đo phase breakdown trên Colab trước khi quyết định hook ở đâu.
+
+---
+
 ## 1. Hiện trạng cụ thể
 
 | Thành phần | Trạng thái |

@@ -7,6 +7,7 @@
 # Hop dong so: fp32, dropout=0, AdamW eps=1e-8 betas=(0.9,0.999) wd=0 — cung
 # tham so hop dong cua tkv (_mk_opt). Moi lan do = forward + backward (+ step).
 import sys
+import os
 import time
 import statistics
 
@@ -109,17 +110,28 @@ def tier_c():
 def tier_d(seq=1024):
     """124M o seq thuc (P4) — CUNG token voi tv/tests/simd_bench_124m_seq.tkv
     (ids[i] = (i*37+11) % 50257, pos[i] = i) de so sanh apple-to-apple.
-    Do 2 phan: fwd+bwd (doi chieu tkv mode 0) va full step (mode 1)."""
+    Do 2 phan: fwd+bwd (doi chieu tkv mode 0) va full step (mode 1).
+
+    Thiet bi: `TKV_BENCH_DEVICE=cpu|cuda` (mac dinh cpu de giu so lieu cu).
+    Tren may co GPU, chay CA HAI de tach ro "CPU apples-to-apples" va
+    "PyTorch tren GPU" (2026-11-12: notebook Colab truoc day gan nhan sai la
+    "PyTorch CUDA" nhung script khong he chuyen tensor/model sang CUDA)."""
     from transformers import GPT2Config
     from transformers import GPT2LMHeadModel
+    dev = os.environ.get("TKV_BENCH_DEVICE", "cpu").strip().lower()
+    if dev == "cuda" and not torch.cuda.is_available():
+        print("BENCH: TKV_BENCH_DEVICE=cuda nhung CUDA khong co -> dung cpu")
+        dev = "cpu"
     ids_l = [(i * 37 + 11) % 50257 for i in range(seq)]
     pos_l = list(range(seq))
-    ids = torch.tensor([ids_l], dtype=torch.long)
-    pos = torch.tensor([pos_l], dtype=torch.long)
+    ids = torch.tensor([ids_l], dtype=torch.long).to(dev)
+    pos = torch.tensor([pos_l], dtype=torch.long).to(dev)
     cfg = GPT2Config(vocab_size=50257, n_positions=1024, n_embd=768, n_head=12,
                      n_layer=12, resid_pdrop=0.0, embd_pdrop=0.0, attn_pdrop=0.0)
     torch.manual_seed(7)
-    model = GPT2LMHeadModel(cfg)
+    model = GPT2LMHeadModel(cfg).to(dev)
+    if dev == "cuda":
+        torch.cuda.synchronize()
     npar = sum(p.numel() for p in model.parameters())
     opt = torch.optim.AdamW(model.parameters(), lr=0.0025, betas=(0.9, 0.999),
                             eps=1e-8, weight_decay=0.0)
@@ -131,17 +143,25 @@ def tier_d(seq=1024):
     l0 = loss_fn().item()
 
     def fb():
+        if dev == "cuda":
+            torch.cuda.synchronize()
         opt.zero_grad(set_to_none=True)
         loss_fn().backward()
+        if dev == "cuda":
+            torch.cuda.synchronize()
 
     def step():
+        if dev == "cuda":
+            torch.cuda.synchronize()
         opt.zero_grad(set_to_none=True)
         loss_fn().backward()
         opt.step()
+        if dev == "cuda":
+            torch.cuda.synchronize()
 
-    report("D torch GPT-2 124M fwd+bwd seq%d" % seq, timeit(fb, 1, 2),
+    report("D torch GPT-2 124M fwd+bwd seq%d dev=%s" % (seq, dev), timeit(fb, 1, 2),
            "loss=%.4f params=%d" % (l0, npar))
-    report("D torch GPT-2 124M full step seq%d" % seq, timeit(step, 1, 2),
+    report("D torch GPT-2 124M full step seq%d dev=%s" % (seq, dev), timeit(step, 1, 2),
            "loss=%.4f params=%d" % (l0, npar))
 
 

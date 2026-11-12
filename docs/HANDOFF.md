@@ -8084,3 +8084,33 @@ trong lúc bench.
 **Chưa làm:** chưa chạy lại notebook trên T4 → **chưa có bằng chứng GPU được dùng**
 (GPU RAM/`TkvCUDA_Available`) và chưa có số `.tkv` vs torch trên GPU. Chi tiết:
 `benchmark/BENCHMARKS.md` §9.24; kế hoạch: `docs/PLAN_COLAB_CROSS_PLATFORM.md`.
+
+## §0.167 COLAB T4: .tkv CHAY DUOC, GPU KHONG DUOC DUNG (2026-11-12)
+
+**Log thật** (T4 15 GB, .NET SDK 10.0.404, Ubuntu 24.04, 2 vCPU), seq1024 mode 0:
+
+| Bên | fwd+bwd |
+|---|---:|
+| `.tkv` (CPU) | **26 768 ms** (fwd 9 674 + bwd 17 094), loss 10.760399 |
+| PyTorch **CPU** cùng VM | **10 540.5 ms**, loss 9.8851 |
+
+`.tkv` chậm hơn PyTorch CPU **2.54×**.
+
+**Hai điều phải sửa trong cách đọc số cũ:**
+
+1. `benchmark/bench_torch.py` **không hề chuyển model/tensor sang CUDA** — con số
+   10,5 s trong log trước là **torch CPU**, không phải T4. Đã thêm
+   `TKV_BENCH_DEVICE=cpu|cuda` + `torch.cuda.synchronize()` (mặc định `cpu`).
+2. `TkvCUDA_Available() = 1` chỉ nghĩa là **dlopen được cuBLAS**. Hook
+   `TkvCUDA_SgemmF32` nằm trong `SgemmF32(a,b,o,n)` mà hàm này chỉ được gọi từ kernel
+   **tile** (`n = T < 512`) → điều kiện `n >= 512` luôn sai → **không lần nào chạy
+   trên GPU**. Thêm nữa per-call `cudaMalloc` + 3 memcpy nằm trong vòng lặp tile.
+
+**Notebook đã sửa:** bỏ `pkill -f nvidia-smi` (nó giết luôn shell của cell — log GPU
+bị mất), thay bằng `timeout 150 nvidia-smi --loop=2`; thêm 2 lần chạy torch
+(`cpu` để apples-to-apples, `cuda` để có baseline GPU thật); markdown ghi rõ trạng
+thái "GPU chưa được dùng".
+
+**Bước tiếp (chưa làm):** (a) lấy số torch CUDA thật trên T4; (b) muốn `.tkv` dùng GPU
+phải hook ở tầng GEMM đầy đủ + giữ weight resident trên device — xem
+`docs/PLAN_GPU_BACKEND.md`. Chi tiết số: `benchmark/BENCHMARKS.md` §9.25.
