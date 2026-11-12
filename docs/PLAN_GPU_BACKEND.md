@@ -24,6 +24,12 @@ phải làm đúng P1/P2: hook ở tầng GEMM **đầy đủ** (có `m,n,k`, `t
 **giữ weight/activation trên device** (device-resident), chỉ copy phần thay đổi.
 Cần đo phase breakdown trên Colab trước khi quyết định hook ở đâu.
 
+**Số đo mới nhất (2026-11-12, `BENCHMARKS.md` §9.26):** `.tkv` 26 230 ms vs torch CPU
+10 243.7 ms (**2.56×** chậm hơn) vs torch CUDA 271.7 ms (**96.5×** chậm hơn).
+GPU chỉ được "chạm" ở mức CUDA context (117 → 243 MiB, util 0–6%) — xác nhận hook
+không bao giờ chạy GEMM. Vì vậy P1 bắt buộc phải hook `SgemmRect`/`SgemmFull`/
+`SgemmPacked` (có `m,n,k`) và bỏ test `n >= 512`.
+
 ---
 
 ## 1. Hiện trạng cụ thể

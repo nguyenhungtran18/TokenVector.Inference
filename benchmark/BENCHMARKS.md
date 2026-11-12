@@ -1030,3 +1030,43 @@ với MKL/oneDNN của torch. **Chưa có bằng chứng nào cho việc `.tkv` 
 để có baseline T4; (b) muốn `.tkv` dùng GPU thì phải hook ở tầng GEMM đầy đủ
 (`SgemmRect`/`SgemmFull`/`SgemmPacked`) + giữ weight trên device (xem
 `docs/PLAN_GPU_BACKEND.md` §P1/P2).
+
+## 9.26 COLAB T4: BASELINE 3 CHIỀU — `.tkv` 26.2 s / torch CPU 10.2 s / torch CUDA 0.27 s (2026-11-12)
+
+Chạy lại `demo/colab_bench_ai_gpu.ipynb` (commit `db5ad47`) trên **cùng một phiên**
+Colab: Tesla T4 15 360 MiB, driver 580.82.07, CUDA 13.0, Ubuntu 24.04, .NET SDK
+10.0.404, **2 vCPU**. GPT-2 124M (vocab 50 257, n_embd 768, 12 layer, 12 head),
+seq 1024, fp32, dropout 0, warmup 1 + 1 bước đo.
+
+| Bên | fwd+bwd | full step (fwd+bwd+AdamW) |
+|---|---:|---:|
+| `.tkv` (CPU, C `.so`, 2 thread) | **26 230 ms** (fwd 8 727 + bwd 17 503) | — |
+| PyTorch **CPU** cùng VM | **10 243.7 ms** | **11 078.9 ms** |
+| PyTorch **CUDA** (T4) | **271.7 ms** | **307.1 ms** |
+
+Tỷ lệ: `.tkv` / torch CPU = **2.56×**; `.tkv` / torch CUDA = **96.5×**;
+torch CPU / torch CUDA = **37.7×**.
+Độ lặp lại: `.tkv` 26 230 ms (phiên này) vs 26 768 ms (§9.25) → lệch 2.1%.
+Loss `.tkv` 10.760399 vs torch 9.8851 — **khác init, không so sánh được**.
+
+**Log GPU trong pha `.tkv` (mỗi dòng = 1 mẫu 2 s):**
+
+```
+117 MiB, 0 %      117 MiB, 4 %      231 MiB, 1 %
+231 MiB, 4 %      231 MiB, 6 %      243 MiB, 6 %
+```
+
+Đây **không phải** GEMM trên GPU. `TkvCUDA_SgemmF32` gọi `cuda_init()` ở dòng đầu
+(trước khi kiểm tra `n < 512`) → `cublasCreate_v2` tạo **CUDA context** ≈ 126 MiB
+(117 → 243 MiB) và vài kernel khởi tạo (util 4–6%). Sau đó `n = T` (tile `T = 256`
+hoặc `T = 64`, xem `SgemmFull`/`SgemmPacked`/`smm_fwd_at`) luôn `< 512` → trả 0
+ngay, **không `cudaMalloc`, không `cublasSgemm`**.
+
+**Bằng chứng chiều ngược lại (torch CUDA thật):** trong pha `TKV_BENCH_DEVICE=cuda`
+log ghi `2715 MiB, 100 %` → GPU thật sự chạy, nên 271.7 ms là số T4 thật.
+
+**Kết luận trung thực:** engine `.tkv` hiện **chỉ dùng CPU**. Trên 2 vCPU của Colab
+nó chậm hơn PyTorch CPU **2.56×** (nguyên nhân: không có kernel ASM AVX2 trên Linux
+→ op phần tử chạy vô hướng; GEMM C nội bộ so với MKL/oneDNN của torch). Muốn có số
+GPU cho `.tkv` phải làm P1/P2 trong `docs/PLAN_GPU_BACKEND.md`, không phải chỉnh
+ngưỡng `n >= 512`.

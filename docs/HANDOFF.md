@@ -8114,3 +8114,27 @@ thái "GPU chưa được dùng".
 **Bước tiếp (chưa làm):** (a) lấy số torch CUDA thật trên T4; (b) muốn `.tkv` dùng GPU
 phải hook ở tầng GEMM đầy đủ + giữ weight resident trên device — xem
 `docs/PLAN_GPU_BACKEND.md`. Chi tiết số: `benchmark/BENCHMARKS.md` §9.25.
+
+## §0.168 COLAB T4: BASELINE 3 CHIEU, .tkv = 2.56x torch CPU (2026-11-12)
+
+Cùng phiên, cùng VM (T4, Ubuntu 24.04, .NET 10.0.404, 2 vCPU), seq1024, GPT-2 124M:
+
+| Bên | fwd+bwd | full step |
+|---|---:|---:|
+| `.tkv` (CPU) | **26 230 ms** (fwd 8 727 + bwd 17 503) | — |
+| torch CPU | 10 243.7 ms | 11 078.9 ms |
+| torch CUDA (T4) | 271.7 ms | 307.1 ms |
+
+Tỷ lệ: `.tkv`/torch-CPU **2.56×**, `.tkv`/torch-CUDA **96.5×**, torch-CPU/torch-CUDA 37.7×.
+Lặp lại tốt: 26 230 vs 26 768 ms (2.1%). Loss khác nhau (10.760399 vs 9.8851) do
+init khác nhau — không phải sai số.
+
+**Log GPU pha `.tkv`:** 117 → 243 MiB, util 0–6%. Đây là **CUDA context** do
+`cuda_init()` → `cublasCreate_v2` (gọi trước khi check `n < 512`), **không phải GEMM**.
+Tile `T = 256/64` < 512 nên hook luôn trả 0, không `cudaMalloc`, không `cublasSgemm`.
+Pha torch CUDA thì log ghi `2715 MiB, 100 %` → 271.7 ms là số T4 thật.
+
+**Trạng thái:** engine CPU-only trên Linux; chậm hơn torch CPU 2.56× vì op phần tử
+không có SIMD (ASM AVX2 là ABI Windows). Muốn `.tkv` dùng GPU: P1/P2
+(`docs/PLAN_GPU_BACKEND.md`) — hook GEMM đầy đủ + weight resident, không phải nới ngưỡng.
+Chi tiết: `benchmark/BENCHMARKS.md` §9.26.
