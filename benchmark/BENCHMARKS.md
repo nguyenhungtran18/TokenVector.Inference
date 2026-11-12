@@ -1108,3 +1108,36 @@ Nói cách khác: **chưa từng có lần đo nào của `.tkv` dùng BLAS**, d
 `231 MiB, 6%` (phiên trước thấy `2715 MiB, 100%`). Sampler `--loop=2` ghi ra file nên
 phần cuối có thể chưa flush; bản thân 279.5 ms cho 124M seq1024 là bất khả thi trên
 2 vCPU nên vẫn kết luận torch CUDA thật, nhưng **log phiên này không tự chứng minh**.
+
+## 9.28 BLAS TRÊN LINUX: ĐÃ NẠP ĐƯỢC NHƯNG **CHẬM HƠN** KERNEL NỘI BỘ (2026-11-12)
+
+Sửa `tkv_blas_load()` (commit `7e653be`, repo TokenVector) để Linux nạp được BLAS:
+thử soname `libscipy_openblas64_.so` / `libopenblas64_.so.0` / `libopenblas.so.0` /
+`libmkl_rt.so.2`, rồi `glob()` các bản có hash trong `numpy.libs`. Linux **mặc định
+TẮT** (opt-in bằng `TKV_GEMM_BLAS=1` hoặc `TKV_GEMM_BLAS_PATH=...`) để giữ loss
+bit-identical; thêm ngưỡng `TKV_GEMM_BLAS_MIN_N` (Linux mặc định 512, Windows 0 =
+hành vi cũ) vì gọi BLAS cho tile `n = T` (64/256) là lỗ.
+
+**Đo trên WSL2** (28 logical core, OpenBLAS 0.3.20 `libopenblas.so.0`, seq1024, mode 2,
+3 vòng xen kẽ native/BLAS, cùng một `.so`, `TKV_GEMM_BLAS_MIN_N=512`):
+
+| Pha | native (3 vòng) | BLAS (3 vòng) | BLAS/native |
+|---|---:|---:|---:|
+| fwd | 1 962 / 1 980 / 2 011 (TB 1 984) | 2 682 / 2 956 / 2 993 (TB 2 877) | **1.45× chậm hơn** |
+| bwd | 5 396 / 5 473 / 5 526 (TB 5 465) | 5 798 / 5 799 / 5 751 (TB 5 783) | **1.06× chậm hơn** |
+| **TỔNG** | 8 649 / 8 777 / 8 873 (**TB 8 766**) | 9 802 / 10 091 / 10 111 (**TB 10 001**) | **1.14× chậm hơn** |
+
+Loss `25.407898` (native) vs `25.40787` (BLAS) — khác ở chữ số thứ 6 do thứ tự cộng,
+không phải sai số logic.
+
+**Kết luận (phủ định, phải ghi lại):** bật BLAS **không** thu hẹp khoảng cách với
+torch; ở 14 core nó còn chậm hơn kernel AVX2 nội bộ (overhead gọi BLAS + thread pool
+riêng của OpenBLAS cạnh pool pthread của engine, và kernel nội bộ đã block cache theo
+đúng shape). Vì vậy **GEMM không phải chỗ đáng tối ưu tiếp**; giả thuyết còn lại cho
+khoảng cách 2.4–2.8× trên Colab là **op phần tử chạy vô hướng trên Linux** (kernel ASM
+AVX2 chỉ có cho ABI Windows x64) — cần đo/kiểm chứng ở Phase B.
+
+**Không đo được trên Windows:** `tkv_simd_native.c` hiện **không build được bằng MSVC**
+(`build.ps1`) — bản `HEAD` cũng lỗi y hệt (`t_nested` undeclared, `C2143`), tức lỗi có
+sẵn từ trước, không liên quan thay đổi này; và `demo/tkv_simd_native.dll` trong repo là
+ELF nên bench Windows cần dựng lại DLL PE (chưa làm).

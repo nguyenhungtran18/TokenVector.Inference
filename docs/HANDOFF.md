@@ -8168,3 +8168,28 @@ là **kernel AVX2 C nội bộ**, chưa lần nào dùng BLAS.
 `TKV_GEMM_BLAS_PATH`), giữ nguyên hành vi Windows; (b) nếu GEMM không phải thủ phạm
 chính thì mới tới `System.Runtime.Intrinsics`/intrinsics trong `.so` cho op phần tử.
 Chi tiết: `benchmark/BENCHMARKS.md` §9.27.
+
+## §0.170 BLAS TREN LINUX: NAP DUOC NHUNG CHAM HON (2026-11-12)
+
+Đã sửa `tkv_blas_load()` (repo TokenVector, commit `7e653be`): Linux thử soname
+(`libopenblas.so.0`, `libopenblas64_.so.0`, `libmkl_rt.so.2`…) + `glob()` bản hash
+trong `numpy.libs`; **mặc định TẮT** trên Linux (opt-in `TKV_GEMM_BLAS=1` hoặc
+`TKV_GEMM_BLAS_PATH`), `TKV_GEMM_BLAS_MIN_N` (Linux 512 / Windows 0) để không gọi
+BLAS cho tile `n = T`.
+
+**Đo WSL2 (28 core), seq1024 mode 2, 3 vòng xen kẽ, cùng `.so`:**
+
+| | native | BLAS 512 | tỷ lệ |
+|---|---:|---:|---:|
+| fwd | 1 984 | 2 877 | 1.45× chậm |
+| bwd | 5 465 | 5 783 | 1.06× chậm |
+| TỔNG | **8 766** | **10 001** | **1.14× chậm** |
+
+Loss 25.407898 vs 25.40787 (khác chữ số thứ 6 do thứ tự cộng).
+
+⇒ **BLAS không phải hướng tối ưu**; GEMM nội bộ đã nhanh hơn OpenBLAS ở shape này.
+Giả thuyết còn lại cho gap 2.4–2.8× trên Colab: **op phần tử vô hướng trên Linux**.
+
+**Chặn đo Windows:** MSVC không build được `tkv_simd_native.c` (cả bản HEAD cũng lỗi
+`t_nested`/`C2143`) và `demo/tkv_simd_native.dll` trong repo là ELF → muốn bench
+Windows phải dựng lại DLL PE trước. Chi tiết: `BENCHMARKS.md` §9.28.
