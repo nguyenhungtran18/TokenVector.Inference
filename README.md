@@ -64,6 +64,7 @@ benchmark/     benchmark tooling & scratch: bench_torch.py (PyTorch reference),
                binaries & dumps gitignored, scripts & logs tracked
 docs/          engineering docs;  docs/archive/ = completed/superseded plans
 packaging/     NuGet packaging (TokenVector.Inference.nuspec, pack.ps1) — build via packaging/pack.ps1
+demo/          Colab demo: colab_train_ai.ipynb (train AI on Google Colab, CPU/AVX2)
 reports/       dated parity & benchmark reports
 benchmark/BENCHMARKING.md step-by-step benchmark guide (EN + VI)
 benchmark/BENCHMARKS.md  master benchmark journal (current: §9.22)

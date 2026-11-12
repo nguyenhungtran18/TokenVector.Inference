@@ -64,6 +64,7 @@ benchmark/     Công cụ & scratch benchmark: bench_torch.py (đối chiếu Py
                binary/dump gitignored, script & log được track
 docs/          Tài liệu kỹ thuật;  docs/archive/ = kế hoạch đã xong/hết hiệu lực
 packaging/     Đóng gói NuGet (TokenVector.Inference.nuspec, pack.ps1) — build bằng packaging/pack.ps1
+demo/          Demo Colab: colab_train_ai.ipynb (train AI trên Google Colab, CPU/AVX2)
 reports/       Báo cáo parity & benchmark theo ngày
 benchmark/BENCHMARKING_VI.md  Hướng dẫn benchmark (VI + EN)
 benchmark/BENCHMARKS.md  Nhật ký benchmark chính (hiện tại: §9.22)
