@@ -1173,3 +1173,33 @@ OpenBLAS). Cần đo trên Colab: `.tkv` mode 2 với `TKV_GEMM_BLAS=1` (cell `[
 **Windows:** không chạy được `bseq` tại máy dev vì `demo/tkv_step124.dll` và
 `tkv_simd_native.dll` trong repo là ELF, không có bản PE `tkv_step124.dll` để đối chiếu
 → xác nhận Windows chỉ dựa vào `testkit_gate` (PASS) và nhánh `calli` giữ nguyên byte.
+
+## 9.30 COLAB 2 vCPU: BLAS **NHANH HƠN 1.54×** — GIẢ THUYẾT GEMM ĐÚNG, NHƯNG CÒN CÁCH TORCH 1.55×
+
+Phiên Colab mới (T4, 2 vCPU, Ubuntu 24.04, seq1024, GPT-2 124M, cùng phiên, cell `[5/5]`
+chạy `.tkv` native rồi `TKV_GEMM_BLAS=1` rồi torch `tier_e` 2 thread):
+
+| Pha | `.tkv` native | `.tkv` + OpenBLAS (`min_n=512`) | torch CPU (T=2) |
+|---|---:|---:|---:|
+| forward | 8 904 ms | 5 379 ms | 3 783 ms (fwd+CE) |
+| CE loss | 1 045 ms | 1 045 ms | (gộp trong fwd) |
+| backward | 20 954 ms | 13 453 ms | 8 115 ms |
+| opt.step | **454 ms** | 502 ms | 1 254 ms |
+| copyback | 97 ms | 98 ms | 41 ms (zero_grad) |
+| **TỔNG** | **31 454 ms** | **20 477 ms** | **13 247 ms** |
+
+- **BLAS nhanh hơn native 1.54×** (−35%): fwd −40%, bwd −36%. Loss `25.4079` (native) vs
+  `25.407888` (BLAS) — chỉ khác thứ tự cộng.
+- So với torch vẫn **1.55× chậm** (20 477 vs 13 247 ms); riêng AdamW `.tkv` nhanh hơn
+  2.5× (502 vs 1 254 ms) nên toàn bộ khoảng chênh nằm ở fwd (1.70×) + bwd (1.66×).
+- Cùng ngưỡng `min_n=512` này, trên WSL 28 core BLAS lại **chậm hơn** native 1.14×
+  (§9.28) ⇒ hành vi phụ thuộc số core, không phải "BLAS luôn tốt/xấu".
+
+**Chênh lệch tuyệt đối giữa các phiên (ghi lại để không so sai):** phiên này `.tkv` native
+mode 0 = 32 640 ms (fwd 11 827 + bwd 20 813), torch CPU = 11 880.9 ms (fwd+bwd) /
+13 039.6 ms (full step), torch CUDA 260.7 / 296.8 ms — VM phiên này chậm hơn phiên 1
+khoảng 16–25% (native 26 067, torch 10 243.7). Vì vậy **mọi so sánh ở trên chỉ dùng tỷ lệ
+trong cùng phiên**; không lấy số tuyệt đối giữa các phiên.
+
+**Còn lại cần giải thích:** tại sao GEMM nội bộ thua OpenBLAS ở 2 thread nhưng thắng ở
+28 thread. Số đo crossover trên WSL (T = 1/2/4/8) ở §9.31.

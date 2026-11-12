@@ -8224,3 +8224,29 @@ Colab: cell `[5/5]` giờ chạy `.tkv` native rồi `TKV_GEMM_BLAS=1` cùng phi
 (`BadImageFormatException` ở `TkvStep124EmbedNative`, lỗi có sẵn không liên quan
 thay đổi này). Xác nhận Windows chỉ dựa vào gate + nhánh `calli` giữ nguyên byte.
 Chi tiết: `BENCHMARKS.md` §9.29.
+
+## §0.172 COLAB 2 vCPU: BLAS NHANH HON 1.54x - GIA THUYET GEMM DUNG (2026-11-12)
+
+Cell `[5/5]` phiên Colab mới (T4, 2 vCPU, seq1024, cùng phiên):
+
+| Pha | `.tkv` native | `.tkv` + OpenBLAS | torch CPU T=2 |
+|---|---:|---:|---:|
+| fwd (+CE) | 8 904 + 1 045 | 5 379 + 1 045 | 3 783 |
+| bwd | 20 954 | 13 453 | 8 115 |
+| opt | 454 | 502 | 1 254 |
+| **TỔNG** | **31 454** | **20 477** | **13 247** |
+
+- **BLAS nhanh hơn native 1.54×** trên 2 vCPU (fwd −40%, bwd −36%) — **ngược** với WSL
+  28 core (§0.170: BLAS chậm hơn 1.14×). ⇒ Hành vi phụ thuộc số core, phải chọn theo
+  môi trường, không thể "bật BLAS toàn cục".
+- So với torch vẫn **1.55× chậm**; `.tkv` chỉ thắng ở AdamW (502 vs 1 254 ms ⇒ 2.5×).
+  Toàn bộ phần còn lại nằm ở fwd (1.70×) + bwd (1.66×).
+- Loss `25.4079` vs `25.407888` — khác thứ tự cộng, không phải sai logic.
+
+**Cảnh báo khi so số:** VM phiên này chậm hơn phiên 1 khoảng 16–25% (mode 0 native
+32 640 vs 26 067 ms; torch CPU 11 881 vs 10 244 ms). Chỉ dùng **tỷ lệ trong cùng phiên**.
+
+**Tiếp theo:** giải thích 2-thread vs 28-thread (sweep `TKV_GEMM_THREADS` = 1/2/4/8
+native vs BLAS trên WSL) — nếu chênh lệch là ở **1 thread** thì gốc rễ là microkernel
+chứ không phải thread pool, và hướng sửa là cải thiện kernel (hoặc auto-chọn BLAS theo
+số core như giải pháp tạm). Chi tiết: `BENCHMARKS.md` §9.30.
