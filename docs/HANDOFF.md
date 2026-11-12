@@ -8193,3 +8193,34 @@ Giả thuyết còn lại cho gap 2.4–2.8× trên Colab: **op phần tử vô 
 **Chặn đo Windows:** MSVC không build được `tkv_simd_native.c` (cả bản HEAD cũng lỗi
 `t_nested`/`C2143`) và `demo/tkv_simd_native.dll` trong repo là ELF → muốn bench
 Windows phải dựng lại DLL PE trước. Chi tiết: `BENCHMARKS.md` §9.28.
+
+## §0.171 OP PHAN TU QUA P/INVOKE TREN LINUX: DUNG NHUNG CHI +2.2% (2026-11-12)
+
+Đổi `_mang_khoi` (repo TokenVector, `simd_feature.tkv`) thành dispatcher 3 tầng:
+kernel RWX (Windows) → **P/Invoke thẳng `.so`** khi `TkvSimd::plat == 2` (field mới
+đặt trong `Init()`) → vô hướng. Thêm `_pt_elem_pinvoke(d)` sinh P/Invoke cho
+`Add/Sub/Mul/Scale/Axpy/Dot/Sum` F32+F64 (cùng DLL `tkv_simd_native.dll`).
+
+Kiểm chứng: `tools\vong.exe` → **IL_IDENTICAL**; `testkit_gate` → **PASS 136/136,
+NEG 44/44**. Loss trên WSL vẫn `25.407898` (bit-identical) → đường P/Invoke đúng.
+
+**Đo WSL2 (28 core, mode 2, seq1024, 3 vòng):**
+
+| Pha | codegen cũ (scalar) | codegen mới | Δ |
+|---|---:|---:|---:|
+| fwd | 1 984 | 1 979 | ~0% |
+| bwd | 5 465 | 5 288 | −3.2% |
+| TỔNG | **8 766** | **8 573** | **−2.2%** |
+
+⇒ **Op phần tử không phải nút cổ chai.** Đã loại 3 giả thuyết: BLAS (chậm hơn 14%),
+elementwise (2%), copyback/AdamW (không đáng kể / đã nhanh hơn torch).
+
+**Giả thuyết cuối còn lại:** GEMM của engine ở **2 thread** chậm hơn MKL/oneDNN ở
+2 thread — khác phép đo 28 core trên WSL (nơi kernel nội bộ thắng OpenBLAS). Cần số
+Colab: cell `[5/5]` giờ chạy `.tkv` native rồi `TKV_GEMM_BLAS=1` cùng phiên.
+
+**Windows:** vẫn không chạy được `bseq` tại máy dev — `demo/tkv_step124.dll` và
+`demo/tkv_simd_native.dll` là ELF, `Release/runtime/` không có `tkv_step124.dll` PE
+(`BadImageFormatException` ở `TkvStep124EmbedNative`, lỗi có sẵn không liên quan
+thay đổi này). Xác nhận Windows chỉ dựa vào gate + nhánh `calli` giữ nguyên byte.
+Chi tiết: `BENCHMARKS.md` §9.29.

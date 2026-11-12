@@ -1141,3 +1141,35 @@ AVX2 chỉ có cho ABI Windows x64) — cần đo/kiểm chứng ở Phase B.
 (`build.ps1`) — bản `HEAD` cũng lỗi y hệt (`t_nested` undeclared, `C2143`), tức lỗi có
 sẵn từ trước, không liên quan thay đổi này; và `demo/tkv_simd_native.dll` trong repo là
 ELF nên bench Windows cần dựng lại DLL PE (chưa làm).
+
+## 9.29 OP PHẦN TỬ QUA P/INVOKE TRÊN LINUX: ĐÚNG NHƯNG CHỈ **+2.2%** (2026-11-12)
+
+Đổi dispatcher IL (`simd_feature.tkv`, `_mang_khoi`) thành 3 tầng:
+
+1. kernel RWX trong bộ nhớ thực thi (Windows AVX2/SSE) — như cũ;
+2. **mới:** `plat == 2` (Linux/macOS) → P/Invoke thẳng `AddF32/SubF32/MulF32/ScaleF32/
+   AxpyF32/DotF32/SumF32` (+F64) trong `tkv_simd_native.dll` (trên Linux là `.so`, đã
+   được nạp sẵn cho GEMM);
+3. vô hướng managed — chỉ còn cho Windows khi `TKV_SIMD_ISA=off`.
+
+Kèm field `TkvSimd::plat` (1 = Win32NT, 2 = Unix/macOS) đặt trong `Init()`.
+Rebuild self-host: **IL_IDENTICAL**; `testkit_gate`: **PASS 136/136, NEG 44/44**.
+
+**Đo WSL2 (28 core, mode 2, seq1024, 3 vòng, cùng `.so`):**
+
+| Pha | codegen cũ (scalar) | codegen mới (P/Invoke) | Thay đổi |
+|---|---:|---:|---:|
+| fwd | 1 984 | 1 979 | ~0% |
+| bwd | 5 465 | **5 288** | −3.2% |
+| **TỔNG** | 8 766 | **8 573** | **−2.2%** |
+| loss | 25.407898 | 25.407898 | giống hệt |
+
+**Kết luận (phủ định thêm một giả thuyết):** op phần tử **không** phải nút cổ chai
+(< 3% tổng). Loại bỏ được cả BLAS (chậm hơn 14%) và elementwise (2%).
+Giả thuyết còn lại cho gap 2.4–2.8× ở Colab: **GEMM của engine ở 2 thread chậm hơn
+MKL/oneDNN ở 2 thread** — khác với phép đo 14 core ở WSL (nơi kernel nội bộ thắng
+OpenBLAS). Cần đo trên Colab: `.tkv` mode 2 với `TKV_GEMM_BLAS=1` (cell `[5/5]` đã thêm).
+
+**Windows:** không chạy được `bseq` tại máy dev vì `demo/tkv_step124.dll` và
+`tkv_simd_native.dll` trong repo là ELF, không có bản PE `tkv_step124.dll` để đối chiếu
+→ xác nhận Windows chỉ dựa vào `testkit_gate` (PASS) và nhánh `calli` giữ nguyên byte.

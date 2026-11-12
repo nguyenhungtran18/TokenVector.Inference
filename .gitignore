@@ -70,3 +70,5 @@ tv/tests/fixtures-124m/
 # Smoke-test build output
 packaging/smoke-test/bin/
 packaging/smoke-test/obj/
+# Output cua tkvc-tv khi build demo (bseq.exe/.il, ban sao .so)
+/out/
