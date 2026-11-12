@@ -8138,3 +8138,33 @@ Pha torch CUDA thì log ghi `2715 MiB, 100 %` → 271.7 ms là số T4 thật.
 không có SIMD (ASM AVX2 là ABI Windows). Muốn `.tkv` dùng GPU: P1/P2
 (`docs/PLAN_GPU_BACKEND.md`) — hook GEMM đầy đủ + weight resident, không phải nới ngưỡng.
 Chi tiết: `benchmark/BENCHMARKS.md` §9.26.
+
+## §0.169 PHASE BREAKDOWN: 65% CHENH LECH O BACKWARD, BLAS CHUA TUNG NAP (2026-11-12)
+
+`.tkv` mode 2 (5 pha) vs torch `tier_e` 2 thread, cùng phiên Colab, seq1024, 124M:
+
+| Pha | `.tkv` | torch | Tỷ lệ |
+|---|---:|---:|---:|
+| fwd (+CE) | 8 936 + 908 = 9 844 | 4 041 | 2.44× |
+| bwd | **16 751** | 6 076 | **2.76×** |
+| opt.step | **466** | 634 | **0.73× (.tkv nhanh hơn)** |
+| copyback / zero | 89 | 37 | — |
+| TỔNG | 27 150 | 11 191 | 2.43× |
+
+Mode 0 cùng phiên: 26 067 vs 10 923.8 ms (2.39×); torch CUDA 279.5 ms.
+
+- Khoảng chênh ~16 s: **bwd 65%**, fwd 36%, opt −1%, copyback 0.4%.
+- ⇒ Đừng tối ưu copyback (89 ms) hay AdamW (đã nhanh hơn torch). Tối ưu **GEMM +
+  op phần tử trong fwd/bwd**.
+
+**Phát hiện code (chưa sửa):** `tkv_blas_load()` chỉ thử `libscipy_openblas64_.dll`
+qua `LoadLibraryA` + tìm cạnh module bằng `strrchr(path, '\\')`. Trên Linux tên thật là
+`libscipy_openblas64_<hash>.so` và không có `'\'` → **BLAS không bao giờ nạp**; trên
+Windows dev cũng không có DLL đó trong `demo/`. Vậy toàn bộ số `.tkv` từ trước tới nay
+là **kernel AVX2 C nội bộ**, chưa lần nào dùng BLAS.
+
+**Bước tiếp (chờ quyết):** (a) sửa `tkv_blas_load` cho Linux (dlopen
+`libscipy_openblas64_*.so` / `libopenblas64_*.so.0` / `libmkl_rt.so.2`, có
+`TKV_GEMM_BLAS_PATH`), giữ nguyên hành vi Windows; (b) nếu GEMM không phải thủ phạm
+chính thì mới tới `System.Runtime.Intrinsics`/intrinsics trong `.so` cho op phần tử.
+Chi tiết: `benchmark/BENCHMARKS.md` §9.27.

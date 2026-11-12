@@ -1070,3 +1070,41 @@ nó chậm hơn PyTorch CPU **2.56×** (nguyên nhân: không có kernel ASM AVX
 → op phần tử chạy vô hướng; GEMM C nội bộ so với MKL/oneDNN của torch). Muốn có số
 GPU cho `.tkv` phải làm P1/P2 trong `docs/PLAN_GPU_BACKEND.md`, không phải chỉnh
 ngưỡng `n >= 512`.
+
+## 9.27 PHASE BREAKDOWN: 65% CHÊNH LỆCH NẰM Ở BACKWARD — VÀ BLAS CHƯA BAO GIỜ NẠP TRÊN LINUX (2026-11-12)
+
+Cùng phiên/baseline như §9.26, thêm cell `[5/5]`: `.tkv` mode 2 (5 pha, warmup + 2
+vòng, lấy min) và `bench_torch.py e 1024` với `TKV_BENCH_THREADS=2` (đúng 2 thread
+GEMM pool của `.tkv` trên Colab 2 vCPU).
+
+| Pha | `.tkv` (2 thread) | torch CPU (2 thread) | Tỷ lệ |
+|---|---:|---:|---:|
+| forward | 8 936 ms | 4 041 ms (fwd+CE) | 2.44× |
+| CE loss | 908 ms | (nằm trong fwd của torch) | — |
+| **backward** | **16 751 ms** | **6 076 ms** | **2.76×** |
+| opt.step (AdamW) | **466 ms** | 634 ms | **0.73× — `.tkv` nhanh hơn** |
+| zero_grad / copyback | 89 ms (copyback) | 37 ms (zero_grad) | không đáng kể |
+| **TỔNG** | **27 150 ms** | **11 191 ms** | **2.43×** |
+
+Cùng phiên, mode 0: `.tkv` 26 067 ms vs torch CPU 10 923.8 ms (**2.39×**), torch CUDA
+279.5 ms (mode 0) / 311.1 ms (full step). `.tkv` lặp lại 26 067 / 26 230 / 26 768 ms
+(3 phiên, lệch ≤ 2.7%).
+
+**Phân rã khoảng chênh (~16 s):** backward ≈ **65%**, forward ≈ **36%**, opt ≈ **−1%**
+(`.tkv` nhường lại), copyback ≈ 0.4%. Copyback (89 ms) rẻ → **không đáng tối ưu**;
+AdamW C của `.tkv` đã nhanh hơn torch. Toàn bộ vấn đề là GEMM + op phần tử trong
+fwd/bwd.
+
+**Nguyên nhân gốc tìm được khi đọc code (chưa sửa):** nhánh BLAS trong
+`tkv_simd_native.c` (`tkv_blas_load`, dòng ~154) chỉ thử **`libscipy_openblas64_.dll`**
+qua `LoadLibraryA`, và tìm file cạnh module bằng `strrchr(path_buf, '\\')`. Trên Linux
+shim map `LoadLibraryA` → `dlopen` nhưng tên `.so` thật là
+`libscipy_openblas64_<hash>.so`, và đường dẫn không có `'\'` → **BLAS không bao giờ
+nạp** → mọi GEMM dùng kernel AVX2 C nội bộ. Trên máy dev Windows cũng **không có**
+`libscipy_openblas64_.dll` trong `demo/`, nên số Windows (7.5 s) cũng là kernel nội bộ.
+Nói cách khác: **chưa từng có lần đo nào của `.tkv` dùng BLAS**, dù code có nhánh đó.
+
+**Lưu ý về log GPU phiên này:** `tail -12 /content/gpu.log` của pha torch CUDA chỉ còn
+`231 MiB, 6%` (phiên trước thấy `2715 MiB, 100%`). Sampler `--loop=2` ghi ra file nên
+phần cuối có thể chưa flush; bản thân 279.5 ms cho 124M seq1024 là bất khả thi trên
+2 vCPU nên vẫn kết luận torch CUDA thật, nhưng **log phiên này không tự chứng minh**.
