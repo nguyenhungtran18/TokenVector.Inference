@@ -8045,3 +8045,42 @@ khoảng 2× — chủ yếu nhờ AVX2+FMA native kernels + không overhead Pyt
 
 **Lưu ý:** workload nhỏ (67 params). Không suy diễn GPT-2 124M zero-cost.
 Chi tiết: `benchmark/BENCHMARKS.md` §9.23.
+
+## §0.166 PHASE A XONG: `.tkv` 124M CHAY DUOC TREN LINUX (2026-11-12)
+
+**Mục tiêu:** gỡ blocker khiến Colab GPU notebook không thể bench GPT-2 124M
+(`demo/colab_bench_ai_gpu.ipynb` trước đó crash ở cell `[5/5]`).
+
+**Hai lỗi, sửa trong compiler repo (`D:\TokenVector`):**
+
+1. `TkvSimd.Init()` P/Invoke `kernel32.dll` (`IsProcessorFeaturePresent`,
+   `VirtualAlloc`) → `DllNotFoundException` trên Linux.
+   Sửa `simd_feature.tkv::_pt_native_ho_tro()`: tách `InitWin()` (toàn bộ thân cũ),
+   `Init()` portable chỉ `call InitWin()` khi `Environment.OSVersion.Platform ==
+   Win32NT`. Trên Linux `InitWin` không được JIT → P/Invoke không được resolve.
+2. `Vector<T>` fallback (`...V`) → `MissingMethodException: op_Addition` trên .NET 10
+   (IL tham chiếu `[System.Numerics.Vectors]`). Sửa: `_elem_block()` dùng bản vô
+   hướng `_pt_dot_scalar` / `_pt_sum_scalar` / `_pt_vong_2_scalar`.
+
+**Verify:** `vong.exe` → `IL_IDENTICAL`; `testkit_gate` **136/136** + negative 44/44;
+`trainer_tests` **15/15** (Windows, `isa=1`); `simd_isa()` = 1 mặc định / 0 khi
+`TKV_SIMD_ISA=off`; `dotnet demo/bseq.dll` trên WSL chạy hết 1 full step
+(seq8: 2 985 ms, loss `10.572291 → 6.925554`).
+
+**Không hồi quy:** A/B cùng máy seq1024 mode1 — compiler cũ 7 563 ms, compiler mới
+7 781 ms (máy phiên này chậm hơn phiên §9.22 ~1.9× nên số tuyệt đối không so trực
+tiếp với 4 016 ms).
+
+**Binary:** `demo/bseq.dll` biên dịch lại; `demo/tkv_step124.dll` + `demo/bseq.dll`
+trước đây bị `.gitignore` chặn nên **Colab clone về không có** — đã `git add -f`.
+`demo/tkv_simd_native.dll` build lại (ELF) có `TkvCUDA_Available`.
+
+**Notebook GPU viết lại:** bỏ cell sinh fixture 124M (bseq dùng random init), cài
+.NET **SDK** (trước chỉ runtime nên `dotnet --version` fail), cài
+`nvidia-cublas-cu12` + `nvidia-cuda-runtime-cu12`, set `LD_LIBRARY_PATH`, copy `.so`
+vào `demo/` (nơi runtime probe), probe `TkvCUDA_Available()`, log `nvidia-smi` 2 s/lần
+trong lúc bench.
+
+**Chưa làm:** chưa chạy lại notebook trên T4 → **chưa có bằng chứng GPU được dùng**
+(GPU RAM/`TkvCUDA_Available`) và chưa có số `.tkv` vs torch trên GPU. Chi tiết:
+`benchmark/BENCHMARKS.md` §9.24; kế hoạch: `docs/PLAN_COLAB_CROSS_PLATFORM.md`.

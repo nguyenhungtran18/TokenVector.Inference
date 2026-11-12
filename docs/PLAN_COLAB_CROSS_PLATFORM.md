@@ -10,6 +10,25 @@ shim Windows-only nào; GPT-2 124M full step trên Colab CPU.
 
 ---
 
+## 0. TRẠNG THÁI — PHASE A XONG (2026-11-12)
+
+Đã làm, khác đề xuất ban đầu ở 3 điểm (đơn giản hơn, ít rủi ro hơn):
+
+| Đề xuất §3 | Thực tế đã làm | Lý do |
+|---|---|---|
+| Xóa hẳn 2 P/Invoke kernel32 | **Giữ**, nhưng chuyển toàn bộ thân cũ sang `InitWin()`; `Init()` chỉ `call InitWin()` khi `OSVersion.Platform == Win32NT` | Giữ nguyên đường AVX2 native trên Windows (không hồi quy hiệu năng). Trên Linux `InitWin()` **không được JIT** nên P/Invoke không bao giờ được resolve |
+| Dùng `Avx2.IsSupported` để detect | Không dùng | Compiler target .NET Framework 4.6 (không có `System.Runtime.Intrinsics`), và không cần: Linux luôn fallback |
+| Chỉ sửa `Init` | Sửa thêm `_elem_block()`: bản fallback `...V` chuyển từ `Vector<T>` sang **vô hướng** | .NET 10 không resolve `Vector<T>.op_Addition` từ IL tham chiếu `[System.Numerics.Vectors]` → `MissingMethodException` (xem §9.24) |
+
+**Kết quả:** `tools/vong.exe` → `IL_IDENTICAL`; `testkit_gate` **PASS 136/136**,
+negative 44/44; `trainer_tests` **15/15 PASS**; `dotnet demo/bseq.dll` (124M) chạy
+được trên WSL/Linux lần đầu tiên. Windows vẫn `isa=1` (native AVX2).
+
+**Còn lại (Phase B):** port kernel AVX2 sang `System.Runtime.Intrinsics` để Linux
+có SIMD thật (hiện chỉ có C `.so` lo GEMM/attention/AdamW, op phần tử là vô hướng).
+
+---
+
 ## 1. Vấn đề chính xác
 
 `TkvSimd.Init()` / `TkvSimd.Kern()` (compiler tự phát IL) gọi hai P/Invoke

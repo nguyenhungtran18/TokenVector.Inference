@@ -938,3 +938,57 @@ PyTorch reimplemented cung workload cho `0.0149499`, acc = 1.0 — khop
 
 **Cach chay:** `demo/colab_bench_ai.ipynb` (file local hoac tu GitHub:
 https://github.com/nguyenhungtran18/TokenVector.Inference/blob/main/demo/colab_bench_ai.ipynb).
+
+## 9.24 PORTABLE RUNTIME: `bseq` 124M CHAY TREN LINUX (2026-11-12)
+
+Đây **không phải** phép so sánh với PyTorch — đây là kết quả gỡ blocker
+cross-platform (Phase A, `docs/PLAN_COLAB_CROSS_PLATFORM.md`). Mọi số dưới đây đo
+trên **cùng một máy** (Windows native và WSL2 Ubuntu), GPT-2 124M random init
+(`gpt2_init(7)`), `_seq_cfg` = `seq / mode / steps`.
+
+### 9.24.1 Hai lỗi đã sửa (nguyên nhân `.tkv` không chạy được trên Colab/Linux)
+
+1. **`DllNotFoundException: kernel32.dll`** — `TkvSimd.Init()` P/Invoke
+   `IsProcessorFeaturePresent` / `VirtualAlloc`. Sửa: tách `InitWin()`, chỉ gọi khi
+   `Environment.OSVersion.Platform == Win32NT`.
+2. **`MissingMethodException: Vector`1.op_Addition`** — bản fallback (`...V`) dùng
+   `System.Numerics.Vector<T>`; trên .NET 10 method này không resolve được từ IL
+   tham chiếu `[System.Numerics.Vectors]`. Sửa: fallback dùng vòng vô hướng
+   (`_pt_dot_scalar`, `_pt_sum_scalar`, `_pt_vong_2_scalar`).
+   *(Lỗi này có sẵn từ trước, chỉ lộ ra khi chạy không có kernel native — tái hiện
+   được cả trên Windows với `TKV_SIMD_ISA=off`.)*
+
+### 9.24.2 Kết quả chạy
+
+| Môi trường | seq | mode | cách đo | kết quả |
+|---|---:|---:|---|---|
+| WSL2 Ubuntu, .NET 10.0.15, `isa=0` | 8 | 1 (full step) | 1 warmup + 1 đo | **2 985 ms**, loss `10.572291 → 6.925554` |
+| Windows native, `isa=1` (AVX2) | 8 | 1 | 1 warmup + 1 đo | **2 187 ms**, loss `10.572291 → 6.925548` |
+| Windows native, `isa=1` | 1024 | 1 | 1 warmup + 1 đo | **7 563 ms** (compiler cũ) / **7 781 ms** (compiler mới) |
+
+- Chênh loss `6.925554` vs `6.925548` (~6e-6) do thứ tự cộng khác nhau (vô hướng
+  vs AVX2), không phải sai số logic; loss đầu giống hệt `10.572291`.
+- **Không hồi quy trên Windows:** A/B cùng phiên, cùng máy, cùng cfg — compiler cũ
+  7 563 ms vs compiler mới 7 781 ms (chênh 2.9%, trong dao động của máy).
+  `simd_isa()` trả **1** khi mặc định và **0** khi `TKV_SIMD_ISA=off` → đường native
+  vẫn hoạt động.
+- **Cảnh báo số tuyệt đối:** phiên này máy chậm hơn phiên §9.22 (~1.9×: 7 563 ms so
+  với 4 016 ms cho cùng workload). Vì vậy **không được** lấy 7 563 ms so với số torch
+  của §9.22; phải đo lại cả hai bên trong cùng phiên (đúng quy tắc §1).
+
+### 9.24.3 Gate sau khi sửa compiler
+
+| Gate | Kết quả |
+|---|---|
+| `tools/vong.exe` (self-host) | `IL_IDENTICAL` |
+| `tools/testkit_gate.ps1` | **PASS 136/136**, negative 44/44, BUILD/TEST/IL/OTHER = 0 |
+| `trainer_tests` (Windows, `isa=1`) | **15/15 PASS**, `eval_loss=0.014949894`, resume bit-exact |
+| `TKV_SIMD_ISA=off` + .NET 10 | `simd_add` / `simd_dot` đúng (`11.0`, `99.0`, `2850.0`) |
+| `dotnet demo/bseq.dll` (WSL) | chạy hết 1 full step, không còn P/Invoke kernel32 |
+
+### 9.24.4 Còn thiếu
+
+- Chưa có số **GPU** (chưa chạy lại `demo/colab_bench_ai_gpu.ipynb` trên T4 sau khi
+  sửa) → chưa chứng minh được cuBLAS dispatch thực sự được dùng.
+- Linux vẫn **không có SIMD cho op phần tử** (chỉ GEMM/attention/AdamW nằm trong C
+  `.so`); đây là nội dung Phase B.

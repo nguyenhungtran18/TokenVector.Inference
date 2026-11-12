@@ -37,3 +37,19 @@ xem `docs/HANDOFF.md` §0.153 và `BENCHMARKING.md` §9.22.
 
 > Lưu ý: native lib yêu cầu CPU có AVX2. Hầu hết VM Colab có AVX2.
 > Nếu chạy lỗi `Illegal instruction`, máy Colab đó không có AVX2.
+
+## Notebook benchmark
+
+| Notebook | Đo gì | Ghi chú |
+|---|---|---|
+| `colab_bench_ai.ipynb` | MLP 4→8→3, 400 bước: `.tkv` vs PyTorch | Kết quả §9.23: `.tkv 0.241 s` vs torch `0.495 s` |
+| `colab_bench_ai_gpu.ipynb` | GPT-2 124M fwd+bwd @seq1024: `.tkv` vs PyTorch CUDA | Từ 2026-11-12 `.tkv` chạy được trên Linux (Phase A) |
+
+`colab_bench_ai_gpu.ipynb` build `tkv_simd_native.so` từ source (có dispatch cuBLAS),
+copy vào `demo/`, in `TkvCUDA_Available()` và log `nvidia-smi` trong lúc chạy để biết
+GPU có thực sự được dùng hay không.
+
+> Trên Linux, kernel ASM AVX2 (Windows x64 ABI) không dùng được: `.tkv` tự rơi về
+> fallback vô hướng cho op phần tử, còn GEMM/attention/AdamW vẫn chạy trong C `.so`.
+> Vì vậy phép so sánh là **.tkv CPU** vs **PyTorch GPU** (trừ khi cuBLAS load được —
+> khi đó một phần GEMM của `.tkv` chạy trên GPU).
