@@ -7991,3 +7991,36 @@ Root hiện còn: README(-VI), RELEASE_NOTES(-VI), USER_GUIDE(-VI), LICENSE, `.g
 - **Nuspec**: thêm `assets/tokenvector-logo.png` vào package — link logo trong README trên nuget.org hoạt động (trước đó trỏ tới file không tồn tại trong package).
 - **Rebuild package**: `TokenVector.Inference.1.0.1.nupkg` mới (3.47 MB) — lib/net10.0 + src + logo + dependency `TokenVector ≥ 1.0.12` (net10.0).
 - Hạn chế còn lại: chưa có ví dụ end-to-end ngoài smoke test trong package; consumer phải tự copy native DLLs (giới hạn của P/Invoke qua package tools/runtime/).
+
+## §0.164 TRAIN AI TREN GOOGLE COLAB — 15/15 PASS (2026-11-12)
+
+**Ngay:** 2026-11-12. Colab (Ubuntu, CPU) chay `demo/colab_train_ai.ipynb`:
+
+1. Cai .NET 10 runtime (`dotnet-install.sh`).
+2. `git clone` repo (public).
+3. `dotnet demo/trainer_tests.dll` — chay MLP 4→8→3, 400 buoc AdamW, 20 mau
+   fixture `tv/tests/fixtures/train_cases.txt`.
+
+**Ket qua (re-verify WSL Linux .NET 10):**
+```
+  [PASS] buoc 1: loss  max_abs_diff=1.19e-07
+  [PASS] lich lr: 400 buoc warmup+cosine khop
+  [PASS] overfit: eval_loss=0.014949892 acc=1.0
+  === G4 trainer cases=15 fails=0 ===
+```
+Demo ben trong repo: `demo/colab_train_ai.ipynb`, binaries committed
+(`trainer_tests.dll` 66 KB managed assembly; `tkv_simd_native.dll` Linux .so
+build tu `gcc` tren WSL, `git add -f`; `.runtimeconfig.json` net10.0).
+
+**Neu Colab ban co CPU co AVX2**: tat ca pass. khong co AVX2 → SIGILL.
+
+**Dieu kien chay:** rien can .NET 10 runtime + git clone; compiler Windows-only
+nen trainer binary phai commit (managed IL .dll chay duoc Linux .NET):
+- Win32->POSIX port: `tkv_simd_native.c`, `tkv_flash_attn.c`,
+  `tkv_linear_dw.c`, `tkv_bwd_ops.c` (semaphore/pthread/dlopen/dlsym replace
+  CreateEvent/WaitForSingleObject/LoadLibraryA) — commit vao **compiler repo**
+  D:\TokenVector.
+- Demo binaries committed trong **inference repo** (demo/).
+
+**GPU**: engine CPU-only (doc luc khong co cam kernel CUDA/ROCm — README backend
+table: CUDA/OpenCL/OpenVINO = Unavailable). Colab GPU khong dung duoc cho .tkv.
