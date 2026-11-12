@@ -1137,6 +1137,13 @@ riêng của OpenBLAS cạnh pool pthread của engine, và kernel nội bộ đ
 khoảng cách 2.4–2.8× trên Colab là **op phần tử chạy vô hướng trên Linux** (kernel ASM
 AVX2 chỉ có cho ABI Windows x64) — cần đo/kiểm chứng ở Phase B.
 
+> **ĐÍNH CHÍNH (thêm 2026-11-12, xem §9.31):** kết luận trên **sai vì cách đo**. Phép đo
+> §9.28 trao cho OpenBLAS **toàn bộ 28 thread**, mà OpenBLAS bão hoà ở 4–8 thread rồi chậm
+> đi. Ở 1 thread, BLAS nhanh hơn kernel nội bộ **1.61×** và ở 2 thread là **1.40×**; trên
+> Colab 2 vCPU BLAS nhanh hơn **1.54×** (§9.30). Gốc rễ thật là **microkernel**, và câu
+> "GEMM không phải chỗ đáng tối ưu" **không còn đúng**. Giả thuyết "op phần tử vô hướng"
+> sau đó cũng bị bác bỏ ở §9.29 (−2.2%).
+
 **Không đo được trên Windows:** `tkv_simd_native.c` hiện **không build được bằng MSVC**
 (`build.ps1`) — bản `HEAD` cũng lỗi y hệt (`t_nested` undeclared, `C2143`), tức lỗi có
 sẵn từ trước, không liên quan thay đổi này; và `demo/tkv_simd_native.dll` trong repo là
@@ -1203,3 +1210,38 @@ trong cùng phiên**; không lấy số tuyệt đối giữa các phiên.
 
 **Còn lại cần giải thích:** tại sao GEMM nội bộ thua OpenBLAS ở 2 thread nhưng thắng ở
 28 thread. Số đo crossover trên WSL (T = 1/2/4/8) ở §9.31.
+
+## 9.31 GỐC RỄ LÀ **MICROKERNEL 1 THREAD**, KHÔNG PHẢI THREAD POOL — VÀ §9.28 SAI VÌ ÉP BLAS 28 THREAD (2026-11-12)
+
+Sweep `TKV_GEMM_THREADS` (ép cả pool nội bộ lẫn `openblas_set_num_threads` cùng số) trên
+WSL2 28 core, mode 2, seq1024, mỗi mức 1 lần, cùng một `.so`:
+
+| T | native TONG (fwd / bwd) | BLAS TONG (fwd / bwd) | Ai nhanh hơn |
+|---:|---:|---:|---|
+| 1 | 26 592 (7 257 / 18 003) | **16 529** (4 545 / 10 690) | BLAS **1.61×** |
+| 2 | 16 402 (4 116 / 10 973) | **11 703** (3 307 / 7 081) | BLAS **1.40×** |
+| 4 | 11 660 (2 786 / 7 503) | **8 786** (2 489 / 5 000) | BLAS **1.33×** |
+| 8 | 8 838 (1 949 / 5 575) | **8 153** (2 191 / 4 657) | BLAS **1.08×** |
+| 28 (mặc định) | **8 766** | 10 001 | native **1.14×** |
+
+Hiệu suất scale (TỔNG):
+
+| | 1→2 | 2→4 | 4→8 | 8→28 |
+|---|---|---|---|---|
+| native | 1.62× | 1.41× | 1.32× | 1.01× |
+| BLAS | 1.41× | 1.33× | 1.08× | 0.82× (chậm đi) |
+
+**Kết luận 1 — gốc rễ là microkernel:** ở **1 thread** (không có thread pool, không
+tranh chấp) native 26 592 ms vs BLAS 16 529 ms ⇒ **kernel AVX2 nội bộ chậm hơn kernel
+Haswell của OpenBLAS ~1.6×/core**. Đây là khoảng cách chất lượng codegen
+(packing/prefetch/unroll/micro-tile), không phải overhead đồng bộ. Nó cũng giải thích
+luôn số Colab 2 vCPU (BLAS 1.54×, khớp WSL T=2 là 1.40×).
+
+**Kết luận 2 — §9.28 sai vì cách đo:** kết luận "BLAS là ngõ cụt" có được khi trao cho
+OpenBLAS **toàn bộ 28 thread**; OpenBLAS bão hoà ở 4–8 thread rồi **chậm đi** khi thêm
+thread (0.82× từ 8→28), trong khi kernel nội bộ vẫn scale. Nghĩa là **không phải BLAS
+dở — mà là BLAS bị ép quá nhiều thread**. Cần đo lại với `TKV_GEMM_BLAS_THREADS` (biến
+mới, 0 = không chặn) để tìm cấu hình tốt nhất trên máy nhiều core (§9.32).
+
+**Số loss:** native `25.407898` ở mọi T; BLAS `25.40786`/`25.407883`/`25.407887` — lệch
+chữ số thứ 6 do thứ tự cộng, đúng như dự kiến.
