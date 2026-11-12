@@ -168,16 +168,22 @@ def tier_d(seq=1024):
 def tier_e(seq=8):
     """PHASE A — doi chuan 2 phia (docs/archive/PLAN_TO_PARITY.md): tach tung phase
     (zero / fwd / bwd / opt) va chay ca 1T + 14T de so bucket voi CJ8 tkv.
-    Goi: python benchmark/bench_torch.py e <seq>"""
+    Goi: python benchmark/bench_torch.py e <seq>
+
+    `TKV_BENCH_THREADS=2` de chi chay 1 cau hinh thread (vd tren Colab 2 vCPU,
+    chay 1T + 14T qua lau; 2 thread = dung so thread cua .tkv GEMM pool de so
+    tung pha apples-to-apples)."""
     from transformers import GPT2Config
     from transformers import GPT2LMHeadModel
+    threads = [int(x) for x in
+               os.environ.get("TKV_BENCH_THREADS", "1,14").split(",") if x.strip()]
     ids_l = [(i * 37 + 11) % 50257 for i in range(seq)]
     pos_l = list(range(seq))
     ids = torch.tensor([ids_l], dtype=torch.long)
     pos = torch.tensor([pos_l], dtype=torch.long)
     cfg = GPT2Config(vocab_size=50257, n_positions=1024, n_embd=768, n_head=12,
                      n_layer=12, resid_pdrop=0.0, embd_pdrop=0.0, attn_pdrop=0.0)
-    for nt in (1, 14):
+    for nt in threads:
         torch.set_num_threads(nt)
         torch.manual_seed(7)
         model = GPT2LMHeadModel(cfg)
