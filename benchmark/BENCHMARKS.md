@@ -1383,3 +1383,26 @@ T4, cell `[5/5]` mode 2 seq1024, cùng phiên với `[4/5]` (mode 0) và torch `
 **Chưa công bằng đầy đủ:** nhánh cuBLAS dùng GPU (không phải CPU-vs-CPU). Muốn so sánh
 apples-to-apples CPU-vs-CPU thì dùng nhánh BLAS (+full profile). Muốn đánh giá hết hoặc
 đuổi torch CUDA cần **P2** (device-resident weight/activation, bỏ H2D mỗi GEMM).
+
+## 9.36 P2-LITE: WEIGHT-B CACHE TRÊN GPU (chưa đo được hiệu năng) (2026-11-13)
+
+Increment đầu của P2: `TkvCUDA_MarkWeightsDirty()` gọi trong `adamw_step_f32_impl` →
+epoch tăng mỗi lần optimizer chạy. Trong `TkvCUDA_RectF32`, khi **A không transpose**
+và **accumulate == 0** (packed fwd Linear/lmhead + `LinearDxFused`: A = activation,
+B = **weight**), B được giữ **device-resident** trong cache 96 entry (grow-only,
+mutex); B chỉ re-upload khi epoch đổi tức sau mỗi lần AdamW.
+
+- `dW`/gdw và các GEMM transA=Trans (X^T·GY) **không** cache — ràng buộc đúng đắn.
+- `.NET` LOH (>85 KB) không compact nên pointer weight ổn định giữa các call — cache
+  có thể hit; nếu GC vẫn di chuyển thì miss → re-upload (đúng, chỉ chậm lại).
+
+**Kiểm chứng (WSL, không GPU):** build OK; `TKV_GEMM_CUDA=1` fallback → loss `25.407887`
+không đổi, TỔNG 8 463 vs 8 666 ms (±3% nhiễu) → **không hồi quy**.
+
+**Chưa có số GPU:** càng chưa biết weight-resident giúp bao nhiêu (bwd nặng nằm ở dW,
+không được cache ở increment này). Cần Colab: đọc nhánh `TKV_GEMM_CUDA=1` ở `[5/5]`,
+so với 8 839 ms của spike trước. Kỳ vọng modest (~0.5–1%); phần đáng làm lớn hơn nhiều
+vẫn là chuyển **LN/softmax/attention** sang GPU (P2 thật).
+
+**RAM:** cell `[7/7]` mới (Inference `6636f94`) đo `VmHWM` `.tkv` vs `PyTorch tier_d`
+(fwd+bwd, T=2, mode 0) bằng `/usr/bin/time -v`; kết quả chưa có (chờ user chạy).

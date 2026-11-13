@@ -8351,3 +8351,18 @@ apples-to-apples (cùng VM, cùng 2 thread). Những hạn chế của `.tkv` so
 reflection/ToArray + pin, torch native pointer zero-copy; (3) không GPU mặc định;
 (4) attention: custom C flash-attn (spawn 12 worker thread/call) vs torch SDPA fused.
 Chi tiết: `BENCHMARKS.md` §9.35.
+
+## §0.177 P2-LITE WEIGHT RESIDENT + CELL RSS (2026-11-13)
+
+**Đã cài đặt** (commit `946500e` TokenVector): `TkvCUDA_MarkWeightsDirty()` trong
+`adamw_step_f32_impl`; trong `TkvCUDA_RectF32`, khi A không Trans + `beta=0`, B (weight)
+được **cache device-resident** (96 entry, grow-only, mutex); re-upload sau mỗi AdamW.
+dW/activations không cache. WSL build OK; fallback loss `25.407887` không đổi; TỔNG
+8 463 vs 8 666 ms (±3%) → không hồi quy. **Chưa đo GPU** — kỳ vọng modest; phần lớn
+bwd nằm ở dW (không được cache).
+
+**(ii) Peak RSS:** notebook cell `[7/7]` (`6636f94`) đo `VmHWM` `.tkv` vs `torch tier_d`
+bằng `/usr/bin/time -v` — chờ user chạy, kết quả chưa có.
+
+**Chạy Colab:** `git pull` cả 2 repo → cell `[4/5]` → `[5/5]` (nhánh `TKV_GEMM_CUDA=1`
+sẽ có weight-resident) → `[7/7]` cho RAM.
