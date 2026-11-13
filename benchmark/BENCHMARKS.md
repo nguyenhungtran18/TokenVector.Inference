@@ -1529,3 +1529,27 @@ ATTN_FWD 3 755 (22.2%) · LMHEAD 3 192 (18.9%) · LIN_DX 904 (5.4%) · LIN_DW 1 
 
 **Điểm nghẽn #1 trên GPU path:** ATTN bwd (`FlashAttentionBwdMergeMulti`) **không đi cuBLAS**
 — 6.0 s CPU. `FlashAttentionFwdFused` cũng vậy (7.1 s BLAS / 3.75 s cuBLAS).
+
+## 9.41 ATTN_CUDA (global causal attention qua cuBLAS) — ĐÚNG LOSS NHƯNG CHẬM (2026-11-13)
+
+Notebook #15, cùng phiên (xen kẽ ×3):
+
+| Pha | BLAS | cuBLAS | cBLAS+ATTN_CUDA |
+|---|---:|---:|---:|
+| fwd | 3 602 | **1 640** | 1 982 |
+| CE | 891 | 865 | 890 |
+| bwd | 10 314 | **4 386** | 4 693 |
+| TỔNG | 15 318 | **7 400** | **8 089** |
+
+- **Loss của nhánh ATTN_CUDA = `25.407856` — ĐÚNG** (feature mới `TKV_ATTN_CUDA=1`,
+  commit `a860731`). GMMs: `S=QK^T, O=P·V, dV=PᵀdO, dP=dO·Vᵀ, dQ=inv·dS·K, dK=inv·dSᵀ·Q`
+  qua cuBLAS, softmax fp32 AVX2; ctxo = recompute `O=P@V` cho IL merge `dw_proj`.
+- **ATTN_FWD op-time 7 083 ms** (vs 3 622 cuBLAS-only) — **CHẬM HƠN** flash AVX2.
+  Cause: 12 worker thread → 12× H2D copies (S, P ~4 MB mỗi head) + cuBLAS handle contention
+  (sau fix: mutex). Việc "toàn bộ attention lên GPU" đổ vào nút thắt cổ chai I/O, không phải
+  compute (GEMM chỉ ~50-100 µs/head).
+- Sampler GPU vẫn 0–10%util, 1 100 MiB — GPU về cơ bản không được dùng.
+
+**Kết luận:** attention CUDA **không ích lợi** ở hình thức này; flash AVX2 vẫn tốt hơn
+(xấp xỉ locality ~nhình QK^T trong cache). Giữ opt-in cho thí nghiệm, không bật mặc định.
+Mutex thêm để ngăn cublasHandle contention (`a860731`+, không đo lại — chỉ WSL build OK).

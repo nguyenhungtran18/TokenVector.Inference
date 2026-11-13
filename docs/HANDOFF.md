@@ -8438,3 +8438,21 @@ GPU: .tkv cuBLAS **7271 ms** vs torch CUDA 292.8 (**24.8x**); sampler 1103 MiB /
 Per-op (BLAS): ATTN_BWD_MERGE 6.0 s (18%) · ATTN_FWD 7.1 s · LMHEAD 7.1 s ·
 LIN_DX 4.9 s · LIN_DW 5.1 s. **cuBLAS:** ATTN_BWD_MERGE **6.0 s (35.5%)** · ATTN_FWD 3.75 s
 · LMHEAD 3.2 s — attention backward hiện ~6 s CỦA CPU, không đi cuBLAS.
+
+
+## §0.182 ATTN_CUDA (TKV_ATTN_CUDA=1): DUNG LOSS NHUNG CHAM HON (2026-11-13)
+
+Commit `a860731` (TokenVector) + `e4a8f74` (Inference notebook). Global causal
+attention qua cuBLAS, IL khong doi; fallback flash AVX2; TKV_ATTN_CUDA=1 bat.
+**Loss nhanh tinh lai = 25.407856 — DUNG** (chua tung duoc test tren GPU nhung van
+ra ket qua dung).
+
+Nhung: ATTN_FWD op-time 7083 ms (vs 3622 cuBLAS-only); TONG: BLAS 15318 / cuBLAS
+**7400** / cBLAS+ATTN_CUDA **8089** -> CHAM HON flash AVX2. Cause: 12 worker threads
+contend chung cublasHandle_t + H2D copies (S,P ~4 MB/head x 12). Sampler GPU van
+0-10%. Them mutex (c0df011+) -> WSL build OK, chua Colab.
+
+**Ket luan:** ATTN_CUDA KHONG giup; flash AVX2 van tot nhat. Giu opt-in, khong dua
+vao mac dinh. Huong thuc su: port attention xuong CUDA kernel co thuc (P2) hoac toi
+uu flash kernel noi bo -- ca 2 deu can budget lon hon; chua co bang chung ve
+headroom (GPU dang 0-10% util nen van tang lap kho giup).
