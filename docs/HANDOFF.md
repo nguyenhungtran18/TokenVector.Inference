@@ -8470,3 +8470,25 @@ Chong lai cung trong van de nay moi 7 s con lai nam o LN/softmax/CE/embed/copyba
 chay AVX2 CPU (Khong da bridge ATen). muon den gan hon voi torch CUDA phai lam
 P1 device-resident: params+act+gap all on GPU, kernel CUDA cho LN/CE/ops khac.
 Day la khoang thoi gian 2-4 tuan (voi feedback loop Colab + T4).
+
+
+## §0.184 QUYET DINH: DUNG GPU, GIU NATIVE AVX2 (2026-11-14)
+
+Sau khi benchmark công bằng hoàn chỉnh (xen kẽ x3, median, seed 7, cùng token
+1024/seq):
+
+- `.tkv` native TONG=15.0-15.6 s vs torch T=2 11 038 ms -> **1.41x** (cải thiện
+  sau GELU AVX2 + instrument).
+- `.tkv` full GPU path TONG=7 240 ms vs torch CUDA 292-310 ms -> **~24x**.
+
+**Lý do dừng GPU (trung thực):**
+1. GPU path chỉ nhanh hơn native 2x (15.6 -> 7.2 s); vẫn chậm hơn CPU torch 25x so
+   với torch CUDA (CPU-native). Những op không bridge (CE inline, LN bwd, embed,
+   attention bwd dispatch) chặn hoàn toàn; nếu muốn tăng, cần P1/P2 device-resident
+   (4 tuần) và sẽ phá loss contract. Không phù hợp với một phiên tối ưu.
+2. Loss giảm KHONG PARITY TRONG GPU: 25.4079 vs 17.1067 (Do ATen (CUBLAS + torch
+   SDPA) khong bit-identical. CPU native vừa nhanh vừa loss EXACT.
+
+**Quy tắc mới:** Mọi số benchmark "công bằng" (cùng VM, cùng input, cùng seed,
+xen kẽ ×3, median) mới được ghi vào tài liệu. Số single-shot bị loại
+('BENCHMARKS §9.42/0.183').
