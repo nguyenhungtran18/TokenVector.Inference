@@ -1271,3 +1271,17 @@ của engine. WSL2 28 core, mode 2, seq1024, mỗi cấu hình 1 lần:
 **Bài học thực nghiệm:** một thư viện BLAS có thể **tốt hơn ở mọi số thread** nếu để nó
 tự chạy với số thread vừa phải; ép quá 28 thread làm hỏng kết quả. Hướng sửa hiện tại:
 chọn BLAS với cap ≈ 8 thay vì viết lại microkernel AVX2 (việc lớn, nhiều ngày).
+
+**Xác nhận 3 vòng xen kẽ (cùng phiên, cùng `.so`; fwd/bwd):**
+
+| vòng | native TỔNG | BLAS cap8 TỔNG | Δ |
+|---:|---:|---:|---:|
+| 1 | 8 393 (1 971 / 5 085) | 7 332 (1 983 / 4 031) | −12.6% |
+| 2 | 8 409 (1 985 / 5 105) | 7 194 (1 851 / 4 029) | −14.4% |
+| 3 | 8 296 (1 928 / 5 084) | 7 221 (1 829 / 4 104) | −13.0% |
+| **TB** | **8 366** | **7 249** | **−13.4% (BLAS 1.15×)** |
+
+Lệch ổn định qua 3 vòng ⇒ kết quả thật, không phải nhiễu. Phần cải thiện tới từ **bwd**
+(native 5 091 → BLAS 4 055 ms, −20%), fwd gần như bằng nhau (1 961 → 1 887).
+Thử nhanh một lần: cap 6 = 7 775 ms, cap 10 = 7 540 ms ⇒ **cap 8 là bắp cầu tốt nhất**
+trên máy này. Loss BLAS `25.407887` ở mọi vòng (native `25.407898`).
