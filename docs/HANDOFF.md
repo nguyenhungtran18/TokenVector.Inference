@@ -8368,3 +8368,19 @@ dx = gy @ w^T**) dùng `cacheB=1`. Packed/attention, SgemmF32, dW, full GEMM: t�
 **4.30 GB** → `.tkv` ít hơn ~210 MB (5%). Cả hai ~4 GB.
 
 Docs: `BENCHMARKS.md` §9.36; commit chưa push (TokenVector + Inference).
+
+
+## §0.178 PROTOCOL + COLAB #11 XAC NHAN LOI DA SUA (2026-11-13)
+
+Notebook Colab #11 (sau fix `29a2463`): nhanh `.tkv + cuBLAS` cho `loss_val=25.407866`
+(CHINH XAC tro lai — incident `13.831469` da het). Cung phien: natic 27 712 -> BLAS
+17 476 -> cuBLAS **9 200** ms (torch T=2 11 182; torch CUDA 267.0/297.3 ms). RAM
+(`[7/7]`): `.tkv` 4.09 GB vs torch 4.30 GB. GPU sampler `[4/5]`: `.tkv` 117 MiB 0-4%
+(BLAS mac dinh, khong dung GPU).
+
+**Protocol benchmark (theo yeu cau user: "moi cai do phai bang nhau ve dieu kien"):**
+notebook co them cell `[8/8]` - A/B XEN KE 3 vong moi ben (`.tkv` mode 0 vs `torch
+tier_d`, ca CPU lan CUDA), lay MEDIAN; cell `[5/5]` co sampler GPU rieng cho nhanh
+cuBLAS. Dieu kien giong nhau: cung VM, seq1024, GPT-2 124M, input tokens [(i*37+11)
+% 50257] GIONG HET, seed 7 ca hai, 2 thread ca hai; loss KHONG so duoc (init khac).
+Xem BENCHMARKS.md §9.37.

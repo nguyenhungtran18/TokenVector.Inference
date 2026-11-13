@@ -1409,3 +1409,35 @@ nhánh `.tkv` (BLAS mặc định) peak = **4 090 192 KB ≈ 4.09 GB**; torch ti
 
 **RAM:** cell `[7/7]` mới (Inference `6636f94`) đo `VmHWM` `.tkv` vs `PyTorch tier_d`
 (fwd+bwd, T=2, mode 0) bằng `/usr/bin/time -v`; kết quả chưa có (chờ user chạy).
+
+## 9.37 PROTOCOL BENCHMARK CHUẨN (2026-11-13) — MỌI SỐ ĐỀU CẦN ĐIỀU KIỆN BẰNG NHAU
+
+Yêu cầu người dùng: **mọi thứ đo phải bằng nhau về điều kiện mới gọi là benchmark.**
+Đối chiếu thực trạng sau khi dọn:
+
+| Điều kiện | `.tkv` | torch | Kết luận |
+|---|---|---|---|
+| Model | GPT-2 124M, seq1024 | GPT-2 124M, seq1024 | **bằng** |
+| Input tokens | `[(i*37+11) % 50257]` | `[(i*37+11) % 50257]` | **bằng** |
+| Seed | `gpt2_init(7)` | `manual_seed(7)` | **bằng** (nhưng scheme khác → params khác) |
+| Threads | 2 (2 vCPU, cap BLAS 8) | 2 (`TKV_BENCH_THREADS=2`) | **bằng** |
+| Timing | mode 0 = **1 bước** (warmup 1); mode 2 = warmup + 1 bước 5 pha | median n=2 | **KHÁC** — single-shot vs median |
+| Thứ tự đo | .tkv chạy hết rồi mới torch | — | **KHÁC** — dễ bị VM drift (±15–25% giữa các phiên) |
+| Device | BLAS (CPU) hoặc `TKV_GEMM_CUDA=1` (GPU) | cpu (`TKV_BENCH_DEVICE=cpu`) hoặc cuda | **bằng** khi cùng flag |
+| Loss | `10.76/25.41` | `9.8851` | **KHÔNG SO ĐƯỢC** (init khác; FLOPs giống nhau) |
+
+**Hệ quả:** các con số §9.24–§9.36 đo đúng hướng nhưng chưa chặt: (a) timing đơn lẻ (nhiễu
+±10–20%), (b) không xen kẽ A/B, (c) loss khác nhau gây hiểu sai; (d) sampler GPU chỉ phủ
+[4/5].
+
+**Đã làm (notebook Inference):**
+- Cell `[8/8]`: A/B **xen kẽ** 3 vòng mỗi bên (`.tkv` mode 0 vs torch tier_d, CPU; và
+  `.tkv` cuBLAS vs torch CUDA, GPU), lấy **median** → loại VM drift, cùng điều kiện.
+- Cell `[5/5]`: **sampler GPU riêng cho nhánh cuBLAS** (`gpu_cublas.log`) — giờ phủ cả
+  mode 0 lẫn (một phần) [5/5].
+- Ghi nhận trong HANDOFF: loss `.tkv` ≠ torch là do init khác, **không** phải sai số;
+  đúng đắn chỉ được kiểm bởi `tv/tests` fixtures/parity, không phải bench.
+
+**Điều kiện ĐÚNG để so:** chỉ so cùng device (CPU BLAS vs torch CPU; cuBLAS vs torch CUDA);
+chỉ so Thời gian, không so loss; mỗi con số phải kèm env flags (`TKV_GEMM_BLAS`,
+`TKV_GEMM_CUDA`, `TKV_BENCH_THREADS`).
