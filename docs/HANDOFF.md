@@ -8410,3 +8410,18 @@ duy nhat; opt la diem manh.
 env-gated timers quanh AttentionBwd*/LayerNormBwd/GeluBwd/softmax/CE) - uoc
 luong ~1 ngay; chua co thi moi hanh dong deu theo giac. Chi tiet BENCHMARKS
 §9.38.
+
+
+## §0.180 GELU AVX2: op-time GELU -80% (side effect nho tren wall) (2026-11-13)
+
+Commit `c0df011` = `998b53d` + GELU AVX2. `tkv_gelu_avx2.h` (erf polynomial A&S 7.1.26,
+exp vectorized Taylor). `GeluErfFwd`/`GeluErfBwd` vector x8 lane + tail scalar.
+
+WSL (BLAS): GELU_FWD 5956->461 ms (-92%); GELU_BWD 5668->1501 ms (-74%); tong
+op-time 25.1->15.5 s; wall TONG 8125->7998 ms (+2 min nhanh - op-time != wall vi
+parallel workers); loss 25.407888 (gate 1e-5 qua).
+
+Per-op hien tai (BLAS): LMHEAD_BWD 27.1%, ATTN_FWD 24.0%, LIN_DX 12.1%,
+GELU combined 12.7%, LIN_DW 7.6%, ATTN_BWD_MERGE 8.8%, LN 6.5%.
+
+Huong tiep: LMHEAD_BWD + ATTN_FWD = 51% con lai. Chi tiet BENCHMARKS §9.39.

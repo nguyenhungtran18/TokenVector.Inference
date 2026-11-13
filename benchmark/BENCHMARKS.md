@@ -1481,3 +1481,27 @@ duy nhất "thủ phạm"); opt thắng rõ. So với single-shot trước đây
    LN/GELU/softmax — instrument sẽ cho biết.
 
 Ràng buộc: mọi số ở đây chỉ valid trong cùng phiên; giữa-phiên lệch ±15%.
+
+
+## 9.39 GELU vectorized AVX2: op-time GELU -80% (side effect nho tren wall) (2026-11-13)
+
+Level-op sau khi instrument: GELU_FWD 5 956 ms + GELU_BWD 5 668 ms ~= **46%** op-time
+-> tach `tkv_gelu_avx2.h` (erf A&S 7.1.26 |err| <= 1.5e-7; exp Taylor vectorized,
+|r| <= 0.347; lanes AVX2 x8). Scalar -> vector theo lo [lo, hi) + tail scalar.
+
+**WSL (BLAS, no GPU):**
+
+| | truoc | sau | delta |
+|---|---:|---:|---:|
+| GELU_FWD op-time | 5 956 (n=432) | **461** | **-92%** |
+| GELU_BWD op-time | 5 668 | **1 501** | **-74%** |
+| tong op-time | 25 113 | 15 534 | **-38%** |
+| **wall TONG** | 8 125 | **7 998** | **-1.6%** |
+| loss | 25.407887 | 25.407888 | trong gate 1e-5 |
+
+Wall gan nhu khong doi — GELU chay tren parallel workers nen op-time > wall x2-3.
+Verify: `gelu_test.c` compare scalar vs AVX2: max |diff| fwd 2.4e-07, bwd 1.8e-07.
+
+**Ranking op-time moi (BLAS):** LMHEAD_BWD 27.1% (4.2 s), ATTN_FWD 24.0% (3.7 s),
+LIN_DX 12.1% (1.9 s), GELU combined 12.7%, LIN_DW 7.6%, ATTN_BWD_MERGE 8.8%, LN 6.5%.
+LMHEAD_BWD + ATTN_FWD la 51% op-time con lai — huong tiep theo.
