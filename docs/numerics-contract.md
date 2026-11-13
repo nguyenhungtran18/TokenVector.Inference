@@ -35,6 +35,25 @@ PyTorch" — do cho thay KHONG kha thi doi voi matmul/reduction (MKL sgemm
   fixture torch) de bat loi cong thuc.
 - GPU: deterministic, khong TF32, rel <= 1e-5 (nguyen trang).
 
+### 2.1 SUA DOI 2026-11-13 — Linux mac dinh dung OpenBLAS (matmul)
+
+Theo quyet dinh do hieu nang (`benchmark/BENCHMARKS.md` §9.30–§9.33), tren
+Linux/macOS GEMM **mac dinh di qua BLAS** (`libopenblas.so.0` hoac `libmkl_rt`),
+so voi kernel AVX2 noi bo truoc day. Do la **ly do duy nhat** thay doi hop dong:
+
+| | Truoc 2026-11-13 | Tu 2026-11-13 (Linux/macOS) |
+|---|---|---|
+| Matmul | kernel noi bo, thu tu co dinh | BLAS (OpenBLAS/MKL) |
+| Bit-exact giua cac may Linux | Co | **Khong con** (thu tu tich luy phu thuoc BLAS) |
+| Loss fixture | `10.760399` | `10.760399` (khong doi — test o §9.21/§9.22 chay tren duong native) |
+| Do lech loss native vs BLAS | — | lech chu so thu 6 (`25.407898` vs `25.407887`), trong nguong gate 1e-5 |
+
+- **Muon khoi phuc dung nghia cu (matmul kernel noi bo, deterministic tren moi
+  may): dat `TKV_GEMM_BLAS=0`**. Windows khong doi (khong co DLL BLAS trong
+  `demo/` nen van native; va duong `TKV_LINK_MKL` co kha nang doi).
+- Hieu nang: BLAS + `TKV_GEMM_BLAS_THREADS=8` nhanh hon 13.4% o 28 core va 35% o
+  2 vCPU so voi kernel noi bo.
+
 ## 3. Bang quyet dinh tung thanh phan
 
 | Thanh phan | Chot | Ghi chu |

@@ -113,6 +113,11 @@ phụ trợ liên quan (`_KERN_AVX2_B64`, `_KERN_SSE_B64`, `_KERN_*_OFFS` — gi
 **Chấp nhận được:** hiệu năng (bằng scalar khỏi phải lo); loss EXACT như gate hiện tại
 (vì fallback đường managed/scalar đã verify bit-exact ở Windows).
 
+> **CAP NHAT 2026-11-13:** Phase A.2 da noi op phan tu va GEMM sang `.so` AVX2/BLAS
+> (xem `benchmark/BENCHMARKS.md` §9.29–§9.33). Tren Linux GEMM **mac dinh di BLAS**
+> nen "loss EXACT" chi con dung khi dat `TKV_GEMM_BLAS=0` (xem
+> `docs/numerics-contract.md` §2.1).
+
 **Ước lượng công sức:** nhỏ — 1 file, ~20 dòng IL, build lại self-host, verify gate.
 **Phụ thuộc:** quyền build compiler tu-host; không cần Windows SDK, không cần tests mới.
 
