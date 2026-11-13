@@ -8279,3 +8279,26 @@ Sweep `TKV_GEMM_THREADS` + biến mới `TKV_GEMM_BLAS_THREADS` (WSL 28 core, mo
 2 vCPU −35% (§9.30). Commit `c9becd3` (TokenVector) + `d025f90` (Inference).
 Còn lại: `.tkv` vẫn **1.55× chậm torch** ở Colab, phần này nằm ở fwd/bwd ngoài GEMM
 (cần profile tiếp: LayerNorm/softmax/attention fused, hay đường copy/pin).
+
+## §0.174 COLAB XAC NHAN: BLAS MAC DINH 1.45x; .tkv KHONG DUNG GPU (2026-11-13)
+
+`[5/5]` cùng phiên (VM nhanh hơn ~15%; chỉ dùng tỷ lệ trong phiên):
+
+| Pha | native | MẶC ĐỊNH (BLAS cap 8) | torch T=2 |
+|---|---:|---:|---:|
+| fwd | 7 738 | 5 246 (−32%) | 3 225 |
+| CE | 1 552 | 1 009 | (gộp) |
+| bwd | 17 246 | **11 821** (−31%) | 7 937 |
+| opt | 430 | 469 | 594 |
+| TỔNG | **27 053** | **18 636** | **11 896** |
+
+- BLAS nhanh hơn native **1.45×**; `.tkv` còn **1.57× chậm torch** (fwd+CE 1.94×,
+  **bwd 1.49×**, opt 0.79×). bwd chiếm **63%** tổng.
+- mode 0 (`[4/5]`) mặc định BLAS: `.tkv` 19 977 ms vs torch CPU 11 220.9 → **1.78×**;
+  torch CUDA 292.8 / 322.4 ms.
+- **Sampler xác nhận `.tkv` KHÔNG dùng GPU** (117–231 MiB, 0–3%) trong khi torch CUDA
+  2 311/3 527 MiB, 99–100%. `TkvCUDA_Available() = 1` chỉ là cuBLAS nạp được.
+  Hook P0 trong `SgemmF32` là dead code (`T < 512`, `cudaMalloc` mỗi call).
+  Muốn GPU thật phải làm P1: hook `SgemmRect`/`SgemmFull`/`SgemmPacked` đầy đủ +
+  device-resident weight/activation (xem `docs/PLAN_GPU_BACKEND.md` §0, §2).
+Chi tiết: `BENCHMARKS.md` §9.34.

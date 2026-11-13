@@ -1326,3 +1326,30 @@ chặn) trên Windows. Windows không đổi hành vi.
 
 → Mặc định mới nhanh hơn **9.2%** ở 28 core (đo độc lập 3 vòng khác cho −13.4%; nhiễu
 máy WSL ±4%) và **−35%** ở Colab 2 vCPU. Commit `c9becd3` (TokenVector).
+
+## 9.34 COLAB XÁC NHẬN: BLAS MẶC ĐỊNH NHANH HƠN 1.45×; `.tkv` **KHÔNG** CHẠY TRÊN GPU (2026-11-13)
+
+Phiên Colab mới (T4, 2 vCPU; `[5/5]`, cùng phiên, VM nhanh hơn phiên trước ~15%: torch
+CPU 11 220.9 → dùng tỷ lệ trong phiên):
+
+| Pha | native (`TKV_GEMM_BLAS=0`) | **MẶC ĐỊNH (BLAS cap 8)** | torch CPU (T=2) |
+|---|---:|---:|---:|
+| forward | 7 738 ms | 5 246 ms (−32%) | 3 225 ms |
+| CE loss | 1 552 ms | 1 009 ms | (gộp trong fwd) |
+| **backward** | **17 246 ms** | **11 821 ms** (−31%) | **7 937 ms** |
+| opt.step | 430 ms | 469 ms | 594 ms |
+| copyback | 87 ms | 91 ms | 17 ms (zero_grad) |
+| **TỔNG** | **27 053 ms** | **18 636 ms** | **11 896 ms** |
+
+- BLAS nhanh hơn native **1.45×**; loss `25.407888` vs `25.4079` (như dự kiến).
+- `.tkv` còn **1.57× chậm torch**; khoảng cách giờ nằm ở fwd+CE (1.94×) và bwd (1.49×).
+  bwd chiếm **63%** TỔNG (11 821/18 636).
+- mode 0 (`[4/5]`), mặc định BLAS: `.tkv` **19 977 ms** (fwd 5 706 + bwd 14 271) vs
+  torch CPU 11 220.9 → **1.78×**; torch CUDA 292.8 / 322.4 ms.
+
+**Xác nhận tận mắt: `.tkv` không dùng GPU.** Sampler `nvidia-smi` trong lúc `.tkv`
+chạy: `117–231 MiB, 0–3 %`; lúc torch CUDA chạy: `2 311 / 3 527 MiB, 99–100 %`.
+`TkvCUDA_Available() = 1` chỉ nghĩa là cuBLAS nạp được, **không phải GEMM chạy trên
+GPU**: hook P0 chỉ nằm trong `SgemmF32` (kernel tile `T < 512`, điều kiện `n >= 512`
+không bao giờ đúng) và mỗi lần gọi lại `cudaMalloc` + 2 H2D + 1 D2H (xem
+`docs/PLAN_GPU_BACKEND.md` §0). Muốn GPU thật phải làm P1 (hook đầy đủ + device-resident).
