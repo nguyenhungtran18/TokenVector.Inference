@@ -8456,3 +8456,17 @@ contend chung cublasHandle_t + H2D copies (S,P ~4 MB/head x 12). Sampler GPU van
 vao mac dinh. Huong thuc su: port attention xuong CUDA kernel co thuc (P2) hoac toi
 uu flash kernel noi bo -- ca 2 deu can budget lon hon; chua co bang chung ve
 headroom (GPU dang 0-10% util nen van tang lap kho giup).
+
+
+## §0.183 CON SO GPU APPLES-TO-APPLES: .tkv 25x CHAM torch CUDA (2026-11-14)
+
+Notebook #19 cell [6/5]: .tkv GPU TONG=7 485-7 942 vs torch CUDA full step
+307 ms -> 24.7x. .tkv GPU fwd+CE+bwd 7 085 s vs torch fwd+bwd 276.6 s -> 25.6x.
+
+Cell [5/5]: .tkv CPU native TONG=15.0-15.6 vs torch T=2 total=11 038 ms ->
+1.41x (tot hon so voi 1.55x truoc day).
+
+Chong lai cung trong van de nay moi 7 s con lai nam o LN/softmax/CE/embed/copyback
+chay AVX2 CPU (Khong da bridge ATen). muon den gan hon voi torch CUDA phai lam
+P1 device-resident: params+act+gap all on GPU, kernel CUDA cho LN/CE/ops khac.
+Day la khoang thoi gian 2-4 tuan (voi feedback loop Colab + T4).

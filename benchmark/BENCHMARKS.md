@@ -1553,3 +1553,31 @@ Notebook #15, cùng phiên (xen kẽ ×3):
 **Kết luận:** attention CUDA **không ích lợi** ở hình thức này; flash AVX2 vẫn tốt hơn
 (xấp xỉ locality ~nhình QK^T trong cache). Giữ opt-in cho thí nghiệm, không bật mặc định.
 Mutex thêm để ngăn cublasHandle contention (`a860731`+, không đo lại — chỉ WSL build OK).
+
+
+## 9.42 SO CONG BANG THUC CHAT VOI GPU (2026-11-14)
+
+Cell [5/5][6/5] moi (in 2 cap rieng, xen ke A/B/A/B x3, median):
+
+CPU (BLAS default, interleave x3, median):
+
+| Cap | .tkv native | torch CPU (T=2) | Tỷ lệ |
+|---|---:|---:|---:|
+| fwd+CE+bwd | 14 995 | 9 538 | **1.57x** |
+| TỔNG (full step) | 15 513 | 11 040 | **1.41x** (từ 1.55x) |
+
+GPU (TKV_TORCH_GPU=1, interleave x3, median):
+
+| Cap | .tkv GPU | torch CUDA | Tỷ lệ |
+|---|---:|---:|---:|
+| fwd+CE+bwd | **7 085** | **276.6** | **25.6x** |
+| TONG (full step) | **7 600** | **307.3** | **24.7x** |
+
+**Ghi chu engineer:** cell [2/2] GPU da dung ATen CUDA qua bridge
+(from_blob + .to(kCUDA) + D2H ve caller buffer moi op). Du lieu GPU util van
+rat thap (~11%) vi su nghit call-to-call + CPU-managed List<f32> pin hang loat.
+
+**Dong nghia thuc chien:** .tkv can P1/P2 device-resident (params tren GPU,
+activations tren GPU, khong roundtrip) de co the gan voi torch CUDA. Du GPU
+available va ATen bridge hoat dong, chi can 30% op con lai chay AVX2 CPU tren
+`.tkv` de lo co dia chu.
