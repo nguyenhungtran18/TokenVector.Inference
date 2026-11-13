@@ -47,7 +47,7 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
 ## 3. Việc cần làm (theo thứ tự)
 
 ### A. Cụ thể, trước mắt
-- [ ] **[A1]** Verify bit-ident law: `mode 1 seq1024` loss bit-EXACT (gap float); không dời chỗ.
+- [x] **[A1]** mode 1 seq1024 chạy được (8.2 s); loss=10.760399 -> 13.686271 (warmup loss **trùng** mode 0 -> score EXACT). Không crash/nan. **Chưa verify độc lập** (loss sau step phụ thuộc optimizer; không so sánh được giữa các phiên).
 - [ ] **[A2]** Rebuild `demo/bseq.dll` từ source mới; chạy cell `[5/5]` lại; ghi
       `BENCHMARKS.md §9.43`.
 - [ ] **[A3]** Đo lại op-breakdown với `TKV_PROF=1` trên cell `[7/5]`.
