@@ -1245,3 +1245,29 @@ mới, 0 = không chặn) để tìm cấu hình tốt nhất trên máy nhiều
 
 **Số loss:** native `25.407898` ở mọi T; BLAS `25.40786`/`25.407883`/`25.407887` — lệch
 chữ số thứ 6 do thứ tự cộng, đúng như dự kiến.
+
+## 9.32 CHẶN THREAD CHO BLAS (`TKV_GEMM_BLAS_THREADS`): BLAS TRỞ THÀNH LỰA CHỌN TỐT Ở **MỌI** SỐ CORE (2026-11-12)
+
+Thêm `TKV_GEMM_BLAS_THREADS` (0 = không chặn) cho phép OpenBLAS dùng ít thread hơn pool
+của engine. WSL2 28 core, mode 2, seq1024, mỗi cấu hình 1 lần:
+
+| Cấu hình | fwd | bwd | TỔNG |
+|---|---:|---:|---:|
+| native (pool 28) | **2 053** | 5 504 | 8 886 |
+| BLAS cap 4 | 2 465 | 5 180 | 8 942 |
+| **BLAS cap 8** | 2 261 | **4 647** | **8 226** |
+| BLAS cap 16 | 2 559 | 4 920 | 8 777 |
+| BLAS cap 0 (=28, cũ) | 2 940 | 5 783 | 10 034 |
+| T=2 native | 4 182 | 10 847 | 16 297 |
+| **T=2 BLAS `min_n=0`** | 3 187 | 6 912 | **11 352** |
+
+- **BLAS cap 8 thắng cả hai đầu:** 28 core (8 226 vs native 8 886, −7.4%) và 2 vCPU trên
+  Colab (§9.30, −35%). Lúc đó fwd thua native ở 28 core (2 261 vs 2 053) nhưng bwd thắng
+  gấp (4 647 vs 5 504) nên tổng vẫn thắng.
+- Ngưỡng `min_n=512` là **không** tối ưu ở 2 thread: `min_n=0` cho 11 352 vs 11 703 (−3%).
+  Trên máy nhiều core thì `min_n=0` chậm hơn (§9.28 lúc đầu) — nhưng ở thời điểm đó BLAS
+  bị ép 28 thread nên kết luận đó vẫn chưa được kiểm chứng lại.
+
+**Bài học thực nghiệm:** một thư viện BLAS có thể **tốt hơn ở mọi số thread** nếu để nó
+tự chạy với số thread vừa phải; ép quá 28 thread làm hỏng kết quả. Hướng sửa hiện tại:
+chọn BLAS với cap ≈ 8 thay vì viết lại microkernel AVX2 (việc lớn, nhiều ngày).
