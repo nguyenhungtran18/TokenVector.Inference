@@ -8250,3 +8250,30 @@ Cell `[5/5]` phiên Colab mới (T4, 2 vCPU, seq1024, cùng phiên):
 native vs BLAS trên WSL) — nếu chênh lệch là ở **1 thread** thì gốc rễ là microkernel
 chứ không phải thread pool, và hướng sửa là cải thiện kernel (hoặc auto-chọn BLAS theo
 số core như giải pháp tạm). Chi tiết: `BENCHMARKS.md` §9.30.
+
+## §0.173 GOC RE: MICROKERNEL 1 THREAD; BLAS + CAP 8 THANG O MOI SO CORE (2026-11-12)
+
+Sweep `TKV_GEMM_THREADS` + biến mới `TKV_GEMM_BLAS_THREADS` (WSL 28 core, mode 2, seq1024):
+
+| T | native | BLAS | Ai thắng |
+|---:|---:|---:|---|
+| 1 | 26 592 | **16 529** | BLAS 1.61× |
+| 2 | 16 402 | **11 703** | BLAS 1.40× |
+| 4 | 11 660 | **8 786** | BLAS 1.33× |
+| 8 | 8 838 | **8 153** | BLAS 1.08× |
+| 28 | 8 366 (TB 3 vòng) | **7 249** (cap 8, TB 3 vòng) | BLAS **1.15×** |
+| 28 (BLAS không chặn) | 8 886 | 10 034 | native 1.13× |
+
+- **Gốc rễ = microkernel, không phải thread pool:** ở **1 thread** native chậm hơn
+  OpenBLAS 1.61× ⇒ kernel AVX2 nội bộ kém hơn kernel Haswell ~1.6×/core (codegen:
+  packing/prefetch/micro-tile). Đây mới là nguyên nhân chính của gap so với torch.
+- **§0.170 (BLAS ngõ cụt) SAI** vì ép OpenBLAS 28 thread: nó bão hoà ở 4–8 thread rồi
+  chậm đi (8→28 = 0.82×). Chặn ở 8 thì BLAS thắng ở cả 28 core (−13.4%) và cả Colab
+  2 vCPU (−35%).
+- `min_n` 0/256/512 không khác rõ → giữ 512. Loss BLAS lệch chữ số thứ 6
+  (`25.407887` vs `25.407898`).
+
+**Đang chờ user:** (a) bật BLAS mặc định trên Linux với cap 8 + `TKV_GEMM_BLAS=0` để
+tắt (nhanh hơn ở mọi máy, mất bit-exact loss); (b) giữ opt-in, chỉ khuyến nghị env khi
+chạy; (c) từ chối BLAS, đầu tư viết lại microkernel (nhiều ngày, đây mới là hướng sửa
+gốc). Chi tiết: `BENCHMARKS.md` §9.31–§9.33.

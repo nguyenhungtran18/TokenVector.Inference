@@ -1285,3 +1285,30 @@ Lệch ổn định qua 3 vòng ⇒ kết quả thật, không phải nhiễu. P
 (native 5 091 → BLAS 4 055 ms, −20%), fwd gần như bằng nhau (1 961 → 1 887).
 Thử nhanh một lần: cap 6 = 7 775 ms, cap 10 = 7 540 ms ⇒ **cap 8 là bắp cầu tốt nhất**
 trên máy này. Loss BLAS `25.407887` ở mọi vòng (native `25.407898`).
+
+## 9.33 `min_n` KHÔNG PHẢI NÚT; CẤU HÌNH ĐỀ XUẤT: BLAS + cap 8 + `min_n=512` (2026-11-12)
+
+| Cấu hình | TỔNG | Ghi chú |
+|---|---:|---|
+| 28T BLAS cap8 `min_n=0` | 7 527 | mọi tile đều đi BLAS |
+| 28T BLAS cap8 `min_n=256` | 7 388 | |
+| 28T BLAS cap8 `min_n=512` | **7 249** (TB 3 vòng) | **giữ** — an toàn, không call BLAS cho tile `n = T` |
+| 2T BLAS `min_n=0` cap 2 | 10 700 | mô phỏng Colab 2 vCPU |
+| 2T BLAS `min_n=0` cap 8 | 10 563 | cap vô nghĩa khi pool = 2 |
+
+Chênh lệch `min_n` 0/256/512 nằm trong nhiễu (7 527 vs 7 388 vs 7 249, khoảng 3% ở
+phép đơn lẻ) nên **giữ `min_n=512`** vì lý do thiết kế: tránh gọi BLAS cho từng tile
+`n = T` (64/256) bên trong vòng lặp packed.
+
+**Cấu hình đề xuất (Linux):** BLAS bật sẵn, `TKV_GEMM_BLAS_THREADS=8`, `min_n=512`;
+`TKV_GEMM_BLAS=0` để quay lại kernel nội bộ. Kết quả:
+
+| Môi trường | native | BLAS cap8 | Cải thiện |
+|---|---:|---:|---:|
+| Colab 2 vCPU (§9.30) | 31 454 ms | 20 477 ms | **−35%** |
+| WSL 28 core (§9.32) | 8 366 ms | 7 249 ms | **−13.4%** |
+
+**Đổi lại:** loss lệch ở chữ số thứ 6 (`25.407898` → `25.407887`), tức **không còn
+bit-identical** với bản native/Windows. Với Colab, `.tkv` vẫn còn **1.55× chậm torch**
+(20 477 vs 13 247 ms) — phần còn lại ở fwd (1.70×) + bwd (1.66×) ngoài GEMM.
+Quyết định bật mặc định hay giữ opt-in đang chờ user (§0.173).
