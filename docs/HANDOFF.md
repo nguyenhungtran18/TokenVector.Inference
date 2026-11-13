@@ -8384,3 +8384,24 @@ tier_d`, ca CPU lan CUDA), lay MEDIAN; cell `[5/5]` co sampler GPU rieng cho nha
 cuBLAS. Dieu kien giong nhau: cung VM, seq1024, GPT-2 124M, input tokens [(i*37+11)
 % 50257] GIONG HET, seed 7 ca hai, 2 thread ca hai; loss KHONG so duoc (init khac).
 Xem BENCHMARKS.md §9.37.
+
+
+## §0.179 FAIR-ONLY NOTEBOOK + TACH TUNG BUC: BACKWARD THUA (2026-11-13)
+
+Notebook `demo/colab_bench_ai_gpu.ipynb` (commit `c83545e`) chi GIU benchmark
+cong bang: xoa `[4/5]` `[5/5]` (single-shot, khong xen ke); `[1/2]` phase-level
+.tkv mode 2 vs torch tier_e T=2 xen ke A/B/A/B x3 median + `[2/2]` .tkv cuBLAS vs
+torch CUDA xen ke x3 + cell RAM. Markdown cell [1] noi ro: loss .tkv != torch
+(init khac, FLOPs giong nhau), chi so TIME.
+
+**Bai hoc nong tu cac so (chua co so fair interleaved):**
+- fwd(+CE): .tkv BLAS 4360-4500 vs torch 3625-3703 (~1.2x)
+- **bwd: .tkv 11582-11787 vs torch 6019-6252 (~1.9x) - THUA LON NHAT**
+- opt.step: .tkv 425-451 vs torch 569-620 (.tkv thang)
+- CUDA=1: bwd 11.7 -> 5.4-5.6 s (GEMM cua bwd ~6 s); con ~5.5 s KHONG di cuBLAS
+  (khop luan: attention flash-attn C + LN/GELU/softmax native + pin/copy)
+
+**Viec phai lam truoc khi "dieu chinh":** instrument tung op bwd (`TKV_PROF`
+env-gated timers quanh AttentionBwd*/LayerNormBwd/GeluBwd/softmax/CE) - uoc
+luong ~1 ngay; chua co thi moi hanh dong deu theo giac. Chi tiet BENCHMARKS
+§9.38.

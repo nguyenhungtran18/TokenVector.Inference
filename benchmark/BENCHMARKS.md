@@ -1441,3 +1441,40 @@ Yêu cầu người dùng: **mọi thứ đo phải bằng nhau về điều ki�
 **Điều kiện ĐÚNG để so:** chỉ so cùng device (CPU BLAS vs torch CPU; cuBLAS vs torch CUDA);
 chỉ so Thời gian, không so loss; mỗi con số phải kèm env flags (`TKV_GEMM_BLAS`,
 `TKV_GEMM_CUDA`, `TKV_BENCH_THREADS`).
+
+> **CẬP NHẬT 2026-11-13 (commit `c83545e`, notebook fair-only):** mọi phép đo KHÔNG
+> theo protocol trên đã bị **xoá khỏi notebook** — chỉ giữ `[1/2]` (phase BLAS-vs-torch
+> T=2, xen kẽ A/B/A/B ×3, median) và `[2/2]` (.tkv cuBLAS vs torch CUDA, xen kẽ ×3) +
+> cell RAM. `[4/5]` (mode 0 đơn lẻ + torch), `[5/5]` (mode 2 đơn lẻ + torch tier_e
+> không xen kẽ) đã xoá; bản cũ trong git nếu cần.
+
+## 9.38 TÁCH TỪNG BƯỚC: BACKWARD LÀ PHA THUA PHẦN LỚN NHẤT (~1.9×) (2026-11-13)
+
+Các số từ các phiên trước (điều kiện gần đúng protocol; **chưa có số fair interleaved —
+chờ chạy lại cell `[1/2]`**):
+
+| Pha | `.tkv` BLAS | torch T=2 | Tỷ lệ | Ghi chú |
+|---|---:|---:|---:|---|
+| fwd (+CE ≈ 900 ms) | 4 360–4 483 | 3 625–3 784 | **1.2×** | BLAS đã cắt fwd ~45% so native |
+| **bwd** | **11 582–11 787** | **6 019–6 252** | **1.9×** | **chỗ thua lớn nhất** |
+| opt.step | 425–451 | 569–620 | **0.73× — .tkv thắng** | AdamW C nhanh hơn torch |
+| zero/copyback | 85–98 | 16–41 | — | không đáng kể |
+| TỔNG | 17.5 s | 11.0 s | 1.6× | |
+
+**Bằng chứng gián tiếp về phía trong bwd:** khi chạy `TKV_GEMM_CUDA=1` (GEMM trên GPU),
+bwd giảm 11.7 → **5.4–5.6 s** ⇒ phần GEMM của backward ≈ 6.2 s; **phần còn lại ≈ 5.5 s
+không đi cuBLAS** — nhiều khả năng nằm ở attention bwd (flash-attn C tự viết, 12 layer ×
+12 head, seq1024, O(n²·d) ≈ 194 GFLOP), LayerNorm bwd/GELU/softmax bwd native, và/hoặc
+chi phí pin/copy giữa managed list[f32] và .so.
+
+**Điều chỉnh cụ thể (theo thứ tự giá trị):**
+1. **Đo tách từng op bwd** bằng instrumentation (`TKV_PROF` env-gated timers ở các entry
+   `AttentionBwd*`, `TkvTorchLayerNormBwd`, `TkvTorchGeluBwd*`, softmax/CE) — hiện engine
+   chưa có; Ước lượng ~1 ngày để đọc call sites và thêm vài chục timer.
+2. Nếu attention bwd chiếm đa số: đưa qua **torch bridge ATen SDPA** (`TkvTorchSdpa` có
+   trong .so nhưng Colab **chưa build** thư viện fused ATen) hoặc port flash-attn bwd
+   sang CUDA — vài ngày.
+3. LayerNorm/GELU/softmax bwd qua ATen bridge hoặc CUDA kernel ngắn — vài ngày.
+
+Cần thêm một phiên Colab **với instrumentation** trước khi chọn hướng điều chỉnh —
+nhắm đúng op chứ không đoán.
