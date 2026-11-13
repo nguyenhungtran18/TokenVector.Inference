@@ -1353,3 +1353,33 @@ chạy: `117–231 MiB, 0–3 %`; lúc torch CUDA chạy: `2 311 / 3 527 MiB, 99
 GPU**: hook P0 chỉ nằm trong `SgemmF32` (kernel tile `T < 512`, điều kiện `n >= 512`
 không bao giờ đúng) và mỗi lần gọi lại `cudaMalloc` + 2 H2D + 1 D2H (xem
 `docs/PLAN_GPU_BACKEND.md` §0). Muốn GPU thật phải làm P1 (hook đầy đủ + device-resident).
+
+## 9.35 SPIKE P1/P0: `TKV_GEMM_CUDA=1` NHANH HƠN TORCH CPU THẬT SỰ (2026-11-13)
+
+Sau khi wiring `TkvCUDA_RectF32` (cuBLAS row-major, buffer device cache grow-only,
+mutex, `beta=1` copy C; commit `3d8d8d8` TokenVector + `1f1de4b` Inference), chạy Colab
+T4, cell `[5/5]` mode 2 seq1024, cùng phiên với `[4/5]` (mode 0) và torch `tier_e` 2 thread:
+
+| Pha | native (`BLAS=0`) | MẶC ĐỊNH BLAS cap 8 | **cuBLAS (`CUDA=1`)** | torch T=2 |
+|---|---:|---:|---:|---:|
+| forward | 8 193 ms | 4 483 ms | **2 108 ms** | 3 089 ms |
+| CE loss | 880 ms | 901 ms | 904 ms | (gộp) |
+| **backward** | **17 963 ms** | **11 316 ms** | **5 310 ms** | 6 826 ms |
+| opt.step | 428 ms | 451 ms | 433 ms | 621 ms |
+| copyback | 93 ms | 85 ms | 84 ms | 32 ms (zero_grad) |
+| **TỔNG** | 27 557 ms | 17 236 ms | **8 839 ms** | **11 096 ms** |
+
+- cuBLAS nhanh hơn BLAS mặc định **1.95×**, nhanh hơn native **3.1×**.
+- cuBLAS **nhanh hơn PyTorch CPU 1.26×** (8 839 vs 11 096 ms) — và vẫn chậm torch CUDA
+  **~32×** (273.5 / 303.1 ms). fwd+CE 3 012 vs torch CPU 3 089 → 1.03×; bwd 5 310 vs
+  6 826 → **1.29× nhanh hơn**; opt 1.43×.
+- Cell `[4/5]` (mode 0), mặc định BLAS: `.tkv` 17 476 ms (fwd 5 482 + bwd 11 994) vs
+  torch CPU 10 440 ms (**1.67× chậm**) / torch CUDA 273.5 / 303.1 ms.
+- Loss khi dùng cuBLAS: `25.407866` (BLAS `25.407888`, native `25.407898`) — lệch chữ số
+  thứ 6, gate `1e-5` vẫn qua. Sampler GPU của `[4/5]` vẫn chỉ thấy `.tkv` ở 117 MiB / 0–4%
+  (nhánh cuBLAS nằm ở `[5/5]` nên không được sample) — **nhưng tốc độ 2 108/5 310 ms là
+  bằng chứng việc cuBLAS thật sự chạy GPU**, không phải nhiễu CPU (2 thread).
+
+**Chưa công bằng đầy đủ:** nhánh cuBLAS dùng GPU (không phải CPU-vs-CPU). Muốn so sánh
+apples-to-apples CPU-vs-CPU thì dùng nhánh BLAS (+full profile). Muốn đánh giá hết hoặc
+đuổi torch CUDA cần **P2** (device-resident weight/activation, bỏ H2D mỗi GEMM).

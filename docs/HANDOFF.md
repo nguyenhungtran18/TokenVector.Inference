@@ -8323,3 +8323,31 @@ TỔN 8 563 ms (vs 8 604 mặc định), loss `25.407887` không đổi → **kh
 
 **Cần Colab:** build `.so` (cell `[4/5]`) → chạy `[5/5]` (có nhánh `TKV_GEMM_CUDA=1`,
 commit Inference `a908880`). Commit code `3d8d8d8` (TokenVector).
+
+## §0.176 SPIKE P1 CUBLAS NAA NHANH TORCH CPU (2026-11-13)
+
+Colab T4, cell `[5/5]` cùng phiên, mode 2 seq1024:
+
+| Pha | native | BLAS (mặc định) | **cuBLAS** | torch T=2 |
+|---|---:|---:|---:|---:|
+| fwd | 8 193 | 4 483 | **2 108** | 3 089 |
+| CE | 880 | 901 | 904 | (gộp) |
+| bwd | **17 963** | 11 316 | **5 310** | 6 826 |
+| opt | 428 | 451 | 433 | 621 |
+| **TỔNG** | 27 557 | 17 236 | **8 839** | **11 096** |
+
+- cuBLAS **nhanh hơn BLAS 1.95×**, **nhanh hơn PyTorch CPU 1.26×** (bwd 1.29×, fwd+CE
+  1.03×, opt 1.43×); vẫn chậm torch CUDA ~32× (273.5 / 303.1 ms).
+- mode 0 `[4/5]` BLAS mặc định: `.tkv` 17 476 vs torch CPU 10 440 (1.67×) / CUDA
+  273.5 ms.
+- Loss cuBLAS `25.407866` (BLAS `25.407888`) — lệch chữ số thứ 6, gate `1e-5` qua.
+- **Chưa apples-to-apples GPU-vs-GPU**; sampler `[4/5]` không bao phủ nhánh cuBLAS
+  (nằm ở `[5/5]`), nhưng tốc độ 2 108 / 5 310 ms không thể đạt bằng 2 CPU core.
+- Muốn đuổi torch CUDA cần **P2** (device-resident) — spike nặng chủ yếu ở bwd.
+
+**Về câu hỏi "benchmark không công bằng / lượng RAM của PyTorch":** phép đo CPU là
+apples-to-apples (cùng VM, cùng 2 thread). Những hạn chế của `.tkv` so với torch:
+(1) OpenBLAS vs MKL/oneDNN mà torch dùng; (2) tensor `list[f32]` (managed) phải qua
+reflection/ToArray + pin, torch native pointer zero-copy; (3) không GPU mặc định;
+(4) attention: custom C flash-attn (spawn 12 worker thread/call) vs torch SDPA fused.
+Chi tiết: `BENCHMARKS.md` §9.35.
