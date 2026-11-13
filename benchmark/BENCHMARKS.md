@@ -1311,4 +1311,18 @@ phép đơn lẻ) nên **giữ `min_n=512`** vì lý do thiết kế: tránh g�
 **Đổi lại:** loss lệch ở chữ số thứ 6 (`25.407898` → `25.407887`), tức **không còn
 bit-identical** với bản native/Windows. Với Colab, `.tkv` vẫn còn **1.55× chậm torch**
 (20 477 vs 13 247 ms) — phần còn lại ở fwd (1.70×) + bwd (1.66×) ngoài GEMM.
-Quyết định bật mặc định hay giữ opt-in đang chờ user (§0.173).
+
+**ĐÃ QUYẾT (2026-11-13, theo lựa chọn của user): bật BLAS mặc định trên Linux/macOS.**
+`tkv_blas_load` không còn ngăn opt-in trên POSIX; `TKV_GEMM_BLAS=0` để quay lại kernel
+AVX2 nội bộ (loss EXACT). `tkv_blas_threads` mặc định **cap 8** trên POSIX, 0 (không
+chặn) trên Windows. Windows không đổi hành vi.
+
+**Kiểm chứng WSL2 28 core, mode 2, seq1024, 3 vòng xen kẽ (cùng `.so`, không env):**
+
+| | TỔNG | loss |
+|---|---:|---|
+| MẶC ĐỊNH mới (BLAS tự nạp) | 7 690 / 7 466 / 7 628 → **TB 7 595** | `25.407887` |
+| `TKV_GEMM_BLAS=0` (native) | 8 358 / 8 376 / 8 364 → **TB 8 366** | `25.407898` |
+
+→ Mặc định mới nhanh hơn **9.2%** ở 28 core (đo độc lập 3 vòng khác cho −13.4%; nhiễu
+máy WSL ±4%) và **−35%** ở Colab 2 vCPU. Commit `c9becd3` (TokenVector).

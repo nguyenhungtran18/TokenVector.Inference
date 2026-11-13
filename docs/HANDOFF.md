@@ -8273,7 +8273,9 @@ Sweep `TKV_GEMM_THREADS` + biến mới `TKV_GEMM_BLAS_THREADS` (WSL 28 core, mo
 - `min_n` 0/256/512 không khác rõ → giữ 512. Loss BLAS lệch chữ số thứ 6
   (`25.407887` vs `25.407898`).
 
-**Đang chờ user:** (a) bật BLAS mặc định trên Linux với cap 8 + `TKV_GEMM_BLAS=0` để
-tắt (nhanh hơn ở mọi máy, mất bit-exact loss); (b) giữ opt-in, chỉ khuyến nghị env khi
-chạy; (c) từ chối BLAS, đầu tư viết lại microkernel (nhiều ngày, đây mới là hướng sửa
-gốc). Chi tiết: `BENCHMARKS.md` §9.31–§9.33.
+**ĐÃ QUYẾT (2026-11-13):** bật BLAS **mặc định** trên Linux/macOS, cap 8
+(`TKV_GEMM_BLAS=0` để tắt / khôi phục loss EXACT; Windows không đổi). Kiểm chứng WSL
+28 core 3 vòng: mặc định mới TB 7 595 ms vs native TB 8 366 ms (**−9.2%**); Colab
+2 vCPU −35% (§9.30). Commit `c9becd3` (TokenVector) + `d025f90` (Inference).
+Còn lại: `.tkv` vẫn **1.55× chậm torch** ở Colab, phần này nằm ở fwd/bwd ngoài GEMM
+(cần profile tiếp: LayerNorm/softmax/attention fused, hay đường copy/pin).
