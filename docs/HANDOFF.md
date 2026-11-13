@@ -8394,12 +8394,17 @@ cong bang: xoa `[4/5]` `[5/5]` (single-shot, khong xen ke); `[1/2]` phase-level
 torch CUDA xen ke x3 + cell RAM. Markdown cell [1] noi ro: loss .tkv != torch
 (init khac, FLOPs giong nhau), chi so TIME.
 
-**Bai hoc nong tu cac so (chua co so fair interleaved):**
-- fwd(+CE): .tkv BLAS 4360-4500 vs torch 3625-3703 (~1.2x)
-- **bwd: .tkv 11582-11787 vs torch 6019-6252 (~1.9x) - THUA LON NHAT**
-- opt.step: .tkv 425-451 vs torch 569-620 (.tkv thang)
-- CUDA=1: bwd 11.7 -> 5.4-5.6 s (GEMM cua bwd ~6 s); con ~5.5 s KHONG di cuBLAS
-  (khop luan: attention flash-attn C + LN/GELU/softmax native + pin/copy)
+**Bai hoc nong tu cac so (notebook #13 — FAIR INTERLEAVED x3, median):**
+- **fwd(+CE): .tkv 5165 vs torch 3097 -> 1.67x** (fwd 4216-4263 mot vong 5020 - VM noise)
+- **bwd: .tkv 11186 vs torch 7122 -> 1.57x** (.tkv rat on dinh 10643-11359; torch dao dong 5931-7412)
+- **opt.step: .tkv 429 vs torch 601 -> 0.71x  (.tkv thắng rõ)**
+- **TỔNG: .tkv 17039 vs torch 11018 -> 1.55x**
+- GPU [2/2]: .tkv cuBLAS median 9728 ms (vong 8762/9728/9731) vs torch CUDA 286.0 ms -> **34.0x**;
+  sampler GPU: 1009-1111 MiB, util **0-9%** (GPU gan nhu idle)
+- RAM: .tkv 4.09 GB < torch 4.29 GB
+
+Ta ket luan: CA HAI pha fwd va bwd deu thua (1.67x / 1.57x) - khong con mot pha
+duy nhat; opt la diem manh.
 
 **Viec phai lam truoc khi "dieu chinh":** instrument tung op bwd (`TKV_PROF`
 env-gated timers quanh AttentionBwd*/LayerNormBwd/GeluBwd/softmax/CE) - uoc

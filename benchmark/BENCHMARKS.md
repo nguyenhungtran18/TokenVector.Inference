@@ -1448,33 +1448,36 @@ chỉ so Thời gian, không so loss; mỗi con số phải kèm env flags (`TKV
 > cell RAM. `[4/5]` (mode 0 đơn lẻ + torch), `[5/5]` (mode 2 đơn lẻ + torch tier_e
 > không xen kẽ) đã xoá; bản cũ trong git nếu cần.
 
-## 9.38 TÁCH TỪNG BƯỚC: BACKWARD LÀ PHA THUA PHẦN LỚN NHẤT (~1.9×) (2026-11-13)
+## 9.38 TÁCH TỪNG BƯỚC — SỐ FAIR INTERLEAVED (notebook #13, 2026-11-13)
 
-Các số từ các phiên trước (điều kiện gần đúng protocol; **chưa có số fair interleaved —
-chờ chạy lại cell `[1/2]`**):
+Cell `[1/2]`, xen kẽ A/B/A/B ×3 mỗi bên, median:
 
-| Pha | `.tkv` BLAS | torch T=2 | Tỷ lệ | Ghi chú |
-|---|---:|---:|---:|---|
-| fwd (+CE ≈ 900 ms) | 4 360–4 483 | 3 625–3 784 | **1.2×** | BLAS đã cắt fwd ~45% so native |
-| **bwd** | **11 582–11 787** | **6 019–6 252** | **1.9×** | **chỗ thua lớn nhất** |
-| opt.step | 425–451 | 569–620 | **0.73× — .tkv thắng** | AdamW C nhanh hơn torch |
-| zero/copyback | 85–98 | 16–41 | — | không đáng kể |
-| TỔNG | 17.5 s | 11.0 s | 1.6× | |
+| Pha | `.tkv` BLAS | torch T=2 | Tỷ lệ |
+|---|---:|---:|---:|
+| **fwd (+CE)** | **4 216–4 263** (round 1/2) — **5 020** (round 3); median +CE = **5 165** | 3 066–3 109 | **1.67×** |
+| **bwd** | 10 643 / 11 186 / 11 359 → **11 186** | 5 931 / 7 122 / 7 412 → **7 122** | **1.57×** |
+| opt.step | 419 / 429 / 432 → **429** | 587 / 601 / 636 → **601** | **0.71× — `.tkv` thắng** |
+| **TỔNG** | 16 797 / 17 039 / 17 061 → **17 039 ms** | 10 658 / 11 014 / 11 114 → **11 018 ms** | **1.55×** |
 
-**Bằng chứng gián tiếp về phía trong bwd:** khi chạy `TKV_GEMM_CUDA=1` (GEMM trên GPU),
-bwd giảm 11.7 → **5.4–5.6 s** ⇒ phần GEMM của backward ≈ 6.2 s; **phần còn lại ≈ 5.5 s
-không đi cuBLAS** — nhiều khả năng nằm ở attention bwd (flash-attn C tự viết, 12 layer ×
-12 head, seq1024, O(n²·d) ≈ 194 GFLOP), LayerNorm bwd/GELU/softmax bwd native, và/hoặc
-chi phí pin/copy giữa managed list[f32] và .so.
+GPU `[2/2]`: `.tkv` cuBLAS median **9 728 ms** (vong 8 762 / 9 728 / 9 731; fwd
+3 113–3 878, bwd 5 599–6 615 — nhiễu) vs torch CUDA **286.0 ms** → **34.0×**; sampler:
+1 009–1 111 MiB, util **0–9%** — GPU gần như nhàn rỗi (CPU-driven).
+RAM: `.tkv` 4.09 GB < torch 4.29 GB.
 
-**Điều chỉnh cụ thể (theo thứ tự giá trị):**
-1. **Đo tách từng op bwd** bằng instrumentation (`TKV_PROF` env-gated timers ở các entry
-   `AttentionBwd*`, `TkvTorchLayerNormBwd`, `TkvTorchGeluBwd*`, softmax/CE) — hiện engine
-   chưa có; Ước lượng ~1 ngày để đọc call sites và thêm vài chục timer.
-2. Nếu attention bwd chiếm đa số: đưa qua **torch bridge ATen SDPA** (`TkvTorchSdpa` có
-   trong .so nhưng Colab **chưa build** thư viện fused ATen) hoặc port flash-attn bwd
-   sang CUDA — vài ngày.
-3. LayerNorm/GELU/softmax bwd qua ATen bridge hoặc CUDA kernel ngắn — vài ngày.
+**Hai pha đang thua:** fwd(+CE) 1.67× và bwd 1.57× (xấp xỉ nhau — không còn một pha
+duy nhất "thủ phạm"); opt thắng rõ. So với single-shot trước đây, tỉ lệ bwd thực chất
+~1.57× chứ không 1.9×; fwd là ~1.67×.
 
-Cần thêm một phiên Colab **với instrumentation** trước khi chọn hướng điều chỉnh —
-nhắm đúng op chứ không đoán.
+**Điểm đáng chú ý:** `.tkv` bwd rất ổn định (10 643–11 359) trong khi torch bwd dao
+động 5 931–7 412 — có thể T=2 tail; ít nhất .tkv không vô cớ ĐỨNG IM.
+
+**Điều chỉnh đề xuất (dựa trên bằng chứng, chưa sửa code):**
+1. **Không đoán — instrument per-op** (`TKV_PROF` timers quanh `AttentionBwd*`,
+   `TkvTorchLayerNormBwd`, GELU/softmax/CE bwd, `LinearDwAtFused`/`LinearDxFused`) —
+   ~1 ngày, để biết chính xác op nào ăn bao nhiêu %.
+2. Nhắm **fwd+CE trước** vì 1.67×: CE loss (gpt2_loss + grad) nếu chạy vô hướng trên
+   managed list[f32] có thể ~900 ms; kiểm bằng instrument.
+3. bwd: phần GEMM đã cuBLAS (trong GPU path 5.4–6.6 s); phần còn lại = attention bwd +
+   LN/GELU/softmax — instrument sẽ cho biết.
+
+Ràng buộc: mọi số ở đây chỉ valid trong cùng phiên; giữa-phiên lệch ±15%.
