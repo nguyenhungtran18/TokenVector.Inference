@@ -8425,3 +8425,16 @@ Per-op hien tai (BLAS): LMHEAD_BWD 27.1%, ATTN_FWD 24.0%, LIN_DX 12.1%,
 GELU combined 12.7%, LIN_DW 7.6%, ATTN_BWD_MERGE 8.8%, LN 6.5%.
 
 Huong tiep: LMHEAD_BWD + ATTN_FWD = 51% con lai. Chi tiet BENCHMARKS §9.39.
+
+
+## §0.181 POST-GELU — FAIR BENCHMARK (notebook #14, 2026-11-13)
+
+Commit `c0df011` + `998b53d` (instrumentation) + `6fa9596` (docs GELU). Số công bằng
+(xen kẽ x3, median): fwd(+CE) .tkv 4692 vs torch 3335 (**1.41x**); bwd 10333 vs 6028
+(**1.71x**); opt .tkv 431 vs 573 (thang); TỐNG 15598 vs 11064 (**1.41x**).
+GPU: .tkv cuBLAS **7271 ms** vs torch CUDA 292.8 (**24.8x**); sampler 1103 MiB / 0-11%
+(GPU gần như idle — CPU đẩy). RAM 4.09/4.29 GB.
+
+Per-op (BLAS): ATTN_BWD_MERGE 6.0 s (18%) · ATTN_FWD 7.1 s · LMHEAD 7.1 s ·
+LIN_DX 4.9 s · LIN_DW 5.1 s. **cuBLAS:** ATTN_BWD_MERGE **6.0 s (35.5%)** · ATTN_FWD 3.75 s
+· LMHEAD 3.2 s — attention backward hiện ~6 s CỦA CPU, không đi cuBLAS.

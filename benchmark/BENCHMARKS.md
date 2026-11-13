@@ -1505,3 +1505,27 @@ Verify: `gelu_test.c` compare scalar vs AVX2: max |diff| fwd 2.4e-07, bwd 1.8e-0
 **Ranking op-time moi (BLAS):** LMHEAD_BWD 27.1% (4.2 s), ATTN_FWD 24.0% (3.7 s),
 LIN_DX 12.1% (1.9 s), GELU combined 12.7%, LIN_DW 7.6%, ATTN_BWD_MERGE 8.8%, LN 6.5%.
 LMHEAD_BWD + ATTN_FWD la 51% op-time con lai — huong tiep theo.
+
+
+## 9.40 POST-GELU: CON SO CONG BĂNG + DUNG GAU ATTN BWD_MERGE (2026-11-13)
+
+Notebook #14 (post-GELU, xen ke x3, median):
+
+| Pha | `.tkv` BLAS | torch T=2 | Tỷ lệ |
+|---|---:|---:|---:|
+| **fwd(+CE)** | **4 692** | 3 335 | **1.41x** (trước 1.67x) |
+| **bwd** | **10 333** | 6 028 | **1.71x** |
+| opt.step | **431** | 573 | **.tkv thắng (0.75x)** |
+| **TỐNG** | **15 598** | **11 064** | **1.41x** (trước 1.55x) |
+
+GPU `[2/2]`: `.tkv` cuBLAS median **7 271 ms** (trước 9 728; GELU fix + weight-B cache) vs torch
+CUDA **292.8 ms** → **24.8x**. Sampler: 1 103 MiB, util 0–11% — GPU cực ít hoạt động.
+RAM: `.tkv` 4.09 GB < torch 4.29 GB.
+
+**Op-time (Colab, BLAS):** ATTN_BWD_MERGE 6 037 (18.4%) · ATTN_FWD 7 143 (21.8%) ·
+LIN_DW 5 094 (15.6%) · LIN_DX 4 943 (15.1%) · **LMHEAD_BWD 7 085 (21.6%)** · LN ~1 122 ·
+GELU chỉ còn 1 116 (trước 11 624). **Op-time (cuBLAS):** ATTN_BWD_MERGE **5 993 (35.5%)** ·
+ATTN_FWD 3 755 (22.2%) · LMHEAD 3 192 (18.9%) · LIN_DX 904 (5.4%) · LIN_DW 1 105 (6.5%).
+
+**Điểm nghẽn #1 trên GPU path:** ATTN bwd (`FlashAttentionBwdMergeMulti`) **không đi cuBLAS**
+— 6.0 s CPU. `FlashAttentionFwdFused` cũng vậy (7.1 s BLAS / 3.75 s cuBLAS).
