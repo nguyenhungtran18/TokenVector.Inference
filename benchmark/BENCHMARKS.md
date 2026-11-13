@@ -1581,3 +1581,19 @@ rat thap (~11%) vi su nghit call-to-call + CPU-managed List<f32> pin hang loat.
 activations tren GPU, khong roundtrip) de co the gan voi torch CUDA. Du GPU
 available va ATen bridge hoat dong, chi can 30% op con lai chay AVX2 CPU tren
 `.tkv` de lo co dia chu.
+
+
+## 9.43 BENCH 2026-11-14 (notebook #22, xen ke x3, median)
+
+Cell [5/5] CPU:
+- .tkv native fwd+CE+bwd = 14 745 ms vs torch T=2 9 167 -> **1.61x**
+- .tkv TONG (full step) = 15 259 ms vs torch TOTAL 10 906 -> **1.40x**
+
+Cell [6/5] GPU (TKV_TORCH_GPU=1):
+- .tkv bridge fwd+CE+bwd = 6 902 ms vs torch fwd+bwd 268.1 ms -> **25.7x**
+- .tkv TONG (full step) = 7 407 ms vs torch full step 299.2 ms -> **24.8x**
+  loss_val = **17.106686** (ATen bridge path, khong parity voi AVX2)
+
+Op-breakdown TKV_PROF native: ATTN_FWD 5 090 / ATTN_BWD_MERGE 6 507 / LMHEAD_BWD 6 755.
+Op-breakdown TKV_PROF bridge-GPU: ATTN_BWD_MERGE 5 966 / LMHEAD_BWD 6 089.
+Tong op-time native 32.7 s vs bridge-GPU 14.0 s.

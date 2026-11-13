@@ -8492,3 +8492,17 @@ Sau khi benchmark công bằng hoàn chỉnh (xen kẽ x3, median, seed 7, cùng
 **Quy tắc mới:** Mọi số benchmark "công bằng" (cùng VM, cùng input, cùng seed,
 xen kẽ ×3, median) mới được ghi vào tài liệu. Số single-shot bị loại
 ('BENCHMARKS §9.42/0.183').
+
+
+## §0.187 BENCH 2026-11-14 (notebook #22)
+
+Cell [5/5] CPU (xen ke x3 median):
+- fwd+bwd: .tkv 14 745 vs torch T=2 9 167 (**1.61x**)
+- TONG full step: .tkv 15 259 vs torch TOTAL 10 906 (**1.40x**)
+
+Cell [6/5] GPU (TKV_TORCH_GPU=1):
+- fwd+bwd: .tkv 6 902 vs torch CUDA 268.1 (**25.7x**)
+- TONG full step: .tkv 7 407 vs torch full step 299.2 (**24.8x**)
+- loss_val = **17.106686** (ATen bridge path, khong parity voi AVX2)
+
+Reference: notebook #22 (nen dung lai sau khi notebook moi bo CPU bench - ee5db29).
