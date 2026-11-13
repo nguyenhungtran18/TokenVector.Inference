@@ -8302,3 +8302,24 @@ Còn lại: `.tkv` vẫn **1.55× chậm torch** ở Colab, phần này nằm �
   Muốn GPU thật phải làm P1: hook `SgemmRect`/`SgemmFull`/`SgemmPacked` đầy đủ +
   device-resident weight/activation (xem `docs/PLAN_GPU_BACKEND.md` §0, §2).
 Chi tiết: `BENCHMARKS.md` §9.34.
+
+## §0.175 P0/P1 SPIKE CUBLAS DA WIRING, CHO MEAS UA MENT TREN COLAB (2026-11-13)
+
+Người dùng chọn hướng GPU (option c). Đã cài đặt spike (chưa đo GPU):
+
+- `tkv_cuda_native.c`: `TkvCUDA_RectF32(a, lda, b, ldb, c, ldc, m, n, k, transA, transB, accumulate)`
+  - row-major C = opA(A)·opB(B) qua `cublasSgemm` (double-transpose trick, ld truyền nguyên giá trị)
+  - buffer device **cache grow-only** (static `g_da/g_db/g_dc_buf`), mutex quanh lời gọi
+  - `beta=1` → H2D copy C trước (dW accumulate); shape `m*n < 65536` → trả 0 (fallback)
+- `tkv_simd_native.c`: env `TKV_GEMM_CUDA=1` (mặc định **0**); `tkv_try_cuda_rect/_tb/_acc`;
+  CUDA được thử **trước** BLAS ở 3 điểm: `run_rect_shaped_m` (pack/full), `LinearDxFused`
+  (dx = gy @ w^T, transB), `LinearDwAtFused` (dW = x^T·gy, transA, beta=1).
+- Cảnh báo thiết kế: chưa device-resident (còn H2D/D2H mỗi GEMM) — đây là bước spike để
+  đo xem cuBLAS fragment có thắng CPU không; muốn tiệm cận torch CUDA cần P2 (giữ
+  weight/activation trên GPU suốt step, bỏ copy).
+
+**Kiểm chứng (WSL, không GPU):** build OK; `TKV_GEMM_CUDA=1` fallback về BLAS →
+TỔN 8 563 ms (vs 8 604 mặc định), loss `25.407887` không đổi → **không hồi quy**.
+
+**Cần Colab:** build `.so` (cell `[4/5]`) → chạy `[5/5]` (có nhánh `TKV_GEMM_CUDA=1`,
+commit Inference `a908880`). Commit code `3d8d8d8` (TokenVector).
