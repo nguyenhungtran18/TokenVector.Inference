@@ -8352,17 +8352,19 @@ reflection/ToArray + pin, torch native pointer zero-copy; (3) không GPU mặc �
 (4) attention: custom C flash-attn (spawn 12 worker thread/call) vs torch SDPA fused.
 Chi tiết: `BENCHMARKS.md` §9.35.
 
-## §0.177 P2-LITE WEIGHT RESIDENT + CELL RSS (2026-11-13)
+## §0.177 P2-LITE WEIGHT RESIDENT + CELL RSS (2026-11-13) — DA SUA LOI
 
-**Đã cài đặt** (commit `946500e` TokenVector): `TkvCUDA_MarkWeightsDirty()` trong
-`adamw_step_f32_impl`; trong `TkvCUDA_RectF32`, khi A không Trans + `beta=0`, B (weight)
-được **cache device-resident** (96 entry, grow-only, mutex); re-upload sau mỗi AdamW.
-dW/activations không cache. WSL build OK; fallback loss `25.407887` không đổi; TỔNG
-8 463 vs 8 666 ms (±3%) → không hồi quy. **Chưa đo GPU** — kỳ vọng modest; phần lớn
-bwd nằm ở dW (không được cache).
+**Incident:** bản P2-lite đầu (`946500e`) suy đoán "A không Trans ⇒ B là weight" và cache
+B cho mọi GEMM → attention packed path (attn_xgemm pack K/V) dùng activation B bị giữ
+=> **Colab loss_val = 13.831469** (đúng ~25.408). Fix: `TkvCUDA_RectF32` thêm tham số
+`cacheB` (mặc định 0 = KHÔNG cache); chỉ `tkv_try_cuda_rect_tb` (**LinearDxFused:
+dx = gy @ w^T**) dùng `cacheB=1`. Packed/attention, SgemmF32, dW, full GEMM: tất cả 0.
 
-**(ii) Peak RSS:** notebook cell `[7/7]` (`6636f94`) đo `VmHWM` `.tkv` vs `torch tier_d`
-bằng `/usr/bin/time -v` — chờ user chạy, kết quả chưa có.
+- API: `TkvCUDA_RectF32(..., transA, transB, accumulate, cacheB)`.
+- WSL build + fallback OK (GPU-less → không tái hiện được; loss `25.407887` không đổi).
+- **Phải Colab chạy lại** `TKV_GEMM_CUDA=1` để xác nhận loss回到 `25.4079xx`.
 
-**Chạy Colab:** `git pull` cả 2 repo → cell `[4/5]` → `[5/5]` (nhánh `TKV_GEMM_CUDA=1`
-sẽ có weight-resident) → `[7/7]` cho RAM.
+**RAM (Colab `[7/7]`):** `.tkv` BLAS mặc định peak RSS = **4.09 GB** vs torch tier_d =
+**4.30 GB** → `.tkv` ít hơn ~210 MB (5%). Cả hai ~4 GB.
+
+Docs: `BENCHMARKS.md` §9.36; commit chưa push (TokenVector + Inference).
