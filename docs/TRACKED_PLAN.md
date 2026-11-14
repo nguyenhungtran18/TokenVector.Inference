@@ -109,6 +109,14 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
       (chỉ khi ATen rc≠0, đường ATen thành công không tốn phí). Test hồi quy
       `tv/tests/gpt2_attn_bwd_gflat_fallback.tkv` — 5 case, FAIL 3 case trên
       code cũ, PASS sau fix; C vs A lệch 6.3e-3 → 5.96e-07. **Chưa gate Colab.**
+- [x] **[A4b]** Rebuild `demo/bseq.dll` từ source đã fix (2026-11-14):
+      `out/bseq_new.exe` rc=0 (IL có thêm `gpt2_linear` bù qkv ở nhánh ATen-fail,
+      line 25666); binary tracked thay mới (SHA256 `C7E16C6D…`; binary cũ
+      `DC772599…` là stale). Notebook: `[2/6]` in HEAD + sha256 bseq + fix marker;
+      `[6/6]` lọc thêm `TkvTorchAttentionBwd`/`AttentionBwd` (lộ stderr ATen
+      fail; luật #2 — lý do: A4 phân tích 2026-11-14, Release repo 9cfdc14);
+      `[5/6]` **không sửa**. **Push GitHub chưa xong** (không có credential —
+      cần user đăng nhập GCM), Colab chỉ thấy sau khi push.
 
 ### B. Việc tác động + flags
 - [ ] **[B1]** Giống A2/A3: kiểm tra `TKV_GEMM_BLAS=0` loss native, TKV_GELU_AVX2=0
