@@ -1458,7 +1458,9 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
     # (simd==0) va nhanh _amm_rc deu can qkv, gay NullReferenceException o
     # gpt2_full_tests. Giu nguyen VI TRI, chi guard bang co _qkv_ready.
     # Moi duong khong phai ATen van tinh y nguyen (cung buffer pool idx 6,
-    # cung tham so, cung thu tu) -> BIT-EXACT.
+    # cung tham so, cung thu tu) -> BIT-EXACT. ATen that bai -> fallback
+    # tinh bu qkv ngay o nhanh fail (2026-11-14) -> duong fallback dung lai
+    # nhu truoc ban fix.
     _qkv_ready = 0
     if simd == 1:
         if gflat != None:
@@ -1496,6 +1498,12 @@ def gpt2_attention_bwd(x: "Tensor", w_qkv: "Tensor", b_qkv: "Tensor",
                 _aat = torch_attention_bwd(_axd, _agd, _awq, _abq, _awp, _abp, _adx, gflat, n, h, NHeads, hd, o_qkv, o_bqkv, o_proj, o_bproj)
                 if _aat == 0:
                     return [dx, t_zeros([0]), t_zeros([0]), t_zeros([0]), t_zeros([0])]
+                # ATen that bai -> duong fallback native CON CAN qkv: tinh bu
+                # NGAY DAY (chi khi ATen fail, nen duong ATen thanh cong khong
+                # ton phi 125 ms). Truoc day qkv KHONG duoc tinh (kt _qkv_ready)
+                # nen fallback doc pool slot 6 chua duoc ghi -> gradient sai
+                # im lang (probe 2026-11-14: dw_qkv lech 6.3e-3, dw_proj 4.6e-2).
+                qkv = gpt2_linear(x, w_qkv, b_qkv, n, h, 3 * h, simd, qkv)
         # fallback: duong cu nguyen van
         # dctx[t,r] = sum_o gout[t,o]*w_proj[r,o] -> smm_dot (thay vong n*h^2)
         dctxT = smm_dot(gout, w_proj, n, h, h)

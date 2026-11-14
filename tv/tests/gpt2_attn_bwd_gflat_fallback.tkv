@@ -1,0 +1,119 @@
+import tv.training.gpt2_ref124
+
+# ============================================================================
+#  gpt2_attention_bwd — duong fallback khi ATen/gflat KHONG dung duoc
+# ----------------------------------------------------------------------------
+#  P6 G11: khi simd==1 VA gflat co data, gpt2_attention_bwd thu torch_attention_bwd
+#  (HF ATen SDPA bwd, BIT-IDENTICAL). Neu bridge ATen that bai (rc != 0 — vd
+#  tkv_torch_fused.dll khong load duoc), duong fallback native PHAI dung qkv.
+#  Truoc ban fix 2026-11-14, _qkv_ready=1 bo qua gpt2_linear(qkv) khong dieu kien
+#  -> fallback doc pool slot 6 CHUA DINH -> gradient sai im lang.
+#
+#  [1] simd=0 (scalar)  vs  simd=1, gflat=None          -> ~fp noise (<= 1e-4)
+#  [2] simd=0           vs  simd=1, gflat non-empty     -> PHAI <= 1e-4
+#      (Windows/local: bridge fail -> fallback; A FE ben nha co bridge -> ATen
+#       hoac wrapper placeholder rỗng -> maxdiff vacuous = 0)
+#
+#  Chay: tkvc tv\tests\gpt2_attn_bwd_gflat_fallback.tkv ra.exe main
+# ============================================================================
+
+N = 192
+H = 768
+TOL = 1e-4
+
+def _val(i: 'i64') -> 'f32':
+    return (float((i * 37 + 11) % 1009) / 1009.0 - 0.5) * 0.2
+
+def _fill(t: "Tensor", off: 'i64') -> 'i64':
+    d = t.data
+    n = len(d)
+    i = 0
+    while i < n:
+        d[i] = _val(i + off)
+        i = i + 1
+    return off + n
+
+def _maxdiff(a: "Tensor", b: "Tensor") -> 'f32':
+    da = a.data
+    db = b.data
+    n = len(da)
+    if len(db) < n:
+        n = len(db)
+    m = 0.0
+    i = 0
+    while i < n:
+        d = da[i] - db[i]
+        if d < 0.0:
+            d = 0.0 - d
+        if d > m:
+            m = d
+        i = i + 1
+    return m
+
+def _mk_gflat(k: 'i64') -> "list[f32]":
+    g = []
+    i = 0
+    while i < k:
+        g.append(0.0)
+        i = i + 1
+    return g
+
+def _line(ok: 'i32', msg: 'str') -> 'i32':
+    if ok == 1:
+        print("  [PASS] " + msg)
+        return 0
+    print("  [FAIL] " + msg)
+    return 1
+
+def main() -> 'i32':
+    print("=== gpt2_attn_bwd gflat/fallback ===")
+    x = t_zeros([N, H])
+    wq = t_zeros([H, 3 * H])
+    bq = t_zeros([3 * H])
+    wp = t_zeros([H, H])
+    bp = t_zeros([H])
+    go = t_zeros([N, H])
+    off = 0
+    off = _fill(x, off)
+    off = _fill(wq, off)
+    off = _fill(bq, off)
+    off = _fill(wp, off)
+    off = _fill(bp, off)
+    off = _fill(go, off)
+
+    ra = gpt2_attention_bwd(x, wq, bq, wp, bp, N, go, 0)
+    rb = gpt2_attention_bwd(x, wq, bq, wp, bp, N, go, 1)
+    gfull = _mk_gflat(N * H)
+    rc = gpt2_attention_bwd(x, wq, bq, wp, bp, N, go, 1, gfull)
+
+    fails = 0
+    cases = 0
+    cases = cases + 1
+    if _maxdiff(ra[1], rb[1]) <= TOL:
+        fails = fails + _line(1, "dw_qkv: simd0 vs simd1 (<= " + str(TOL) + ")")
+    else:
+        fails = fails + _line(0, "dw_qkv: simd0 vs simd1")
+    cases = cases + 1
+    if _maxdiff(ra[1], rc[1]) <= TOL:
+        fails = fails + _line(1, "dw_qkv: simd0 vs simd1+gflat")
+    else:
+        fails = fails + _line(0, "dw_qkv: simd0 vs simd1+gflat (diff = " + str(_maxdiff(ra[1], rc[1])) + ")")
+    cases = cases + 1
+    if _maxdiff(ra[3], rc[3]) <= TOL:
+        fails = fails + _line(1, "dw_proj: simd0 vs simd1+gflat")
+    else:
+        fails = fails + _line(0, "dw_proj: simd0 vs simd1+gflat (diff = " + str(_maxdiff(ra[3], rc[3])) + ")")
+    cases = cases + 1
+    if _maxdiff(ra[2], rc[2]) <= TOL:
+        fails = fails + _line(1, "db_qkv: simd0 vs simd1+gflat")
+    else:
+        fails = fails + _line(0, "db_qkv: simd0 vs simd1+gflat (diff = " + str(_maxdiff(ra[2], rc[2])) + ")")
+    cases = cases + 1
+    if _maxdiff(ra[3], rb[3]) <= TOL:
+        fails = fails + _line(1, "dw_proj: simd0 vs simd1")
+    else:
+        fails = fails + _line(0, "dw_proj: simd0 vs simd1")
+
+    print("")
+    print("cases=" + str(cases) + " fails=" + str(fails))
+    return fails

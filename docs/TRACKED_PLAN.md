@@ -78,6 +78,13 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
       tổng op-time native 32.7 s vs bridge-GPU 14.0 s.
 - [ ] **[A4]** Tìm trong `bwd` vùng có thể `#ADD` thêm: ATTN_FWD/ATTN_BWD tận dụng
       `attention_fwd_fused` (AVX2) có thể nhanh hơn whisper. cell `[3/6]` sạch hoàn toàn.
+- [x] **[A4a]** Sửa bug correctness (phát hiện trong A4): `_qkv_ready` bỏ
+      `gpt2_linear(qkv)` kể cả khi ATen fail → fallback native đọc pool slot 6
+      chưa ghi → gradient sai im lặng (dw_qkv lệch 6.3e-3, dw_proj 4.6e-2;
+      tái hiện local 2026-11-14). Fix: fallback tính bù qkv ngay ở nhánh fail
+      (chỉ khi ATen rc≠0, đường ATen thành công không tốn phí). Test hồi quy
+      `tv/tests/gpt2_attn_bwd_gflat_fallback.tkv` — 5 case, FAIL 3 case trên
+      code cũ, PASS sau fix; C vs A lệch 6.3e-3 → 5.96e-07. **Chưa gate Colab.**
 
 ### B. Việc tác động + flags
 - [ ] **[B1]** Giống A2/A3: kiểm tra `TKV_GEMM_BLAS=0` loss native, TKV_GELU_AVX2=0
