@@ -76,8 +76,32 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
       → Đã có trong §9.43 (notebook #22): native ATTN_FWD 5 090 /
       ATTN_BWD_MERGE 6 507 / LMHEAD_BWD 6 755; bridge-GPU 5 966 / 6 089;
       tổng op-time native 32.7 s vs bridge-GPU 14.0 s.
-- [ ] **[A4]** Tìm trong `bwd` vùng có thể `#ADD` thêm: ATTN_FWD/ATTN_BWD tận dụng
-      `attention_fwd_fused` (AVX2) có thể nhanh hơn whisper. cell `[3/6]` sạch hoàn toàn.
+- [x] **[A4]** Tìm trong `bwd` vùng có thể `#ADD` thêm: ATTN_FWD/ATTN_BWD tận dụng
+      `attention_fwd_fused` (AVX2) — **ĐÃ PHÂN TÍCH 2026-11-14, kết luận: KHÔNG #ADD,
+      production thực tế không đi qua đường native bwd.** Bằng chứng (cell `[6/6]`
+      notebook #22):
+      1. `TKV_PROF` chỉ đếm timer tại entry native (`tkv_prof.h`); op đi qua
+         ATen/bridge → counter = 0.
+      2. Chạy bridge-GPU (`TKV_TORCH_GPU=1`) vẫn thấy **`ATTN_BWD_MERGE` 5 966 ms**
+         ≈ native 6 507 ⇒ production (simd==1 + `gflat=opt.g`) đã rơi rớt về
+         native `FlashAttentionBwdMergeMulti` — ATen attention-bwd
+         (`torch_attention_bwd` → HF autograd) đã trả rc≠0 ngay trong phiên
+         (Release repo 2026-11-13..14: 60cbb54 → 02e81b2 → 9cfdc14 "de Colab
+         xem vi sao fallback" → 986e4e0 → a6b9749 → e043b3f, toàn đăng debug
+         + fix CUDA-device; chưa có bằng chứng bwd chạy qua ATen).
+      3. `ATTN_FWD` không thấy ở bridge-GPU (qua `torch_sdpa_fwd` → SDPA CUDA),
+         thấy 5 090 ms ở native; native fwd vốn đã gọi `attention_fwd_fused`
+         (kèm fallback) — không có chỗ #ADD mới.
+      4. `LMHEAD_BWD` 6 755 native / 6 089 bridge (3 call, `lmhead_bwd_fused`;
+         chỉ phần dwte đi qua bridge `TkvTorchAddmmTaOut` bên trong) — target
+         lớn nhất còn ở native; xem **B3**.
+      5. Hệ quả: đường fallback chính là đường production thật. Fix A4a (tính
+         bù qkv khi ATen fail) là bắt buộc — trước fix #22 đo bằng gradient sai.
+         Còn ~125 ms/step phí extra (GEMM 3.6 GFLOP mỗi layer nếu fallback).
+      6. Bước tiếp theo cần Colab: xem stderr `[TkvTorchAttentionBwd]` ở cell
+         `[6/6]` để biết lỗi ATen-bwd; nếu bwd ATen chạy được → xoá hẳn
+         `ATTN_BWD_MERGE` khỏi op-time; nếu không → fallback native là đường
+         chính thức, bench + gate phải xác nhận lại.
 - [x] **[A4a]** Sửa bug correctness (phát hiện trong A4): `_qkv_ready` bỏ
       `gpt2_linear(qkv)` kể cả khi ATen fail → fallback native đọc pool slot 6
       chưa ghi → gradient sai im lặng (dw_qkv lệch 6.3e-3, dw_proj 4.6e-2;
