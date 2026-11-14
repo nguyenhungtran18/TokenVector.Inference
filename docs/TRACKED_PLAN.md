@@ -146,5 +146,5 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
 | `docs/ROADMAP_TRAIN.md` | Khởi thủy từ G0-G1 của training |
 | `docs/SPEC_FUSED_SDPA_BWD.md` | Thiết kế fused SDPA backward |
 | `docs/HANDOFF.md` | Nhật ký mọi bước; không xóa |
-| `Notebook` = `demo/colab_bench_ai_gpu.ipynb` | Single source of truth cho bench |
-| `Notebook` = validation script (Windows dev) | Win-only benchmark, `_seq_cfg.txt` |
+| `Notebook` = `demo/colab_bench_ai_gpu.ipynb` | Single source of truth cho bench (Colab) |
+| `tv/tests/simd_bench_124m_seq.tkv` + `demo/bseq.dll` | Bench native/Windows dev; đọc `_seq_cfg.txt` (seq, threads) |
