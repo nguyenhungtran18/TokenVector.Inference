@@ -115,8 +115,8 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
       `DC772599…` là stale). Notebook: `[2/6]` in HEAD + sha256 bseq + fix marker;
       `[6/6]` lọc thêm `TkvTorchAttentionBwd`/`AttentionBwd` (lộ stderr ATen
       fail; luật #2 — lý do: A4 phân tích 2026-11-14, Release repo 9cfdc14);
-      `[5/6]` **không sửa**. **Push GitHub chưa xong** (không có credential —
-      cần user đăng nhập GCM), Colab chỉ thấy sau khi push.
+      `[5/6]` **không sửa**. Push xong 2026-11-14: `cf61c42..befa5ae main -> main`;
+      Colab clone được fix.
 
 ### B. Việc tác động + flags
 - [ ] **[B1]** Giống A2/A3: kiểm tra `TKV_GEMM_BLAS=0` loss native, TKV_GELU_AVX2=0
