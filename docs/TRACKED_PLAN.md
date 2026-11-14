@@ -14,23 +14,36 @@
 
 GPU bridge (cùng phiên, `TKV_TORCH_GPU=1`): fwd+CE+bwd **6 902** vs torch CUDA 268.1 (**25.7×**); TỔNG **7 407** vs 299.2 (**24.8×**); loss_val **17.106686** (ATen bridge, không parity với AVX2).
 
-Peak RAM: `.tkv` **4.09 GB** < torch **4.29 GB**.
+Peak RAM: `.tkv` **4.09 GB** < torch **4.29 GB** (§9.40, notebook #14).
 
-**Gates đang xanh:** testkit 136/136, NEG 44/44; trainer 15/15; loss EXACT (mode 0).
+**Gates đang xanh:** testkit 136/136, NEG 44/44; trainer 15/15; loss EXACT (mode 0) (§9.37).
 **Notebook:** `demo/colab_bench_ai_gpu.ipynb` (cell `[5/6]` GPU bench .tkv vs torch CUDA, xen kẽ x3 median; `[6/6]` op-breakdown `TKV_PROF=1`; cell attention-check `[5/5]` cũ đã bỏ vì trùng op-breakdown).
 
 ## 1. Mô hình bottleneck hiện tại
 
-Đo bang `TKV_PROF=1` (op-time, native, seq1024):
+Đo bang `TKV_PROF=1` (op-time, native, seq1024). Mỗi bảng ghi kèm phiên đo (luật #1).
 
-| Op | n | ms | % |
-|---|---:|---:|---:|
-| LMHEAD_BWD | 3 | 6 497 | **23%** |
-| ATTN_FWD | 432 | 5 106 | **18%** |
-| ATTN_BWD_MERGE | 36 | 5 646 | **20%** |
-| LIN_DX | 108 | 4 528 | 16% |
-| LIN_DW | 108 | 4 684 | 16% |
-| **GELU (sau fix AVX2)** | **863** | **980** | **(đã từ 11 624 xuống)** |
+Phiên mới nhất — notebook #22 (2026-11-14), `BENCHMARKS.md §9.43`:
+
+| Op | ms |
+|---|---:|
+| LMHEAD_BWD | 6 755 |
+| ATTN_BWD_MERGE | 6 507 |
+| ATTN_FWD | 5 090 |
+
+Tổng op-time native 32.7 s vs bridge-GPU 14.0 s.
+
+Bản đầy đủ 7 op (kèm %) — notebook #14 (2026-11-13), `BENCHMARKS.md §9.40`:
+
+| Op | ms | % |
+|---|---:|---:|
+| LMHEAD_BWD | 7 085 | 21.6% |
+| ATTN_FWD | 7 143 | 21.8% |
+| ATTN_BWD_MERGE | 6 037 | 18.4% |
+| LIN_DW | 5 094 | 15.6% |
+| LIN_DX | 4 943 | 15.1% |
+| LN | ~1 122 | — |
+| **GELU (sau fix AVX2)** | **1 116** | **(đã từ 11 624 xuống)** |
 
 Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% bwd.
 
@@ -38,7 +51,7 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
 
 | # | Mục tiêu | Win-condition | Triển vọng | Ghi chú |
 |---|---|---|---|---|
-| 1 | `.tkv` ≤ torch CPU (full step) | **< 10 400 ms** | **KHÓ** | cần bwd nhanh hơn ~40%, sát mức torch, không bitexact; chạm 1.0× khó |
+| 1 | `.tkv` ≤ torch CPU (full step) | **< 10 906 ms** (torch T=2, §9.43 #22) | **KHÓ** | cần bwd nhanh hơn ~30%, sát mức torch, không bitexact; chạm 1.0× khó |
 | 2 | **seq1024 mode 1 bit-ident loss** ↔ torch | gate gradient | **KHÓ** | đưa GELU AVX2 kỹ; quality duy trì |
 | 3 | **seq1024 full step < 4000 ms** | **THẮNG torch** | **KHÓ nhưng khả thi** | cần: attention native native để bwd, GELU đã AOT, LMhead đã AOT, LN |
 | 4 | **GPU full-Tck** | chạm ~3-5 s/full step | **RẤT KHÓ** | dựa P1 device-resident (PLAN_GPU_BACKEND.md); ngắt hot path |
@@ -70,12 +83,13 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
 - [ ] **[B1]** Giống A2/A3: kiểm tra `TKV_GEMM_BLAS=0` loss native, TKV_GELU_AVX2=0
       loss native — nếu loss EXACT fail, có điểm cầu vượt dễ phát hiện.
 - [ ] **[B2]** Xác nhận loss EXACT từng mode (0/1/2/1) từ Colab (2 phiên).
-- [ ] **[B3]** Gap `LMHEAD_BWD` (3 calls = 6 500 ms) — có thể refactor bằng `lmhead_bwd_fused`
+- [ ] **[B3]** Gap `LMHEAD_BWD` (6 755 ms — §9.43 notebook #22) — có thể refactor bằng `lmhead_bwd_fused`
       trực tiếp `addmm_out` (oneDNN) → nhưng `gflat` phải ở đó; thiết kế cẩn thận.
 
 ### C. Việc "sâu" (dự án kế)
-- [ ] **[C1]** `ATTN_BWD_MERGE` (6 GEMM + softmax bwd native, 5 646 ms) — dùng `ATen SDPA bwd`
-      sẽ nhanh, nhưng không tương thích với packed layout IL hiện tại.
+- [ ] **[C1]** `ATTN_BWD_MERGE` (6 GEMM + softmax bwd native, 6 507 ms — §9.43
+      notebook #22) — dùng `ATen SDPA bwd` sẽ nhanh, nhưng không tương thích
+      với packed layout IL hiện tại.
 - [ ] **[C2]** `LMHEAD_BWD`: tách ra cần (do sink, portable).
 - [ ] **[C3]** SCALABILITY: GELU này chưa bit-exact. Nếu waiver thì re-record.
 - [ ] **[C4]** **GPU parity**: hiện không có parity con pipeline CPU → GPU (loss khác
