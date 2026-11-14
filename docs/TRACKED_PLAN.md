@@ -15,7 +15,7 @@
 Peak RAM: `.tkv` **4.09 GB** < torch **4.29 GB**.
 
 **Gates đang xanh:** testkit 136/136, NEG 44/44; trainer 15/15; loss EXACT (mode 0).
-**Notebook:** `demo/colab_bench_ai_gpu.ipynb` (cell `[5/5]` CPU, `[6/5]` GPU, `[7/5]` op-breakdown).
+**Notebook:** `demo/colab_bench_ai_gpu.ipynb` (cell `[5/6]` GPU bench .tkv vs torch CUDA, xen kẽ x3 median; `[6/6]` op-breakdown `TKV_PROF=1`; cell attention-check `[5/5]` cũ đã bỏ vì trùng op-breakdown).
 
 ## 1. Mô hình bottleneck hiện tại
 
