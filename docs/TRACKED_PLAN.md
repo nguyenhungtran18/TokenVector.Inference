@@ -4,13 +4,15 @@
 > 2 thread CPU, xen kẽ x3, median. Loss ≠ torch (init khác; FLOPs giống). Không so sánh
 > single-shot.
 
-## 0. Trạng thái hiện tại (đo cùng phiên Colab, 2026-11-14)
+## 0. Trạng thái hiện tại (đo cùng phiên Colab, notebook #22, 2026-11-14; nguồn: `BENCHMARKS.md §9.43`, `HANDOFF.md §0.187`)
 
 | | `.tkv` native | torch CPU 2T | Tỷ lệ |
 |---|---:|---:|---:|
-| fwd+CE+bwd | **14 088** | **8 605** | **1.64×** |
-| TỔNG (full step) | **14 593** | **10 402** | **1.40×** |
+| fwd+CE+bwd | **14 745** | **9 167** | **1.61×** |
+| TỔNG (full step) | **15 259** | **10 906** | **1.40×** |
 | Loss | **25.407877** EXACT | 9.8851 (init khác) | so TIME riêng |
+
+GPU bridge (cùng phiên, `TKV_TORCH_GPU=1`): fwd+CE+bwd **6 902** vs torch CUDA 268.1 (**25.7×**); TỔNG **7 407** vs 299.2 (**24.8×**); loss_val **17.106686** (ATen bridge, không parity với AVX2).
 
 Peak RAM: `.tkv` **4.09 GB** < torch **4.29 GB**.
 
@@ -48,11 +50,21 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
 
 ### A. Cụ thể, trước mắt
 - [x] **[A1]** mode 1 seq1024 chạy được (8.2 s); loss=10.760399 -> 13.686271 (warmup loss **trùng** mode 0 -> score EXACT). Không crash/nan. **Chưa verify độc lập** (loss sau step phụ thuộc optimizer; không so sánh được giữa các phiên).
-- [ ] **[A2]** Rebuild `demo/bseq.dll` từ source mới; chạy cell `[5/5]` lại; ghi
-      `BENCHMARKS.md §9.43`.
-- [ ] **[A3]** Đo lại op-breakdown với `TKV_PROF=1` trên cell `[7/5]`.
+- [x] **[A2]** Rebuild `demo/bseq.dll` từ source mới; chạy cell bench lại; ghi
+      `BENCHMARKS.md §9.43`. → Verify 2026-11-14 (local): rebuild bằng
+      `D:\TokenVector\Release\dist\tkvc-tv.exe` cho IL SHA256 **trùng khớp**
+      `out/bseq.il` hiện tại (compiler+source deterministic); `.exe` chỉ khác
+      19 byte (MVID + PE timestamp); `demo/bseq.dll` == `out/bseq.exe`. Nghĩa là
+      binary đã track trên repo là bản mới nhất từ source+compiler hiện tại.
+      Số đo đã ghi §9.43 + `HANDOFF.md §0.187` (notebook #22, 2026-11-14,
+      xen kẽ x3, median). Cell CPU `[5/5]` đã bỏ khỏi notebook (commit
+      ee5db29); cell bench GPU hiện tại là `[5/6]`.
+- [x] **[A3]** Đo lại op-breakdown với `TKV_PROF=1` (cell `[6/6]`).
+      → Đã có trong §9.43 (notebook #22): native ATTN_FWD 5 090 /
+      ATTN_BWD_MERGE 6 507 / LMHEAD_BWD 6 755; bridge-GPU 5 966 / 6 089;
+      tổng op-time native 32.7 s vs bridge-GPU 14.0 s.
 - [ ] **[A4]** Tìm trong `bwd` vùng có thể `#ADD` thêm: ATTN_FWD/ATTN_BWD tận dụng
-      `attention_fwd_fused` (AVX2) có thể nhanh hơn whisper. cell `[3/5]` sạch hoàn toàn.
+      `attention_fwd_fused` (AVX2) có thể nhanh hơn whisper. cell `[3/6]` sạch hoàn toàn.
 
 ### B. Việc tác động + flags
 - [ ] **[B1]** Giống A2/A3: kiểm tra `TKV_GEMM_BLAS=0` loss native, TKV_GELU_AVX2=0
@@ -75,7 +87,7 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
 
 ## 4. Luật cập nhật
 1. Mọi con số số liệu đều phải có **timestamp và phiên**, kèm link notebook/benchmark.
-2. Không sửa Cell `[5/5]`, `[6/5]`, `[7/5]`, `[8/5]` nếu không có lý do cụ thể; nếu
+2. Không sửa Cell `[5/6]`, `[6/6]` nếu không có lý do cụ thể; nếu
    phải sửa, phải ghi chú (cite phiên đo).
 3. Nếu loss EXACT sụt: dừng, rollback, kiểm tra ngay, không push.
 4. Gate phải trong sạch trước khi cập nhật plan — không push plan nháp.
