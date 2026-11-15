@@ -22,6 +22,24 @@ Conclude: **trên cùng máy, cùng protocol, .tkv ~ parity (0.99×)**. Colab ch
 
 **0a-fix:** `TKV_GEMM_THREADS=nproc` (hoặc trực tiếp =2 trên Colab 2-vCPU) → kỳ vọng quay lại ~1.0×.
 
+### 0a-measure (2026-11-15, notebook `[5B/10 thread-test]`) — REJECTED
+
+```
+threads=2: TONG=16 733
+threads=4: TONG=16 917
+threads=8: TONG=17 153
+default (12, Colab 2-vCPU): ~16 231 ([6/9])
+```
+
+Chênh lệch chỉ 3–5,7% — **thread oversubscription KHÔNG phải nguyên nhân** của gap
+1.4–1.5× vs torch. Kết luận vội:
+
+- Gap Colab ≈ 1.45× torch là do **cuDNN/MKL (Intel) chứ không phải OpenBLAS**, i.e.
+  thổi **MKL direct / cuBLAS trên GPU** mới đóng được gap, chứ không chỉ `TKV_GEMM_THREADS`.
+- Xoá hẳn Bảng mục tiêu "~1.0× trên Colab" — chắc chắn không đạt được KHÔNG MKL/CUDA.
+- Cập nhật chiến lược: tập trung vào CUDA backend (`PLAN_GPU_BACKEND.md §2`) + MKL nếu cần,
+  chứ không tối ưu thread.
+
 ---
 
 ## 0.5 GPU bridge hiện tại đã GREEN (2026-11-15 — xem `BENCHMARKS.md §9.44/9.45`)
