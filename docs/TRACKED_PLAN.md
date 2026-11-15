@@ -117,6 +117,14 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
       fail; luật #2 — lý do: A4 phân tích 2026-11-14, Release repo 9cfdc14);
       `[5/6]` **không sửa**. Push xong 2026-11-14: `cf61c42..befa5ae main -> main`;
       Colab clone được fix.
+- [x] **[A5]** Phiên Colab 2026-11-15 (T4, HEAD `b00d797`, notebook mới 9 cells) — tự
+      chạy qua browse. Kết quả (`BENCHMARKS.md §9.44`): native median **TONG 15 548 ms**
+      (fwd 3 629 / bwd 10 556 / opt 425 / copyback 88), op-time 29 788 ms (LMHEAD_BWD
+      8 122 27% · ATTN_BWD_MERGE 5 663 19% · ATTN_FWD 4 690 16%). **GPU bridge segfault
+      `rc=139` cả 3 lần** — A/B chứng minh không phải do binary/fix A4a (binary cũ
+      `eff10f1` và binary mới đều rc=139); `mode=0` + CPU-bridge chạy OK ⇒ lỗi ở đường
+      CUDA của bridge (`torch_fused.cpp`, repo TokenVector), không phải bên .tkv. Việc còn
+      lại: gdb backtrace + fix bridge. **Số GPU của §9.43 (#22) vẫn là tham chiếu.**
 
 ### B. Việc tác động + flags
 - [ ] **[B1]** Giống A2/A3: kiểm tra `TKV_GEMM_BLAS=0` loss native, TKV_GELU_AVX2=0

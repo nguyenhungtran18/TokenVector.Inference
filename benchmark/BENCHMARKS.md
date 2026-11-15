@@ -1597,3 +1597,35 @@ Cell [6/5] GPU (TKV_TORCH_GPU=1):
 Op-breakdown TKV_PROF native: ATTN_FWD 5 090 / ATTN_BWD_MERGE 6 507 / LMHEAD_BWD 6 755.
 Op-breakdown TKV_PROF bridge-GPU: ATTN_BWD_MERGE 5 966 / LMHEAD_BWD 6 089.
 Tong op-time native 32.7 s vs bridge-GPU 14.0 s.
+
+
+## 9.44 PHIEN 2026-11-15 (Colab T4, notebook viet lai 9 cells, HEAD b00d797)
+
+Notebook moi: `demo/colab_bench_ai_gpu.ipynb` (9 cells; [6/9] native, [7/9] GPU bridge,
+[9/9] prof-dump). Clone HEAD = b00d797, demo/bseq.dll sha256 = c7e16c6d (ban co fix A4a).
+
+**Native (.tkv CPU, TKV_TORCH_PATH= rong), x3 xen ke, median:**
+- TONG = **15 548 ms** (15 295 / 15 647 / ...) | fwd 3 629 | bwd 10 556 | opt 425 | copyback 88
+- Op-time TKV_PROF tong = **29 788 ms**: LMHEAD_BWD 8 122 (27.3%) / ATTN_BWD_MERGE 5 663 (19.0%)
+  / ATTN_FWD 4 690 (15.7%) / LIN_DW 4 625 (15.5%) / LIN_DX 4 543 (15.3%) / LN_BWD 642 / LN_FWD 421
+  / GELU_BWD 554 / GELU_FWD 321 / BIAS_GRAD 196 / EMB_BWD 10.6.
+- Doi chieu phien #22 (SS9.43): TONG 15 259 -> 15 548 (may chay hon do bien may, khong phai hoi qu).
+  So GPU bridge cua SS9.43 (7 407 ms) van la tham chieu cho GPU; native cua phien nay KHONG
+  the so sanh truc tiep voi SS9.43 (khac phien, khac may).
+
+**GPU bridge (TKV_TORCH_GPU=1) — SEGFAULT, lap lai nhieu phien:**
+- `rc=139` (Segmentation fault) o ca 3 lan chay cua [7/9] va [9/9] (GPU phan).
+- A/B chung minh KHONG phai do binary .tkv: binary CU (eff10f1, pre-fix A4a) va binary MOI
+  (c7e16c6d) deu rc=139 giong nhau trong cung phien.
+- Da loai bug gradient A4a (fallback attention-bwd) — da fix + test hoi quy
+  (`tv/tests/gpt2_attn_bwd_gflat_fallback.tkv`, 5/5 PASS local); fix khong giup GPU vi
+  GPU chet o pha forward, truoc khi vao attention-bwd.
+- `mode=0` (fwd+bwd, khong opt.step) cung segfault; `mode=0` voi CPU-bridge (TKV_TORCH_GPU=0)
+  chay binh thuong => loi nam o duong CUDA cua bridge, khong o .tkv.
+- `CUDA_LAUNCH_BLOCKING=1` van segfault (khong phai loi CUDA bat dong bo).
+- Phien 2026-11-15 03:39 co 1 lan chay GREEN toan bo (ca GPU) => nghi nhay theo phien/may.
+- **Viec con lai:** backtrace gdb cho cua segfault (cell `diag-gdb` da bi lo khi viet lai
+  notebook) va fix ben `torch_fused.cpp` (repo TokenVector) — KHONG phai ben .tkv.
+
+**Ghi chu loss:** `[6/9]` in loss_val 875 / 1129 / 909 (mode=2 chay 3 buoc voi lr schedule
+toy cua bench) — khong phai loss chuan; loss chuan (1 buoc) = 25.45388 nhu [9/9].
