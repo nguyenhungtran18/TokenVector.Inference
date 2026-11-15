@@ -24,6 +24,35 @@ Conclude: **trên cùng máy, cùng protocol, .tkv ~ parity (0.99×)**. Colab ch
 
 ---
 
+## 0.5 GPU bridge hiện tại đã GREEN (2026-11-15 — xem `BENCHMARKS.md §9.44/9.45`)
+
+**Câu hỏi user đặt:** làm sao để .tkv không chỉ
+- chạy được trên GPU (đó là tiêu chuẩn tối thiểu rồi),
+- mà **còn cạnh tranh sòng phẳng** với torch CUDA (~270–300 ms full step),
+- tức là **không chấp nhận tình trạng hiện tại: 8 252 ms trên GPU, chậm 25–30× torch**.
+
+Hiện trạng (~25× chậm torch CUDA, 1.9× nhanh hơn .tkv CPU):
+
+| Thành phần | Hiện tại (bridge) | Torch CUDA |
+|---|---|---|
+| ops | ATen bridge, from_blob CPU→H2D→CPU, D2H mỗi op | direct CUDA kernels (cuBLAS/cuDNN/FlashAttention) |
+| attention bwd | **fallback native AVX2** (vì `TkvTorchAttentionBwd` nổ exception c10, bị swallow) | FlashAttention bwd (cuDNN/ampere) |
+| GEMMs | ATen addmm có H2D/D2H wrap | direct cublasSgemm/GemmEx |
+| device-resident | **không** — mỗi op chở data qua PCIe/CUDA | weights + activations trên GPU mọi bước |
+| Loss parity | loss_val 17.111387 (≠ torch 9.8851; chấp nhận được vì init khác) | loss_val 9.8851 |
+
+**Plan cụ thể để tiến đến cạnh tranh KHẢ NĂNG (không phải "chạy được"):**
+1. Đọc `PLAN_GPU_BACKEND.md` §2 Phương án A/B (cuBLAS + dropout host → flash attention).
+2. Ưu tiên tìm nơi ROI lớn nhất:
+   - **Device-resident alloc**: weights + activations trên GPU suốt step (sinh ra từ bridge, device_ptr cached).
+   - **Attention fwd/bwd**: gọi cuDNN SDPA (is_causal) qua torch ATen C++ `at::scaled_dot_product_attention` — chẻ đo cùng build khác.
+   - **GEMMs**: direct `cublasSgemm`/`cublasGemmEx` thay vì ATen wrapper from_blob.
+   - **AdamW**: CUDA kernel đơn giản (có thể port từ AdamwStepF32 AVX2 sang CUDA nếu muốn chắc digest).
+3. Không cần rewrite runtime —— tất cả là native C code gọi qua FFI như pattern `libsimd_native.dll`.
+4. Benchmark trên Colab T4 15 GB: GPT-2 124M full step, mục tiêu **≤ 500 ms** (tăng tốc >30× vs bridge hiện tại).
+
+---
+
 ## 1. Breakdown gây chậm (Colab 2026-11-15)
 
 | Op (fwd bwd) | .tkv ms | Ghi chú |
@@ -101,7 +130,18 @@ Nếu lệch, BLAS path đang không bit-exact; ghi chú ngay và fallback lện
 
 - Giữ nguyên bit-exact: bất kỳ change nào đụng bwd/fwd làm loss lệch = revert.
 - Không thêm threading mới trừ khi `TKV_GEMM_THREADS` cho lợi rõ ràng (≥5%).
-- Không dùng CUDA/bridge cho mục tiêu .tkv; GPU bridge chỉ dùng để chẩn đoán khi cần.
+- **CUDA là lợi thế cạnh tranh chính** — không thể né. Nếu .tkv không có CUDA, repo
+  này không cạnh tranh được với torch (~25× chậm hơn). Không được coi GPU
+  là "phải tránh"; phải coi nó là mục tiêu bắt buộc.
+- GPU bridge hiện tại (TKV_TORCH_GPU=1) **chỉ là "CPU trên GPU"** — mỗi op đều:
+  H2D copy → ATen CPU kernel → D2H copy, hoàn toàn không có device-resident
+  weights/activations; attention bwd lại fallback native (43% op-time). Nó **GREEN**
+  (chạy được, loss_val 17.1) nhưng **~25× chậm hơn torch CUDA**.
+- Mục tiêu CUDA thực sự = `PLAN_GPU_BACKEND.md` §2 (Phương án A/B):
+  device-resident tensors + cuBLAS + custom flash fwd/bwd kernel hoặc
+  gọi thẳng CUDASDPA, + CUDA AdamW fused — không qua from_blob+wrapper.
+- Bắt buộc chạy đúng T4 (hoặc cao hơn) và đối chiếu loss_val vs
+  `BENCHMARKS.md §9.45` (loss_val GPU = 17.111387) để xác nhận không mất parity.
 
 ---
 
