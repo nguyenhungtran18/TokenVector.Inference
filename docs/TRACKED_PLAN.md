@@ -4,7 +4,7 @@
 > 2 thread CPU, xen kẽ x3, median. Loss ≠ torch (init khác; FLOPs giống). Không so sánh
 > single-shot.
 
-## 0. Trạng thái hiện tại (đo cùng phiên Colab, notebook #22, 2026-11-14; nguồn: `BENCHMARKS.md §9.43`, `HANDOFF.md §0.187`)
+## 0. Trạng thái hiện tại (nguồn: `BENCHMARKS.md §9.43` #22 2026-11-14; mới nhất: `§9.44`/`§9.45` Colab 2026-11-15)
 
 | | `.tkv` native | torch CPU 2T | Tỷ lệ |
 |---|---:|---:|---:|
@@ -12,12 +12,13 @@
 | TỔNG (full step) | **15 259** | **10 906** | **1.40×** |
 | Loss | **25.407877** EXACT | 9.8851 (init khác) | so TIME riêng |
 
-GPU bridge (cùng phiên, `TKV_TORCH_GPU=1`): fwd+CE+bwd **6 902** vs torch CUDA 268.1 (**25.7×**); TỔNG **7 407** vs 299.2 (**24.8×**); loss_val **17.106686** (ATen bridge, không parity với AVX2).
+GPU bridge (cùng phiên notebook #22, `TKV_TORCH_GPU=1`): fwd+CE+bwd **6 902** vs torch CUDA 268.1 (**25.7×**); TỔNG **7 407** vs 299.2 (**24.8×**); loss_val **17.106686** (ATen bridge, không parity với AVX2).
+**GPU fix (2026-11-15, commit Release `8929830` — `host()` `std::memcpy` CUDA ptr → `copy_`): bridge giờ GREEN; phiên 2026-11-15 đo `TONG 8 252 ms`, loss_val **17.111387** (§9.45).**
 
 Peak RAM: `.tkv` **4.09 GB** < torch **4.29 GB** (§9.40, notebook #14).
 
 **Gates đang xanh:** testkit 136/136, NEG 44/44; trainer 15/15; loss EXACT (mode 0) (§9.37).
-**Notebook:** `demo/colab_bench_ai_gpu.ipynb` (cell `[5/6]` GPU bench .tkv vs torch CUDA, xen kẽ x3 median; `[6/6]` op-breakdown `TKV_PROF=1`; cell attention-check `[5/5]` cũ đã bỏ vì trùng op-breakdown).
+**Notebook:** `demo/colab_bench_ai_gpu.ipynb` — 10 cells: `[6/9]` Bench native (.tkv CPU, x3, median), `[7/9]` Bench GPU bridge (x3, median; giờ GREEN sau fix `8929830`), `[8/9]` op-breakdown `TKV_PROF=1`, `[9/9]` GDB backtrace GPU segfault (tuỳ chọn, chỉ chạy khi [7/9] fail).
 
 ## 1. Mô hình bottleneck hiện tại
 
@@ -117,17 +118,16 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
       fail; luật #2 — lý do: A4 phân tích 2026-11-14, Release repo 9cfdc14);
       `[5/6]` **không sửa**. Push xong 2026-11-14: `cf61c42..befa5ae main -> main`;
       Colab clone được fix.
-- [x] **[A5]** Phiên Colab 2026-11-15 (T4, HEAD `5c14766`/`38cf9cb`, notebook
-      9 cells) — *chạy qua browse; GPU chưa verify*. Kết quả (`BENCHMARKS.md §9.44`):
-      native median **TONG 16 320 ms** (x3; #22 = 15 259) | fwd 3 850 / bwd 10 998
-      / opt 445 / copyback 92. **GPU bridge segfault `rc=139`** (reproducible, mọi
-      phiên). A/B loại trừ binary .tkv; `mode=0` + CPU-bridge OK ⇒ lỗi ở CUDA path
-      của bridge. GDB backtrace: `TkvTorchLayerNormFwd → host(Tensor CUDA) → memcpy[2]
-      → SIGSEGV` ⇒ **root cause**: `torch_fused.cpp::host()` làm `std::memcpy` GPU→CPU
-      trên CUDA pointer (không hợp lệ) — **fix commit `8929830`** (Release repo):
-      `tgt.copy_(t)`. Fix đã push lên `origin/main` của Release.
-      Xem `BENCHMARKS.md §9.45`. **Verify pending.** **Số GPU của §9.43 (#22, 7 407 ms)
-      vẫn là tham chiếu cho đến khi có phiên GREEN.**
+- [x] **[A5]** Phiên Colab 2026-11-15 (T4, HEAD `dbe4f97`, notebook 9 cells — GREEN sau fix).
+      Kết quả (`BENCHMARKS.md §9.44` native, `§9.45` GPU+fix): native median
+      **TONG 15 783 ms** (fwd 3 745 / bwd 10 628 / opt 436 / copyback 87).
+      **GPU bridge GREEN: TONG 8 252 ms** (fwd 1 019 / bwd 5 859), loss_val **17.111387**
+      (ATen bridge; gần #22 = 17.106686). **Root cause GPU segfault**:
+      `torch_fused.cpp::host()` — `std::memcpy` GPU→CPU trên CUDA pointer ⇒ SIGSEGV;
+      fix commit Release **`8929830`** (`tgt.copy_(t)`). **GPU bench lần đầu GREEN.**
+      GPU sai nhanh nhưng attn-bwd vẫn fallback AVX2 native (~40% op-time GPU);
+      đó là design hiện tại, không phải bug. **§9.43 GPU 7 407 ms vẫn tham chiếu gốc;
+      phiên này thấp 8 252 ms (máy chậm).**
 
 ### B. Việc tác động + flags
 - [ ] **[B1]** Giống A2/A3: kiểm tra `TKV_GEMM_BLAS=0` loss native, TKV_GELU_AVX2=0

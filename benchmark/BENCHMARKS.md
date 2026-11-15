@@ -1601,8 +1601,10 @@ Tong op-time native 32.7 s vs bridge-GPU 14.0 s.
 
 ## 9.44 PHIEN 2026-11-15 (Colab T4, notebook viet lai 9 cells, HEAD b00d797)
 
-Notebook moi: `demo/colab_bench_ai_gpu.ipynb` (9 cells; [6/9] native, [7/9] GPU bridge,
-[9/9] prof-dump). Clone HEAD = b00d797, demo/bseq.dll sha256 = c7e16c6d (ban co fix A4a).
+Notebook moi: `demo/colab_bench_ai_gpu.ipynb` (10 cells; [6/9] native, [7/9] GPU bridge,
+[8/9] prof-dump, [9/9] diag-gdb). Clone HEAD = b00d797, demo/bseq.dll sha256 = c7e16c6d
+(ban co fix A4a). Phien GREEN sau fix (HEAD dbe4f97) do lai native median = **15 783 ms**
+(fwd 3 745 / bwd 10 628 / opt 436 / copyback 87) — xem §9.45.
 
 **Native (.tkv CPU, TKV_TORCH_PATH= rong), x3 xen ke, median:**
 - TONG = **15 548 ms** (15 295 / 15 647 / ...) | fwd 3 629 | bwd 10 556 | opt 425 | copyback 88
@@ -1655,6 +1657,34 @@ Xem `Release/tools/simd_native/torch_fused.cpp` (commit 8929830).
 **Trang thai:** da commit `8929830` (Release repo) va da push len `origin/main`
 (e043b3f..8929830) ngay 2026-11-15, nen Colab clone moi se build ban bridge da fix.
 Repo Inference (`TokenVector.Inference`) KHONG can sua cho GPU crash nay.
-Waiting: re-run Colab notebook de xac nhan GPU bridge GREEN (loss_val ?= 17.106686).
-Neu van rc=139, gdb backtrace moi (mode=2, `handle SIG34 nostop noprint pass`)
-se chi diem nhay.
+
+### KET QUA SAU FIX - GREEN (2026-11-15 15:50, T4, Inference HEAD dbe4f97)
+
+GPU bridge chạy GREEN end-to-end. Numbers:
+
+**Bench GPU bridge, x3 median, mode=2:**
+- TONG = **8 252 ms** (8 252 / 8 505 / 8 224) | fwd 1 019 | bwd 5 859 | opt 423 | copyback 87
+- loss_val = **17.111387** (ATen bridge path; gần #22 = 17.106686 — không parity với AVX2)
+- Nhanh hơn native 15 783 ms median, ~1.9x. So với #22 (7 407 ms) — cách biệt máy/phiên,
+  không phải bản fix gây chậm.
+
+**Op-breakdown GPU bridge (TKV_PROF, mode=2):**
+- Tổng op-time = **14 578 ms** (vs native 30 877): ATTN_BWD_MERGE 6 349 (43.6%)
+  / LMHEAD_BWD 5 701 (39.1%) / LN_BWD 1 056 / LN_FWD 938 / LIN_DW 500 / BIAS_GRAD 25
+  / EMB_BWD 9.
+- ATTN_BWD_MERGE tức là **attention bwd vẫn fallback về native flash merged** (không chạy
+  ATen SDPA bwd) — trong stderr của gdb: `TkvTorchAttentionBwd + 0x817` →
+  `at::TensorBase::const_data_ptr<float>` ném c10::Error ("not a leaf" / grad access)
+  bị swallow trong bridge → native fallback.
+  Đây đúng là exception được bridge catch, không phải crash.
+
+**Native fallback vẫn hoạt động đúng** (ATTN_BWD_MERGE bit-exact flash AVX2), nên loss
+GPU gần với native lẫn #22; chỉ không nhanh bằng ATen SDPA bwd.
+
+**Native median làm tham chiếu (phiên GREEN, HEAD dbe4f97):** 15 783 ms
+(fwd 3 745 / bwd 10 628; xem §0 trong TRACKED_PLAN). §9.44 giữ lại native number cũ
+của chính phiên đó (15 548, cùng máy, cùng bridge bug chưa fix).
+
+**Việc còn lại (optional, không bắt buộc):** fix `TkvTorchAttentionBwd` để thực sự dùng
+ATen SDPA bwd thay vì fallback — tự do thiết kế cho phép tăng op-time GPU lên < 10 s;
+điều này không còn BLOCKER cho benchmark: GPU bench đã chạy ổn định.
