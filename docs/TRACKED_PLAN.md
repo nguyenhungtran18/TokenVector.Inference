@@ -166,4 +166,5 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
 | `docs/SPEC_FUSED_SDPA_BWD.md` | Thiết kế fused SDPA backward |
 | `docs/HANDOFF.md` | Nhật ký mọi bước; không xóa |
 | `Notebook` = `demo/colab_bench_ai_gpu.ipynb` | Single source of truth cho bench (Colab) |
+| `docs/PLAN_FWD_BWD_TORCH_PARITY.md` | Giải thích gap vs torch (threads), kế hoạch đóng gap |
 | `tv/tests/simd_bench_124m_seq.tkv` + `demo/bseq.dll` | Bench native/Windows dev; đọc `_seq_cfg.txt` (seq, threads) |
