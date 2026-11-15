@@ -1629,3 +1629,32 @@ Notebook moi: `demo/colab_bench_ai_gpu.ipynb` (9 cells; [6/9] native, [7/9] GPU 
 
 **Ghi chu loss:** `[6/9]` in loss_val 875 / 1129 / 909 (mode=2 chay 3 buoc voi lr schedule
 toy cua bench) — khong phai loss chuan; loss chuan (1 buoc) = 25.45388 nhu [9/9].
+
+
+## 9.45 ROOT CAUSE: BRIDGE CUDA `host()` memcpy tren device pointer (2026-11-15)
+
+Notebook session 2026-11-15 (T4, HEAD b00d797/38cf9cb) chay GPU bridge
+(`TKV_TORCH_GPU=1`): **segfault rc=139** trong moi phien. GDB backtrace
+(cell `diag-gdb` trong notebook, `apt-get install gdb` + `gdb -batch -ex run -ex "bt 30"`):
+
+```
+Thread 1 "dotnet" received signal SIGSEGV, Segmentation fault.
+#0  __memcpy_evex_unaligned_erms () at memmove-vec-unaligned-erms.S:265
+#1  host(at::Tensor const&) () from /content/TokenVector/Release/tools/simd_native/tkv_torch_fused.so
+#2  TkvTorchLayerNormFwd () from .../tkv_torch_fused.so
+#3  LayernormFwd () from .../demo/tkv_simd_native.dll
+```
+
+**Nguyen nhan that:** `torch_fused.cpp` (repo Release TokenVector, HEAD e043b3f) co
+`dev()`/`host()` su dung `std::memcpy(tgt.data_ptr(), t.data_ptr(), ...)` de copy tensor
+GPU→CPU — `t.data_ptr()` neu `t` la CUDA tensor tra ve dia chi DEVICE, CPU `memcpy` khong
+hop le → SIGSEGV. Commit `8929830` (2026-11-15) fix bang `tgt.copy_(t)` (ATen tu xu ly
+D2H); dev() cung copy_ cho thong nhat (CPU->CPU copy_ voi con tro hop le neu host call).
+Xem `Release/tools/simd_native/torch_fused.cpp` (commit 8929830).
+
+**Trang thai:** da commit `8929830` (Release repo) va da push len `origin/main`
+(e043b3f..8929830) ngay 2026-11-15, nen Colab clone moi se build ban bridge da fix.
+Repo Inference (`TokenVector.Inference`) KHONG can sua cho GPU crash nay.
+Waiting: re-run Colab notebook de xac nhan GPU bridge GREEN (loss_val ?= 17.106686).
+Neu van rc=139, gdb backtrace moi (mode=2, `handle SIG34 nostop noprint pass`)
+se chi diem nhay.
