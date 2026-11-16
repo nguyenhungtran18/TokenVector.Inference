@@ -4,7 +4,7 @@
 > 2 thread CPU, xen kẽ x3, median. Loss ≠ torch (init khác; FLOPs giống). Không so sánh
 > single-shot.
 
-## 0. Trạng thái hiện tại (nguồn: `BENCHMARKS.md §9.43` #22 2026-11-14; mới nhất: `§9.44`/`§9.45` Colab 2026-11-15)
+## 0. Trạng thái hiện tại (nguồn: `BENCHMARKS.md §9.43` #22 2026-11-14; mới nhất: `§9.44`/`§9.45` Colab 2026-11-17)
 
 | | `.tkv` native | torch CPU 2T | Tỷ lệ |
 |---|---:|---:|---:|
@@ -14,6 +14,7 @@
 
 GPU bridge (cùng phiên notebook #22, `TKV_TORCH_GPU=1`): fwd+CE+bwd **6 902** vs torch CUDA 268.1 (**25.7×**); TỔNG **7 407** vs 299.2 (**24.8×**); loss_val **17.106686** (ATen bridge, không parity với AVX2).
 **GPU fix (2026-11-15, commit Release `8929830` — `host()` `std::memcpy` CUDA ptr → `copy_`): bridge giờ GREEN; phiên 2026-11-15 đo `TONG 8 252 ms`, loss_val **17.111387** (§9.45).**
+**GPU manual backward chay that (2026-11-17, notebook (20), T4): TONG **5 256 ms**, fwd 803 / bwd **3 069 ms** / opt 417 / copyback 87; loss_val **17.111390** (17.111387 - lech 3e-6, ATen non-determinism). ATTN_BWD_MERGE **BIEN MAT** (manual attention backward ATen CUDA chay that thay cho fallback AVX2). Nguyên nhân trước đó: TkvTorchAttentionBwd truyền tensor 4-D vao at::bmm (ATen docs: bmm bắt buộc 3-D) -> c10::Error -> fallback mỗi lần; fix = at::matmul + softmax-bwd P*(dP-sum(dP*P)) + host() cho dx (Release `a6dfc30`) + notebook clone in TokenVector HEAD & parse loss_val thật (Inference `cc70fe4`). GPU nhanh native **~3.0x** (§9.47/§9.48).**
 
 Peak RAM: `.tkv` **4.09 GB** < torch **4.29 GB** (§9.40, notebook #14).
 
@@ -129,6 +130,11 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
       đó là design hiện tại, không phải bug. **§9.43 GPU 7 407 ms vẫn tham chiếu gốc;
       phiên này thấp 8 252 ms (máy chậm).**
 
+- [x] **[A5-1]** Phien Colab 2026-11-17 (notebook (20), T4, Inference cc70fe4 / TokenVector a6dfc30).
+      **GPU bridge: TONG 5 256 ms** (fwd 803 / bwd 3 069 / opt 417); loss_val **17.111390**; ATTN_BWD_MERGE bien mat;
+      native cung phien **TONG 15 811 ms** (loss_val 25.453880) - **GPU nhanh native ~3.0x**.
+      LMHEAD_BWD con 5 748 ms (77.5% op-time) - dxf = dl @ wte van SgemmF32 native,
+      de xuat route qua ATen CUDA (doi y user xac nhan waiver numerics). LN GPU cham hon native. (`BENCHMARKS.md` 9.47/9.48)
 ### B. Việc tác động + flags
 - [ ] **[B1]** Giống A2/A3: kiểm tra `TKV_GEMM_BLAS=0` loss native, TKV_GELU_AVX2=0
       loss native — nếu loss EXACT fail, có điểm cầu vượt dễ phát hiện.

@@ -1717,3 +1717,80 @@ flash. attention backward của .tkv (flash AVX2 ~86% peak FMA) đo được ~5�
 **Việc còn lại (optional, không bắt buộc):** fix `TkvTorchAttentionBwd` để thực sự dùng
 ATen SDPA bwd thay vì fallback — tự do thiết kế cho phép tăng op-time GPU lên < 10 s;
 điều này không còn BLOCKER cho benchmark: GPU bench đã chạy ổn định.
+
+## 9.47 GPU BRIDGE MANUAL BACKWARD CHAY THAT: at::bmm (3-D only) -> at::matmul (2026-11-17, T4, notebook (20))
+
+Notebook (19) chay voi commit `9b08c69` (manual backward, 2026-11-16): bwd van fallback
+AVX2 â€” frame #8 `at::_ops::bmm::call` + warning `.grad` tren non-leaf. Lap lai debug nhung
+lan nay doc tai lieu chinh thuc thay vi doan:
+
+- `torch.bmm` docs (https://docs.pytorch.org/docs/stable/generated/torch.bmm.html):
+  "input and mat2 **must be 3-D tensors** ... This function does not broadcast."
+- Manual path truyen tensor **4-D** `[1, nheads, T, hd]` vao `at::bmm` -> c10::Error nem
+  ngay trong CUDA dispatch -> bridge catch -> `.tkv` fallback AVX2 flash bwd MOI LAN
+  (ATTN_BWD_MERGE ~6.5 s van nguyen).
+- `torch.matmul` docs: ho tro N-D, batch dims broadcast -> chinh la op dung cho [1, nh, T, hd].
+
+**Fix â€” commit `a6dfc30` (repo TokenVector):**
+1. Ca 6 lenh `at::bmm` -> `at::matmul` (forward recompute + backward dP/dQ/dK/dV/t_ctx).
+2. **Softmax backward viet sai**: `dS = (dP - dPs * P)` -> `P * (dP - dPs)`
+   (dPs = rowsum(dP .* P), shape [1, nh, T, 1]) â€” cong thuc dung cua softmax bwd.
+3. `memcpy(dx, d_x...const_data_ptr<float>())` â€” doc tu con tro CUDA sang host = dung
+   class bug da sua o Â§9.45 â€” doi sang `host(d_x).const_data_ptr<float>()`.
+
+**Notebook â€” commit `cc70fe4` (repo Inference):** clone cell in them `TokenVector HEAD`
+(truoc day chi in Inference HEAD -> khong biet .so build tu commit nao); bench cells
+parse dung token `loss_val=` (truoc in `loss=` ~897/906 = train loss, khong phai val).
+
+**KET QUA (notebook (20), T4, HEAD Inference cc70fe4 / TokenVector a6dfc30):**
+
+Bench GPU bridge x1:
+- TONG = **5256 ms** | fwd 803 / bwd **3069** / opt 417 / copyback 87
+- **loss_val = 17.111390** â€” khop 17.111387 (lech 3e-6 = ATen CUDA non-determinism, khong
+  phai regression; native-mode2 reference 25.45388)
+- (lan truoc buoc fix: TONG 7892 | bwd 5676 | loss_val 17.111387)
+
+Bench native x1 (sang phien nay):
+- TONG = 15811 ms | fwd 3809 / bwd 10623 | loss_val 25.453880
+- **GPU bridge nhanh native ~3.0x** vs ~1.9-2.05x truoc fix.
+
+Op-breakdown GPU bridge (TKV_PROF, mode=2):
+- tong op-time = **7416 ms** (vs native 30 971, vs truoc fix 14 947)
+- **ATTN_BWD_MERGE BIEN MAT** (fallback AVX2 khong con chay) â€” manual backward ATen CUDA
+  chay that: fwd recompute + dP/dS/dQ/dK/dV qua cublas.
+- LN_BWD 939 ms (12.7%) | LN_FWD 719 ms (9.7%) | EMB_BWD 9.8 ms | **LMHEAD_BWD 5748 ms (77.5%)**
+- (LIN_DX/LIN_DW/ATTN_FWD/GELU_* khong con trong breakdown = di qua duong TkvTorch*ATen
+  truc tiep, khong dem vao counter native â€” uoc tinh ATen CUDA chay voi chi phi nho.)
+
+diag-gdb (notebook (20)): **khong con bmm backtrace**. `rc=1`, process exited normally,
+BPHASE loss_val=17.11139. Con 3 warning `.grad` tren non-leaf (benign; LN bwd doc grads
+cua leaves; khong anh huong). loss_val xac nhan trong 2 cell doc lap (bench-gpu + prof-dump).
+
+torch-profile tren cung VM: aten::mm 53.5% (4.870 s / 99 calls), addmm 1.44 s, flash bwd
+~827 ms (12 calls), self CPU 9.11 s -> torch bwd ~9.1 s tren CPU; .tkv GPU bwd 2.998 s.
+Gap con lai chu yeu GEMM tot (cublas) + tuy bien SDPA.
+
+**Su thay doi thuc:** manual attention backward tu "luon fail + fallback AVX2" thanh
+"ATen CUDA hoat dong"; bwd giam 5676 -> 3069 ms; native->GPU ratio 1.9x -> 3.0x;
+loss_val giu nguyen (17.11139).
+
+
+## 9.48 KET LAI â€” LMHEAD_BWD la bottleneck con lai (77.5%) â€” dxf GEMM chua qua ATen (2026-11-17)
+
+Trong `lmhead_bwd_fused_impl` (`Release/tools/simd_native/tkv_simd_native.c`, ~line 1895):
+- pha 1: softmax-grad rows -> dl [T,V] (parallel, memory-bound â€” on)
+- pha 2: **dxf = dl @ wte** qua `run_rect_shaped` (noi bo SgemmF32 blocked/threaded) â€”
+  **LUON native**, khong co nhanh ATen. 79 GFLOP (T=1024, E=768, V=50257); tren do
+  GoldenImage native GEMM nhanh, nhu~1.5â€“2.5 s/step â€” day la phan lon 5 748 ms / 3 buoc.
+- pha 3: dwte += dl^T @ xf qua `TkvTorchAddmmTaOut` (ATen `addmm_out` beta=1 tren CUDA neu
+  TKV_TORCH_GPU=1, fallback openblas) â€” nhan xet trong code ghi nhan -102.9 ms/step vs duong cu.
+
+De xuat (chua lam, doi y user): route pha 2 dxf qua bridge ATen CUDA (mm [T,V]x[V,E],
+cublas â€” uoc tinh < 100 ms). Se doi numerics cua dxf GPU bridge (cung lop waiver da chap
+nhan cho dwte addmm_out); loss_val co the lech them ~1e-7. Ket qua uoc tinh: LMHEAD_BWD
+~1-1.5 s -> TONG ~3.5-4 s. Can user xac nhan waiver numerics cho dxf.
+
+Canhv luon: LN_FWD/LN_BWD tren GPU cham hon native (719/939 vs native 384/661) â€” could be
+copy/autograd overhead qua bridge; co the profile sau. GELU*/LIN_* da vao nhom "khong dem
+counter" = chay qua TkvTorch* duong ATen (khong ro chi tiet thoi gian, nhung TONG cho thay
+chung nho). x2 dang lam: win GPU 3.0x vs native â€” chuan bi TRACKED_PLAN A5.
