@@ -22,23 +22,27 @@ Conclude: **trên cùng máy, cùng protocol, .tkv ~ parity (0.99×)**. Colab ch
 
 **0a-fix:** `TKV_GEMM_THREADS=nproc` (hoặc trực tiếp =2 trên Colab 2-vCPU) → kỳ vọng quay lại ~1.0×.
 
-### 0a-measure (2026-11-15, notebook `[5B/10 thread-test]`) — REJECTED
+### 0b (2026-11-15, cell `[10/9 torch-profile]`) — same-machine parity, gap nhỏ
+
+Đo torch CPU backward trên chính VM (T4, L4) như sau:
 
 ```
-threads=2: TONG=16 733
-threads=4: TONG=16 917
-threads=8: TONG=17 153
-default (12, Colab 2-vCPU): ~16 231 ([6/9])
+aten::mm                             52.12%  4.843s   99 calls
+aten::addmm                          17.12%  1.591s   48 calls
+aten::_scaled_dot_product_flash_attention  13.6%  1.260s  24 calls (12 fwd + 12 bwd)
+aten::mul / add / log_softmax / fill / pow  ~10%    ~900ms
+Self CPU total (backward): 9.291s
 ```
 
-Chênh lệch chỉ 3–5,7% — **thread oversubscription KHÔNG phải nguyên nhân** của gap
-1.4–1.5× vs torch. Kết luận vội:
+**So sánh cùng máy (chỉ backward):**
+- torch: **9.29 s** (aten ops, CPU) | .tkv: **~10.6 s** (`TKV_PROF` bwd §9.44/§9.45)
+- Gap ~1.1× — phù hợp với `BENCHMARKS.md §9.22` (Xeon 2695 v3, 0.99×).
 
-- Gap Colab ≈ 1.45× torch là do **cuDNN/MKL (Intel) chứ không phải OpenBLAS**, i.e.
-  thổi **MKL direct / cuBLAS trên GPU** mới đóng được gap, chứ không chỉ `TKV_GEMM_THREADS`.
-- Xoá hẳn Bảng mục tiêu "~1.0× trên Colab" — chắc chắn không đạt được KHÔNG MKL/CUDA.
-- Cập nhật chiến lược: tập trung vào CUDA backend (`PLAN_GPU_BACKEND.md §2`) + MKL nếu cần,
-  chứ không tối ưu thread.
+**Conclude (cập nhật):** gap ``.tkv full step chậm torch`` ~1.45× Colab là tổng của
+(a) fwd+CE (~1.1×), (b) bwd (~1.1×), (c) opt (.tkv ~469 vs torch ~594)
+— các yếu tố đều nhỏ; KHÔNG phải variance lớn như phiên trước tưởng.
+
+Ghi chú: Colab luôn chậm hơn Windows Xeon đáng kể; .tkv/torch ngang trên Windows.
 
 ---
 
@@ -73,19 +77,28 @@ Hiện trạng (~25× chậm torch CUDA, 1.9× nhanh hơn .tkv CPU):
 
 ## 1. Breakdown gây chậm (Colab 2026-11-15)
 
+Xem `BENCHMARKS.md §9.46` cho torch-profile tạo cùng máy.
+
 | Op (fwd bwd) | .tkv ms | Ghi chú |
 |---|---:|---|
-| `ATTN_BWD_MERGE` | 6 119 – 6 349 | flash AVX2; 86% peak FMA; không thể giảm nhiều |
-| `LMHEAD_BWD` | 6 755 – 6 507 | 2 paths: native fused vs ATen `addmm_out`; cần đo ROI |
-| `LIN_DW` + `LIN_DX` | 10 689 – 10 548 | oneDNN vs OpenBLAS — .tkv đã dùng BLAS default |
-| `ATTN_FWD` | 4 674 – 5 119 | native flash vs torch SDPA math |
-| LN (fwd+bwd) | 1 063 – 1 132 | .tkv `layernorm_fwd_fused` / `layernorm_bwd_fused` AVX2 |
-| GELU fwd+bwd | ~554+621 = 1 175 | đã AVX2 từ 11.6 s → 980 ms; có thể shave thêm |
-| EMB_BWD | 9 | bỏ qua |
-| BIAS_GRAD | 200 – 262 | bỏ qua |
-| `CE fwd+bwd` (fused) | ~900 | cộng vào loss_val; không breakout |
+| `ATTN_FWD` | 4 674–6 400 (khác phiên) | vs torch: 1.25s (aten flash fwd) |
+| `ATTN_BWD_MERGE` | 5 663–6 507 | vs torch: ~1.25s (aten flash bwd). **Gap ~4–5x** — I must optimize this |
+| `LMHEAD_BWD` | 6 507–8 121 | vs torch: gộp trong `aten::mm` (≈3.2s) |
+| `LIN_DW` + `LIN_DX` | 10 548–10 689 | vs torch: gộp trong mm/addmm |
+| LN (fwd+bwd) | 1 063–1 132 | gần sát torch |
+| GELU fwd+bwd | ~1 175 | |
+| `CE fwd+bwd` | ~900 | |
 
-Hot ops top-3 (GEMMs + flash merge) đều ~70% bwd → tối ưu chúng sẽ thành công lớn nhất.
+Hot ops trên .tkv (bwd): `ATTN_BWD_MERGE` (~6 s) + `LMHEAD_BWD` (~6.8 s) = 12.8 s
+= **~75% bwd**. Tối ưu attention backward sẽ mang lại 6+ s.
+
+**Attention backward gap cụ thể:**
+- .tkv `att_bwd_merge_multi` (AVX2 flash bwd, 12 threads) ≈ 6 s
+- .tkv fallback scalar (nếu không dùng `attention_bwd_merge_multi`) ≈ 23 s
+- torch CPU flash bwd ≈ 1.26 s
+
+Cơ hội lớn nhất: **giảm `ATTN_BWD_MERGE` ≈ 6 → ~2.5 s** → bwd từ 10.6 → ~7 s,
+full step từ 15.7 → ~11.7 s ≈ **torch parity (10.9 s)**.
 
 ---
 
@@ -113,11 +126,14 @@ Nếu lệch, BLAS path đang không bit-exact; ghi chú ngay và fallback lện
 - So sánh `LMHEAD_BWD` native fused vs ATen `addmm_out` (đo cả hai trước/sau).
 - Chỉ giữ native fused nếu nhanh hơn; ngược lại — bật ATen path (hoặc ngược lại, gọi `onednn_linear_bwd(addmm_out)` trực tiếp với kiểu khác).
 
-### Bước 4 — Đóng hoàn toàn copyback (tùy ý, xem `TRACKED_PLAN.md §0` Stream-A)
+### Bước 4 — Đóng hoàn toàn copyback — REJECTED
 
-- Dùng zero-copy view (`f32buf_wrap` slices của `p_buf = alloc_bytes(n*4)`) để params
-  cập nhật in-place, khỏi copyback ~400–500 MB.
-- Tiết kiệm dự kiến: ~80–400 ms mỗi bước + ~500 MB RAM.
+**Đã thử** ở `gpt2_unflatten` (2026-10-27, commit trước session này):
+est 844 ms; thực tế **0% gain** trên cả seq8/seq1024 + phình ~0.9 GB RAM
+so với 844 ms ước tính → **DROP, giữ đường interpreted cũ**.
+Kết luận: không làm zero-copy phẳng. Không ROI đủ lớn, chỉ negative.
+Không làm metric "copyback = 87 ms → 0" cho bước này nữa — chấp nhận con số hiện tại
+(~0.6% tổng step).
 
 ### Bước 5 — Tối ưu `LMHEAD_BWD` + `ATTN_BWD_MERGE` (nếu hot-op vẫn chênh lệch)
 
@@ -165,7 +181,21 @@ Nếu lệch, BLAS path đang không bit-exact; ghi chú ngay và fallback lện
 
 ## 5. Ưu tiên thực thi
 
-1. Bước 1 (`TKV_GEMM_THREADS`) → benchmark lại Colab, xác nhận gap đóng.
-2. Bước 3 (breakdown op-by-op) → xác định hot-op có ROI cao.
-3. Bước 4 (copyback) + 5 (`LMHEAD_BWD`, `ATTN_BWD_MERGE`).
-4. Bước 6 (`fwd` gap).
+Thứ tự cập nhật, sau khi đo thực tế trên cùng VM (Cell `[10/9]`):
+
+1. **Đo gap same-machine mode=2** — session Colab mới chạy notebooks `[6/9]` `[8/9]`
+   và `[10/9]` → so sánh bwd self-CPU của torch (9.29 s) vs .tkv bwd wall
+   (`TKV_PROF` ≈ 10–11 s). Gap thực sự ~1.1–1.2×; KHÔNG phải 25% nhiều như suy luận ban đầu.
+2. **Nếu muốn nhanh hơn nữa:** tập trung vào `ATTN_BWD_MERGE` — flash AVX2
+   `attention_bwd_merge_multi` (12 luồng) có thể tối ưu thêm 2–4× ở nhánh fallback;
+   có thể thử `attention_bwd_fused` per-head hoặc tái cấu trúc backward "--recompute"
+   theo flash-attn-2 algorithm (save q,k,v và recompute on the fly).
+3. **LayerNorm .tkv (~1.1 s) vs torch (~50 ms)** — đi tìm vì sao AVX2 LN mất 46 ms
+   /call: hội thoại seq1024 h=768; 75 calls = 1.2M elements; tính thôi 0.015ms mỗi element,
+   tức là LN_back += 1.2s so với torch. Bước này có khả năng cắt giảm 1+ giây dễ dàng.
+4. **GELU + CE** — ít tác động (~1 s combined).
+5. **Output ATEN vs native GEMM comparison** — .tkv line DW/DX 10+ s; aten mm+addmm 6.4 s —
+   có thể coi `SgemmPacked` là đường mở đầu; đáng benchmark `TKV_GEMM_BLAS=0
+   thử cùng máy để xem gap lớn vào đâu.
+6. **Nếu muốn đạt parity torch CPU:** fix LayerNorm + attention bwd ≈ 11.7 s total
+   full step: **CLOSEST candidates**.

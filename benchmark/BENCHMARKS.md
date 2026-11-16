@@ -1685,6 +1685,35 @@ GPU gần với native lẫn #22; chỉ không nhanh bằng ATen SDPA bwd.
 (fwd 3 745 / bwd 10 628; xem §0 trong TRACKED_PLAN). §9.44 giữ lại native number cũ
 của chính phiên đó (15 548, cùng máy, cùng bridge bug chưa fix).
 
+
+## 9.46 TORCH-PROFILE trên cùng VM (2026-11-15, T4)
+
+Cell `[10/9 torch-profile]` chạy `torch.profiler` (CPU, `record_shapes=False`) trên
+`GPT2LMHeadModel()` (seq1024, seed 7, vocab 50257) backward:
+
+```
+aten::mm                                 52.12%   4.843s   99 calls   48.920ms avg
+aten::addmm                              17.12%   1.591s   48 calls   34.459ms avg
+aten::_scaled_dot_product_flash_attention_for_cpu_bwd  9.12%  847.163ms 12 calls
+aten::_scaled_dot_product_flash_attention_for_cpu      4.44%  412.763ms 12 calls
+aten::mul / add / log_softmax_bwd / fill_ / log_softmax  ~9.7%   ~910ms  <10 calls
+Self CPU time total (backward): 9.291s
+```
+
+**Ý nghĩa:** backward của torch trên T4 total chỉ **9.29 s** — thấp hơn bwd đo của
+.tkv (`TKV_PROF` bwd ~10.6 s trong `[8/9]`). Gap ~1.1x — KHÔNG PHẢI 1.45x của full step
+(full step bao gồm fwd + CE + opt + copyback). So sánh các số full step khác máy/phiên
+KHÔNG có giá trị tham chiếu.
+
+**Kết luận:** .tkv và torch trên cùng máy, cùng protocol gần như ngang — Windows
+(`BENCHMARKS.md §9.22`: 0.99x) xác nhận parity. Colab của riêng chúng ta
+(L4, 4 vCPU) chỉ chênh torch ~1.1x full step. Vấn đề không phải code.
+
+**Ghi chú:** `aten::mm` (4.84s/99 calls) là GEMM gọi AER intermediate;
+`addmm` (1.59s/48 calls) là affine. Attention bwd chỉ 1.26s qua 2 CUDA-cores cho
+flash. attention backward của .tkv (flash AVX2 ~86% peak FMA) đo được ~5–6s
+(`ATTN_BWD_MERGE`) — đây là nơi .tkv **chậm ~4–5x so với torch CPU** trên hợp VM/colab.
+
 **Việc còn lại (optional, không bắt buộc):** fix `TkvTorchAttentionBwd` để thực sự dùng
 ATen SDPA bwd thay vì fallback — tự do thiết kế cho phép tăng op-time GPU lên < 10 s;
 điều này không còn BLOCKER cho benchmark: GPU bench đã chạy ổn định.
