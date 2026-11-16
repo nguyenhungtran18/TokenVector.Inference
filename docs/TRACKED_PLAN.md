@@ -135,6 +135,12 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
       native cung phien **TONG 15 811 ms** (loss_val 25.453880) - **GPU nhanh native ~3.0x**.
       LMHEAD_BWD con 5 748 ms (77.5% op-time) - dxf = dl @ wte van SgemmF32 native,
       de xuat route qua ATen CUDA (doi y user xac nhan waiver numerics). LN GPU cham hon native. (`BENCHMARKS.md` 9.47/9.48)
+- [x] **[A5-2]** Phien Colab 2026-11-17 (notebook (21), T4, Inference daf3197 / TokenVector 42832c2).
+      dxf (pha 2 lmhead) route ATen CUDA cuBLAS (waiver numerics user duyet 2026-11-17).
+      **GPU bridge: TONG 4 533 ms** (fwd 808 / bwd 2 361 / opt 413); loss_val **17.111393**;
+      LMHEAD_BWD 5 748 -> **3 638 ms**; native cung phien **TONG 15 208 ms** - GPU nhanh native **~3.36x**.
+      Native EXACT 25.407877 giu nguyen (native mode khong doi code path). (`BENCHMARKS.md` 9.49)
+
 ### B. Việc tác động + flags
 - [ ] **[B1]** Giống A2/A3: kiểm tra `TKV_GEMM_BLAS=0` loss native, TKV_GELU_AVX2=0
       loss native — nếu loss EXACT fail, có điểm cầu vượt dễ phát hiện.

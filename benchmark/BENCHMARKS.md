@@ -1794,3 +1794,43 @@ Canhv luon: LN_FWD/LN_BWD tren GPU cham hon native (719/939 vs native 384/661) �
 copy/autograd overhead qua bridge; co the profile sau. GELU*/LIN_* da vao nhom "khong dem
 counter" = chay qua TkvTorch* duong ATen (khong ro chi tiet thoi gian, nhung TONG cho thay
 chung nho). x2 dang lam: win GPU 3.0x vs native â€” chuan bi TRACKED_PLAN A5.
+
+## 9.49 LMHEAD pha 2 (dxf) ROUTE ATen CUDA - GPU 5 256 -> 4 533 ms (2026-11-17, notebook (21))
+
+Sau khi user xac nhan waiver numerics cho dxf (2026-11-17), pha 2 trong
+`lmhead_bwd_fused_impl` (dxf = dl @ wte, 79 GFLOP) di qua bridge moi
+`TkvTorchMmCudaOnly` (repo Release `42832c2`):
+- bridge tra `-9` khi `TKV_TORCH_GPU` chua bat / bridge cu khong export ->
+  **native giu nguyen run_rect_shaped SgemmF32 -> loss EXACT 25.407877 an toan**.
+- GPU mode: H2D (dl 205 MB + wte 154 MB) -> at::mm cuBLAS -> D2H (dxf 3 MB).
+- Waiver numerics (giong dwte addmm_out): dxf cuBLAS accumulation khac SgemmF32 -> loss GPU lech ~1e-7.
+
+**KET QUA (notebook (21), T4, HEAD Inference daf3197 / TokenVector 42832c2):**
+
+Bench GPU bridge x1:
+- TONG = **4 533 ms** | fwd 808 / bwd **2 361** / opt 413 / copyback 88
+- **loss_val = 17.111393** (so 17.111390 - lech 3e-6, trong sai phan ATen CUDA non-determinism)
+- (truoc: TONG 5 256 | bwd 3 069 | loss_val 17.111390)
+
+Bench native x1 (sang phien): TONG 15 208 ms | fwd 3 506 / bwd 10 340 | loss_val **25.453880** (native EXACT khong doi).
+=> **GPU bridge nhanh native ~3.36x** (truoc 3.0x).
+
+Op-breakdown GPU bridge (TKV_PROF):
+- tong op-time = 5 225 ms
+- LN_BWD 862 (16.5%) | LN_FWD 716 (13.7%) | EMB_BWD 10 | **LMHEAD_BWD 3 638 (69.6%)**
+  (LMHEAD_BWD -2 110 ms / -36.7% - dxf native -> cuBLAS)
+- ATTN_BWD_MERGE van khong con (manual backward chay that, xem §9.47)
+
+diag-gdb: sach backtrace; rc=1; process exit normal; BPHASE loss_val=17.111393.
+3 warning .grad non-leaf (benign - ben LN/embedding, khong thuoc dxf path).
+
+**So voi torch:** .tkv GPU bwd 2.36 s vs torch (CPU profile, cung VM) ~9.1 s;
+full step GPU 4.53 s vs torch CUDA ~0.27 s (seq1024) - **gap lon con lai** (GEMM/SDPA);
+chua route them pha 1 softmax cua LMHEAD hay LN sang ATen.
+
+**So voi native:** GPU giu ~3.4x; native EXACT 25.407877 khong bi anh huong.
+
+**Con lai:** pha 1 (softmax-grad -> dl [T,V], memory-bound ~400 MB+) van native;
+LN_FWD/LN_BWD tren GPU cham hon native (716/862 vs 361/720 native) - nghi overhead
+copies/autograd per call qua bridge (chua xu ly). Bench hien x1 (muon median chac
+chan thi doi range(1) -> range(3)).
