@@ -54,9 +54,15 @@ Self CPU backward: 9.291s
 
 Dominant ops: **GEMM (4.84 + 1.59 s vs 10.6 s)** + **attention bwd**.
 
-## 0.5 GPU bridge hiện tại đã GREEN (2026-11-15)
-Đã fix `torch_fused.cpp::host()` (CUDA mem-copy bug). BENCHMARKS.md §9.45.
-GPU bridge GREEN nhưng vẫn khoảng **25× slower torch CUDA** (~8.2 s vs 270 ms).
+## 0.5 GPU bridge GREEN (2026-11-15 - 2026-11-16 trong tam moi)
+- 2026-11-14: GPU bridge segfault do torch_fused.cpp::host() (xem BENCHMARKS.md SS9.45).
+- Fix: host()/dev() dung copy_ anh xa CPU <-> CUDA dung cach. GPU GREEN (TONG ~8 250 ms). Ghi lai.
+- 2026-11-16 (commit Release 4b8e14f): torch_fused.cpp::wrap_in requires_grad=true
+  -> at::layer_norm / at::scaled_dot_product_attention tao autograd graph ->
+  .backward() thuc su chay qua ATen; LN bwd & attention bwd ki vong chuyen tu
+  scalar/flash fallback sang ATen fast-path.
+- **Trong tam do lai**: do lai [8/9] op-breakdown va [7/9] bench-GPU sau khi rebuild bridge;
+  ky vong LMHEAD_BWD + LN_BWD + ATTN_BWD thu hep voi torch.
 
 ## 1. Breakdown gây chậm (Colab 2026-11-15) — xem §0b
 
