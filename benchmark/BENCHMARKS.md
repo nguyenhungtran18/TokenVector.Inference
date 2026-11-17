@@ -1896,3 +1896,35 @@ chua 'tkv-ln' nen lines bi loai. Da add 'tkv-ln'/'ln-fwd'/'ln-bwd' vao KEYS (Inf
 Native LN_FWD 354-374 ms (f64 scalar fallback, bridge khong load native mode); GPU LN_FWD
 707 ms => nghi nhieu exception/flash-path cham ATen CUDA (can verify bang ln debug prints).
 Docs phai ghi kem phien (luat #1).
+
+## 9.52 Manual ATen LN backward - LN_BWD 862 -> 505 ms, GPU TONG 4 268 -> 4 145 ms (2026-11-17/18, notebook (27))
+
+Notebook (26) chay voi debug flags xac nhan: `t_y def=1 req=1`, `backward()` chay,
+**ca 3 leaves (.grad()) undefined** -> exception `expected scalar type Float but found
+UNKNOWN_SCALAR` tai const_data_ptr<float>() (moi call, 75 LAN). LN_FWD at::layer_norm CUDA
+chay OK 75/1. => Autograd CUDA trong engine nay "chay ma khong ghi grad" -> bo hoan toan
+autograd khoi duong LN bwd.
+
+**Fix â€” Release `ca77396` (manual LN backward, KHONG autograd):**
+```
+mu = mean(x,-1); var = mean((x-mu)^2,-1); rstd = rsqrt(var+eps); xh = (x-mu)*rstd
+dx = rstd * (gy*g - mean(gy*g) - xh*mean(gy*g*xh))   /* mean over h */
+dg = sum_over_rows(gy*xh); db = sum_over_rows(gy)
+```
+ATen elementwise/reduce ops tren CUDA; rc != 0 -> native f64 fallback NGUYEN VAN.
+waiver numerics (cung lop dxf/dwte): dx/dg/db chenh ~1e-6.
+
+**KET QUA (notebook (27), T4, HEAD Inference 99f5183 / TokenVector ca77396):**
+- bench-gpu x3 median: TONG = **4 145 ms** | fwd 778 / bwd **1 925** / opt 424 / copyback 86
+- loss_val **17.111305** (x3 giong; lech ~7e-6 vs 17.111298 - waiver)
+- bench-native x3 median: TONG **16 484 ms** | fwd 3 854 / bwd 10 246 | loss_val 25.453880 (x3)
+- **GPU nhanh native ~3.97x**
+
+Op-breakdown GPU bridge:
+- op-time = 3 803 ms; **LMHEAD_BWD 2 530 ms (66.5%)** | LN_BWD **505 ms (13.3%)** | LN_FWD 760 ms (20.0%) | EMB_BWD 8.5
+- **LN_BWD 862 -> 505 ms** (-357 ms, -41%); log: 75x `[tkv-ln-bwd] ok` trong `/tmp/tkv_ln_debug.log`
+
+Native profile: TONG 16 281; LMHEAD_BWD 8 562; ATTN_BWD_MERGE 6 394; LIN_DW 5 713; LIN_DX 5 313; loss 25.45388
+
+**LN_FWD ~9.7 ms/call con cham** (at::layer_norm CUDA OK nhung cham hon torch LN fwd
+0.45 ms ~21x - nghi overheads/dispatch; chua xu ly trong phien nay).

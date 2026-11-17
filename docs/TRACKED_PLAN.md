@@ -152,6 +152,11 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
       ln-bench cell OK (torch LN fwd 0.450 ms bwd 1.284 ms). Notebook bi invalid JSON vi edit
       cua minh (fixed `08ce021`/`e5c9891`). LN bridge debug (tkv-ln prints) cho (24). (`BENCHMARKS.md` 9.51)
 
+- [x] **[A5-5]** Phien Colab 2026-11-17/18 (notebook (27), T4, Inference 99f5183 / TokenVector ca77396).
+      LN bwd manual qua ATen (autograd CUDA im lang - leaves .grad undefined): **LN_BWD 862 -> 505 ms**.
+      **GPU bridge TONG 4 145 ms** (fwd 778 / bwd **1 925**); loss_val **17.111305** (x3); native EXACT,
+      GPU ~3.97x native. op-time 3 803 ms; LMHEAD_BWD 2 530 (66.5%). Native mode khong doi. (`BENCHMARKS.md` 9.52)
+
 ### B. Việc tác động + flags
 - [ ] **[B1]** Giống A2/A3: kiểm tra `TKV_GEMM_BLAS=0` loss native, TKV_GELU_AVX2=0
       loss native — nếu loss EXACT fail, có điểm cầu vượt dễ phát hiện.
