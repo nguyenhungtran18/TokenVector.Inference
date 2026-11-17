@@ -1,0 +1,12 @@
+# tkv_full_ping smoke test — 2026-11-17
+# Verifies that the rebuilt compiler can emit calls to TkvFullPingNative.
+def main() -> 'i32':
+    x = tkv_full_ping(100)
+    print("tkv_full_ping(100) = " + str(x))
+    y = tkv_full_ping(-5)
+    print("tkv_full_ping(-5) = " + str(y))
+    if x == 42100 and y == 41995:
+        print("PING_PASS")
+        return 0
+    print("PING_FAIL")
+    return 1

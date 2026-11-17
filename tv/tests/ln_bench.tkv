@@ -1,0 +1,57 @@
+import tv.training.gpt2_ref124
+from tv.training.gpt2_ref124 import _sh0, _sh1
+
+# LN-PROBE: time gpt2_layernorm / gpt2_layernorm_bwd on 1024 x 768.
+# Show: raw LN forward / backward fwd+bwd wall-clock per call vs torch:
+#   torch native_layer_norm fwd+bwd ~25 ms / 1 call ("LN_atomic" per call)
+#   .tkv scalar fallback likely orders of magnitude slower.
+
+def _fill(t: "Tensor", off: 'i64') -> 'i64':
+    d = t.data
+    n = len(d)
+    i = 0
+    while i < n:
+        # deterministic data ~10% scale
+        if (i + off) % 100 == 0:
+            d[i] = 0.5
+        else:
+            d[i] = (float(((i + off) * 37 + 11) % 997) / 997.0 - 0.5) * 2.0
+        i = i + 1
+    return off + n
+
+def main() -> 'i32':
+    print("=== LN-PROBE (.tkv direct) ===")
+    x = t_zeros([1024, 768])
+    g = t_zeros([768])
+    b = t_zeros([768])
+    gy = t_zeros([1024, 768])
+    off = 0
+    off = _fill(x, off)
+    off = _fill(g, off)
+    off = _fill(b, off)
+    off = _fill(gy, off)
+
+    t0 = now_ms()
+    for i in range(20):
+        y = gpt2_layernorm(x, g, b)
+    t1 = now_ms()
+    print("LN_FWD   20 calls : " + str(t1 - t0) + " ms")
+
+    t0 = now_ms()
+    for i in range(20):
+        dx = gpt2_layernorm_bwd(x, g, b, gy, None, -1, -1)
+    t1 = now_ms()
+    print("LN_BWD   20 calls : " + str(t1 - t0) + " ms")
+
+    # also do 1 fwd + 1 bwd to confirm normal absolute timings
+    t0 = now_ms()
+    y = gpt2_layernorm(x, g, b)
+    t1 = now_ms()
+    print("LN_FWD   single   : " + str(t1 - t0) + " ms")
+
+    t0 = now_ms()
+    dx = gpt2_layernorm_bwd(x, g, b, gy, None, -1, -1)
+    t1 = now_ms()
+    print("LN_BWD   single   : " + str(t1 - t0) + " ms")
+
+    return 0
