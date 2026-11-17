@@ -1958,3 +1958,27 @@ Lai gan nhu chac chan: loss_val ~17.1113, native EXACT khong doi.
 
 **Ky vong (29):** LN_FWD giam tru cap 465 ms (~370-400 ms voi steady ~1.9 ms/call);
 TONG ~3.4-3.6 s; ATTN/LN chi con cac ep ATen. Torch CUDA ~0.27 s van con xa (interpreter+GEMM/SDPA) â€” khong con duong bridge thuáº§n.
+
+## 9.54 PhiÃªn (30) - environment degraded, KHONG phai regression (2026-11-17/18)
+
+**HEAD:** Inference c7e0995 / TokenVector **e8156c4** (fix forward decl). build-fused **rc = 0**,
+`.so` load OK (sua xong loi compile cua 1f4efad).
+
+**Numerics GREEN:** loss_val GPU = **17.111270** (x3, khá»›p (28)); native 25.453880 EXACT x3.
+=> code duong ATen van chay dung; warm-up constructor KHONG anh huong numerics.
+
+**NHUNG perf cua phien nay bi moi truong lam cham (khong do code):**
+- bench-gpu TONG median 8 453 ms (10 270 / 8 279 / 8 453) vs (28) 3 849 ms - cham hon ~2.2x,
+  va NOI rat lon giua cac lan (10 270 -> 8 279).
+- Bench-native cung phien: 15 672 ms - BINH THUONG (15-17s quanh day) => chi phia CUDA bi anh huong.
+- Sub-step LN fwd log: dev (H2D 3MB) tu 0.95 ms (28) -> **6-21 ms** (30) => PCIe/host-copy
+  bi dam; kernel `ln` van ~170us (nhanh) - day la network/host-side degrade, khong phai kernel.
+- LN_BWD 406 -> 1 419 ms; LMHEAD_BWD 1 456 -> 4 228 ms - moi thu cháº­m deu ~3x.
+- nvidia-smi luc dau: T4 34C, P8 11W idle, khong co process - mo hinh "dang bi chiem/throttle do host".
+
+**Ket luan:** (30) KHONG dung lam so sanh perf. Noi that cua fix e8156c4: build OK, numerics GREEN,
+warm-up da loai ~465 ms first-call (dev call dau 21 ms << 262 ms o (28)). Can 1 phien sach de do lai
+TONG ky vong (ky vong ~3.4-3.6 s nhu (28) hoac tot hon).
+
+**Bai hoc (lan luot xay ra):** phiÃªn Colab T4 co the bi throttle/degrade bat ky luc nao - moi so
+perf can kem theo nvidia-smi duoi tai + so sanh voi baseline cung commit de loai tru moi truong.
