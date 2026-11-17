@@ -141,6 +141,11 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
       LMHEAD_BWD 5 748 -> **3 638 ms**; native cung phien **TONG 15 208 ms** - GPU nhanh native **~3.36x**.
       Native EXACT 25.407877 giu nguyen (native mode khong doi code path). (`BENCHMARKS.md` 9.49)
 
+- [x] **[A5-3]** Phien Colab 2026-11-17/18 (notebook (22), T4, Inference d24b044 / TokenVector ef01ab8).
+      pha 1 LMHEAD qua ATen CUDA (waiver tiep noi): **LMHEAD_BWD 3 638 -> 3 210 ms**; TONG 4 605 ms (x1, noise);
+      loss_val 17.111393; native EXACT khong doi. Cell 11/9 ln-bench BUG do code (khong requires_grad +
+      autograd.grad(None)) - fix Inference **9f7d2f8** (khong raise). (`BENCHMARKS.md` 9.50)
+
 ### B. Việc tác động + flags
 - [ ] **[B1]** Giống A2/A3: kiểm tra `TKV_GEMM_BLAS=0` loss native, TKV_GELU_AVX2=0
       loss native — nếu loss EXACT fail, có điểm cầu vượt dễ phát hiện.

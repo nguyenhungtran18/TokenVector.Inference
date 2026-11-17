@@ -1834,3 +1834,25 @@ chua route them pha 1 softmax cua LMHEAD hay LN sang ATen.
 LN_FWD/LN_BWD tren GPU cham hon native (716/862 vs 361/720 native) - nghi overhead
 copies/autograd per call qua bridge (chua xu ly). Bench hien x1 (muon median chac
 chan thi doi range(1) -> range(3)).
+## 9.50 pha 1 LMHEAD qua ATen CUDA - LMHEAD_BWD 3 638 -> 3 210 ms (2026-11-17/18, notebook (22))
+
+pha 1 (`lmhead_softmax_rows`, dl = (softmax - onehot) * scale, 205 MB write + 51M expf) route
+qua bridge `TkvTorchLmSoftmaxCudaOnly` (Release `ef01ab8`): H2D logits -> at::softmax ->
+mul_(scale) -> scatter_(1, ids, -scale) -> D2H. Fallback native NGUYEN VAN khi rc != 0;
+native mode giu bit-exact (EXACT 25.407877 an toan). Waiver numerics (nhu dxf, Â§9.49).
+
+**KET QUA (notebook (22), T4, HEAD Inference d24b044 / TokenVector ef01ab8):**
+- bench-gpu x1: TONG **4 605 ms** | fwd 799 / bwd **2 431** (x1, trong noise so voi (21) 4 533)
+- bench-native x1: TONG 15 272 ms | loss_val 25.453880 (native EXACT khong doi)
+- **LMHEAD_BWD 3 638 -> 3 210 ms** (-428 ms, -11.8%; ~143 ms/step) - pha 1 ATen chay that
+- loss_val **17.111393** (khong doi o do chinh xac in) - waiver du, pha 1 giup it hon pha 2
+- profile GPU bridge: op-time 4 806 ms; LN_BWD 849 (17.7%), LN_FWD 735 (15.3%), LMHEAD_BWD 3 210 (66.8%)
+- diag/build: build rc=0; clone HEAD dung `ef01ab8`
+
+**Cell 11/9 (ln-bench) BUG (fix commit Inference `9f7d2f8`):** `torch.autograd.grad([y.backward()])`
+von nhan `None` (backward() tra None) + x/g/b khong requires_grad -> RuntimeError moi lan
+(deterministic, khong phai bridge). Fix: x/g/b requires_grad=True, ln_bwd() dung `backward(gy)`,
+try/except skip, khong abort run. torch LN fwd ~0.48 ms (jep lai trong bench).
+
+**So voi torch:** torch LN fwd 0.48 ms vs .tkv ~7-11 ms/call (ca native lan GPU bridge deu
+cháº­m) - xem item LN GPU trong HANDOFF. Gap torch CUDA toan model con lon.
