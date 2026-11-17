@@ -146,6 +146,12 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
       loss_val 17.111393; native EXACT khong doi. Cell 11/9 ln-bench BUG do code (khong requires_grad +
       autograd.grad(None)) - fix Inference **9f7d2f8** (khong raise). (`BENCHMARKS.md` 9.50)
 
+- [x] **[A5-4]** Phien Colab 2026-11-17/18 (notebook (23), T4, Inference e5c9891 / TokenVector eae6c97,
+      bench x3 median): **GPU bridge TONG 4 268 ms**; bwd **2 099 ms**; loss_val **17.111298** (x3);
+      native median **TONG 15 417 ms**, loss EXACT. LMHEAD_BWD 2 520 ms (pha 1+2 ATen chay).
+      ln-bench cell OK (torch LN fwd 0.450 ms bwd 1.284 ms). Notebook bi invalid JSON vi edit
+      cua minh (fixed `08ce021`/`e5c9891`). LN bridge debug (tkv-ln prints) cho (24). (`BENCHMARKS.md` 9.51)
+
 ### B. Việc tác động + flags
 - [ ] **[B1]** Giống A2/A3: kiểm tra `TKV_GEMM_BLAS=0` loss native, TKV_GELU_AVX2=0
       loss native — nếu loss EXACT fail, có điểm cầu vượt dễ phát hiện.

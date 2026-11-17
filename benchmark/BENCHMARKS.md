@@ -1856,3 +1856,43 @@ try/except skip, khong abort run. torch LN fwd ~0.48 ms (jep lai trong bench).
 
 **So voi torch:** torch LN fwd 0.48 ms vs .tkv ~7-11 ms/call (ca native lan GPU bridge deu
 cháº­m) - xem item LN GPU trong HANDOFF. Gap torch CUDA toan model con lon.
+
+## 9.51 Bench x3 MEDIAN â€” GPU 4 268 ms; LMHEAD_BWD 3 210 -> 2 520; ln-bench fix OK (2026-11-17/18, notebook (23))
+
+**KET QUA (notebook (23), T4, HEAD Inference 08ce021 / TokenVector eae6c97):**
+
+Bench native x3 (median):
+- TONG **15 417 ms** (15 417 / 15 547 / 14 602) | fwd 3 542 / bwd **10 512** / opt 418
+- loss_val **25.453880** (x3 â€” native EXACT nguyen)
+
+Bench GPU bridge x3 (median):
+- TONG **4 268 ms** (4 247 / 4 314 / 4 268) | fwd 796 / bwd **2 099** / opt 418 / copyback 84
+- **loss_val = 17.111298** (x3 giong nhau; lech ~9e-5 vs 17.111393 â€” cublasLt algo heuristic
+  moi phien, deterministic trong phien; waiver nhu cac lan truoc)
+- (lan x1 truoc: 4 605 (22) / 4 533 (21))
+
+**GPU bridge nhanh native ~3.6x.** bwd 2 099 ms (was 2 431 (22), 3 069 (20), 5 676 (19)).
+
+Op-breakdown GPU bridge (TKV_PROF):
+- tong op-time = **4 097 ms**
+- **LMHEAD_BWD 2 520 ms (61.5%)** â€” was 3 210 (22): pha 2 + pha 1 ATen tiep tuc giam
+- LN_BWD 861 (21.0%) | LN_FWD 707 (17.3%) â€” ADC cua LN van ~9.4/11.5 ms moi call
+- EMB_BWD 8.7
+
+Native profile: TONG 15 346; LMHEAD_BWD 7 589; ATTN_BWD_MERGE 6 087 (19.9%); LIN_DW 5 386;
+LIN_DX 5 219; ATTN_FWD 3 943; (native EXACT 25.453880).
+
+**Cell 11/9 (ln-bench): FIX OK** (Inference `9f7d2f8` + `08ce021` JSON-invalid fix) â€”
+torch LN fwd **0.450 ms**, torch LN bwd **1.284 ms**.
+
+**BUG cua notebook (22): invalid JSON â€” tuan truoc khi fix cell 11/9** (literal newline trong
+chuoi JSON vi PowerShell backtick-n trong string thay vi escape). Colab khong load duoc;
+PowerShell khoan dung nen khong bao. FIX: commit `08ce021` (escape \n) + scan control-char
+trong string JSON = 0 + gi nguyen UTF-8/no BOM. **Bai hoc: scan control-char truoc khi push .ipynb.**
+
+**LN bridge: chua thay stderr trong ln-fwd/ln-bwd** â€” cell `[8/10 PROF]` KEYS filter khong
+chua 'tkv-ln' nen lines bi loai. Da add 'tkv-ln'/'ln-fwd'/'ln-bwd' vao KEYS (Inference
+**`e5c9891`**) â€” lan chay tiep theo se lo RC exception (neu co) cua at::layer_norm CUDA.
+Native LN_FWD 354-374 ms (f64 scalar fallback, bridge khong load native mode); GPU LN_FWD
+707 ms => nghi nhieu exception/flash-path cham ATen CUDA (can verify bang ln debug prints).
+Docs phai ghi kem phien (luat #1).
