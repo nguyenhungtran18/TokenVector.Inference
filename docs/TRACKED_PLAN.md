@@ -157,6 +157,12 @@ Giải nghĩa: LMHead + attention backward (= reshape + 3-4 GEMM) chiếm >60% b
       **GPU bridge TONG 4 145 ms** (fwd 778 / bwd **1 925**); loss_val **17.111305** (x3); native EXACT,
       GPU ~3.97x native. op-time 3 803 ms; LMHEAD_BWD 2 530 (66.5%). Native mode khong doi. (`BENCHMARKS.md` 9.52)
 
+- [x] **[A5-6]** Phien Colab 2026-11-17/18 (notebook (28), T4, Inference f3443d5 / TokenVector 993ad6e/+1f4efad).
+      **LMHEAD_BWD 2 530 -> 1 456 ms** (A0.151 tron goi 1 CUDA call, dl khong ve CPU).
+      **GPU bridge TONG 3 849 ms** | fwd 796 / bwd **1 582** | loss_val **17.111270**; native 17 310, GPU ~4.5x native.
+      LN_FWD: call dau ~465 ms (CUDA lazy module load) - warm-up trong constructor Release `1f4efad`;
+      steady-state ~1.9 ms/call. Ghi `BENCHMARKS.md` 9.53.
+
 ### B. Việc tác động + flags
 - [ ] **[B1]** Giống A2/A3: kiểm tra `TKV_GEMM_BLAS=0` loss native, TKV_GELU_AVX2=0
       loss native — nếu loss EXACT fail, có điểm cầu vượt dễ phát hiện.

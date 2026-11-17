@@ -1928,3 +1928,33 @@ Native profile: TONG 16 281; LMHEAD_BWD 8 562; ATTN_BWD_MERGE 6 394; LIN_DW 5 71
 
 **LN_FWD ~9.7 ms/call con cham** (at::layer_norm CUDA OK nhung cham hon torch LN fwd
 0.45 ms ~21x - nghi overheads/dispatch; chua xu ly trong phien nay).
+
+## 9.53 LMHEAD A0.151 fused-CUDA + LN_FWD manual + CUDA warm-up - GPU TONG 3 849 ms (2026-11-17/18, notebook (28))
+
+**THEO DONG (28), HEAD Inference f3443d5 / TokenVector 993ad6e:**
+
+Bench-gpu x3 (median):
+- TONG = **3 849 ms** (3 987 / 3 849 / 3 822) | fwd 796 / bwd **1 582** / opt 438 / copyback 93
+- loss_val **17.111270** (x3 giong nhau)
+- (lan truoc (27): 4 145 | TONG (28) giam 296 ms)
+
+Bench-native x3 (median): TONG **17 310 ms** (17 093 / 17 310 / 17 528) | fwd 5 072 bwd 10 611; loss 25.453880 (EXACT x3)
+**GPU nhanh native ~4.5x** sang phien nay.
+
+Op-breakdown GPU bridge (TKV_PROF):
+- op-time = **2 712 ms**
+- **LMHEAD_BWD 1 456 ms (53.7%)** â€” was 2 530 (pha 1+2+3 tron goi 1 CUDA call A0.151, dl KHONG ve CPU)
+- **LN_BWD 406 ms (15.0%)** â€” was 505 (pow->mul)
+- **LN_FWD 837 ms (30.9%)** â€” chua giam; chrono logs cho biet:
+  - **call dau: dev=262 ms + ln=202 ms = ~465 ms mot lan** (fwd step 1 bao gom CUDA kernel module lazy-load)
+  - cac call sau: **dev ~910-990 us, ln ~154-270 us, d2h ~630-780 us -> ~1.9 ms/call binh thuong**
+  - bench/op-time LN_FWD co 465 ms "lan dau" bi tinh oan -> bench fwd bu nop chi trong step 1.
+
+**FIX tiep tuc â€” Release `1f4efad`: warm-up CUDA kernels trong constructor** (mm+softmax nho):
+chu dong nap module SGEMM/softmax NGAY tai load library => 465 ms van khong loan vao step 1.
+Lai gan nhu chac chan: loss_val ~17.1113, native EXACT khong doi.
+
+**loss/gates:** loss_val GPU = **17.111270** (waiver, lech ~4e-5 so voi 17.111298; drift qua ATen conv); native 25.453880 (EXACT) giu nguyen; bridge fallback contract (rc!=0 -> paths native NGUYEN VAN) khong doi.
+
+**Ky vong (29):** LN_FWD giam tru cap 465 ms (~370-400 ms voi steady ~1.9 ms/call);
+TONG ~3.4-3.6 s; ATTN/LN chi con cac ep ATen. Torch CUDA ~0.27 s van con xa (interpreter+GEMM/SDPA) â€” khong con duong bridge thuáº§n.
