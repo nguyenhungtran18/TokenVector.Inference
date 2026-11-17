@@ -16,6 +16,16 @@ GPU bridge (cùng phiên notebook #22, `TKV_TORCH_GPU=1`): fwd+CE+bwd **6 902** 
 **GPU fix (2026-11-15, commit Release `8929830` — `host()` `std::memcpy` CUDA ptr → `copy_`): bridge giờ GREEN; phiên 2026-11-15 đo `TONG 8 252 ms`, loss_val **17.111387** (§9.45).**
 **GPU manual backward chay that (2026-11-17, notebook (20), T4): TONG **5 256 ms**, fwd 803 / bwd **3 069 ms** / opt 417 / copyback 87; loss_val **17.111390** (17.111387 - lech 3e-6, ATen non-determinism). ATTN_BWD_MERGE **BIEN MAT** (manual attention backward ATen CUDA chay that thay cho fallback AVX2). Nguyên nhân trước đó: TkvTorchAttentionBwd truyền tensor 4-D vao at::bmm (ATen docs: bmm bắt buộc 3-D) -> c10::Error -> fallback mỗi lần; fix = at::matmul + softmax-bwd P*(dP-sum(dP*P)) + host() cho dx (Release `a6dfc30`) + notebook clone in TokenVector HEAD & parse loss_val thật (Inference `cc70fe4`). GPU nhanh native **~3.0x** (§9.47/§9.48).**
 
+**Milestone GPU bridge 2026-11-17 (notebooks (19)->(30), T4):** ATen CUDA du cho attention bwd/fwd,
+LM head, LN; manual backward khong qua autograd (autograd CUDA trong engine nay "im lang":
+`.grad()` leaves undefined -> throw UNKNOWN_SCALAR). So do:
+- TONG 7 892 (19) -> **3 849 ms (28)** | bwd 5 676 -> **1 582 ms** | LMHEAD_BWD 5 748 -> **1 456 ms**
+- loss_val GPU ~17.1113 (waiver numerics ATen); native EXACT 25.453880/25.407877 khong doi.
+- Phiên (30): build/numerics GREEN nhung GPU bi throttle (dev H2D 3MB: 0.95->8-21ms) — perf
+  khong dung de so sanh (§9.54); bench cell da in nvidia-smi clocks tu chan doan.
+- Con lai ~3.4-3.6s la interpreter .tkv + GEMM/SDPA quality; torch CUDA ~0.27s — can
+  custom CUDA kernels moi bum, ngoai pham vi bridge.
+
 Peak RAM: `.tkv` **4.09 GB** < torch **4.29 GB** (§9.40, notebook #14).
 
 **Gates đang xanh:** testkit 136/136, NEG 44/44; trainer 15/15; loss EXACT (mode 0) (§9.37).
