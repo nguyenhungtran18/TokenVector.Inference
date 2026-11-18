@@ -1,0 +1,11 @@
+def main() -> 'i32':
+    ids = [11, 48, 85]
+    ids_ptr = alloc_bytes(12)
+    rc = tkv_full_set_ids(ids_ptr, 3)
+    print("ids rc=" + str(rc))
+    gbuf = alloc_bytes(400)
+    rc2 = tkv_full_set_grad(gbuf, 100)
+    print("grad rc=" + str(rc2))
+    rc3 = tkv_full_begin(148, 12, 768, 12, 64, 50257)
+    print("begin rc=" + str(rc3))
+    return 0

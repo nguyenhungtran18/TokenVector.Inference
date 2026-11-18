@@ -1,0 +1,16 @@
+import tv.training.gpt2_ref124
+import tv.training.trainer
+
+def _run(ps: 'list[Tensor]', n: 'i64') -> 'i32':
+    rc = tkv_full_begin(len(ps), 12, 768, 12, 64, 50257)
+    print("begin=" + str(rc))
+    d0 = ps[0].data
+    n0 = len(d0)
+    print("d0 len=" + str(n0))
+    rc2 = tkv_full_set_tensor(0, d0, n0)
+    print("set=" + str(rc2))
+    return 0
+
+def main() -> 'i32':
+    ps = gpt2_init(7)
+    return _run(ps, len(ps))

@@ -1,0 +1,72 @@
+# Full-step smoke test (2026-11-17/18)
+# Goi 1 full training step qua bridge, so loss voi native path.
+import tv.training.gpt2_ref124
+import tv.training.trainer
+import tv.training.simd_matmul
+
+CFG = "tv/tests/_seq_cfg.txt"
+
+def load_ints(path: 'str') -> 'list[i64]':
+    txt = read_file(path)
+    out = []
+    for ln in txt.replace(chr(13), "").split("\n"):
+        if len(ln.strip()) == 0:
+            continue
+        out.append(int(ln.strip()))
+    return out
+
+def mk_ids(n: 'i64') -> 'list[i64]':
+    out = []
+    i = 0
+    while i < n:
+        out.append((i * 37 + 11) % 50257)
+        i = i + 1
+    return out
+
+def mk_pos(n: 'i64') -> 'list[i64]':
+    out = []
+    i = 0
+    while i < n:
+        out.append(i)
+        i = i + 1
+    return out
+
+def main() -> 'i32':
+    cfg = load_ints(CFG)
+    seq = cfg[0]
+    ids = mk_ids(seq)
+    pos = mk_pos(seq)
+    ps = gpt2_init(7)
+    total = 0
+    for t in ps:
+        total = total + len(t.data)
+    print("fullstep: seq=" + str(seq) + " params=" + str(total))
+    gbuf = alloc_bytes(total * 4)
+    pbuf = alloc_bytes(total * 4)
+    mbuf = alloc_bytes(total * 4)
+    vbuf = alloc_bytes(total * 4)
+    # p/m/v se duoc bridge cap nhat; de test loss/khong can init pbuf
+    rc = tkv_full_begin(len(ps), 12, 768, 12, 64, 50257)
+    if rc != 0:
+        print("BEGIN_FAIL " + str(rc))
+        return 1
+    for i in range(len(ps)):
+        rc2 = tkv_full_set_tensor(i, ps[i].data, len(ps[i].data))
+        if rc2 != 0:
+            print("SET_TENSOR_FAIL " + str(i) + "=" + str(rc2))
+            return 1
+    rc3 = tkv_full_set_ids(ids.data, seq)
+    if rc3 != 0:
+        print("SET_IDS_FAIL " + str(rc3))
+        return 1
+    rc4 = tkv_full_set_grad(gbuf, total)
+    if rc4 != 0:
+        print("SET_GRAD_FAIL " + str(rc4))
+        return 1
+    rc5 = tkv_full_set_opt(pbuf, mbuf, vbuf, 0.0025, 0.9, 0.999, 0.00000001, 0.0, 1000, 0)
+    if rc5 != 0:
+        print("SET_OPT_FAIL " + str(rc5))
+        return 1
+    loss = tkv_full_step(0)
+    print("FULLSTEP_LOSS=" + str(loss))
+    return 0

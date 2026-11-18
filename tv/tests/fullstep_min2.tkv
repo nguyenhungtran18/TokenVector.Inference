@@ -1,0 +1,9 @@
+def main() -> 'i32':
+    p = alloc_bytes(100)
+    m = alloc_bytes(100)
+    v = alloc_bytes(100)
+    rc = tkv_full_set_opt(p, m, v, 0.0025, 0.9, 0.999, 0.000001, 0.0, 1000, 0)
+    print("opt rc=" + str(rc))
+    rc2 = tkv_full_step(0)
+    print("step=" + str(rc2))
+    return 0
