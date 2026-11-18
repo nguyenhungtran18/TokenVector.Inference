@@ -1982,3 +1982,24 @@ TONG ky vong (ky vong ~3.4-3.6 s nhu (28) hoac tot hon).
 
 **Bai hoc (lan luot xay ra):** phiÃªn Colab T4 co the bi throttle/degrade bat ky luc nao - moi so
 perf can kem theo nvidia-smi duoi tai + so sanh voi baseline cung commit de loai tru moi truong.
+
+## 9.55 PhiÃªn sáº¡ch sau pinned-staging + warm-up â€” GPU TONG 3 322 ms (2026-11-17/18, notebook (33))
+
+**HEAD:** Inference ff27e83 / TokenVector **313894d** (fix auto& compile error trong
+`dev()/host()` pinned staging), clone ok, build-native rc=0, build-fused **rc=0**.
+
+Bench x3 median:
+- GPU bridge: TONG **3 322 ms** (3 328 / 3 305 / 3 322) | fwd **654** / bwd **1 280** / opt 416 / copyback 86
+- Native: TONG **15 440 ms** (15 440 / 15 440 / 15 672) | fwd 3 679 / bwd 10 465 | loss VAL 25.453880 (EXACT x3)
+- **GPU nhanh native ~4.65x** (so (28) 3 849 ms / ~4.0x â€” pinned staging + warm-up hoat dong toan dien)
+- loss_val GPU **17.111270** (x3, khop (28)/(30)/(31)/(33))
+- nvidia-smi sau bench: T4 **1260 MHz / 41 W / 78Â°C / util 1%** â€” phien khoe, khong throttle.
+
+Op-time GPU (TKV_PROF):
+- tong op-time 2 346 ms | LMHEAD_BWD **1 206 (51.4%)** | LN_FWD **792 (33.7%)** | LN_BWD 334 (14.2%) | EMB_BWD 14.5
+- LN_FWD sub-step (`/tmp/tkv_ln_debug.log`): steady dev ~750-950us, ln ~155-270us, d2h ~300us;
+  **call dau 21-86ms (module load) van con xay ra 1 lan** truoc khi vao steady (warm-up chua phu toan bo).
+- [[tkv-ln-fwd] ok dev=... ln=... d2h=...] xuat hien 75x/step, khong con exception
+
+**Bai hoc huu ich:** pin_grow return Tensor by value (khong the auto&) -> compile rc=1
+(da fix 313894d). Phienc (32) clone TokenVector fail -> code cu roi build fail â€” can fresh runtime.
