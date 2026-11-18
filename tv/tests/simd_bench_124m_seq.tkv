@@ -193,6 +193,48 @@ def _sc5_arg(sc5: "list[f32]", pool: 'i64' = 1) -> "list[f32]":
     z = t_zeros([1])
     return z.data
 
+def _step124_gpu(opt: "AdamW", ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]') -> 'f32':
+    # Full-step GPU resident: 1 native call fwd+bwd+adam, khong qua interpreter
+    n = len(ps)
+    total = 0
+    for t in ps:
+        total = total + len(t.data)
+    rc = tkv_full_begin(n, 12, 768, 12, 64, 50257)
+    if rc != 0:
+        print("FULL_BEGIN_FAIL " + str(rc))
+        return 0.0
+    for i in range(n):
+        t = ps[i]
+        d = t.data
+        rc2 = tkv_full_set_tensor(i, d, len(d))
+        if rc2 != 0:
+            print("FULL_SET_FAIL " + str(i) + "=" + str(rc2))
+            return 0.0
+    rc3 = tkv_full_set_ids(ids, len(ids))
+    if rc3 != 0:
+        print("FULL_IDS_FAIL " + str(rc3))
+        return 0.0
+    rc4 = tkv_full_set_grad(opt.pg, total)
+    if rc4 != 0:
+        print("FULL_GRAD_FAIL " + str(rc4))
+        return 0.0
+    lr = lr_at(opt.t, opt.warmup, opt.total, opt.lr_max, opt.lr_min)
+    rc5 = tkv_full_set_opt(opt.pp, opt.pm, opt.pv, lr, opt.b1, opt.b2, opt.eps, opt.wd, opt.total, opt.t)
+    if rc5 != 0:
+        print("FULL_OPT_FAIL " + str(rc5))
+        return 0.0
+    loss = tkv_full_step(0)
+    # sync params from native buffer pp -> ps (bridge da cap nhat pp)
+    off = 0
+    for i in range(n):
+        t = ps[i]
+        d = t.data
+        for j in range(len(d)):
+            d[j] = opt.p[off + j]
+        off = off + len(d)
+    opt.t = opt.t + 1
+    return loss
+
 def _step124(opt: "AdamW", ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]', simd: 'i32',
               sc5: "list[f32]" = None, sc4: "list[f32]" = None,
               m6_plg: 'i64' = 0, m6_pids: 'i64' = 0, m6_pwte: 'i64' = 0,
@@ -201,6 +243,12 @@ def _step124(opt: "AdamW", ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[i64]
               ibuf: "Tensor" = None, dbuf: "Tensor" = None,
               abuf: 'list[Tensor]' = None,
               hpool: 'list[Tensor]' = None) -> 'f32':
+    cfg = load_ints(CFG)
+    full_gpu = 0
+    if len(cfg) >= 4:
+        full_gpu = cfg[3]
+    if full_gpu == 1:
+        return _step124_gpu(opt, ps, ids, pos)
     # M3c: sc5 = scratch [n*V] cho logits (fwd, luu trong saves[0] -> doc trong bwd
     #      nhu logits_t, KHONG ghi lai); sc4 = scratch [V*h] cho dwte (bwd).
     #      2 buffer RIENG (logits + dwte CUNG SONG trong bwd P5.5) — CU do 172ms/shape.
