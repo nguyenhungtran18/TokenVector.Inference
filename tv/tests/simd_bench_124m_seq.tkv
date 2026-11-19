@@ -337,6 +337,13 @@ def main() -> 'i32':
             # MOI now_ms() dat trong main — now_ms() trong ham local doc sai (bug #8).
             opt = _mk_opt(n, groups, 1000)
             _prepare(opt, ps)
+            # CFG dong 4 = 1 -> 1 native call GPU full step (mode 2 cung phai
+            # di qua day; truoc day flag nam trong _step124, mode 2 khong goi)
+            if len(cfg) >= 4 and cfg[3] == 1:
+                lg = _step124_gpu(opt, ps, ids, pos)
+                print("BSEQ fullstep-gpu seq=" + str(seq) + " loss=" + str(lg))
+                print("BSEQ done")
+                return 0
             sc5 = t_zeros([seq * VocabSize])
             sc4 = t_zeros([VocabSize * HiddenSize])
             sab = _mk_sa_bufs(seq, pool)
