@@ -224,14 +224,7 @@ def _step124_gpu(opt: "AdamW", ps: 'list[Tensor]', ids: 'list[i64]', pos: 'list[
         print("FULL_OPT_FAIL " + str(rc5))
         return 0.0
     loss = tkv_full_step(0)
-    # sync params from native buffer pp -> ps (bridge da cap nhat pp)
-    off = 0
-    for i in range(n):
-        t = ps[i]
-        d = t.data
-        for j in range(len(d)):
-            d[j] = opt.p[off + j]
-        off = off + len(d)
+    # params/m/v/grad GPU-resident: khong copy ve host (tran 500MB D2H/step)
     opt.t = opt.t + 1
     return loss
 
