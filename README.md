@@ -139,6 +139,7 @@ Historical CPU path (2026-11-11, same session, `benchmark/BENCHMARKS.md` Â§9.2
 ## Docs map
 
 - `docs/BENCHMARK_GUIDE.md` - how to reproduce GPU/CPU benchmarks (Colab T4)
+- `demo/colab_train_gpt2medium.ipynb` - fine-tune GPT2-medium 355M on Tiny Shakespeare (Colab T4)
 - `docs/HANDOFF.md` — engineering journal, every investigation and wrong turn
 - `USER_GUIDE.md` / `USER_GUIDE_VI.md` — API user guide
 - `TOKENVECTOR_SYNTAX_SPEC(_VI).md` — language syntax rules

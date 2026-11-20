@@ -40,6 +40,7 @@
     <file src="..\benchmark\BENCHMARKS_VI.md" target="src\docs\benchmarks\BENCHMARKS_VI.md" />
     <file src="..\benchmark\_bench_matrix.ps1" target="src\tools\_bench_matrix.ps1" />
     <file src="..\benchmark\bench_torch.py" target="src\tools\bench_torch.py" />
+    <file src="..\demo\colab_train_gpt2medium.ipynb" target="src\demo\colab_train_gpt2medium.ipynb" />
     <!-- Managed assembly built from source by packaging/pack.ps1 (lib/ is gitignored) -->
     <file src="lib\net10.0\TokenVector.Inference.dll" target="lib/net10.0/TokenVector.Inference.dll" />
   </files>
