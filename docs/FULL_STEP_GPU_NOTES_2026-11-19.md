@@ -246,3 +246,16 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   ctypes int32 path (`TkvFullSetIds` on tkv_torch_fused.so) and cell 7D unchanged.
 - No IL/DLL change. Rerun cells 3 -> 4 -> 5 -> 6; expect XDBG ids max < 50257
   then FULLSTEP TONG at T=1024; compare torch T=1024 median 290.2 ms (notebook 51).
+
+### 2026-11-20 (cont.8) — cell 6 WORKS; steady-state variant (notebooks 52 / de34355)
+- Notebook 52: cell 6 ran: FULLSTEP TONG 545.0 / 634.6 / 531.8 ms, loss_val 10.757812.
+  Cell 7D (3 steps in ONE ctypes process) median 199.8 ms at T=2048;
+  torch T=1024 median 318.7 ms (fair target).
+- Diagnosis: each cell-6 retry is a FRESH dotnet process with ONE step, so TONG includes
+  ~400-600 ms CUDA lazy-load; not comparable to steady state.
+- Fix `Inference@de34355`: patched IL gate to call `_step124_gpu` 3x in one process
+  (local `__fs_i`, loop); reassembled bseq.dll SHA256
+  ACFB38DD15253D48FCC2E1BEAF91582E28F3A92EA1EAD6AB97051DD68D111188.
+  Cell 6 now uses `re.findall` on `XDBG timing ... total` and takes
+  `median(vals[1:])` — drops the first lazy-load step.
+- Next run should show steady-state TONG around ~150-200 ms at T=1024; compare torch T=1024.
