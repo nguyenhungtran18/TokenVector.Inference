@@ -146,3 +146,16 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   LR warmup 2 steps in ours vs constant LR in torch ref); (3) native path untouched (loss 25.454).
 - Original objective "near PyTorch eager speed" is MET and exceeded. Further bwd optimization is
   optional (bwd ~96-114 ms is now largest single phase), not required for parity.
+
+### Clarification: "dat va vuot" applies ONLY to fullstep mode
+- The user-quoted numbers `TONG=3286/3258/3295, fwd≈648, bwd≈1250, loss_val=17.111270` come from
+  cell 6 (`# 7/9 Bench GPU bridge`), NOT cell 7D. Cell 6 writes `_seq_cfg.txt = "1024\n2\n1\n"`
+  => per-op bridge at T=1024, 148 op dispatches through ctypes/ATen, loss 17.11.
+- Torch ref (cell 9) is T=2048, median 607.5 ms. So "bridge 3286 vs torch 607.5" is BOTH a
+  different execution mode AND a different seq length — not a valid parity comparison.
+  (Even normalized, per-op bridge is far slower: ~1388 ms/step is pure op-dispatch overhead.)
+- "Dat va vuot" was claimed only for: fullstep GPU (cell 7D, T=2048, loss ~10.75, 224.9 ms)
+  vs torch eager (cell 9, T=2048, 607.5 ms), both real GPU time, same HEAD. That is ~2.7x faster.
+- My phrasing "Repo ~9.1k token/s" was too broad: must always name the mode.
+  Correct: fullstep ~9.1k token/s; per-op bridge ~0.62k token/s; native CPU ~0.13k token/s.
+- Rule going forward: every speed number must carry mode + T + HEAD + timestamp.
