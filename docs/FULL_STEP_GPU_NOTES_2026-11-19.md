@@ -279,3 +279,17 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   uses torch.cuda.synchronize(). Need apples-to-apples before claiming.
 - Inference@c8aa002: cell 6 command now sets CUDA_LAUNCH_BLOCKING=1 too. Rerun cell 6;
   the new TONG is the number to compare against 288.7 ms.
+
+### 2026-11-20 FINAL (notebook 56) - real repo bench path BEATS torch
+- Cell 6 (bseq.dll, T=1024, CUDA_LAUNCH_BLOCKING=1, 3 calls/process):
+  TONG 40.0 / 37.4 / 40.1 ms -> median 40.0 ms, loss_val 8.570312.
+- Cell 10 (torch GPT2 eager fp32, T=1024, torch.cuda.synchronize()):
+  median 289.1 ms (step1 289.0, step2 289.1), max_allocated 3330 MiB.
+- => real repo fullstep path is ~7.2x FASTER than eager torch at T=1024 (289.1/40.0),
+  with real GPU-time on both sides this time (no enqueue-only bias).
+- Head at run: TokenVector 9ef0d91, Inference f1d4b99, bseq.dll 4eb13bc3...
+- Earlier same-session cross-check: fullstep ctypes T=2048 212.6 ms vs torch T=2048 599.5 ms
+  (~2.8x faster). Both paths beat eager torch.
+- Caveats: ours fp16 params + fp32 master vs torch fp32 model; losses NOT comparable
+  (different LR schedule: .tkv lr_max=0.05 warmup=2 vs torch constant 0.0025);
+  native EXACT path untouched (loss 25.454).
