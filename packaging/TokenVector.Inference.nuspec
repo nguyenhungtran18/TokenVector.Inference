@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
   <metadata>
     <id>TokenVector.Inference</id>
-    <version>1.0.1</version>
+    <version>1.0.2</version>
     <title>TokenVector.Inference - Pure .tkv Inference Runtime &amp; GPT-2 124M Training Engine</title>
     <authors>Nguyen Hung Tran, TokenVector Compiler Engineering Team</authors>
     <owners>nguyenhungtran18</owners>
@@ -11,9 +11,9 @@
     <projectUrl>https://github.com/nguyenhungtran18/TokenVector.Inference</projectUrl>
     <icon>icon.png</icon>
     <readme>README.md</readme>
-    <description>TokenVector.Inference - the inference runtime and GPT-2 124M training engine written in pure TokenVector (.tkv). Graph optimization, INT8/FP8 quantization, ONNX reader, paged KV-cache, micro-batcher, and an end-to-end GPT-2 124M trainer (loss EXACT vs HF fixture, 135/135 f32 gate, full step @seq1024 on par with PyTorch). Compiled with the tkvc-tv compiler (package 'TokenVector').</description>
+    <description>TokenVector.Inference - the inference runtime and GPT-2 124M training engine written in pure TokenVector (.tkv). Graph optimization, INT8/FP8 quantization, ONNX reader, paged KV-cache, micro-batcher, and an end-to-end GPT-2 124M trainer (loss EXACT on the native CPU path; GPU full-step 40.0 ms/step @seq1024, ~7.2x faster than eager PyTorch on Colab T4). Compiled with the tkvc-tv compiler (package 'TokenVector').</description>
     <summary>Pure .tkv inference runtime and GPT-2 124M training engine for the TokenVector ecosystem.</summary>
-    <releaseNotes>v1.0.1 - 2026-11-11: GPT-2 124M full train step @seq1024 = 4016 ms vs torch 4061.1 (0.989x, same session); loss EXACT; gate_f32 135/135; trainer 15/15; gpt2_full 33/33; request #14; ships a managed assembly TokenVector.Inference.dll (net10.0, built from the .tkv sources) with a dependency on the 'TokenVector' package (compiler + native runtime).</releaseNotes>
+    <releaseNotes>v1.0.2 - 2026-11-20: GPU-resident full training step (one native TkvFullStep124m call) measured 40.0 ms/step @seq1024 vs eager PyTorch 289.1 ms (~7.2x faster) and 212.6 ms @seq2048 vs 599.5 ms (~2.8x) on Colab T4; fp16 params with fp32 master, autograd backward, fused AdamW; native CPU EXACT path unchanged (loss 25.454). Includes docs/BENCHMARK_GUIDE.md. v1.0.1 - 2026-11-11: CPU full step @seq1024 4016 ms vs torch 4061.1 (0.989x); loss EXACT; gate_f32 135/135; trainer 15/15; gpt2_full 33/33.</releaseNotes>
     <copyright>Copyright (c) 2026 Nguyen Hung Tran</copyright>
     <tags>tokenvector dotnet cil aot gpt2 inference training llm pytorch quantization</tags>
     <repository type="git" url="https://github.com/nguyenhungtran18/TokenVector.Inference" />

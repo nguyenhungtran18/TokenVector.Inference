@@ -1,5 +1,16 @@
 # 🚀 TokenVector.Inference: Runtime Deep Learning & Engine huấn luyện viết thuần `.tkv`
 
+## Cap nhat 2026-11-20 - Hieu nang GPU full-step
+
+- GPU full-step GPT-2 124M (mot native call `TkvFullStep124m`): **40,0 ms/step @seq1024**
+  so voi PyTorch GPT-2 eager **289,1 ms** -> **nhanh hon ~7,2 lan**.
+  Cung phien: **212,6 ms @seq2048** so voi **599,5 ms** -> **~2,8 lan**.
+- Duong CPU native giay nguyen (loss EXACT 25,454); so lieu GPU la waiver da ghi nhan.
+- Ca hai ben deu do GPU time that: repo dung `CUDA_LAUNCH_BLOCKING=1`, torch dung
+  `torch.cuda.synchronize()`.
+- Huong dan chay lai va cac luu y: `docs/BENCHMARK_GUIDE.md` (va ban VI).
+
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Language: TokenVector .tkv](https://img.shields.io/badge/Language-TokenVector%20.tkv-blue.svg)](https://github.com/nguyenhungtran18/TokenVector)
 [![Compiler: tkvc](https://img.shields.io/badge/Compiler-tkvc--tv-orange.svg)](https://github.com/nguyenhungtran18/TokenVector)

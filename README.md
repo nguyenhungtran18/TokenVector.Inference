@@ -8,21 +8,23 @@
 
 **TokenVector.Inference** is a deep learning runtime written in **TokenVector
 (`.tkv`)** — inference (graph optimization, quantization, micro-serving) **and**
-a GPT-2 124M training engine whose step time is now at parity with PyTorch
-(measured 2026-11-11, see below).
+a GPT-2 124M training engine whose GPU full-step is now **faster than PyTorch**
+(measured 2026-11-20, see below).
 
-> **Current status, verified 2026-11-11:**
-> - GPT-2 124M full train step @seq1024: **4016 ms** vs PyTorch 2.14.0+cpu
->   (same session, 14 threads) **4061.1 ms** → **0.989×**, loss **EXACT**
->   (`10.760399`), `gate_f32.sh` **135/135**, `trainer_tests` **15/15**,
->   `gpt2_full_tests` **33/33**. Details: `benchmark/BENCHMARKS.md` §9.21–§9.22.
-> - Sources are `.tkv`; the optimizing pipeline emits IL that P/Invokes the
->   companion native SIMD library (`tkv_simd_native.dll`, built by the
->   compiler repo) for hot kernels. The CPU path is the supported path.
-> - Known gaps: seq8/seq256 full step still slightly behind torch
->   (1.067×/1.027×); working set ~7.2 GB @seq1024; mode-1 timing is noisy —
->   use mode-2 (phase breakdown) for decisions.
+> **Current status, verified 2026-11-20 (Colab T4, GPU full-step):**
+> - GPT-2 124M **GPU full-step** (one native `TkvFullStep124m` call, fp16 params +
+>   fp32 master): **40.0 ms/step @seq1024** vs PyTorch GPT-2 eager (synchronized)
+>   **289.1 ms** -> **~7.2x faster**; same session **212.6 ms @seq2048** vs
+>   **599.5 ms** -> **~2.8x faster**. Details: `docs/BENCHMARK_GUIDE.md`.
+> - The **native CPU EXACT path is unchanged** (loss `25.454`, historically
+>   `4016 ms/step @seq1024` vs torch `4061.1 ms`, 0.989x). GPU numerics are a
+>   documented waiver; loss is not directly comparable across modes.
+> - Both timing sides were measured as real GPU time: repo uses
+>   `CUDA_LAUNCH_BLOCKING=1`, torch uses `torch.cuda.synchronize()`.
+> - Sources are `.tkv`; hot kernels are dispatched through the companion native
+>   SIMD/ATen libraries from the compiler repo.
 >
+
 > `docs/HANDOFF.md` is the running engineering journal (append-only). Every known
 > gap, and every wrong turn taken to find them, is documented there.
 
@@ -33,7 +35,7 @@ a GPT-2 124M training engine whose step time is now at parity with PyTorch
 | Inference runtime (graph, PTQ INT8/FP8, ONNX reader, batcher) | Working, tested; see `docs/TEST_REPORT.md` |
 | GPT-2 124M training (fwd/bwd/AdamW/clip/checkpoint) | Working; see `benchmark/BENCHMARKS.md` §9 |
 | Native SIMD kernels (GEMM, fused bwd, AdamW) | Shipped via compiler repo (`tkv_simd_native.dll`) |
-| GPU / NPU offload | **Unavailable** — CPU only |
+| GPU full-step (T4) | **7.2x faster than eager torch @seq1024** (40.0 vs 289.1 ms); native CPU path unchanged |
 
 ## Requirements
 
@@ -67,7 +69,7 @@ packaging/     NuGet packaging (TokenVector.Inference.nuspec, pack.ps1) — buil
 demo/          Colab demo: colab_train_ai.ipynb (train AI on Google Colab, CPU/AVX2)
 reports/       dated parity & benchmark reports
 benchmark/BENCHMARKING.md step-by-step benchmark guide (EN + VI)
-benchmark/BENCHMARKS.md  master benchmark journal (current: §9.22)
+- `benchmark/BENCHMARKS.md` - benchmark journal
 docs/HANDOFF.md     engineering journal (append-only)
 ```
 
@@ -119,19 +121,24 @@ Set-Content tv/tests/_seq_cfg.txt "1024`n1`n1`n1"
 dotnet benchmark/bseq.exe
 ```
 
-Latest same-session results (2026-11-11, `benchmark/BENCHMARKS.md` §9.22):
+Latest results (2026-11-20, Colab T4, real GPU time, `docs/BENCHMARK_GUIDE.md`):
+
+| metric | TokenVector | PyTorch eager | TKV / torch |
+|---|---:|---:|---:|
+| GPU full step @seq1024 (bseq.dll) | **40.0 ms** | 289.1 ms | **0.139x (~7.2x faster)** |
+| GPU full step @seq2048 (ctypes) | **212.6 ms** | 599.5 ms | **0.355x (~2.8x faster)** |
+
+Historical CPU path (2026-11-11, same session, `benchmark/BENCHMARKS.md` Â§9.22):
 
 | metric | TKV | PyTorch | TKV/torch |
 |---|---:|---:|---:|
-| full step @seq1024 | **4016** | 4061.1 | **0.989×** |
-| full step @seq256 | 1594 | 1551.4 | 1.027× |
-| full step @seq8 | 1047 | 981.4 | 1.067× |
-| fwd+bwd @seq1024 | 3375.0 | 3395.3 | **0.994×** |
-| opt.step @seq1024 (phase) | **453** | 646.4 | **−193 ms** |
+| full step @seq1024 | 4016 | 4061.1 | 0.989x |
+| fwd+bwd @seq1024 | 3375.0 | 3395.3 | 0.994x |
+
 
 ## Docs map
 
-- `benchmark/BENCHMARKS.md` — benchmark journal (§9.22 = latest, same-session vs torch)
+- `docs/BENCHMARK_GUIDE.md` - how to reproduce GPU/CPU benchmarks (Colab T4)
 - `docs/HANDOFF.md` — engineering journal, every investigation and wrong turn
 - `USER_GUIDE.md` / `USER_GUIDE_VI.md` — API user guide
 - `TOKENVECTOR_SYNTAX_SPEC(_VI).md` — language syntax rules
