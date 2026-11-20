@@ -159,3 +159,18 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - My phrasing "Repo ~9.1k token/s" was too broad: must always name the mode.
   Correct: fullstep ~9.1k token/s; per-op bridge ~0.62k token/s; native CPU ~0.13k token/s.
 - Rule going forward: every speed number must carry mode + T + HEAD + timestamp.
+
+### 2026-11-20 (cont.) — make the REAL repo bench path fast (user request: "bang va vuot")
+- Research (subagent) found the one-call wiring already exists inside the shipped `demo/bseq.dll`:
+  `tv/tests/simd_bench_124m_seq.tkv` `_step124_gpu()` lines 196-229 populates registry and calls
+  `tkv_full_step(0)` once; gate for mode 2 at lines 342-346 requires cfg line 4 == 1.
+  Cell 6 wrote only 3 lines (`1024\n2\n1\n`) => gate off => 148-op bridge (TONG 3286 ms, loss 17.11).
+- No native/compiler/DLL change needed. Notebook commit `cf4852c`:
+  * cell 6 writes `1024\n2\n1\n1\n` (4th line enables fullstep), parses `BSEQ fullstep-gpu ... loss=`
+    from stdout and `XDBG timing ... total=... ms` from stderr as TONG (real GPU time), still
+    fault-tolerant and falls back to BPHASE regex if gate is off.
+  * added last cell (id `torch1024`) running the SAME GPT2-124M at T=1024 with
+    `torch.cuda.synchronize()` — fair apples-to-apples vs cell 6 (old torch cell is T=2048).
+- Expected: cell 6 TONG drops from ~3286 ms to roughly the fullstep cost at T=1024 (likely
+  ~100-150 ms); compare against torch T=1024 median from the new cell, not the T=2048 607.5 ms.
+- Native mode 1 / CPU path untouched; mode 2 gate only. No DLL rebuild.
