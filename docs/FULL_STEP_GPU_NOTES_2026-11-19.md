@@ -227,3 +227,11 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   now forwards to it. `TkvFullSetIdsNative` (int32, ctypes) unchanged. No IL/DLL change.
 - Rerun cells 3 -> 4 (rebuild native .so) -> 5 (rebuild torch .so) -> cell 6.
 - Fair target from notebook 49: torch T=1024 median 290.1 ms.
+
+### 2026-11-20 (cont.6) — still OOB after int64 ids (notebook 50)
+- int64 path changed failing block 4 -> 74 but still `vectorized_gather_kernel` OOB.
+  Need actual ids values + shapes: `TokenVector@f036c6b` adds one-time XDBG prints:
+  `XDBG ids64 T/min/max` in TkvFullSetIds64 and
+  `XDBG fullstep T/V/Pw/wte/wpe/ids=[min,max]` in TkvFullStep124m.
+- Rerun cells 3 -> 4 -> 5 -> 6; read XDBG lines to see whether ids are in [0,V) and
+  whether wpe rows Pw >= T (the two possible gather sources).
