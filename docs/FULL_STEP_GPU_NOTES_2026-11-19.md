@@ -203,3 +203,14 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   `tkv_simd_native.so` with the new exports before cell 6.
 - Notebook 46 reference numbers: fullstep 7D median 210.2 ms, torch T=2048 573.9 ms;
   torch T=1024 median 285.9 ms (fair target for cell 6).
+
+### 2026-11-20 (cont.4) — C++ abort inside TkvFullStep124m (notebook 47)
+- After short-name aliases (c46b588) + cell 4 rebuild, cell 6 now enters C++ but aborts (rc=134):
+  stack `at::operator+` -> `TkvFullStep124m + 0xa2b` (first embedding add in forward).
+  Cell 7D ctypes path still works (median 207.1 ms) => C++ logic fine; difference is how the
+  .NET/bseq path populates the registry (SetTensor/SetIds/SetOpt pointers).
+- Notebook cell 6 only printed last 1200 chars so the `what():` line was cut off.
+  `Inference@6d756c3` now prints `STDERR HEAD: se[:2500]` and `STDOUT HEAD` on failure.
+- Next run needs only cell 6 (no rebuild); read the first error line to identify the exact
+  mismatch (device/dtype/shape) in the .NET-populated registry.
+- Reference: torch T=1024 median 290.0 ms; fullstep ctypes T=2048 median 207.1 ms.
