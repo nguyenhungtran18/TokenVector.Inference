@@ -190,3 +190,16 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   (old was 3B067400...). No change to native .so or compiler binary.
 - Next Colab run should show new sha in cell 3, then cell 6 prints FULLSTEP TONG at T=1024;
   compare with cell 10 TORCH1024 median (387.7 ms on notebook 45).
+
+### 2026-11-20 (cont.3) — EntryPointNotFoundException (notebook 46)
+- Cell 6 after DLL fix: `EntryPointNotFoundException: Unable to find an entry point named
+  'TkvFullBegin' in shared library 'tkv_simd_native.dll'` (rc=134).
+- Cause: IL P/Invoke declares `as "TkvFullBegin" / "TkvFullSetTensor" / ...` (short names),
+  but `tkv_simd_native.c` only exported `TkvFullBeginNative` etc. (suffix `Native`). Both names
+  must exist for DllImport resolution on Linux.
+- Fix in `TokenVector@c46b588`: added thin `EXPORT` aliases `TkvFullPing/Begin/SetTensor/
+  SetIds/SetGrad/SetOpt/Step` forwarding to the `*Native` versions. No IL/DLL change this round.
+- Requirement: rerun cell 3 (fresh clone HEAD c46b588) then **cell 4** to rebuild
+  `tkv_simd_native.so` with the new exports before cell 6.
+- Notebook 46 reference numbers: fullstep 7D median 210.2 ms, torch T=2048 573.9 ms;
+  torch T=1024 median 285.9 ms (fair target for cell 6).
