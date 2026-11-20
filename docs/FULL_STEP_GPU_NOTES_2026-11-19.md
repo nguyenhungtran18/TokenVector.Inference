@@ -214,3 +214,16 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Next run needs only cell 6 (no rebuild); read the first error line to identify the exact
   mismatch (device/dtype/shape) in the .NET-populated registry.
 - Reference: torch T=1024 median 290.0 ms; fullstep ctypes T=2048 median 207.1 ms.
+
+### 2026-11-20 (cont.5) - index_select OOB root cause (notebook 49)
+- DIAG notebook showed: `vectorized_gather_kernel ... Assertion ind>=0 && ind<ind_dim_size failed`
+  at the first `at::index_select` in TkvFullStep124m.
+- Cause: .NET/bseq path pins `ids: list[i64]` (8-byte elements) but P/Invoke resolved to
+  `TkvFullSetIds(const int*, int64_t)` which reads 8-byte data as int32 -> scrambled indices
+  (low/high halves) -> out-of-range gather. Cell 7D ctypes passes int32 ids via
+  `TkvFullSetIds` directly on tkv_torch_fused.so, which is why it kept working.
+- Fix `TokenVector@d67827e`: added `TkvFullSetIds64(const int64_t*, int64_t)` in torch_fused.cpp;
+  tkv_simd_native.c loads `TkvFullSetIds64` and the SHORT alias `TkvFullSetIds` (used by IL)
+  now forwards to it. `TkvFullSetIdsNative` (int32, ctypes) unchanged. No IL/DLL change.
+- Rerun cells 3 -> 4 (rebuild native .so) -> 5 (rebuild torch .so) -> cell 6.
+- Fair target from notebook 49: torch T=1024 median 290.1 ms.
