@@ -174,3 +174,19 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Expected: cell 6 TONG drops from ~3286 ms to roughly the fullstep cost at T=1024 (likely
   ~100-150 ms); compare against torch T=1024 median from the new cell, not the T=2048 607.5 ms.
 - Native mode 1 / CPU path untouched; mode 2 gate only. No DLL rebuild.
+
+### 2026-11-20 (cont.2) — MissingMethodException root cause + fix (notebook 45)
+- Cell 6 with cfg line 4=1 hit `System.MissingMethodException:
+  Method not found: 'Int32 TkvSimd.TkvFullSetGradM(Int64, Int64)'` (rc=134).
+- Root cause: compiler emitted managed wrappers `TkvFullSetGradM(native int, int64)` and
+  `TkvFullSetOptM(native int x3, ...)` but `_emit_full_api` call sites pass `int64` for pointer
+  args. On .NET, `native int` = IntPtr is a DIFFERENT type from Int64 even on x64 → JIT cannot
+  resolve the method. `TkvFullSetTensorM`/`SetIdsM` were already correct.
+- Fix in `TokenVector@c9096e3`: `simd_feature.tkv` wrappers now take `int64` pointer args and
+  insert `conv.i` before calling the native P/Invokes (which still declare `native int`).
+- Fix in `TokenVector.Inference@ba5af32`: patched generated IL of `out/bseq_mode2.il` with the
+  same signature change + `conv.i`, reassembled with .NET Framework `ilasm.exe` → new
+  `demo/bseq.dll` SHA256 **237B63D1E7E7F1CACB7484B0213ACFAE9D577030594FA92A5426C154D27656A6**
+  (old was 3B067400...). No change to native .so or compiler binary.
+- Next Colab run should show new sha in cell 3, then cell 6 prints FULLSTEP TONG at T=1024;
+  compare with cell 10 TORCH1024 median (387.7 ms on notebook 45).
