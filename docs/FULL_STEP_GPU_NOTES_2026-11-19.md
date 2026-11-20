@@ -270,3 +270,12 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   Notebook already uses re.findall + median(vals[1:]) -> steady median from 3 timings.
 - Notebook 53 reference: cell 7D median 202.4 ms (T=2048), torch T=1024 median 299.4 ms.
 - Next run: cell 3 (fresh clone) then cell 6; expect 3 XDBG timing lines and FULLSTEP TONG.
+
+### 2026-11-20 (cont.10) - notebook 54: real bench path finally green
+- Cell 6 TONG 34.0 / 33.5 / 39.8 ms at T=1024, median 34.0 ms, loss_val 8.570312.
+  Torch T=1024 median 288.7 ms. Cell 7D T=2048 median 212.6 ms, torch T=2048 599.5 ms.
+- CAUTION: 34 ms vs 288.7 ms (8.5x) may be inflated: cell 6 subprocess did NOT set
+  CUDA_LAUNCH_BLOCKING, so C++ chrono TONG may be enqueue-only, whereas cell 10 torch
+  uses torch.cuda.synchronize(). Need apples-to-apples before claiming.
+- Inference@c8aa002: cell 6 command now sets CUDA_LAUNCH_BLOCKING=1 too. Rerun cell 6;
+  the new TONG is the number to compare against 288.7 ms.
