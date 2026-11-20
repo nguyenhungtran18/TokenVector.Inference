@@ -130,3 +130,19 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Next: rerun cell 5 -> 7D -> cell 9 with synced torch ref; only then compare.
   Our 210.2 ms is real GPU time; if torch synced is ~200 ms we are at parity.
   Do NOT repeat the "7x" claim until fair numbers exist.
+
+### 2026-11-20 FINAL — fair comparison (notebook 43, HEADs 9cf756a / 3d85ec5)
+- Cell 3 confirmed: TokenVector 9cf756a, Inference 3d85ec5 (notebook sync fix active).
+- Fullstep GPU (real GPU time, CUDA_LAUNCH_BLOCKING=1):
+  STEP 0/1/2 = 817.5 / 224.9 / 199.3 ms; **median 224.9 ms**;
+  fwd 49.1/39.3 (sdpa 9.2/6.8), bwd 113.6/95.8, put 13.9/13.7, adam 47.9/49.1;
+  peak mem 4185 MiB, util 76%.
+- Torch GPT2 eager WITH synchronize (cell 9, fixed): STEP 0/1/2 = 834.5 / 602.0 / 607.5 ms;
+  **median 607.5 ms**; max_allocated 5200 MiB, GPU peak 5843 MiB, util 100%.
+- => Fullstep GPU is **~2.7x FASTER than eager torch** (607.5 / 224.9) on this T4 workload,
+  with LOWER memory (4185 vs 5200/5843 MiB). The old "7x slower" was pure timing bug.
+- Caveats to report: (1) ours uses fp16 params + fp32 master vs torch fp32 model — speedup partly
+  from fp16 compute, not only engineering; (2) loss NOT comparable (random weights, different
+  LR warmup 2 steps in ours vs constant LR in torch ref); (3) native path untouched (loss 25.454).
+- Original objective "near PyTorch eager speed" is MET and exceeded. Further bwd optimization is
+  optional (bwd ~96-114 ms is now largest single phase), not required for parity.
