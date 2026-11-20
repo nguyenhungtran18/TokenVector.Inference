@@ -259,3 +259,14 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   Cell 6 now uses `re.findall` on `XDBG timing ... total` and takes
   `median(vals[1:])` — drops the first lazy-load step.
 - Next run should show steady-state TONG around ~150-200 ms at T=1024; compare torch T=1024.
+
+### 2026-11-20 (cont.9) - notebook 53: loop patched in WRONG method
+- Cell 6 printed `FULLSTEP FAIL rc=0`: BSEQ fullstep-gpu ran (loss 10.7578125) but only ONE
+  XDBG timing per process -> len(ms)<2. Earlier IL loop was inserted into `_step124`, which
+  mode 2 never calls; main() calls `_step124_gpu` directly at its own gate.
+- Fix Inference@5720c86: reverted _step124 loop (native path intact), patched main() gate
+  to call _step124_gpu 3x in one process (local __fs_i2), reassembled bseq.dll SHA256
+  4EB13BC3D79691E56FA2008BA99CC93004270703D2221C15D6981F71568E2AEA.
+  Notebook already uses re.findall + median(vals[1:]) -> steady median from 3 timings.
+- Notebook 53 reference: cell 7D median 202.4 ms (T=2048), torch T=1024 median 299.4 ms.
+- Next run: cell 3 (fresh clone) then cell 6; expect 3 XDBG timing lines and FULLSTEP TONG.
