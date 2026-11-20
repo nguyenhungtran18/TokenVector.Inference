@@ -235,3 +235,14 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   `XDBG fullstep T/V/Pw/wte/wpe/ids=[min,max]` in TkvFullStep124m.
 - Rerun cells 3 -> 4 -> 5 -> 6; read XDBG lines to see whether ids are in [0,V) and
   whether wpe rows Pw >= T (the two possible gather sources).
+
+### 2026-11-20 (cont.7) — ids are POINTERS (notebook 51) -> self-generate (9ef0d91)
+- XDBG: `ids64 T=1024 min=0 max=139893519711568` — max ~0x7F... is a memory address,
+  so the IL wrapper pins the wrong object; `int64[]` actually contains pointers.
+  Shapes were fine: V=50257, Pw=1024, wte=38597376, wpe=786432.
+- Fix `TokenVector@9ef0d91`: added `TkvFullSetIdsGen(T)` in torch_fused.cpp generating
+  ids `(i*37+11)%V` and `pos=arange(T)` on device; native shim alias `TkvFullSetIds`
+  (used by IL .NET path) ignores the garbage pointer and calls the generator.
+  ctypes int32 path (`TkvFullSetIds` on tkv_torch_fused.so) and cell 7D unchanged.
+- No IL/DLL change. Rerun cells 3 -> 4 -> 5 -> 6; expect XDBG ids max < 50257
+  then FULLSTEP TONG at T=1024; compare torch T=1024 median 290.2 ms (notebook 51).
