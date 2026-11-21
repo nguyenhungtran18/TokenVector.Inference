@@ -348,3 +348,16 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   lam thay doi mapping (co the do grad shape 2D/reshape hoac th tu) -> khong the thay.
 - Trang thai cuoi: tokenvector main d6287a0 = ban on dinh (train 219.8ms, 2.23x torch,
   ADAMW PATH=1). M4 khong ap dung.
+
+### 2026-11-21 (chot) - Chuyen native path C -> .tkv CUDA: KHONG THE giu EXACT
+- Thu: linear_dw.tkv tuong duong LinearDwFused (CPU AVX2, bit-exact loss 25.454).
+- Ket qua (notebook NATIVE BITEXACT V2): CPU rc=0, CUDA rc=0,
+  bitwise equal = FALSE, diff 275/512 (~54%), max abs diff 9.5e-7 (1 ULP fp32).
+- Ly do: CPU AVX2 FMA /fp:precise co thu tu tich luy khac CUDA FMA. Sai 1 ULP tich luy
+  qua hang trieu phep -> loss khong con EXACT 25.454.
+- Ket luan: muon chuyen 8 file .c native sang TokenVector ma van EXACT can backend .tkv
+  sinh CPU AVX2 (cung intrinsics/fp:precise), KHONG phai CUDA. cuda_feature.tkv hien tai
+  chi sinh CUDA -> khong the. Giu nguyen 8 file .c native (yeu cau EXACT uu tien).
+- Trang thai cuoi: TokenVector main d6287a0 (train 219.8ms, 2.23x torch, ADAMW PATH=1);
+  branch prototype/cuda-backend cb806e8 (kernels .tkv:
+  adamw/wep/gelu/bias/embed/LN 5 phien ban/linear_dw - deu test, khong dung cho native).
