@@ -437,3 +437,11 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Con lai trong tkv_bwd_ops.c: SoftmaxCausalFwd/Bwd (exp f64 + nhan causal - kho),
   EmbedBwdFused (can mang dong counts/starts/cursor/pos), LN fwd/bwd (ATen shadow),
   MergeHbHead. Ngoai ra tkv_flash_attn.c / tkv_attn_cuda.c / tkv_linear_dx.c (tile 256).
+
+### 2026-11-21 (STEP7e PASS) - MergeHbHead bit-exact bang .tkv C
+- Sua compiler rule: ho/p0/r0/c0/base -> long long (array subscript).
+- 3/3 bitwise=True diff=0 (n=4/8/2, h=768/256, hlo/hhi khac nhau).
+- File thu 6 thay duoc: LinearDwFused, BiasAddRows, BiasGrad, GeluErfFwd,
+  GeluErfBwd, MergeHbHead. TopicVector 49a8e7e, Inference c7939ea.
+- Con lai: SoftmaxCausalFwd/Bwd (exp f64 + causal), EmbedBwdFused (can mang dong),
+  LN fwd/bwd (ATen shadow), tkv_flash_attn.c, tkv_attn_cuda.c, tkv_linear_dx.c.
