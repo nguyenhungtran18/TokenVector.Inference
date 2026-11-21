@@ -399,3 +399,11 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   (8,64,24) native tu choi rc=-7 (out_d%16 != 0) -> khong tinh.
 - KET LUAN: CPU backend .tkv -> C CO THE BIT-EXACT. Tiep STEP6: thay tkv_linear_dw.c
   bang kernel sinh, verify loss native 25.454 EXACT.
+
+### 2026-11-21 (STEP6 PASS) - Thay tkv_linear_dw.c bang C sinh tu .tkv, loss EXACT
+- Notebook NATIVE LOSS V3 (mode 2 native bench):
+  native build rc=0, BSEQ: fwd=7209 loss=947 bwd=20603 opt=421 copyback=91
+  TONG=29271 ms, **loss_val=25.45386** (= 25.454 EXACT).
+- Ket luan: CPU backend (.tkv -> C, fmaf, acc=0 + gdw cong cuoi) thay duoc file C native
+  ma KHONG doi loss. Day la bang chung dau tien TokenVector thay duoc C/C++ trong native path.
+- Tiep STEP7: lan luot 7 file .c con lai, moi file test bit-exact + loss rieng.
