@@ -522,3 +522,13 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   LayernormFwd, LayernormBwdFused.
 - 5 kernel auto-glue C van de nguyen, sua sau: GeluErfFwd/Bwd, SoftmaxCausalFwd/Bwd, EmbedBwdFused.
 - HEAD: TokenVector prototype/cuda-backend 47ad847; Inference main aa00df4 (notebook).
+
+### 2026-11-22 - Danh gia kha nang viet thuan TKV cho cac file con lai
+- 3 file lon KHONG the viet thuan TKV voi DSL hien tai (can mo rong LON, phai hoi user):
+  * tkv_linear_dx.c: 57 token SIMD (__m256/_mm256_fmadd), 9 malloc, tile 256/k_eff.
+  * tkv_flash_attn.c: 331 token SIMD, 55 malloc, 992 dong.
+  * tkv_attn_cuda.c: 28 SIMD, 104 malloc, 126 token CUDA.
+- 5 kernel auto-glue C cung can mo rong DSL (__m256, exp/erf f64, calloc) de sua that.
+- Kernel elementwise DON GIAN van lam thuanne TKV duoc: F32ListAdd, F32ListCopy
+  (F32Addcmul co bam order FMA khac giua AVX2 va scalar tail -> de sau).
+- Nguyen tac: khong tu y mo rong compiler; da co d_sqrt (user cho phep) la du cho LN.
