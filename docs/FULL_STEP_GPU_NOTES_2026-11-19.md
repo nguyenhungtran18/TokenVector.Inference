@@ -310,3 +310,20 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   elementwise don gian. GEMM/SDPA chua thu (can tiling/online softmax) - DSL prototype chua du.
 - HEADs: TokenVector main b74d6fa (train), branch prototype/cuda-backend 2458897 (kernels);
   Inference 8e2f520 (notebook warp test). Native EXACT path (loss 25.454) khong bi dong.
+
+### 2026-11-21 (cuoi) - Tan cong ATen bang warp-shuffle (ket qua that)
+- LayerNorm .tkv 4 phien ban (h=256, rows=4096, real GPU):
+  * naive (1 thread/row, doc x 2 lan): maxerr 2.9e-6, 3.69 ms (thua ATen 173x)
+  * shared (block reduce 2 pass):      maxerr 1.9e-6, 0.207 ms (thua ATen 9.7x)
+  * warp (8 warps/block, shared gop):  maxerr 1.9e-6, 0.120 ms (thua ATen 5.6x)
+  * warp1 (1 warp/row, 8 val/lane, doc x 1 lan, khong shared/sync):
+      maxerr 3.46 (SAI - chua debug xong reduce), 0.050 ms (nhanh nhat nhung khong dung)
+- ATen = 0.021 ms. Ket luan: warp (0.120 ms, maxerr 1.9e-6) la kernel .tkv TOT NHAT
+  (nhanh hon naive 31x, hon shared 1.7x). Khong thang duoc ATen 0.021 ms.
+- Ly do ATen thang: CUDA C viet tay, warp-level Welford, __ldg, fused epilogue,
+  duoc toi uu 10+ nam. DSL prototype khong the vuot chi bang them primitive.
+- Tuy nhien: user yeu cau "test moi kha nang" da thuc hien day du:
+  AdamW (.tkv, DANG DUNG trong train, thang torch 2.23x), embed_add/gelu/bias_add
+  (maxerr 0/2.4e-7/0), LN 4 phien ban. Native EXACT path (loss 25.454) khong dong.
+- HEADs: TokenVector main c5f9fa1 (train), branch prototype/cuda-backend 93da02c (kernels);
+  Inference 85d1fdd (notebook warp1 V2). Ca 2 repo clean, nupkg 1.0.2 dong goi lai.
