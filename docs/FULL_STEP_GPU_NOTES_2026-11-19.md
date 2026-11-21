@@ -489,3 +489,14 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
      sua sau; khong tu y doi phuong an khong bao user.
 - Trang thai repo: TokenVector main 9ccc17b; prototype/cuda-backend e0813c5;
   Inference main 45f54ef (docs phan loai 4 thuan / 5 glue). Ca 2 s?ch.
+
+### 2026-11-22 - Notebook test LayernormFwd san sang (cho user chay Colab)
+- Da tao demo/colab_NATIVE_LAYERNORM_FWD_TEST_2026-11-22.ipynb (Inference 743a9df).
+- KHONG chen C. Build CA HAI .so bang CUNG flags `-O2 -mavx2 -mfma` (tranh b?y FMA
+  contraction: native fallback `v += d*d` duoc gan thanh FMA, neu .tkv build voi
+  -ffp-contract=off se lech 1 ULP).
+- Diagnostic trong cell 2: goi TkvTorchLayerNormFwd -> rc != 0 xac nhan ATen bridge vang,
+  native.LayernormFwd that su dung duong f64 fallback (cai ma .tkv thay the).
+- So sanh 4 shape (n,h) = (4,64),(16,256),(8,768),(7,33), bitwise uint32.
+- HEAD: TokenVector prototype/cuda-backend e0813c5; Inference main 743a9df.
+- CHUA co ket qua Colab. Khong claim bit-exact cho toi khi user tra notebook.
