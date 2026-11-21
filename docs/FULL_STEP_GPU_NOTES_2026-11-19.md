@@ -338,3 +338,13 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   cuoi cung gi? warp cho LN (neu gap vao train trong tuong lai), va git warp1/warp1d
   lai lam bai toan mo (khong dung trong pipeline).
 - Thang loi that: AdamW .tkv (ADAMW PATH=1, train 219.8ms, 2.23x torch).
+
+### 2026-11-21 (M4) - Bat 148 grad copy bang at::cat: THAT BAI, da revert
+- Thu: thay 148x (cast fp16->fp32 + copy vao g_grad_dev) bang 148 push_back vao grad_list
+  roi 1 at::cat + 1 g_grad_dev.copy_. Build OK, ADAMW PATH=1, nhung loss step0 3.89
+  -> step50 10.8249 (= ln(50257), model random) => params bi hong, training sai.
+- Nghi do. Da revert ve 07e0ce8 (commit d6287a0). Khong dung M4.
+- Bai hoc: put() projection vao flat grad buffer phai giy NGUYEN tung offset; at:cat
+  lam thay doi mapping (co the do grad shape 2D/reshape hoac th tu) -> khong the thay.
+- Trang thai cuoi: tokenvector main d6287a0 = ban on dinh (train 219.8ms, 2.23x torch,
+  ADAMW PATH=1). M4 khong ap dung.
