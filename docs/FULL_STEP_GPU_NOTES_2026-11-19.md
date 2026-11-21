@@ -327,3 +327,14 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   (maxerr 0/2.4e-7/0), LN 4 phien ban. Native EXACT path (loss 25.454) khong dong.
 - HEADs: TokenVector main c5f9fa1 (train), branch prototype/cuda-backend 93da02c (kernels);
   Inference 85d1fdd (notebook warp1 V2). Ca 2 repo clean, nupkg 1.0.2 dong goi lai.
+
+### 2026-11-21 (chot) - f64 reduce khong fix duoc warp1: loi LOGIC, khong phoi precision
+- warp1 (1 warp/row, doc x 1 lan, block=32): 0.080 ms NHUNG maxerr 4.74 (SAI).
+- warp1d (reduce fp64 wreduce_d): 0.085 ms, maxerr 4.74 Y HET -> loai tru rounding.
+  Bug nam o cau truc 1-warp (chua xac dinh: co the __shfl_down_sync mask hoac mapping lane/row).
+- Kernel .tkv TOT NHAT cho LN van la warp (8 warps/block + shared gop): 0.0965 ms,
+  maxerr 1.9e-6. ATen 0.0306 ms -> TKV thua 3.15x. Khong thang duoc ATen o LN.
+- Da test MOI kha nang theo yeu cau user: naive/shared/warp/warp1/warp1d;
+  cuoi cung gi? warp cho LN (neu gap vao train trong tuong lai), va git warp1/warp1d
+  lai lam bai toan mo (khong dung trong pipeline).
+- Thang loi that: AdamW .tkv (ADAMW PATH=1, train 219.8ms, 2.23x torch).
