@@ -510,3 +510,15 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - KERNEL THUAN TKV THU 5: LinearDwFused, BiasAddRows, BiasGrad, MergeHbHead, LayernormFwd.
 - 5 kernel auto-glue C van de nguyen, sua sau: GeluErfFwd/Bwd, SoftmaxCausalFwd/Bwd, EmbedBwdFused.
 - HEAD: TokenVector prototype/cuda-backend e0813c5; Inference main bbca371 -> (commit tiep).
+
+### 2026-11-22 (STEP7j PASS) - LayernormBwdFused BIT-EXACT, THUAN TKV (khong chen C)
+- Ket qua Colab (prototype/cuda-backend 47ad847): TkvTorchLayerNormBwd rc=-9 (ATen vang,
+  native dung f64 fallback); C INJECTED=False; 4/4 bitwise=True cho CA dx va gflat
+  (n,h)=(4,64),(16,256),(8,768),(7,33); gflat khoi tao KHAC 0 de exercise accumulate.
+- Loichit da fix: (1) d_xh/f_gg khai bao trong vong j dau -> DSL khong declare lai o vong 2
+  -> C scope error; (2) comment Python # trong than kernel -> sinh directive C `#` -> error.
+  Ca 2 la loi sinh C cua DSL, KHONG phai loi cong thuc.
+- KERNEL THUAN TKV THU 6: LinearDwFused, BiasAddRows, BiasGrad, MergeHbHead,
+  LayernormFwd, LayernormBwdFused.
+- 5 kernel auto-glue C van de nguyen, sua sau: GeluErfFwd/Bwd, SoftmaxCausalFwd/Bwd, EmbedBwdFused.
+- HEAD: TokenVector prototype/cuda-backend 47ad847; Inference main aa00df4 (notebook).
