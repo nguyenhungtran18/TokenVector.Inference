@@ -293,3 +293,20 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Caveats: ours fp16 params + fp32 master vs torch fp32 model; losses NOT comparable
   (different LR schedule: .tkv lr_max=0.05 warmup=2 vs torch constant 0.0025);
   native EXACT path untouched (loss 25.454).
+
+### 2026-11-21 - "Test moi kha nang": CUDA kernels viet bang TokenVector
+- User: "moi kh? nang di?u có, TokenVector có th? nhanh hon C thì không gì là không th?".
+- Mo rong DSL compiler (cuda_feature.tkv, self-host rebuild vong.exe IL_IDENTICAL moi lan):
+  sqrtf/erff/expf, for-loop, ltid() (threadIdx.x), __shared__ (shared_array),
+  __syncthreads (syncthreads()), wreduce() (__shfl_down_sync), int/float inference.
+- Xoa hoan toan Python prototype (tkv_cuda.py, tests/) theo yeu cau user - chi con duong .tkv.
+- Kernel .tkv da verify GPU that:
+  * AdamW: ADAMW PATH=1 trong train, train 219.8 ms/step (~2.23x torch).
+  * embed_add maxerr 0.0; gelu_erf 2.4e-7; bias_add 0.0.
+  * LayerNorm 3 phien ban: naive 3.39ms (maxerr 4.8e-6) -> shared 0.182ms (2.9e-6)
+    -> warp-shuffle 0.108ms (1.9e-6). ATen 0.046ms. Warp thua ATen 2.4x, thang naive 31x.
+- Ket luan: ATen/CuBLAS van la lua chon tot nhat cho LN/GEMM/SDPA (duoc viet tay warp-level,
+  transcendentals, fused epilogue). Kernel .tkv thang o AdamW (da dung trong train) va
+  elementwise don gian. GEMM/SDPA chua thu (can tiling/online softmax) - DSL prototype chua du.
+- HEADs: TokenVector main b74d6fa (train), branch prototype/cuda-backend 2458897 (kernels);
+  Inference 8e2f520 (notebook warp test). Native EXACT path (loss 25.454) khong bi dong.
