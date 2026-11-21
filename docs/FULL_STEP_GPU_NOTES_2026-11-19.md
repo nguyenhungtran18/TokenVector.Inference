@@ -428,3 +428,12 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   notebook chen nguyen AVX2 helper tu tkv_gelu_avx2.h -> diff=0/64,0/59,0/1000,0/774.
 - File thu 4 thay duoc: LinearDwFused, BiasAddRows, BiasGrad, GeluErfFwd.
 - TokenVector fe8ecb2, Inference bfa4476. Tiep: GeluErfBwd (tkv_gelu_bwd_one).
+
+### 2026-11-21 (STEP7d PASS) - GeluErfBwd bit-exact bang .tkv C
+- Kernel .tkv goi gelu_bv -> tkv_gelu_bv; notebook chen AVX2 tkv_gelu_bwd_one +
+  scalar gelu_b_one tu C goc -> diff=0 (lo/hi 4 shape).
+- File thu 5 thay duoc: LinearDwFused, BiasAddRows, BiasGrad, GeluErfFwd, GeluErfBwd.
+- TokenVector 27bc0b1, Inference 63d40fa.
+- Con lai trong tkv_bwd_ops.c: SoftmaxCausalFwd/Bwd (exp f64 + nhan causal - kho),
+  EmbedBwdFused (can mang dong counts/starts/cursor/pos), LN fwd/bwd (ATen shadow),
+  MergeHbHead. Ngoai ra tkv_flash_attn.c / tkv_attn_cuda.c / tkv_linear_dx.c (tile 256).
