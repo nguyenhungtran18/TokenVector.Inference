@@ -388,3 +388,14 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   native C. Gi? nguyên 8 file .c (loss EXACT 25.454).
 - Branch prototype/cuda-backend gi? cac STEP1-4 lam bang chung compiler co the sinh CPU C
   tu .tkv, nhung KHONG bit-exact -> khong ap dung cho native path.
+
+### 2026-11-21 (STEP5b PASS) - Tim ra ly do khong bit-exact va SUA DUOC
+- LY DO: native tkv_linear_dw.c tich luy tu ACC=0 (_mm256_setzero_ps) roi CONG gdw CU O CUOI
+  (_mm256_add_ps(load(d), b)). Kernel .tkv ban dau gan s = gdw ROI FMA vao -> gdw bi lam tron
+  trong moi buoc FMA -> lech 1 ULP (275/512).
+- SUA: acc = 0.0; for p: acc = fma(x,gy,acc); gdw = gdw + acc. (commit f073538)
+- KET QUA V2: bitwise=True diff=0 cho cac shape hop le:
+  (8,16,32) 0/512, (8,8,64) 0/512, (4,32,48) 0/1536, maxabs=0.
+  (8,64,24) native tu choi rc=-7 (out_d%16 != 0) -> khong tinh.
+- KET LUAN: CPU backend .tkv -> C CO THE BIT-EXACT. Tiep STEP6: thay tkv_linear_dw.c
+  bang kernel sinh, verify loss native 25.454 EXACT.
