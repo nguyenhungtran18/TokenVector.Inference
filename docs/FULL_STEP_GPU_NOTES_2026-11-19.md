@@ -461,3 +461,14 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   MergeHbHead, SoftmaxCausalFwd, SoftmaxCausalBwd. TokenVector bb5eec8, Inference 36cfb53.
 - Con lai: EmbedBwdFused (can mang dong counts/starts/cursor/pos), LN fwd/bwd (ATen shadow),
   tkv_flash_attn.c, tkv_attn_cuda.c, tkv_linear_dx.c (tile 256, k_eff).
+
+### 2026-11-21 - PHAN LOAI THAT (sua lai cac note truoc)
+- Trong 9 kernel da verify, CHI 4 kernel sinh THUAN TU DSL (khong chen C):
+  LinearDwFused, BiasAddRows, BiasGrad, MergeHbHead.
+- 5 kernel con lai (GeluErfFwd/Bwd, SoftmaxCausalFwd/Bwd, EmbedBwdFused)
+  dung CO CHE AUTO-GLUE: kernel .tkv chi goi placeholder, notebook chen nguyen C cu
+  vao file .cpu.c truoc khi gcc. => ABI/signature do compiler sinh, NHUNG THUAT TOAN
+  VAN LA C CU. Khong duoc goi la "da thay bang TokenVector" - day la buoc dem.
+- Cac note "STEP7c/7f/7g/7h PASS ... thay duoc" o tren phai doc kem nhan nay.
+- QUYET DINH: giu 5 file auto-glue, sua sau. Cac file lam tiep PHAI viet THUAN TKV,
+  khong chen C. Neu DSL thieu gi -> DUNG va bao user (khong tu y mo rong compiler).
