@@ -500,3 +500,13 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - So sanh 4 shape (n,h) = (4,64),(16,256),(8,768),(7,33), bitwise uint32.
 - HEAD: TokenVector prototype/cuda-backend e0813c5; Inference main 743a9df.
 - CHUA co ket qua Colab. Khong claim bit-exact cho toi khi user tra notebook.
+
+### 2026-11-22 (STEP7i PASS) - LayernormFwd BIT-EXACT, THUAN TKV (khong chen C)
+- Ket qua Colab: TkvTorchLayerNormFwd rc=-9 (ATen vang, native dung f64 fallback);
+  C INJECTED=False; sqrt(double) present=True; 4/4 bitwise=True diff=0
+  (n,h)=(4,64),(16,256),(8,768),(7,33).
+- Ky thuat quan trong: build CA HAI .so bang CUNG flags -O2 -mavx2 -mfma
+  (tranh FMA contraction lech 1 ULP giua native va .tkv).
+- KERNEL THUAN TKV THU 5: LinearDwFused, BiasAddRows, BiasGrad, MergeHbHead, LayernormFwd.
+- 5 kernel auto-glue C van de nguyen, sua sau: GeluErfFwd/Bwd, SoftmaxCausalFwd/Bwd, EmbedBwdFused.
+- HEAD: TokenVector prototype/cuda-backend e0813c5; Inference main bbca371 -> (commit tiep).
