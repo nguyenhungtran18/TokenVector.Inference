@@ -371,3 +371,20 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   sai mapping. Giu nguyen 148 copy_ (cost ~13-15ms/step) - day la gia phai tra de dung.
 - Trang thai cuoi ON DINH: TokenVector main 9ccc17b = d6287a0:
   train 219.8ms/step, 2.23x torch, ADAMW PATH=1, native loss 25.454 EXACT.
+
+### 2026-11-21 (STEP5 result) - CPU backend .tkv -> C: KHONG bit-exact, DUNG THEO PLAN
+- Thuc thi plan 1-4 xong (branch prototype/cuda-backend 0b5cc90):
+  * cpu_feature.tkv sinh C (fmaf, vong p tuan tu, -ffp-contract=off -fno-fast-math)
+  * vong.exe IL_IDENTICAL (135 file), testkit_gate PASS 136/136 NEG=44/44
+  * linear_dw_cpu.tkv -> .cpu.c co `float s` + `s = fmaf(x[p*in_d+i], gy[p*out_d+c], s)`
+- Ket qua STEP5 (notebook CPU BACKEND BITEXACT V1):
+  * n=8 in=16 out=32: diff 275/512, maxabs 9.54e-07
+  * n=8 in=8  out=64: diff 288/512, maxabs 7.15e-07
+  * n=4 in=32 out=48: diff 751/1536, maxabs 4.77e-07
+  * (in=64 out=24 native tu choi rc=-7)
+- Ket luan: du sinh C voi fmaf cung flags /fp:precise van LECH ~54% so voi _mm256_fmadd_ps
+  cua tkv_linear_dw.c. Ly do: native tich luy 4 row x 8 col bang 4 accumulator AVX2,
+  scalar fmaf khong tai tao duoc cung chuoi FMA. Theo tieu chi dung cua plan: KHONG thay
+  native C. Gi? nguyên 8 file .c (loss EXACT 25.454).
+- Branch prototype/cuda-backend gi? cac STEP1-4 lam bang chung compiler co the sinh CPU C
+  tu .tkv, nhung KHONG bit-exact -> khong ap dung cho native path.
