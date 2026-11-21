@@ -407,3 +407,9 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Ket luan: CPU backend (.tkv -> C, fmaf, acc=0 + gdw cong cuoi) thay duoc file C native
   ma KHONG doi loss. Day la bang chung dau tien TokenVector thay duoc C/C++ trong native path.
 - Tiep STEP7: lan luot 7 file .c con lai, moi file test bit-exact + loss rieng.
+
+### 2026-11-21 (STEP7a PASS) - BiasAddRows bit-exact bang .tkv C
+- Notebook NATIVE BIASADD TEST: rows/cols (3,8),(16,32),(7,13),(1,1024) deu bitwise=True diff=0.
+- File thu 2 trong native path (sau tkv_linear_dw.c) co the thay bang C sinh tu .tkv.
+- TokenVector a8b793d (compiler + bias_add_rows_cpu.tkv), Inference 3a2e25a.
+- Tiep: LayernormFwd / cac kernel khac trong tkv_bwd_ops.c.
