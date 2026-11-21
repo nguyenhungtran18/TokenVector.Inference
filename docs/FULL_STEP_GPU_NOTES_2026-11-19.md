@@ -361,3 +361,13 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Trang thai cuoi: TokenVector main d6287a0 (train 219.8ms, 2.23x torch, ADAMW PATH=1);
   branch prototype/cuda-backend cb806e8 (kernels .tkv:
   adamw/wep/gelu/bias/embed/LN 5 phien ban/linear_dw - deu test, khong dung cho native).
+
+### 2026-11-21 (chot) - M4b sync fp16 bang foreach: CUNG THAT BAI nhu M4
+- Thu: thay 148 g_p[i].copy_(g_p_all.narrow) bang 1 g_p_all.to(Half) + 1 at::_foreach_copy_.
+- Ket qua: build rc=0, ADAMW PATH=1, NHUNG loss step0 3.89 -> step399 10.8249 (= ln(V)).
+- Da revert ve d6287a0 (commit 9ccc17b). Khong dung M4b.
+- Ket luan: ca 2 chieu grad->master (M4) va master->fp16 (M4b) deu KHONG the gop bang
+  cat/foreach. Ly do: moi param co shape/dtype rieng va thu tu nghiem ngat; batch op lam
+  sai mapping. Giu nguyen 148 copy_ (cost ~13-15ms/step) - day la gia phai tra de dung.
+- Trang thai cuoi ON DINH: TokenVector main 9ccc17b = d6287a0:
+  train 219.8ms/step, 2.23x torch, ADAMW PATH=1, native loss 25.454 EXACT.
