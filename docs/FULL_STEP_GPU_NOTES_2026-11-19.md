@@ -472,3 +472,20 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Cac note "STEP7c/7f/7g/7h PASS ... thay duoc" o tren phai doc kem nhan nay.
 - QUYET DINH: giu 5 file auto-glue, sua sau. Cac file lam tiep PHAI viet THUAN TKV,
   khong chen C. Neu DSL thieu gi -> DUNG va bao user (khong tu y mo rong compiler).
+
+### 2026-11-22 sang - Dang lam: LayernormFwd THUAN TOKENVECTOR
+- Da xong: mo rong DSL them d_sqrt( -> sqrt() double (token trung gian __TKVSQRT__ de tranh
+  bi sqrt->sqrtf an theo). Self-host vong.exe IL_IDENTICAL (135 file).
+- Da viet layernorm_fwd_cpu.tkv THUAN TKV (KHONG chen C): d_mu/d_var/d_rstd double,
+  vong for tinh mean/var/rstd, ghi float ra out. Generated C co `double d_rstd = 1.0/sqrt(d_var+1e-6)`.
+- Commit TokenVector prototype/cuda-backend e0813c5.
+- CHUA lam sang mai:
+  1. Tao notebook bit-exact test LayernormFwd .tkv C vs native (moi cach: KHONG chen C,
+     build truc tiep file .cpu.c, so sanh voi native.LayernormFwd tren 4 shape;
+     luu y native co ATen shadow - test phay goi truc tiep _impl hoac true rieng).
+  2. Neu bit-exact: tiep cac kernel khac (LN bwd, tkv_linear_dx.c tile 256,
+     tkv_flash_attn.c, tkv_attn_cuda.c) - DEU VIET THUAN TKV, khong chen C.
+  3. GiQ nguyen quy tac: 5 file da chen C (GELU fwd/bwd, Softmax fwd/bwd, EmbedBwd)
+     sua sau; khong tu y doi phuong an khong bao user.
+- Trang thai repo: TokenVector main 9ccc17b; prototype/cuda-backend e0813c5;
+  Inference main 45f54ef (docs phan loai 4 thuan / 5 glue). Ca 2 s?ch.
