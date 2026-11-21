@@ -421,3 +421,10 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Con lai: GELU (erf f64 approximation - kho), SoftmaxCausal, EmbedBwd, LN fwd/bwd
   (ATen shadow), tkv_flash_attn.c, tkv_attn_cuda.c, tkv_linear_dx.c (tile 256, k_eff),
   tkv_simd_native.c/tkv_step124.c (shim/entry - khong phai compute kernel).
+
+### 2026-11-21 (STEP7c PASS) - GeluErfFwd bit-exact bang .tkv C
+- Ly do cac ban truoc lech ~6e-8: native dung AVX2 tkv_erf_ps/tkv_exp_ps (exp polynomial),
+  khong phai scalar f64 erf. Chuyen kernel .tkv goi gelu_fv -> sinh tkv_gelu_fv,
+  notebook chen nguyen AVX2 helper tu tkv_gelu_avx2.h -> diff=0/64,0/59,0/1000,0/774.
+- File thu 4 thay duoc: LinearDwFused, BiasAddRows, BiasGrad, GeluErfFwd.
+- TokenVector fe8ecb2, Inference bfa4476. Tiep: GeluErfBwd (tkv_gelu_bwd_one).
