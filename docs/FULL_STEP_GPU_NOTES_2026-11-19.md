@@ -413,3 +413,11 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - File thu 2 trong native path (sau tkv_linear_dw.c) co the thay bang C sinh tu .tkv.
 - TokenVector a8b793d (compiler + bias_add_rows_cpu.tkv), Inference 3a2e25a.
 - Tiep: LayernormFwd / cac kernel khac trong tkv_bwd_ops.c.
+
+### 2026-11-21 (STEP7b PASS) - BiasGrad bit-exact bang .tkv C
+- Sai lan dau do goi native voi 5 args thay vi 7 (gy,gy_len,gflat,gflat_len,off,n,cols).
+- Sau fix signature (TokenVector 2f50773): 4/4 bitwise=True diff=0 maxabs=0.
+- File thu 3 thay duoc: LinearDwFused (loss 25.45386), BiasAddRows (4/4), BiasGrad (4/4).
+- Con lai: GELU (erf f64 approximation - kho), SoftmaxCausal, EmbedBwd, LN fwd/bwd
+  (ATen shadow), tkv_flash_attn.c, tkv_attn_cuda.c, tkv_linear_dx.c (tile 256, k_eff),
+  tkv_simd_native.c/tkv_step124.c (shim/entry - khong phai compute kernel).
