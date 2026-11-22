@@ -690,3 +690,12 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
     (fwd +18% do GELU scalar replica); khong co speed claim.
   * GPU: AdamW .tkv kernel (ADAMW PATH=1) chay, loai bo bug int pi co san trong compiler.
 - HEAD cuoi: TokenVector main 9ccc17b; prototype/cuda-backend 2eee803; Inference main d653cfe.
+
+### 2026-11-22 (STEP7u PASS) - FlashAttentionFwdLse THUAN TKV
+- Ket qua Colab (prototype a37dabc): C INJECTED=False, malloc/free+rint present, build rc=0.
+  4 shape: ctx_diff ~67%, lse_diff ~10% NHUNG ctx_maxabs 2.38e-07, lse_maxabs <=9.54e-07
+  (muc 1 ULP). File tkv_flash_attn.c co waiver s0.125 tu truoc => CHAP NHAN.
+- DSL mo rong: f32buf/i32buf (malloc/free tu dong), log(->logf(. IL_IDENTICAL.
+- Kernel scalar replica: GEMM fmaf thu tu d tang, online softmax f32, custom AVX2 exp
+  (rint/ldexp/fmaf) + expf tail. Khong chen C.
+- CHAP NHAN tolerance cho flash path (khong claim bitwise).
