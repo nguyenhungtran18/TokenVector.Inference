@@ -542,3 +542,17 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   LayernormBwdFused, F32ListAdd, F32ListCopy.
 - 5 kernel auto-glue C van de nguyen; 3 file SIMD/CUDA lon van can mo rong DSL (xem note truoc).
 - HEAD: TokenVector prototype/cuda-backend 10eb162; Inference main c7c0d00 (notebook).
+
+### 2026-11-22 (STEP7l) - Dang test: LinearDxFused THUAN TKV (scalar fmaf thay AVX2)
+- User chon: mo rong DSL, bat dau linear_dx.
+- Nhan xet chot: moi lane AVX2 (_mm256_fmadd_ps) tinh DOC LAP -> scalar fmaf cung thu tu
+  cho ket qua BIT-IDENTICAL. KHONG can them __m256 vao DSL.
+- Mo rong DSL 1 dong: builtin tkv_notfinite( -> !isfinite( de tinh k_eff dung nhu native.
+  Self-host vong.exe IL_IDENTICAL (135 file).
+- Viet linear_dx_cpu.tkv thuan TKV: tile T=256, k_eff quet forward (tuong duong native quet nguoc),
+  KC=64, Ct gop don truoc roi moi cong vao dx (KHONG cong tung chunk).
+- Test so voi native reference build RIENG tu tkv_linear_dx.c (11 args), vi tkv_simd_native.c
+  co LinearDxFused 9 args (wrapper CUDA/BLAS khac) - khong the build chung 1 .so.
+- Notebook demo/colab_NATIVE_LINEAR_DX_TEST_2026-11-22.ipynb, 5 shape, furniture rc.
+- HEAD: TokenVector prototype/cuda-backend 80024e0; Inference main edbeeac.
+- CHUA co ket qua Colab. Khong claim bit-exact khi chua tra notebook.
