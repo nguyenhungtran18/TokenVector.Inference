@@ -607,3 +607,19 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Bug SL dam fix: (1) `i` khong duoc force int (type inference) -> them % 1000000000;
   (2) bien f_v/f_arg khai bao trong vong AVX2 bi dung lai o tail (mat C scope) -> doi ten t_*.
 - KERNEL THUAN TKV THU 12: + GeluErfFwd. Auto-glue con 2: GeluErfBwd, EmbedBwdFused.
+
+### 2026-11-22 (STEP7p/q PASS) - XONG TOAN BO 5 FILE AUTO-GLUE -> PURE TKV
+- GeluErfBwd v2 (8e3d15a): 4/4 bitwise. Fix 1 ULP: gelu_b_one() tra FLOAT, phai round
+  truoc khi nhan (double)gy. EmbedBwdFused (2252422): 4/4 bitwise, no calloc.
+- NHAN XET CHOT EmbedBwd: mang counts/starts/cursor/pos cua native chi de ep thu tu
+  T TANG DAN trong moi row. Scatter truc tiep for t: gw[idx[t]] += gy[t] cho CUNG thu tu,
+  van O(n*d), KHONG can mo rong DSL, khong ch?m hon native.
+- 14 KERNEL THUAN TKV (bitwise verified, KHONG chen C, KHONG dlsym glue):
+  1 LinearDwFused 2 BiasAddRows 3 BiasGrad 4 MergeHbHead 5 LayernormFwd
+  6 LayernormBwdFused 7 F32ListAdd 8 F32ListCopy 9 LinearDxFused
+  10 SoftmaxCausalBwd 11 SoftmaxCausalFwd 12 GeluErfFwd 13 GeluErfBwd 14 EmbedBwdFused.
+- DSL extensions duoc user cho phep: d_sqrt, tkv_notfinite, d_exp, tkv_rint,
+  tkv_ldexp, tkv_fmax, tkv_fabs. Self-host vong.exe IL_IDENTICAL moi lan.
+- HEAD: TokenVector prototype/cuda-backend 2252422; Inference main d304be3.
+- CON LAI 2 file lon CHUAdung: tkv_flash_attn.c (992 dong, 331 SIMD, 55 malloc),
+  tkv_attn_cuda.c (394 dong, 28 SIMD, 104 malloc, 126 CUDA). Can user quyet dinh.
