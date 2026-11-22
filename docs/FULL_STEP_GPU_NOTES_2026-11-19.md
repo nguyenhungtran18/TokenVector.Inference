@@ -717,3 +717,20 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   argtypes test 14 thay vi 13.
 - tkv_flash_attn.c (992 dong) DA THAY TOAN BO bang pure TKV.
 - FILE C/C++ CON LAI: tkv_attn_cuda.c (2 export TkvCudaAttnFwd/Bwd, 126 token CUDA, 104 malloc).
+
+### 2026-11-22 (STEP7x PASS) - CHOT: TOAN BO NATIVE PLANE LA PURE TOKENVECTOR
+- Ket qua Colab (main 9ccc17b / prototype 688567d, Inference c45b78a):
+  * thay toan bo: 10 bwd_ops + linear dw/dx + 2 list-op + 7 flash + 2 attn stub.
+  * native build rc=0; symbols missing=[]; TkvCudaAttnFwd rc=0 (fallback flash).
+  * bseq rc=0; loss_val=25.45386 -> EXACT khop baseline.
+  * timing mode2 1 step (us): fwd 7868 / loss 865 / bwd 19182 / opt 410 / copy 87 / TONG 28412.
+    baseline V3 TONG 29271; 14-kernel 30112. Khong co speed claim - chi bao so do duoc.
+- TONG KET SO KERNEL THUAN TKV: 14 (CPU elementwise/LN/GEMM/softmax) + 7 (flash attn)
+  + 2 (attn cuda stub) = 23 export, KHONG C INJECTION.
+- Luu y trung thuc: duong cuBLAS tuy y cua tkv_attn_cuda.c bi BO (DSL CPU khong bieu dien
+  duoc cuBLAS); hanh vi mac dinh (tra 0 -> fallback flash) giu nguyen.
+- DSL extensions duoc user cho phep: d_sqrt, d_exp, tkv_notfinite, tkv_rint, tkv_ldexp,
+  tkv_fmax, tkv_fabs, log->logf, f32buf/i32buf. Self-host vong.exe IL_IDENTICAL moi lan.
+- Compiler bugs da fix trong hanh trinh: d_sqrt ordering, C scope, dctx stride, int inference
+  (CUDA 'r * ' va CPU 'n[' trong 'lse_in[').
+- HEAD cuoi: TokenVector main 9ccc17b; prototype/cuda-backend 688567d; Inference main c45b78a.
