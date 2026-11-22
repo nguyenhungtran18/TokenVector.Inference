@@ -556,3 +556,18 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Notebook demo/colab_NATIVE_LINEAR_DX_TEST_2026-11-22.ipynb, 5 shape, furniture rc.
 - HEAD: TokenVector prototype/cuda-backend 80024e0; Inference main edbeeac.
 - CHUA co ket qua Colab. Khong claim bit-exact khi chua tra notebook.
+
+### 2026-11-22 (STEP7l PASS) - LinearDxFused BIT-EXACT, THUAN TKV, GEMM AVX2
+- Ket qua Colab (prototype/cuda-backend b46910f): 5/5 bitwise=True diff=0 cho
+  (m,n,k,T)=(8,768,3072,256),(8,3072,768,256),(16,64,256,256),(4,128,512,256),(4,64,300,256).
+  C INJECTED=False; fmaf/isfinite present=True; rc=0/0.
+- CHOT: KHONG can them __m256 vao DSL. Moi lane AVX2 tinh doc lap -> scalar fmaf
+  cung thu tu = BIT-IDENTICAL. DSL chi mo rong 1 dong: tkv_notfinite -> !isfinite.
+- Bug da fix: dieu kien `p0 + pc + p < pw` (so index tuyet doi voi do rong tuong doi)
+  -> luon false khi p0>0 -> bo tile sau. Sua thanh `pc + p < pw`. Phat hien nh?
+  shape k=300 (partial tile) trong bo test - shape don_le khong bat duoc.
+- KERNEL THUAN TKV THU 9: + LinearDxFused (tile T=256, k_eff, KC=64, Ct gop truoc).
+ Tong: LinearDwFused, BiasAddRows, BiasGrad, MergeHbHead, LayernormFwd,
+ LayernormBwdFused, F32ListAdd, F32ListCopy, LinearDxFused.
+- 5 kernel auto-glue C van de nguyen; con tkv_flash_attn.c, tkv_attn_cuda.c.
+- HEAD: TokenVector prototype/cuda-backend b46910f; Inference main edbeeac/0d8f56a.
