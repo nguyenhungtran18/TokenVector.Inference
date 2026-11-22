@@ -635,3 +635,18 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   cell 1 patch+build, cell 2 check 14 symbols + chay `dotnet demo/bseq.dll` mode 1 doc loss.
 - Ky vong: loss van 25.454 (EXACT).neu doi -> .tkv kernel khong dung duoc cho native path.
 - CHUA co ket qua Colab. Khong claim integrated thanh cong khi chua tra notebook.
+
+### 2026-11-22 (STEP7r PASS) - TICH HOP 14 PURE TKV VAO NATIVE PATH, LOSS GIU NGUYEN
+- Ket qua Colab (main 9ccc17b / prototype 2252422, Inference dfb2ecc):
+  * build rc=0; bwd_ops replaced 10 kernels; linear_dw/dx replaced; F32ListAdd/Copy patched count=1;
+    14 symbols missing = []; bseq rc=0.
+  * loss_val = 25.45386 -> EXACT khop baseline V3 (2026-11-21), native path KHONG doi.
+- TIMING that (mode2, 1 step, ms: fwd/loss/bwd/opt/copyback/TONG):
+  * baseline V3 : 7209 / 947 / 20603 / 421 / 91 / 29271
+  * integrated  : 8524 / 863 / 20209 / 430 / 86 / 30112
+  * delta       : +1315 / -84 / -394 / +9 / -5 / +841 (~+2.9% tong).
+  * Giai thich: fwd ch?m hon do GeluErfFwd thuan TKV phai replicate custom exp bang SCALAR
+    (thay vi AVX2 8-lane). bwd nhanh hon nho LinearDxFused bo hang thua. KHONG co speed claim.
+- Harness: mode 1 bi MissingMethodException `TKVApp._step124_gpu` trong Inference main hien tai;
+  mode 2 chay tot. Da doi notebook sang mode 2.
+- HEAD: TokenVector prototype/cuda-backend 2252422; Inference main dfb2ecc.
