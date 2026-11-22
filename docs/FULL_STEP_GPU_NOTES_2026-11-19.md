@@ -673,3 +673,20 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Notebook verify: demo/colab_GPU_VERIFY_CUDA_FIX_2026-11-22.ipynb (Inference 3edf1f4),
   co REGRESSION assert `float pi` trong adamw.cuda.cu + 120 steps train.
 - Ky vong: loss 3.89 -> ~3.7, ADAMW PATH=1, speedup ~2x. CHUA co ket qua Colab.
+
+### 2026-11-22 (STEP7t PASS) - FIX CUDA int inference, GPU loss khong con diverge
+- Ket qua Colab (main 9ccc17b / prototype 2eee803, Inference d653cfe):
+  * adamw float pi = True, int pi = False; build rc=0; ADAMW PATH=1.
+  * loss 3.8906 -> (step50 4.4917, step100 4.2292, step119 3.9272). KHONG con 10.8249.
+  * torch median 450.4ms, TKV median 245.0ms, SPEEDUP = 1.84x (120 steps).
+  * VERIFY HEADS 9ccc17b 2eee803.
+- So sanh lich su (can thanh th?t, KHONG claim 2.23x cho lan nay):
+  * 400-step run cu (backend 7da4f67): torch 490.8ms, TKV 219.8ms, 2.23x, loss 3.89->3.74.
+  * 120-step run nay: torch 450.4ms, TKV 245.0ms, 1.84x, loss 3.89->3.93 (chua du steps).
+  * Khac so steps + cua so median + GPU noise => khong the so sanh truc tiep. Chi khang dinh:
+    fix loai bo diverge, GPU path chay tot lai.
+- TONG KET 2 MUC TIEU:
+  * Native EXACT: loss 25.45386 (mode 2) sau khi thay 14 kernel C bang pure TKV. +2.9% CPU tong
+    (fwd +18% do GELU scalar replica); khong co speed claim.
+  * GPU: AdamW .tkv kernel (ADAMW PATH=1) chay, loai bo bug int pi co san trong compiler.
+- HEAD cuoi: TokenVector main 9ccc17b; prototype/cuda-backend 2eee803; Inference main d653cfe.
