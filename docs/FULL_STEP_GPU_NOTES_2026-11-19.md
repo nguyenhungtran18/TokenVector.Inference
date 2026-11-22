@@ -595,3 +595,15 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
  SoftmaxCausalBwd, SoftmaxCausalFwd.
 - Con 3 auto-glue: GeluErfFwd/Bwd (can kiem tra AVX2 vs scalar bit-identical),
   EmbedBwdFused (can mang dong).
+
+### 2026-11-22 (STEP7o PASS) - GeluErfFwd THUAN TKV (replicate AVX2 + scalar tail)
+- Ket qua Colab (prototype/cuda-backend 31ab942): 4/4 bitwise=True diff=0
+  (lo,hi)=(0,64),(5,64),(0,1000),(3,777). C INJECTED=False; rint/ldexp/d_exp present.
+- Phat hien quan trong: native co 2 duong KHAC BIT:
+  * AVX2: tkv_exp_ps (Taylor f32 + rint + ldexp bits), erf f32
+  * scalar tail: exp(double), poly f64
+  => phai replicate CA HAI. DSL them 4 builtin: tkv_rint/rintf, tkv_ldexp/ldexpf,
+  tkv_fmax/fmaxf, tkv_fabs/fabsf. Self-host IL_IDENTICAL.
+- Bug SL dam fix: (1) `i` khong duoc force int (type inference) -> them % 1000000000;
+  (2) bien f_v/f_arg khai bao trong vong AVX2 bi dung lai o tail (mat C scope) -> doi ten t_*.
+- KERNEL THUAN TKV THU 12: + GeluErfFwd. Auto-glue con 2: GeluErfBwd, EmbedBwdFused.
