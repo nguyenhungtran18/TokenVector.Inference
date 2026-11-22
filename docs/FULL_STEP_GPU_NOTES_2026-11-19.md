@@ -571,3 +571,14 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
  LayernormBwdFused, F32ListAdd, F32ListCopy, LinearDxFused.
 - 5 kernel auto-glue C van de nguyen; con tkv_flash_attn.c, tkv_attn_cuda.c.
 - HEAD: TokenVector prototype/cuda-backend b46910f; Inference main edbeeac/0d8f56a.
+
+### 2026-11-22 (STEP7m PASS) - SoftmaxCausalBwd THUAN TKV (thay auto-glue)
+- Ket qua Colab (prototype/cuda-backend 82193f9): 4/4 bitwise=True diff=0
+  (n,hd)=(8,16),(16,64),(64,128),(127,64). C INJECTED=False, f64 dot present=True.
+- Native SoftmaxCausalBwd_impl la SCALAR THUAN (dot f32 widen f64, cong tuan tu) -> khong
+  can mo rong DSL. File auto-glue giam 5 -> 4.
+- KERNEL THUAN TKV THU 10: + SoftmaxCausalBwd.
+ Tong: LinearDwFused, BiasAddRows, BiasGrad, MergeHbHead, LayernormFwd,
+ LayernormBwdFused, F32ListAdd, F32ListCopy, LinearDxFused, SoftmaxCausalBwd.
+- Con 4 auto-glue: GeluErfFwd/Bwd (can d_exp f64), SoftmaxCausalFwd (can d_exp f64),
+  EmbedBwdFused (can mang dong counts/starts/cursor/pos).
