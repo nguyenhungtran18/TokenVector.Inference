@@ -288,7 +288,7 @@ def _groups(ps: 'list[Tensor]') -> 'list[i64]':
     return out
 
 def _mk_opt(n: 'i64', groups: 'list[i64]', total: 'i64') -> "AdamW":
-    return new_adamw_g(n, groups, 2, total, 0.05, 0.0025, 0.9, 0.999,
+    return new_adamw_g(n, groups, 2, total, 0.0006, 0.00006, 0.9, 0.999,
                        0.00000001, 0.0, 1.0)
 
 def main() -> 'i32':
