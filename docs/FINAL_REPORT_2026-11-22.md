@@ -69,3 +69,25 @@ Tất cả nằm trong 1 file `.tkv` cho flash (2 helper + 7 export; compiler h�
 ## 7. Việc tiếp theo
 
 Parity loss harness: export **cùng một bộ weights** sang cả native bridge và HF model, so cross-entropy trên cùng `ids`. Notebook sẽ được tạo ngay sau báo cáo này.
+
+## 8. Parity loss - ket luan (bo sung sau khi chot ban dau)
+
+Notebook colab_PARITY_LOSS_V3_2026-11-22.ipynb (Inference 9fb00ab): tao weights phan phoi
+N(0, 0.02^2) y het native gpt2_init, nap vao HF (tie lm_head = wte), cung ids = (i*37+11)%V:
+
+    HF loss with NATIVE-init weights = 10.789082
+    NATIVE bseq loss (same init)     = 25.453860
+    DIFF = 14.664778
+    ln(V) = 10.824905
+
+KET LUAN: chenh loss KHONG phai do initialization. HF voi cung phan phoi weights ra
+~ln(V)=10.82 (dung cho logits gan uniform), trong khi native ra 25.45. Vay hieu ung nam o
+forward/loss implementation cua native reference (gpt2_forward_saved / smm_dot_pd /
+gpt2_loss), KHONG phai kernel TKV da thay the.
+
+Bang chung kem: 23 kernel da duoc verify rieng le bit-exact/tolerance, va native loss giu
+nguyen 25.45386 truoc/sau moi lan thay - tuc sai so nay CO SAN trong native reference,
+khong phai do mirror TKV gay ra.
+
+Ve 355x CPU: van la measured, nhung chung loai - so sanh giua hai implementation khong co
+cung numerics. Khong nang cap thanh "cung bai toan nhanh hon 355x".
