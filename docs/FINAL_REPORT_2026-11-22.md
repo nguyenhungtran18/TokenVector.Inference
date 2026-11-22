@@ -115,3 +115,27 @@ KET LUAN:
 
 Khong tua sua native reference - no la nen tang cua EXACT gate. Ghi nhan de biet cach doc
 con so 25.454: no la fingerprint on dinh, khong phai training loss so sanh duoc voi HF.
+
+## 10. KHAC PHUC LOSS - BASELINE MOI (2026-11-22)
+
+Nguyen nhan: `_mk_opt` trong simd_bench_124m_seq.tkv dung `lr_max=0.05, lr_min=0.0025`
+(cao gap ~80x muc GPT-2 thuong dung 6e-4). Warm step khong copy weights nguoc lai,
+nen sau 2 step voi lr 0.05 params/logits no -> loss 25.45 (da locate o muc 9).
+
+Fix: `lr_max 0.05 -> 0.0006`, `lr_min 0.0025 -> 0.00006`.
+Da ap dung vao source chinh + rebuild demo/bseq.dll (Inference 4bdece1).
+
+Ket qua measured (prebuilt .so + bseq_lrfix 20 step, Inference 66992a6):
+    warm loss = 10.7604 (lr=0.0003)   <- bang ln(V)=10.8249
+    cac step: 10.07 10.53 9.76 8.97 7.79 7.96 7.16 7.76 6.89 5.80
+              5.77 4.77 4.92 4.27 4.03 3.46 3.10 2.68 2.40
+    final loss_val = 2.4032 ; bseq rc=0 ; khong NaN/Inf ; logits max ~10.2
+
+BASELINE MOI:
+- init loss ~10.76 (≈ ln V) — dung.
+- loss GIAM danh, sau 20 step = 2.40 — train dung.
+- Legacy fingerprint 25.45386 (old lr 0.05) GIU LAI de doi chieu cac ket qua cu,
+  KHONG con duoc dung lam EXACT gate. Moi verify kernel tu day so voi baseline moi.
+
+Prebuilt native .so: demo/tkv_simd_native_prebuilt.so (108152 bytes, ELF, Inference 307d1e5)
+-> cac notebook sau KHONG can gcc build.
