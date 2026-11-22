@@ -699,3 +699,12 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Kernel scalar replica: GEMM fmaf thu tu d tang, online softmax f32, custom AVX2 exp
   (rint/ldexp/fmaf) + expf tail. Khong chen C.
 - CHAP NHAN tolerance cho flash path (khong claim bitwise).
+
+### 2026-11-22 (STEP7v PASS) - FlashAttentionBwdFusedLse THUAN TKV
+- Ket qua Colab (prototype 9b88b60): ctxo_diff=0 (bitwise), dqo_maxabs 4.77e-07..7.15e-07
+  (muc 1 ULP) -> dat waiver s0.125. C INJECTED=False.
+- 3 bug da fix: (1) C scope f_acc/ob; (2) dctx stride dung h (khong phai 3h) - loi nay
+  gay segfault -> Colab reset runtime; (3) compiler CPU infer `n[` trong `lse_in[` -> f_x thanh
+  int -> dqo sai. Da sua word-boundary, IL_IDENTICAL; 5 file .cpu.c khac chi them stdlib.h.
+- Con lai trong tkv_flash_attn.c: FlashAttentionBwdFused (pass1 recompute), FwdLseMulti,
+  BwdFusedLseMulti, BwdMergeMulti, FwdFused. + tkv_attn_cuda.c (2 kernels).
