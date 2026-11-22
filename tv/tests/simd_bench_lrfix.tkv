@@ -389,7 +389,7 @@ def main() -> 'i32':
             b_op = 1.0e9
             b_cb = 1.0e9
             kk = 0
-            while kk < 2:
+            while kk < 20:
                 zh = thread_spawn(_bq_zr_one, _BqZrJob(opt.g))
                 ta = now_ms()
                 sv = _f124_fwd2(ps, ids, pos, 1, _sc5_arg(sc5.data, pool), sab, abp, hpl)
