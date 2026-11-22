@@ -532,3 +532,13 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Kernel elementwise DON GIAN van lam thuanne TKV duoc: F32ListAdd, F32ListCopy
   (F32Addcmul co bam order FMA khac giua AVX2 va scalar tail -> de sau).
 - Nguyen tac: khong tu y mo rong compiler; da co d_sqrt (user cho phep) la du cho LN.
+
+### 2026-11-22 (STEP7k PASS) - F32ListAdd/F32ListCopy BIT-EXACT, THUAN TKV
+- Ket qua Colab (prototype/cuda-backend 10eb162): 8/8 bitwise=True diff=0
+  (F32ListAdd va F32ListCopy, n=17/64/1000/4097 - co ca size le de test tail).
+  C INJECTED=False. Build cung flags -O2 -mavx2 -mfma.
+- KERNEL THUAN TKV THU 7-8: + F32ListAdd, F32ListCopy.
+  Tong: LinearDwFused, BiasAddRows, BiasGrad, MergeHbHead, LayernormFwd,
+  LayernormBwdFused, F32ListAdd, F32ListCopy.
+- 5 kernel auto-glue C van de nguyen; 3 file SIMD/CUDA lon van can mo rong DSL (xem note truoc).
+- HEAD: TokenVector prototype/cuda-backend 10eb162; Inference main c7c0d00 (notebook).
