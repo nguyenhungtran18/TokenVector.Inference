@@ -659,3 +659,17 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   goc colab_train_gpt2medium, gioi han STEPS=120, bo 2 cell perplexity/sample,
   them print VERIFY HEADS. Ky vong: ADAMW PATH=1, loss giam, SPEEDUP ~2x.
 - CHUA co ket qua Colab.
+
+### 2026-11-22 (STEP7t) - FIX ROOT CAUSE GPU loss 10.82 (CUDA int inference)
+- Phat hien: GPU verify (STEP7s) loss 3.8906 -> 10.8249 (ln V). Khong phai do 14 kernel native.
+- B?ng ch?ng: notebook tot 11-21 dung main 07e0ce8 + CUDA backend 7da4f67; `git diff 07e0ce8 9ccc17b`
+  RONG (M4/M4b reverted net-zero). adamw.cuda.cu khac 1 dong:
+  `int pi` (bad, tu 94e2dfb) thay vi `float pi` (good, tu 7da4f67).
+- Root cause: rule trong cuda_feature.tkv `'r * ' in rhs` khop NHAM `lr * mi` -> is_int=1 -> int pi
+  -> moi update param bi truncate -> model random -> loss ln(V).
+- FIX: them `_cuda_has_int_mul()` kiem tra word-boundary (chi tinh index khi toan tu o ranh gioi tu),
+  thay rule cu. Self-host vong.exe IL_IDENTICAL. Regenerate adamw.cuda.cu -> `float pi` (int_pi=False).
+  Commit TokenVector prototype/cuda-backend 2eee803.
+- Notebook verify: demo/colab_GPU_VERIFY_CUDA_FIX_2026-11-22.ipynb (Inference 3edf1f4),
+  co REGRESSION assert `float pi` trong adamw.cuda.cu + 120 steps train.
+- Ky vong: loss 3.89 -> ~3.7, ADAMW PATH=1, speedup ~2x. CHUA co ket qua Colab.
