@@ -734,3 +734,14 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Compiler bugs da fix trong hanh trinh: d_sqrt ordering, C scope, dctx stride, int inference
   (CUDA 'r * ' va CPU 'n[' trong 'lse_in[').
 - HEAD cuoi: TokenVector main 9ccc17b; prototype/cuda-backend 688567d; Inference main c45b78a.
+
+### 2026-11-22 (BENCH FINAL) - SO TOC DO VOI PYTORCH (ket qua Colab thuc do)
+- GPU 400 steps, GPT2-medium 355M, T=1024, T4 (main 9ccc17b / prototype 688567d):
+  * torch median 501.7 ms, TKV median 224.2 ms => SPEEDUP 2.24x, ADAMW PATH=1.
+  * loss torch 9.0058 -> 5.3827; TKV 3.8906 -> 3.7419 (KHONG so sanh truc tiep,
+    fp16/board layout khac - da ghi chu tu dau).
+- CPU native all-TKV (bseq mode2, 3 runs): TONG 29034/28291/29254 us, median 29.03 ms,
+  loss_val 25.45386 (giu nguyen).
+- PyTorch CPU eager, GPT2-124M, T=1024: median 10318.9 ms (loss 11.00->9.49).
+  => speedup 355.41x. CAN GHI CHU: KHONG phai so sanh apple-to-apple (xem note rieng).
+- HEAD bench: Inference 5eabf91. Khong doi code - chi do va ghi nhan.
