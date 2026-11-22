@@ -582,3 +582,16 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
  LayernormBwdFused, F32ListAdd, F32ListCopy, LinearDxFused, SoftmaxCausalBwd.
 - Con 4 auto-glue: GeluErfFwd/Bwd (can d_exp f64), SoftmaxCausalFwd (can d_exp f64),
   EmbedBwdFused (can mang dong counts/starts/cursor/pos).
+
+### 2026-11-22 (STEP7n PASS) - SoftmaxCausalFwd THUAN TKV (d_exp, thay auto-glue)
+- Ket qua Colab (prototype/cuda-backend 3a4156f): 4/4 bitwise=True diff=0
+  (n,inv)=(8,0.125),(16,0.25),(64,0.125),(127,0.25). C INJECTED=False, exp double.
+- DSL mo rong: d_exp( -> exp( double (token __TKVEXP__, khong bi expf an). IL_IDENTICAL.
+- Native la SCALAR THUAN (scale/max f64 chua round, exp f64, totv f64 chua round,
+  ivv f64, mask). Auto-glue giam 4 -> 3.
+- KERNEL THUAN TKV THU 11: + SoftmaxCausalFwd.
+ Tong: LinearDwFused, BiasAddRows, BiasGrad, MergeHbHead, LayernormFwd,
+ LayernormBwdFused, F32ListAdd, F32ListCopy, LinearDxFused,
+ SoftmaxCausalBwd, SoftmaxCausalFwd.
+- Con 3 auto-glue: GeluErfFwd/Bwd (can kiem tra AVX2 vs scalar bit-identical),
+  EmbedBwdFused (can mang dong).
