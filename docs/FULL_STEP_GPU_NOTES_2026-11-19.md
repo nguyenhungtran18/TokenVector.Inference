@@ -650,3 +650,12 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - Harness: mode 1 bi MissingMethodException `TKVApp._step124_gpu` trong Inference main hien tai;
   mode 2 chay tot. Da doi notebook sang mode 2.
 - HEAD: TokenVector prototype/cuda-backend 2252422; Inference main dfb2ecc.
+
+### 2026-11-22 (STEP7s) - GPU train verify sau khi doi compiler (cho Colab)
+- Ly do: da them 7 builtin vao cpu_feature.tkv + rebuild tkvc-tv.exe. GPU path dung
+  cuda_feature.tkv va file .cuda.cu SINH SAN (khong chay compiler trong notebook) -> ve ly
+  thuyet khong anh huong, nhung van verify.
+- Notebook demo/colab_GPU_VERIFY_AFTER_TKV14_2026-11-22.ipynb (Inference fd0336f):
+  goc colab_train_gpt2medium, gioi han STEPS=120, bo 2 cell perplexity/sample,
+  them print VERIFY HEADS. Ky vong: ADAMW PATH=1, loss giam, SPEEDUP ~2x.
+- CHUA co ket qua Colab.
