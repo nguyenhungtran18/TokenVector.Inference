@@ -708,3 +708,12 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
   int -> dqo sai. Da sua word-boundary, IL_IDENTICAL; 5 file .cpu.c khac chi them stdlib.h.
 - Con lai trong tkv_flash_attn.c: FlashAttentionBwdFused (pass1 recompute), FwdLseMulti,
   BwdFusedLseMulti, BwdMergeMulti, FwdFused. + tkv_attn_cuda.c (2 kernels).
+
+### 2026-11-22 (STEP7w PASS) - TOAN BO 7 FLASH KERNEL THUAN TKV
+- Ket qua Colab (prototype 0268b1f, Inference 0689702): 7/7 dat waiver, maxabs 2.38e-07..4.77e-07.
+  BwdLse/BwdLseMulti/BwdMergeMulti ctxo/ctxT bitwise=True (diff=0).
+- 1 file .tkv duy nhat chua 2 helper + 7 export (compiler ho tro nhieu kernel + goi kernel khac).
+- Bug da fix: signature-body newline, lse->lse_out rename, thieu marker @tkv.cpu_kernel,
+  argtypes test 14 thay vi 13.
+- tkv_flash_attn.c (992 dong) DA THAY TOAN BO bang pure TKV.
+- FILE C/C++ CON LAI: tkv_attn_cuda.c (2 export TkvCudaAttnFwd/Bwd, 126 token CUDA, 104 malloc).
