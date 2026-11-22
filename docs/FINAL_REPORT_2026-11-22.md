@@ -91,3 +91,27 @@ khong phai do mirror TKV gay ra.
 
 Ve 355x CPU: van la measured, nhung chung loai - so sanh giua hai implementation khong co
 cung numerics. Khong nang cap thanh "cung bai toan nhanh hon 355x".
+
+## 9. DEBUG LOGITS - locate nguon cua loss 25.45 (bo sung)
+
+Benv `colab_DEBUG_LOGITS_PARITY_2026_11_22.ipynb` (Inference 8945eb4) chay `bseq_debug.exe`
+(compiled tu `simd_bench_debug.tkv` bang tkvc-tv local, co ham dbg_logits). Ket qua:
+
+    (warm, truoc opt.step)   max=3.0046 min=-2.986 mean=-0.0003  row0=-0.286 -0.804 -0.376
+    (loop iter 1, sau 1 step) max=3.0046 min=-2.986 mean=-0.0003  row0= same
+    (loop iter 2, sau 2 step) max=11.095 min=-12.035 mean=8.3098 row0=7.377 8.314 10.190
+    BPHASE ... loss_val=25.45386
+
+    HF cung phan phoi weights: max=2.9598 min=-3.0413 mean=-0.0014, CE=10.789081
+
+KET LUAN:
+- Forward NATIVE o lan dau (va sau 1 step) HOAN TOAN BINH THUONG, logits khop HF
+  (max ~3, mean ~0, CE ~10.8). Khong co loi lm-head / smm_dot_pd / gpt2_loss.
+- Logits chi NO sau lan opt.step() thu 2 (mean 8.31, variance lon) => loss 25.45 la
+  HAU QUAN cua trang thai params sau 2 buoc optimizer cua native reference, KHONG phai
+  loi forward. Day la artifact CO SAN cua native reference (ghim la EXACT 25.454).
+- Vi 23 kernel deu duoc verify bit-exact/tolerance rieng le va loss gium nguyen 25.45386
+  truoc/sau moi lan thay, artifact nay KHONG do mirror TKV gaya ra.
+
+Khong tua sua native reference - no la nen tang cua EXACT gate. Ghi nhan de biet cach doc
+con so 25.454: no la fingerprint on dinh, khong phai training loss so sanh duoc voi HF.
