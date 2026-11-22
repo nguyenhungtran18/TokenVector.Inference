@@ -623,3 +623,15 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - HEAD: TokenVector prototype/cuda-backend 2252422; Inference main d304be3.
 - CON LAI 2 file lon CHUAdung: tkv_flash_attn.c (992 dong, 331 SIMD, 55 malloc),
   tkv_attn_cuda.c (394 dong, 28 SIMD, 104 malloc, 126 CUDA). Can user quyet dinh.
+
+### 2026-11-22 (STEP7r) - TICH HOP 14 PURE TKV VAO NATIVE BUILD (cho Colab verify)
+- User chon: integrate vao native build, verify loss 25.454 / step time.
+- Co che (theo tien le colab_NATIVE_LOSS_AFTER_TKV): sinh .cpu.c de OVERWRITE source native roi build lai .so.
+  * 10 kernel trong tkv_bwd_ops.c -> gom thanh 1 file (strip include/define, them header) de.
+  * linear_dw_cpu.cpu.c -> tkv_linear_dw.c; linear_dx_cpu.cpu.c -> tkv_linear_dx.c.
+  * F32ListAdd/F32ListCopy nam trong tkv_simd_native.c -> thay body bang regex
+    `EXPORT int NAME\(.*?\n\}\n` (da test match=True local).
+- Notebook demo/colab_NATIVE_TKV14_INTEGRATE_LOSS_2026-11-22.ipynb (Inference 760bd37):
+  cell 1 patch+build, cell 2 check 14 symbols + chay `dotnet demo/bseq.dll` mode 1 doc loss.
+- Ky vong: loss van 25.454 (EXACT).neu doi -> .tkv kernel khong dung duoc cho native path.
+- CHUA co ket qua Colab. Khong claim integrated thanh cong khi chua tra notebook.
