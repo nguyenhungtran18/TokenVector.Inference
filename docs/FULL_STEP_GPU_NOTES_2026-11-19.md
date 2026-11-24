@@ -745,3 +745,25 @@ Edit `D:\TokenVector\Release\tools\simd_native\torch_fused.cpp`, function `TkvFu
 - PyTorch CPU eager, GPT2-124M, T=1024: median 10318.9 ms (loss 11.00->9.49).
   => speedup 355.41x. CAN GHI CHU: KHONG phai so sanh apple-to-apple (xem note rieng).
 - HEAD bench: Inference 5eabf91. Khong doi code - chi do va ghi nhan.
+
+### 2026-11-24 01:06 UTC (Colab T4) - GPU BRIDGE DO TOKENVECTOR SINH C++ - THANH CONG
+- Notebook: colab_TORCH_KERNEL_FROM_TKV_V17_2026-11-23.ipynb -> colab_FINAL_TOKENVECTOR_GENERATED_GPU_BRIDGE_2026-11-24.ipynb
+- HEAD: Inference 9ccc17b (bridge reference) / 793bbd9 (V17 notebook); TokenVector main 9ccc17b;
+  prototype/cuda-backend 92a2349. Generated .torch.cpp 18919 bytes, nvcc build rc=0, ctypes load OK.
+- GPT2-medium 355M, T=512, 60 steps, torch 2.14.1+cu130, Tesla T4:
+  * torch: median(last50) 442.3 ms, loss 9.0058 -> 5.0647
+  * TKV (generated bridge): median(last50) 187.8 ms, loss 3.8906 -> 3.4384
+  * SPEEDUP 2.36x; ADAMW PATH=1 (tile kernel .tkv thong qua dlsym, KHONG ATen fallback)
+  * forward-only mode=1: loss 3.8906; VRAM free truoc fwd 12.41 GB, sau step0 5.75/14.56 GB
+- 3.8906 la fingerprint cua duong native/fp16 (bang bridge C++ viet tay cu, FULL_STEP notes 2026-11-19),
+  KHONG so sanh truc tiep voi 9.0058 cua HF fp32 eager. Khong doi tuyen bo fidelity.
+- Cac bug da fix tren duong .tkv -> .torch.cpp (deu sua trong compiler/backend, khong sua C++ tay):
+  1. duplicate global declaration (vector types) -> elif chain
+  2. local undeclared (changed/V/p/T): gnames + declaration block
+  3. tuple > 7 phan tu -> split string; .item() -> tkv_item_f32 (item<float>)
+  4. data_ptr<int64_t> + cast long long*; extern "C" trong TKV_TORCH_EXPORT
+  5. device-prep thieu (g_p_all/m_dev/v_dev/grad_dev + half views + g_dev_ready)
+  6. set_requires_grad dat truoc view; SDPA is_causal=true; log_softmax tren float
+  7. try/catch trong codegen (TKV_ERR + g_tkv_last_err/TkvFullLastErr, khong abort kernel)
+  8. ROOT CAUSE cuoi: "% 1" de ep kieu int lam V/h/T/L = 0 -> view({0,0}) -> exception.
+     Thay bang "% 1000000007" (giu gia tri, van ep int). Day la loi duy nhat chan forward.
