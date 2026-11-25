@@ -29,19 +29,29 @@ KET LUAN: OK
 - Sau **step 1**, tham số khớp reference double tới `2e-8` ⇒ forward, backward và AdamW đúng.
 - Sai số loss **tăng dần** tới `1.06e-4` ở step 5. Đây là điểm cần giải thích, không phải lỗi chặn.
 
-## Giả thuyết cho sai số tăng dần (đang kiểm chứng)
+## Chẩn đoán sai số tăng dần — đã khoanh vùng (notebook V4, HEAD `0196551`)
 
-Hai nguồn khả dĩ, tách được bằng phép đo mới (notebook V4):
+| step | dW1max | dW2max | db1max | db2max | lossIL − lossDouble(tham số IL) |
+|---|---|---|---|---|---|
+| 1 | 2.90e-8 | 4.78e-8 | 3.62e-10 | 3.81e-09 | 5.67e-8 |
+| 2 | 6.37e-5 | 7.02e-8 | 3.43e-05 | 3.78e-08 | 2.02e-7 |
+| 3 | 1.70e-4 | 1.33e-7 | 1.42e-04 | 1.27e-07 | 1.09e-7 |
+| 4 | 2.29e-4 | 9.26e-7 | 2.19e-04 | 2.60e-07 | 9.17e-8 |
+| 5 | 2.64e-4 | 2.31e-6 | 2.63e-04 | 5.15e-07 | 1.97e-8 |
 
-1. **Forward**: `tanh.approx.f32` trong GELU (sai số ~1e-6 trên mỗi phần tử H) — sẽ làm
-   `loss_double(tham số IL)` lệch khỏi `LOSS` in ra.
-2. **Đường cập nhật**: AdamW f32 với `eps = 1e-8`; các phần tử gradient rất nhỏ
-   (`|g| ~ 1e-8`) rơi vào vùng `sqrt(v/bc2) ≈ eps`, nơi làm tròn f32 đổi hướng cập nhật
-   ⇒ tham số lệch dần giữa f32 và f64.
+Kết luận từ bảng này:
 
-Notebook V4 in **toàn bộ tham số sau từng step** + thống kê `|g|` (min/max/số phần tử < 1e-7),
-rồi so sánh từng step và tính lại forward bằng double **từ chính tham số IL** — cho biết
-sai số nằm ở forward hay ở update.
+1. **Forward + softmax/loss chính xác.** Cột cuối là loss tính lại bằng double **từ chính tham số IL
+   in ra**; khớp `LOSS` in ra ≤ `2e-7` ở **mọi** step ⇒ `tanh.approx.f32` trong GELU **không phải**
+   nguyên nhân (loại giả thuyết 1).
+2. **Không phải vùng `eps`.** `tiny = 0` ở mọi step (không phần tử nào `|g| < 1e-7`) ⇒ loại giả thuyết 2.
+3. **Sai số chỉ nằm ở W1/b1**, tức nhánh `dZ = dH ⊙ dgelu(Z)`; W2/b2 (nhánh `dL`) sạch tới `1e-7`.
+   Drift bắt đầu từ **step 2** (sau update đầu tiên) và bão hoà dần.
+
+Nghi vấn còn lại: sai số **gradient** của nhánh `dZ` là bao nhiêu, và AdamW khuếch đại nó lên mức nào.
+Đo mới (HEAD `ec63d03`): exe in thêm `DW1/DW2/DB1/DB2` từng step; reference tính
+`predW1 = |Adam(g_IL) − Adam(g_ref)|` — nếu `obsW1 ≈ predW1` thì drift được giải thích hoàn toàn
+bởi làm tròn f32 bị Adam khuếch đại, không phải lỗi kernel.
 
 ## Ý nghĩa
 
