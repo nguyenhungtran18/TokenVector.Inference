@@ -99,6 +99,24 @@ cùng PTX module: mỗi thread xử lý **1 token**, 3 pass tuần tự trên V 
 dùng `ex2.approx.f32`/`lg2.approx.f32`. Kernel ghi `dLossRow[t] = -(log P[id])/T`; host chỉ D2H
 `T` float để in loss. Không còn D2H của logits và không còn H2D của gradient mỗi step.
 
+### Xác nhận device-loss trên T4 — HEAD `93e8bc7` (notebook 26)
+
+Lần đầu JIT báo `MODULE FAIL 218`. Nguyên nhân được sửa bằng hai thay đổi trong PTX:
+- `[reg+reg]` → `add.u64` riêng rồi `ld.global.f32 x,[xa]` (khớp mọi kernel cũ đã verify);
+- predicate `eq` → `pis` (`eq` là từ khoá so sánh của PTX).
+
+Sau fix, **không còn dòng FAIL**:
+
+```
+loss maxerr = 4.631e-7
+dG1max (step1) = 3.29e-9 ; dGb1max = 1.02e-8
+dLossFwd <= 2.02e-7 ; quy.dao duoc.Adam giai.thich = True
+KET LUAN: OK
+```
+
+So với bản host-loss (`b831002`), loss-maxerr không đổi (`4.631e-7`), gradient vẫn sạch ~1e-9.
+⇒ Toàn bộ bước train toy không còn transfer `T×V` mỗi step; sẵn sàng cho vòng lặp đo thời gian.
+
 ## Ý nghĩa
 
 Đây là lần đầu một bước train **hoàn toàn bằng IL/PTX tự sinh, không C++, không torch** chạy đúng
