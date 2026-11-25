@@ -76,8 +76,28 @@ Tính `dW1` bằng double từ các giá trị `DW1` mà exe in ra (notebook 23)
 
 `ilgpu_step_full_gpu.tkv` (HEAD sau fix): cấp phát `dZB1` (T×D), dùng lại kernel `biasadd`
 (grid=D, block=T) để tính `Z + b1` trên device, rồi truyền `dZB1` vào `dgelu`. Đã biên dịch sạch
-bằng `tkvc-tv.exe`. Kỳ vọng sau fix: `dG1max`, `dGb1max` ~1e-8; `loss maxerr` ~1e-7;
-`W1` maxerr ~1e-8; `KET LUAN: OK`.
+bằng `tkvc-tv.exe`.
+
+### Kết quả sau fix — xác nhận trên T4, HEAD `b831002` (notebook 24)
+
+```
+dG1max:        1.962e-4  -> 3.190e-9
+dGb1max:       7.887e-4  -> 1.119e-8
+loss maxerr:   1.061e-4  -> 4.631e-7
+W1/W2 step1:   2.614e-8 / 4.779e-8
+dLossFwd <= 2.021e-7   |   quy.dao duoc.Adam giai.thich = True
+KET LUAN: OK
+```
+
+5/5 step sạch: forward, backward, AdamW đều trên GPU, không C++/torch. Toàn bộ tham số và
+gradient in ra khớp reference double ở mức f32. Đây là mốc **hoàn tất** bước train GPU toy.
+
+## Bước tiếp: đưa loss/softmax xuống device (HEAD sau đây)
+
+Thay host-softmax (D2H `T×V` + H2D `dL` mỗi step) bằng một `.entry loss_kernel` duy nhất trong
+cùng PTX module: mỗi thread xử lý **1 token**, 3 pass tuần tự trên V (max → sum exp → ghi `dL`),
+dùng `ex2.approx.f32`/`lg2.approx.f32`. Kernel ghi `dLossRow[t] = -(log P[id])/T`; host chỉ D2H
+`T` float để in loss. Không còn D2H của logits và không còn H2D của gradient mỗi step.
 
 ## Ý nghĩa
 
