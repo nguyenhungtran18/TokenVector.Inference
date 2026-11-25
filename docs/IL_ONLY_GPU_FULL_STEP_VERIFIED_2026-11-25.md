@@ -48,10 +48,36 @@ Kết luận từ bảng này:
 3. **Sai số chỉ nằm ở W1/b1**, tức nhánh `dZ = dH ⊙ dgelu(Z)`; W2/b2 (nhánh `dL`) sạch tới `1e-7`.
    Drift bắt đầu từ **step 2** (sau update đầu tiên) và bão hoà dần.
 
-Nghi vấn còn lại: sai số **gradient** của nhánh `dZ` là bao nhiêu, và AdamW khuếch đại nó lên mức nào.
-Đo mới (HEAD `ec63d03`): exe in thêm `DW1/DW2/DB1/DB2` từng step; reference tính
-`predW1 = |Adam(g_IL) − Adam(g_ref)|` — nếu `obsW1 ≈ predW1` thì drift được giải thích hoàn toàn
-bởi làm tròn f32 bị Adam khuếch đại, không phải lỗi kernel.
+Nghi vấn cuối cùng: sai số **gradient** của nhánh `dZ` là bao nhiêu. Đo HEAD `ec63d03`:
+
+| step | dG1max | dG2max | dGb1max | dGb2max | predW1 | obsW1 |
+|---|---|---|---|---|---|---|
+| 1 | 1.96e-4 | 1.67e-7 | 7.89e-4 | 1.77e-8 | — | 2.90e-8 |
+| 2 | 1.33e-5 | 1.86e-7 | 9.87e-5 | 2.16e-8 | 1.15e-5 | 6.37e-5 |
+| 3 | 1.35e-4 | 1.51e-5 | 4.50e-4 | 4.50e-6 | 6.92e-5 | 1.70e-4 |
+
+`dG2max` ~1e-7 (sạch), `dG1max` ~1e-4 trên gradient cỡ 1e-3 ⇒ **sai ~20%, không phải làm tròn**.
+
+### Nguyên nhân xác định (offline, không cần GPU)
+
+Tính `dW1` bằng double từ các giá trị `DW1` mà exe in ra (notebook 23), so với hai ứng viên:
+
+| ứng viên | maxerr vs IL |
+|---|---|
+| `dgelu(Z)` — code cũ | **1.03e-9** (IL đang làm cái này) |
+| `dgelu(Z + b1)` — đúng, giống forward | **1.96e-4** (đúng bằng `dG1max` đo được) |
+
+⇒ Kernel `dgelu` **đúng**; **wiring sai**: kernel nhận `Z` chưa cộng bias, trong khi forward tính
+`H = gelu(Z + b1)`. Step 1 vẫn khớp `2.9e-8` vì AdamW ở step 1 là sign-only
+(`m/bc1 = g`, `sqrt(v/bc2) = |g|` ⇒ update `= lr·sign(g)`): sai biên độ bị che, rồi nhiễm vào
+`m/v` từ step 2.
+
+### Sửa
+
+`ilgpu_step_full_gpu.tkv` (HEAD sau fix): cấp phát `dZB1` (T×D), dùng lại kernel `biasadd`
+(grid=D, block=T) để tính `Z + b1` trên device, rồi truyền `dZB1` vào `dgelu`. Đã biên dịch sạch
+bằng `tkvc-tv.exe`. Kỳ vọng sau fix: `dG1max`, `dGb1max` ~1e-8; `loss maxerr` ~1e-7;
+`W1` maxerr ~1e-8; `KET LUAN: OK`.
 
 ## Ý nghĩa
 
