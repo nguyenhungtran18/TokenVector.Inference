@@ -110,9 +110,26 @@ LOSS 13.193880 -> 12.885666 -> 12.616205
 Bug khi tăng V: khởi tạo `Wh` dùng `0.2 + 0.01*(i+j)` với `j` tới 50257 → weight tới ~502,
 logits explode, `exp` underflow, loss `inf`. Đổi thành `0.2 + 0.01*(i + (j % 8))`.
 
+## GPT2-medium config — chạy sạch (notebook 84, HEAD `e413c32`)
+
+`ilgpt2_trainN.tkv` dạng layer-loop, `NL=24, T=512, H=1024, F=4096, V=50257`:
+
+```
+LOSS 10.824877 (x2 step, ~= ln 50257)
+24 x MARK B (23..0) / step, MARK FWD + MARK BWD + MARK UPD, khong FAIL
+KET LUAN: OK
+max ldloc.s = 254 (<256)
+```
+
+Các bug khi scale phải sửa:
+- khởi tạo weight/input/gamma chỉ dùng `jj % 8` → `ii` vẫn tới 1024 → weight ~10 → activation nổ;
+  dùng hằng số cho mọi init.
+- `exp(2*z)` cho tanh overflow khi `z` lớn → clamp `thv = ±1` khi `|z| > 8`.
+- sau softmax chỉ H2D vào buffer riêng `pd`, quên H2D vào buffer dùng chung `dP` → attention = 0.
+- `hGY2` cấp `qb` nhưng D2H gradient `fb` → tràn buffer, segfault.
+
 ## Tiếp theo
 
-1. **NL=24, H=1024, F=4096**: không thể nhân đôi code 24 lần (vượt 256 local) — phải viết lại
-   thành **vòng lặp theo lớp với mảng device-pointer**, tái dùng một đoạn code.
-2. Thay LN1/LN2 host bằng kernel device thiết kế lại (lần gọi `lnf_kernel` thứ 2 từng segfault).
-3. Thêm AdamW (hiện dùng SGD) và timing; đo median ms/step; thêm path fp16 tensor-core để so `187.8 ms`.
+1. Đo ms/step (cần bớt vài local để nhét `time_perf`) — hiện vẫn host-heavy nên chưa so được `187.8 ms`.
+2. Thay LN/dgelu/softmax/CE bằng kernel device để bỏ D2H/H2D mỗi step.
+3. Thêm AdamW (hiện SGD `lr=1e-7`) rồi path fp16 tensor-core để so baseline `2.36x`.
