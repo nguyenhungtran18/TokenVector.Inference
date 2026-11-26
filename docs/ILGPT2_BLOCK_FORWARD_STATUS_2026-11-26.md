@@ -128,8 +128,20 @@ Các bug khi scale phải sửa:
 - sau softmax chỉ H2D vào buffer riêng `pd`, quên H2D vào buffer dùng chung `dP` → attention = 0.
 - `hGY2` cấp `qb` nhưng D2H gradient `fb` → tràn buffer, segfault.
 
+## Số đo baseline GPT2-medium (notebook 85, HEAD `09755b1`)
+
+```
+MS_TOTAL 12843.70 ms / 2 step  ->  MS_STEP 6421.85 ms
+LOSS 10.824877 (x2), KET LUAN: OK
+```
+
+So với bridge C++ sinh ra `187.8 ms/step` (torch eager `442.3 ms`, speedup `2.36x`):
+IL-only host-heavy chậm hơn ~34x. Nguyên nhân: mỗi lớp D2H/H2D buffer `Z` (~8 MB),
+host gelu ~2M phần tử ×24, host softmax CE ~25.7M phần tử ×2, host LN 25M phần tử.
+
 ## Tiếp theo
 
-1. Đo ms/step (cần bớt vài local để nhét `time_perf`) — hiện vẫn host-heavy nên chưa so được `187.8 ms`.
-2. Thay LN/dgelu/softmax/CE bằng kernel device để bỏ D2H/H2D mỗi step.
-3. Thêm AdamW (hiện SGD `lr=1e-7`) rồi path fp16 tensor-core để so baseline `2.36x`.
+1. Dùng các kernel device đã verify (`lnf`, `sf`, `gelu`, `dgelu`, `loss_kernel`) thay host loop.
+   Cần bớt thêm local (hiện 253/255) để nhét handle/module.
+2. Thêm AdamW (hiện SGD `lr=1e-7`).
+3. Thêm path fp16 tensor-core (`cublasGemmEx`) với master weight fp32 để so `187.8 ms`.
