@@ -74,9 +74,22 @@ làm `T/H/F/V` đọc thành `256/256/65536/2048` (vòng LN chạy 29 lần). Go
 (`w0..w25`, `f0..f20`, `u*`, `v*`, `z*`, `b*`, `c*`) thành 2 biến dùng lại → max `ldloc.s = 177`.
 Bài học: **phải kiểm tra max local index < 256** cho mọi script .tkv lớn.
 
+## Train T=512 — verified (notebook 64, HEAD `cadd9fa`)
+
+Cùng script `ilgpt2_train1.tkv`, đổi `T=4 -> 512` và sửa `dS` cấp `sb = T*T*4` (thay `fb`):
+
+```
+LOSS 3.4078045 -> 3.2996545 -> 3.2021413
+3 x MARK UPD, khong FAIL, KET LUAN: OK
+MS_STEP 79.58 ms  (baseline host-heavy: LN/softmax/dgelu/CE deu qua host)
+```
+
+`lr` phải đổi `1e-3 -> 1e-6`: gradient trọng số là **tổng qua T token**, nên tăng ~128×
+khi T tăng 4 → 512. Đây là mốc train IL-only đầu tiên ở `T=512`.
+
 ## Tiếp theo
 
-1. Nhân thành 2 lớp (kiểm tra max `ldloc.s < 256` sau khi thêm buffer), rồi đổi `T=512`.
+1. Nhân thành 2 lớp (kiểm tra max `ldloc.s < 256` sau khi thêm buffer).
 2. Thay LN1/LN2 host bằng kernel device thiết kế lại (lần gọi `lnf_kernel` thứ 2 từng segfault).
-3. Thêm AdamW (hiện dùng SGD `lr=0.001`), đo median ms/step; sau đó V=50257, NL=24;
+3. Thêm AdamW (hiện dùng SGD), đo median ms/step sau khi device hóa; sau đó V=50257, NL=24;
    thêm path fp16 tensor-core để so `187.8 ms`.
