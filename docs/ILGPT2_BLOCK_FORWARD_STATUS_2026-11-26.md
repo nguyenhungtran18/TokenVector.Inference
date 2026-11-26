@@ -87,9 +87,21 @@ MS_STEP 79.58 ms  (baseline host-heavy: LN/softmax/dgelu/CE deu qua host)
 `lr` phải đổi `1e-3 -> 1e-6`: gradient trọng số là **tổng qua T token**, nên tăng ~128×
 khi T tăng 4 → 512. Đây là mốc train IL-only đầu tiên ở `T=512`.
 
+## 2-layer train step — verified (notebook 65, exe HEAD `7e9df80`)
+
+`ilgpt2_train2.tkv` sinh tự động từ bản 1 lớp: forward lớp 1 → lớp 2 → CE → backward lớp 2 → lớp 1 → SGD cả hai.
+T=512, H=8, F=32, V=8, lr=1e-6:
+
+```
+LOSS 4.4484606 -> 4.139653 -> 3.8697996
+2 x MARK FWD + 2 x MARK UPD / step, khong FAIL
+KET LUAN: OK (sau khi sua reference regex / so luong update)
+```
+
+Max local IL = **249** (đã chia sẻ scratch và buffer gradient giữa 2 lớp để né ngưỡng 256).
+
 ## Tiếp theo
 
-1. Nhân thành 2 lớp (kiểm tra max `ldloc.s < 256` sau khi thêm buffer).
+1. Đổi V=50257, NL=24 (dùng cùng cơ chế sinh code theo lớp; kiểm tra lại max local).
 2. Thay LN1/LN2 host bằng kernel device thiết kế lại (lần gọi `lnf_kernel` thứ 2 từng segfault).
-3. Thêm AdamW (hiện dùng SGD), đo median ms/step sau khi device hóa; sau đó V=50257, NL=24;
-   thêm path fp16 tensor-core để so `187.8 ms`.
+3. Thêm AdamW (hiện dùng SGD) và timing; đo median ms/step; thêm path fp16 tensor-core để so `187.8 ms`.
