@@ -31,8 +31,36 @@ Hiện tại LN2 tính trên host (D2H `T×H`, tính mean/rstd/xhat/y, H2D lại
 - Trình tự scale: **trung gian trước** (T=512, ít lớp/V nhỏ rồi mới V=50257, NL=24, 60 steps).
 - Baseline cần vượt: torch eager `442.3 ms` vs bridge C++ sinh ra `187.8 ms` = `2.36×`, fingerprint `3.8906` (fp16, không so trực tiếp với HF fp32 `9.0058`).
 
+## Block backward — verified (notebook 54, HEAD `aa13acd`)
+
+Script `Release/cuda_backend/examples/ilgpt2_bwd_clean.tkv` (exe 20 480 B) — tách khỏi forward,
+mọi tensor đầu vào sinh deterministic trên host rồi H2D, 16 gradient so với reference double:
+
+```
+GW2 2.0e-8   GW1 1.7e-7   GY2 1.7e-7   GX2 6.9e-7
+GA  1.7e-6   GWO 2.6e-6   GP  5.5e-6   GV 1.3e-6
+GS  1.0e-6   GQ  3.7e-7   GK  7.9e-7
+GWQ 4.4e-7   GWK 1.5e-6   GWV 1.1e-5
+GY1 3.2e-6   GDX 5.2e-6
+KET LUAN: OK
+```
+
+Các bug phải sửa (đều là dạng **ghi đè weight/buffer đầu vào bằng gradient** hoặc sai kích thước):
+
+1. `dZ`/`dHH` device buffer cấp `qb` (128 B) thay vì `fb` (512 B).
+2. `dHHg` tách riêng; `dZ` dùng `dHHg` (gradient), không dùng `dHH` (input thô).
+3. `dW1g`/`dW2g` tách riêng; `dY2` dùng `dW1` gốc, `dHHg` dùng `dW2` gốc.
+4. `dV` GEMM đúng `m=T, n=H, ldc=T` (không phải `H,T`).
+5. `dK` GEMM đúng `m=T, n=H`.
+
+Bản QKV-backward tối thiểu (`ilgpt2_qkv_bwd.tkv`, notebook 49) cũng sạch:
+`GWQ 6e-8, GWK 1e-7, GWV 2e-7, GY1 7e-8`.
+
+**Kết luận**: forward và backward của một block transformer đều đã verify ở mức f32,
+dù đang tạm tính LN/dgelu/softmax-backward trên host (cần device hóa để đo tốc độ).
+
 ## Tiếp theo
 
-1. Backward cho block: `dγ/dβ` qua GEMM với vector ones; `dQ/dK/dV` qua `sbk_kernel`; `dgelu` đã verify; residual add.
-2. Thay LN2 host bằng kernel device thiết kế lại.
-3. Lặp 2 lớp ở T=512, đo median ms/step; sau đó V=50257, NL=24.
+1. Ghép forward + backward thành vòng train 2 lớp ở T=512 (weight deterministic), kiểm tra loss giảm.
+2. Thay LN1/LN2 host bằng kernel device thiết kế lại (lần gọi `lnf_kernel` thứ 2 từng segfault).
+3. Đo median ms/step; sau đó V=50257, NL=24; thêm path fp16 tensor-core để so `187.8 ms`.
