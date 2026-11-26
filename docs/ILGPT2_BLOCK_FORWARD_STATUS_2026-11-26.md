@@ -100,8 +100,19 @@ KET LUAN: OK (sau khi sua reference regex / so luong update)
 
 Max local IL = **249** (đã chia sẻ scratch và buffer gradient giữa 2 lớp để né ngưỡng 256).
 
+## V=50257, 2 lớp — verified (notebook 68, HEAD `1f8b10d`)
+
+```
+LOSS 13.193880 -> 12.885666 -> 12.616205
+2 x MARK FWD + 2 x MARK UPD / step, KET LUAN: OK
+```
+
+Bug khi tăng V: khởi tạo `Wh` dùng `0.2 + 0.01*(i+j)` với `j` tới 50257 → weight tới ~502,
+logits explode, `exp` underflow, loss `inf`. Đổi thành `0.2 + 0.01*(i + (j % 8))`.
+
 ## Tiếp theo
 
-1. Đổi V=50257, NL=24 (dùng cùng cơ chế sinh code theo lớp; kiểm tra lại max local).
+1. **NL=24, H=1024, F=4096**: không thể nhân đôi code 24 lần (vượt 256 local) — phải viết lại
+   thành **vòng lặp theo lớp với mảng device-pointer**, tái dùng một đoạn code.
 2. Thay LN1/LN2 host bằng kernel device thiết kế lại (lần gọi `lnf_kernel` thứ 2 từng segfault).
 3. Thêm AdamW (hiện dùng SGD) và timing; đo median ms/step; thêm path fp16 tensor-core để so `187.8 ms`.
