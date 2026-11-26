@@ -59,8 +59,24 @@ Bản QKV-backward tối thiểu (`ilgpt2_qkv_bwd.tkv`, notebook 49) cũng sạc
 **Kết luận**: forward và backward của một block transformer đều đã verify ở mức f32,
 dù đang tạm tính LN/dgelu/softmax-backward trên host (cần device hóa để đo tốc độ).
 
+## 1-layer train step — verified (notebook 61, HEAD `0804559`)
+
+`Release/cuda_backend/examples/ilgpt2_train1.tkv` — forward + CE loss + backward + SGD, 3 bước,
+T=4 H=8 F=32 V=8, weight deterministic:
+
+```
+LOSS 2.821911 -> 2.337988 -> 1.9980869
+3 x MARK UPD, khong co FAIL, KET LUAN: OK
+```
+
+Bug quyết định: IL có **263 local**, `ldloc.s`/`stloc.s` dùng chỉ số 8-bit → tràn ở 256,
+làm `T/H/F/V` đọc thành `256/256/65536/2048` (vòng LN chạy 29 lần). Gom các handle tạm
+(`w0..w25`, `f0..f20`, `u*`, `v*`, `z*`, `b*`, `c*`) thành 2 biến dùng lại → max `ldloc.s = 177`.
+Bài học: **phải kiểm tra max local index < 256** cho mọi script .tkv lớn.
+
 ## Tiếp theo
 
-1. Ghép forward + backward thành vòng train 2 lớp ở T=512 (weight deterministic), kiểm tra loss giảm.
+1. Nhân thành 2 lớp (kiểm tra max `ldloc.s < 256` sau khi thêm buffer), rồi đổi `T=512`.
 2. Thay LN1/LN2 host bằng kernel device thiết kế lại (lần gọi `lnf_kernel` thứ 2 từng segfault).
-3. Đo median ms/step; sau đó V=50257, NL=24; thêm path fp16 tensor-core để so `187.8 ms`.
+3. Thêm AdamW (hiện dùng SGD `lr=0.001`), đo median ms/step; sau đó V=50257, NL=24;
+   thêm path fp16 tensor-core để so `187.8 ms`.
