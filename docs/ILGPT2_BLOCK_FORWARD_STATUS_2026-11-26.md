@@ -571,3 +571,30 @@ Huong con lai: gom chinh cac cuLaunch `cublasGemmEx` trong moi layer (hien
 ~12 GEMM/layer, moi lan P/Invoke + cap phat 24-32 buffer host), hoac dung
 mot kernel PTX hop nhat thay 2 LN + softmax + 6 GEMM nho. Day la phan tuong
 duong voi “Bridge dung GPU tot len nhanh” ma chua thuc hien duoc.
+
+---
+
+## Run 31 - so sanh hai huong (2026-11-27 10:03 +0700)
+
+### Huong (1): GEMM C=fp16, tensor-core
+
+Probe tren GEMM lon nhat Z = Y2.W1 (4.3 GF/layer): doi Ctype=2, output fp16,
+roi kernel `tof` convert fp16->fp32 cho gelu/backward.
+
+Ket qua: `LOSS` van dung (`delta -0.2893`, gate OK) nhung
+`MS_STEP 390.43` (tu 264.95) — **cham hon 47%**. Da revert.
+=> Huong (1) bi loai. Kernel cuBLAS chon cho C fp16 khong nhanh hon trong
+shape nay, va them 1 kernel convert/layer khong bù lai duoc.
+
+### Huong (2): fused attention/MLP kieu Bridge
+
+Con lai huong duy nhat co the dat 187.8 ms. Dang lay:
+board dang o `TokenVector.CudaBackend@42adc5d` (= 81b7290), verified
+`MS_STEP 264.95`, `delta -0.2902`.
+
+Ghi chu de tranh lap lai: da thu va loai ca
+- strided-batched head GEMM (318 ms)
+- 64-block loss kernel (PTX 218 / segfault)
+- weight shadow convert 1 lan/step (275 ms, delta -0.2107)
+- CUBLAS_COMPUTE_32F_FAST_16F / GEMM_DEFAULT_TENSOR_OP (khong doi)
+- head fp16 output (NaN / 374 ms)
