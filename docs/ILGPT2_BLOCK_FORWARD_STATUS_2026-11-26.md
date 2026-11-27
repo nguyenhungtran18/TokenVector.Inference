@@ -1005,3 +1005,12 @@ shQKV/shadow), gate da verify. Khong	ri ve cac ban shadow WIP vao san pham.
 - `packaging/TokenVector.Inference.nuspec`: version **1.0.3** (tu 1.0.2), them 3 file
   cua trainer vao package; `pack.ps1` cap nhat assembly ver `1:0:3:0`.
 - Ket qua cuoi giu nguyen: `~176 ms/step`, gate OK, loss 11.18 -> 1.25 / 10 buoc.
+
+### HEAD cuoi cung (da push)
+
+- `TokenVector.Inference@819081e` (2026-11-27 22:45 +0700) - repo chinh, sach se.
+- `TokenVector.CudaBackend@5945a41` (22:33 +0700) - branch `prototype/cuda-backend`,
+  da don dep va khong con goi sai.
+- Package: `packaging/TokenVector.Inference.1.0.3.nupkg` (5.36 MB, da verify chua
+  `src/cuda-backend/*.tkv`, docs va DLL). Chua push len nuget.org (can API key).
+- Kaggle notebook da tro `TokenVector.Inference.git@main` va duong dan moi.
