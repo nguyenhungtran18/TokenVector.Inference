@@ -1180,7 +1180,9 @@ def run() -> "i32":
     gY1 = read_i64(cell, 0)
     rc = cuda_malloc(cell, qb)
     gOUT = read_i64(cell, 0)
-    # host scratch (dung lai)    # host scratch (dung lai)
+    print("PROBE P4")
+    # host scratch (dung lai)    print("PROBE P4")
+    # host scratch (dung lai)
     hY1 = alloc_bytes(qb)
     hY2 = alloc_bytes(qb)
     hST = alloc_bytes(stb)
@@ -1223,10 +1225,12 @@ def run() -> "i32":
         return 1
     rc = c_fread(hg, 1, qb + 2 * hb + NL * lsz + wh2, fh)
     print("WEIGHT BYTES", rc)
+    print("PROBE P1")
     rc = c_fclose(fh)
     wh = cuda_h2d(dX, hg, qb, 1)
     wh = cuda_h2d(dFG, hg + qb, hb, 1)
     wh = cuda_h2d(dFB, hg + qb + hb, hb, 1)
+    print("PROBE P2")
     wo: "i64" = 0
     ll: "i32" = 0
     while ll < NL:
@@ -1325,6 +1329,8 @@ def run() -> "i32":
         rc = cuda_malloc(cell, hb)
         wh = write_i64(AB2, ll * 8, read_i64(cell, 0))
         wh = cuda_h2d(read_i64(AB2, ll * 8), hg + wo, hb, 1)
+        if ll == 0:
+            print("PROBE P3")
         ll = ll + 1
     # head weight
 
