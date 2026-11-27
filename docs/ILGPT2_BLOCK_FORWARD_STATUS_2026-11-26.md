@@ -724,3 +724,18 @@ Nhung cac lan gop kernel khong tang toc do -> mau thuan that khong phai
 TRIZ xac nhan dung huong (graph) nhung chan cuoi cung nam o
 `cudaGraphInstantiate` (loi 1, log rong) khong giai duoc qua P/Invoke.
 Da revert ve `a02fa47` (= 81b7290): 264.95 ms, gate OK. Target van chua dat.
+
+---
+
+## TRIZ graph - ket luan cuoi (2026-11-27 13:25 +0700)
+
+Tiep tuc/TRIZ #1 Segmentation va #28 Substitution:
+- graph 1 node (mot cudaMemcpyAsync) va graph rong: `cudaStreamEndCapture` rc=0,
+  handle graph hop le (printed), nhung `cudaGraphInstantiate`,
+  `cudaGraphInstantiateWithFlags` va `cuGraphInstantiate` (driver API) **deu
+  tra 1**.
+=> Loi nam o chinh API instantiate qua P/Invoke, khong phai node/graph.
+Khong the replay graph.
+
+Da revert ve `84e0aac` (= 81b7290): `MS_STEP 264.95`, gate OK.
+Target 187.8 ms van chua dat. Day la di Ket thuc cacThu nghiem TRIZ.
