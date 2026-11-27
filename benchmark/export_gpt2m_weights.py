@@ -1,4 +1,4 @@
-"""Export full pretrained GPT2-medium weights into the exact layout of
+﻿"""Export full pretrained GPT2-medium weights into the exact layout of
 cuda-backend/.../ilgpt2_real10.tkv, plus a train/test split of real text.
 
 Noi dung train: 4096 token dau cua tinyshakespeare (corpus that dang hoc).
@@ -33,7 +33,7 @@ print("CORPUS chars=%d tokens=%d | train 512 | held-out 512" % (len(text), len(i
 
 wte = f32(sd["transformer.wte.weight"])
 wpe = f32(sd["transformer.wpe.weight"])[:T]
-emb = (wte[xb] + wpe).T.copy()          # [H,T] linear buffer i+j*T
+emb = (wte[xb] + wpe).copy()             # [T,H] -> column-major i+j*T
 
 parts = [emb, f32(sd["transformer.ln_f.weight"]), f32(sd["transformer.ln_f.bias"])]
 for i in range(NL):
@@ -47,7 +47,7 @@ for i in range(NL):
               f32(sd[p + "ln_2.weight"]), f32(sd[p + "ln_2.bias"])]
 parts.append(wte.T.copy())              # tied head, last
 
-blob = b"".join(p.tobytes(order="C") for p in parts)
+blob = b"".join(p.tobytes(order="F") for p in parts)
 with open(OUT, "wb") as f:
     f.write(blob)
 print("EXPORT", OUT, len(blob), "bytes")
