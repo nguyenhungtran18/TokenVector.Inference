@@ -478,3 +478,40 @@ Khong de GPU session chay khong lam viec: Kaggle tinh quota theo thoi gian.
 Check nhanh (browser evaluate):
 `[...document.querySelectorAll('button')].filter(b=>/session/i.test(b.getAttribute('aria-label')||'')).map(b=>b.getAttribute('aria-label'))`
 -> `["Start session"]` nghia la da tat, an toan.
+
+---
+
+## Run 28 - do chinh xac Head vs Loss (HEAD `c7d9225`, 2026-11-27 09:20 +0700)
+
+Chen `cuda_sync()` sau head GEMM de do that (cac cublas call la async):
+
+```
+MS_HEAD_GEMM 148.54 ms / 2 buoc  = 74.3 ms/step   (52 GFLOP -> ~0.7 TFLOPS)
+MS_LOSS       94.29 ms / 2 buoc  = 47.1 ms/step
+MS_LAYERS    140.74 ms / 2 buoc  = 70.4 ms/step
+MS_BWD        98.37 ms / 2 buoc  = 49.2 ms/step
+```
+
+=> Head logits GEMM `T=512, V=50257, K=1024` la diem nghen lon nhat, khong phai
+loss kernel nhu gia dinh ban dau. Ty le hieu suat thap bat thuong (0.7 TFLOPS
+so voi 4.6 TFLOPS cua cac GEMM trong layer).
+
+### Da thu, khong cai thien / bi revert
+
+- `CUBLAS_GEMM_DEFAULT_TENSOR_OP (99)`: 293 ms/step (khong doi).
+- `Ctype=CUDA_R_16F` output cho head GEMM + kernel loss doc fp16: `LOSS nan`,
+  374 ms/step - revert.
+- `loss_split` 64 vocab chunk (lpart/lred/ldl): PTX load loi 218; khi dung
+  `cuModuleLoadDataEx` thì .NET segfault (rc -11) - revert.
+
+### Trang thai cuoi
+
+Code chay duoc tot nhat van la `TokenVector.CudaBackend@879a2bf` (noi dung
+giong `81b7290`): `MS_STEP 264.95`, `loss delta -0.2902`, gate OK.
+Target 187.8 ms CHUA dat. Huong tiep theo: thay head GEMM bang多个 nho hoac
+mo duong danh rieng cho shape `512 x 50257 x 1024`.
+
+### Kaggle quota
+
+Da xac nhan: sau moi Run All phai bam `Stop session` truoc khi doc output.
+Lan cuoi da bam, nut tro lai `Start session` => khong con quota tieu thu.
