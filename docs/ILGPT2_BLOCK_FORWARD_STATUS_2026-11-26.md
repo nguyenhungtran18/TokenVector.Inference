@@ -824,3 +824,14 @@ ban verified `e4f2e8a`, giu lai compiler fix.
 
 **Target 187.8 ms van chua dat.** Phat hien quan trong nhat la compiler bug da duoc
 sua, khong phai loi runtime khong xac dinh nhu ket luan truoc.
+
+---
+
+## Probe compute 64 (2026-11-27 15:10 +0700)
+
+Thu `CUBLAS_COMPUTE_16F (64)` voi output fp16 tren GEMM Z: `MS_STEP 300 ms`,
+loss dung im (`10.895439` o ca 2 buoc) -> mat update fp16, khong nhanh hon.
+Da revert ve `7cca40f` (= 81b7290), giu compiler fix. Target 187.8 ms chua dat.
+
+Huong con lai (chua thu): cuBLASLt epilogue (bias+GELU+residual) hoac batched
+attention theo 16 head de giam so GEMM va luong S/P.
