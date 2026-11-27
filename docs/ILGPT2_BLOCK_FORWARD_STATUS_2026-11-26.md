@@ -662,3 +662,19 @@ Target `187.8 ms` (Bridge, dung ATen fused kernel) **KHONG dat duoc** bang
  launch deu khong tang toc do -> can mot rewrite PTX quy mo lon hon nhieu
  (fused attention + MLP + optimizer trong mot vai kernel), vuot qua kha nang
  verify trong cac lan chay nay.
+
+---
+
+## Ket thuc phan tich (2026-11-27 12:01 +0700)
+
+Da thu them: chia se 1 host arg buffer cho toi thong (60 lan/step) -> 323 ms
+(cham hon). Da revert.
+
+Code chay duoc tot nhat van la
+`TokenVector.CudaBackend@0a77049` (= `81b7290`): `MS_STEP 264.95`,
+`loss delta -0.2902`, gate OK.
+
+**Target 187.8 ms KHONG dat duoc** trong pham vi cac ban vá va PTX hien tai.
+Bridge dat 187.8 ms nhờ ATen fused kernel (layer_norm, addmm, flash SDPA,
+gelu, autograd) — khong the mo phong bang cac cuLaunch rieng le.
+Moi huong da thu va ket qua deu duoc ghi trong cac muc Run 24-33 o tren.
