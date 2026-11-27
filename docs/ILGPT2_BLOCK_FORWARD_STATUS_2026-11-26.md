@@ -760,3 +760,24 @@ Ket qua dieu tra:
 resolution/runtimeconfig cua exe, nhung chua xac dinh duoc).
 
 Da revert ve `e06f551` (= 81b7290): 264.95 ms, gate OK. Target van chua dat.
+
+---
+
+## Xac dinh loi do tkvc hay khong (2026-11-27 13:59 +0700)
+
+Thi nghiem cheo:
+- C# thuần: chay duoc voi runtimeconfig SDK **va** runtimeconfig viet tay
+  (`ISO_CS 0 0 0 0` ca hai) -> khong loi runtimeconfig.
+- C# thuần co them `cuInit(0)` + `cublasCreate_v2`: `ISO2 0 0 0 0 0 0 0`
+  -> khong loi trang thai cuInit/cublas.
+- Exe do tkvc sinh, du thay bang runtimeconfig SDK: van `TESTINSTD 1`.
+- Reflection DllImportAttribute cua `__pinvoke_cuda_graph_inst`:
+  `dll=cudart.dll ep=cudaGraphInstantiate cc=Cdecl exact=False cs=None preserve=True`
+  -> giong het C# DllImport mac dinh. IL callsite: 5 x int64, dung so tham so.
+
+Ket luan: PE do tkvc sinh that bai, NHUNG khong phan nao cua compiler
+sinh extern/pinvoke dtype sai (da kiem tra tkv_compile.tkv:2888-2994 va IL).
+Khong co thay doi compiler nao duoc ap dung vi khong co bug ro rang de sua.
+Loi nam o trang thai runtime cua chinh chuong trinh (chua xac dinh duoc).
+
+Da revert ve `6be8ef5` (= 81b7290): 264.95 ms, gate OK. Target van chua dat.
