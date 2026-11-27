@@ -739,3 +739,24 @@ Khong the replay graph.
 
 Da revert ve `84e0aac` (= 81b7290): `MS_STEP 264.95`, gate OK.
 Target 187.8 ms van chua dat. Day la di Ket thuc cacThu nghiem TRIZ.
+
+---
+
+## Nghien cuu compiler (2026-11-27 13:43 +0700)
+
+Cau hoi: co can sua compiler (`tkv_compile.tkv`) de graph instantiate chay duoc?
+
+Ket qua dieu tra:
+- `_validate_and_register_extern_pinvoke` (tkv_compile.tkv:2919-2994) sinh dung
+  `.method ... pinvokeimpl("..." as "..." cdecl) int32 ...(...) cil managed preservesig`;
+  `i64 -> int64` qua `_EXTERN_DTYPE_TO_IL`. Khong thay bug dtype/signature.
+- IL sinh ra tai callsite: `ldloc ...; ldc.i8 0; ...; call int32 ...::__pinvoke_cu_graph_inst(int64,int64,int64,int64,int64)`
+  -> dung so va kieu tham so.
+- **C++ probe** (g++ -lcudart): begin=0, end=0, instantiate=0.
+- **C# thuần P/Invoke** (dotnet run): `CSPROBE 0 0 0 0` -> cung thanh cong.
+
+=> Khong co bang chung compiler can sua. Loi `1` chi xuat hien trong PE do
+`tkvc` sinh, nam ngoai phan dtype/codegen cua extern (co the la DllImport
+resolution/runtimeconfig cua exe, nhung chua xac dinh duoc).
+
+Da revert ve `e06f551` (= 81b7290): 264.95 ms, gate OK. Target van chua dat.
