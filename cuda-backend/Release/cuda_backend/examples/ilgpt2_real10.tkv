@@ -1048,8 +1048,6 @@ def run() -> "i32":
     sTT: "i32" = T * T
     sTF: "i32" = T * F
     sFH: "i32" = F * H
-    sTV: "i32" = T * V
-    sHV: "i32" = H * V
     cell = alloc_bytes(8)
     # arrays cua device-pointer / host-pointer theo lop
     AWq = alloc_bytes(msz)
@@ -1223,8 +1221,8 @@ def run() -> "i32":
     if fh == 0:
         print("WEIGHT FILE OPEN FAIL")
         return 1
-    nr: "i64" = c_fread(hg, 1, qb + 2 * hb + NL * lsz + wh2, fh)
-    print("WEIGHT BYTES", nr)
+    rc = c_fread(hg, 1, qb + 2 * hb + NL * lsz + wh2, fh)
+    print("WEIGHT BYTES", rc)
     rc = c_fclose(fh)
     wh = cuda_h2d(dX, hg, qb, 1)
     wh = cuda_h2d(dFG, hg + qb, hb, 1)
@@ -1405,8 +1403,6 @@ def run() -> "i32":
         return 1
     lnf: "i64" = read_i64(kh, 0)
     lnb: "i64" = read_i64(kh, 8)
-    sff: "i64" = read_i64(kh, 16)
-    sbk: "i64" = read_i64(kh, 24)
     gadd: "i64" = read_i64(kh, 32)
     th: "i64" = read_i64(kh, 40)
     tht: "i64" = toht_init()
@@ -1421,8 +1417,8 @@ def run() -> "i32":
         return 1
     rc = cuda_malloc(cell, 3 * H * H * 2)
     fpQKV: "i64" = read_i64(cell, 0)
-    lfn: "i64" = loss_init()
-    if lfn == 0:
+    rc = loss_init()
+    if rc == 0:
         print("LOSS INIT FAIL")
         return 1
     l3h: "i64" = loss3_init()
@@ -1450,9 +1446,6 @@ def run() -> "i32":
     bhadd: "i64" = read_i64(bh, 0)
     bhgrad: "i64" = read_i64(bh, 8)
     h3: "i64" = 3 * hb
-    h4: "i64" = 4 * hb
-    s64T: "i64" = 64 * T
-    sATT: "i64" = T * T
     hal16 = alloc_bytes(4)
     wh = write_f32(hal16, 0, 0.125)
     wh = cuda_h2d(dgam, g1h, hb, 1)
@@ -1517,7 +1510,7 @@ def run() -> "i32":
                 return 1
             rc = toh(th, qd, fpA, sQH)
             rc = toh(th, kd, fpB, sQH)
-            rc = gemm16b(ch, 0, 1, T, T, 64, hal16, fpA, T, s64T, fpB, T, s64T, zero, dS, T, sATT, 16)
+            rc = gemm16b(ch, 0, 1, T, T, 64, hal16, fpA, T, 64 * T, fpB, T, 64 * T, zero, dS, T, T * T, 16)
             if rc != 0:
                 print("S GEMM FAIL", ll, rc)
                 return 1
@@ -1527,7 +1520,7 @@ def run() -> "i32":
                 return 1
             rc = toh(th, pd, fpA, 16 * sTT)
             rc = toh(th, vd, fpB, sQH)
-            rc = gemm16b(ch, 0, 0, T, 64, T, one, fpA, T, sATT, fpB, T, s64T, zero, ad, T, s64T, 16)
+            rc = gemm16b(ch, 0, 0, T, 64, T, one, fpA, T, T * T, fpB, T, 64 * T, zero, ad, T, 64 * T, 16)
             if rc != 0:
                 print("A GEMM FAIL", ll, rc)
                 return 1
@@ -1565,7 +1558,7 @@ def run() -> "i32":
         # logits + loss tu OUT cua lop cuoi
         rc = ln_fwd(lnf, dOUT, dFG, dFB, y1d, xh1d, s1d, T, H)
         rc = toh(th, y1d, fpA, sQH)
-        rc = toh(th, dWh, fpB, sHV)
+        rc = toh(th, dWh, fpB, H * V)
         rc = gemm16(ch, 0, 0, T, V, H, one, fpA, T, fpB, H, zero, dLG, T)
         wh = write_i32(hPK, 0, T)
         wh = write_i32(hPK, 4, V)
@@ -1587,13 +1580,12 @@ def run() -> "i32":
             lossv = lossv + read_f32(hLS, ii * 4)
             ii = ii + 1
         print("LOSS", lossv)
-        lf: "f64" = lossv
-        print("LOSSF", lf)
+        print("LOSSF", lossv)
         tB = time_perf()
         thd = thd + (tB - tH)
         tf = tf + (tH - tA)
         print("MARK FWD", step)
-        rc = toh(th, dDL, fpA, sTV)
+        rc = toh(th, dDL, fpA, T * V)
         rc = gemm16(ch, 0, 1, T, H, V, one, fpA, T, fpB, H, zero, gOUT, T)
         # ---- backward layers (nguoc) ----
         ll = NL - 1
@@ -1668,20 +1660,20 @@ def run() -> "i32":
             rc = bias_grad_k(bhgrad, gWo, bo, T, H)
             rc = toh(th, gA, fpA, sQH)
             rc = toh(th, vd, fpB, sQH)
-            rc = gemm16b(ch, 0, 1, T, T, 64, one, fpA, T, s64T, fpB, T, s64T, zero, gP, T, sATT, 16)
+            rc = gemm16b(ch, 0, 1, T, T, 64, one, fpA, T, 64 * T, fpB, T, 64 * T, zero, gP, T, T * T, 16)
             rc = toh(th, pd, fpA, 16 * sTT)
             rc = toh(th, gA, fpB, sQH)
-            rc = gemm16b(ch, 1, 0, T, 64, T, one, fpA, T, sATT, fpB, T, s64T, zero, gV, T, s64T, 16)
+            rc = gemm16b(ch, 1, 0, T, 64, T, one, fpA, T, T * T, fpB, T, 64 * T, zero, gV, T, 64 * T, 16)
             rc = sf16_bwd(sbk16, gP, pd, gS, T, 16)
             if rc != 0:
                 print("SF BWD FAIL", ll)
                 return 1
             rc = toh(th, gS, fpA, 16 * sTT)
             rc = toh(th, kd, fpB, sQH)
-            rc = gemm16b(ch, 0, 0, T, 64, T, hal16, fpA, T, sATT, fpB, T, s64T, zero, gQ, T, s64T, 16)
+            rc = gemm16b(ch, 0, 0, T, 64, T, hal16, fpA, T, T * T, fpB, T, 64 * T, zero, gQ, T, 64 * T, 16)
             rc = toh(th, gS, fpA, 16 * sTT)
             rc = toh(th, qd, fpB, sQH)
-            rc = gemm16b(ch, 1, 0, T, 64, T, hal16, fpA, T, sATT, fpB, T, s64T, zero, gK, T, s64T, 16)
+            rc = gemm16b(ch, 1, 0, T, 64, T, hal16, fpA, T, T * T, fpB, T, 64 * T, zero, gK, T, 64 * T, 16)
             rc = toh(th, yb1, fpA, sQH)
             rc = toh(th, gQ, fpB, sQH)
             rc = gemm16(ch, 1, 0, H, H, T, one, fpA, T, fpB, T, zero, gqd, H)
@@ -1735,7 +1727,6 @@ def run() -> "i32":
         print("MARK UPD", step)
         print("STEPMS", (time_perf() - tA) * 1000.0)
         step = step + 1
-    syn: "i32" = cuda_sync()
     t1 = time_perf()
     dtm: "f64" = t1 - t0
     print("MS_LAYERS", tf * 1000.0)
