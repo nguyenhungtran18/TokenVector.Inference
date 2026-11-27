@@ -1,4 +1,4 @@
-.version 8.0
+﻿.version 8.0
 .target sm_75
 .address_size 64
 .entry biasadd_kernel(.param .u64 pC, .param .u64 pB, .param .u32 pT, .param .u32 pN)
@@ -36,7 +36,7 @@ ret;
 .entry biasgrad_kernel(.param .u64 pG, .param .u64 pB, .param .u32 pT, .param .u32 pR)
 {
 .reg .f32 g,s;
-.reg .u64 gb,bb,off,ba;
+.reg .u64 gb,bb,off,ba,goff;
 .reg .u32 col,i,t,r,base,nt;
 .reg .pred q;
 ld.param.u64 gb,[pG];
@@ -59,8 +59,8 @@ setp.ge.u32 q,i,t;
 @q bra DONE;
 mul.lo.u32 off,i,t;
 add.u32 off,off,col;
-mul.wide.u32 off,off,4;
-add.u64 ba,gb,off;
+mul.wide.u32 goff,off,4;
+add.u64 ba,gb,goff;
 ld.global.f32 g,[ba];
 add.f32 s,s,g;
 add.u32 i,i,1;
