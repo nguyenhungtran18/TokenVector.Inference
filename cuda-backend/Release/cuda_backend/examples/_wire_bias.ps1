@@ -36,7 +36,7 @@ $t=Rep2 $t $a ($a+@'
     h4: "i64" = 4 * hb
 '@) 'bias handles'
 # lsz includes 6 bias vectors
-$t=Rep2 $t '    lsz: "i64" = 4 * whb + w1b + w2b + 4 * hb' '    lsz: "i64" = 4 * whb + w1b + w2b + 10 * hb' 'lsz'
+$t=Rep2 $t '    lsz: "i64" = 4 * whb + w1b + w2b + 4 * hb' '    lsz: "i64" = 4 * whb + w1b + w2b + 13 * hb' 'lsz'
 # init loop: bias device buffers after LN weights
 $a='        wh = cuda_h2d(read_i64(ALB2, ll * 8), hg + wo, hb, 1)'
 $t=Rep2 $t $a ($a+@'

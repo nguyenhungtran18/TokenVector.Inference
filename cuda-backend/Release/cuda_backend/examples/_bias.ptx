@@ -37,7 +37,7 @@ ret;
 {
 .reg .f32 g,s;
 .reg .u64 gb,bb,off,ba,goff;
-.reg .u32 col,i,t,r,base,nt;
+.reg .u32 col,i,t,r,base,nt,idx;
 .reg .pred q;
 ld.param.u64 gb,[pG];
 ld.param.u64 bb,[pB];
@@ -57,9 +57,9 @@ mov.u32 i,0;
 LOOP:
 setp.ge.u32 q,i,t;
 @q bra DONE;
-mul.lo.u32 off,i,t;
-add.u32 off,off,col;
-mul.wide.u32 goff,off,4;
+mul.lo.u32 idx,i,t;
+add.u32 idx,idx,col;
+mul.wide.u32 goff,idx,4;
 add.u64 ba,gb,goff;
 ld.global.f32 g,[ba];
 add.f32 s,s,g;
