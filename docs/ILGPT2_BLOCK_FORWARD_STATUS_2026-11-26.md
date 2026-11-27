@@ -515,3 +515,39 @@ mo duong danh rieng cho shape `512 x 50257 x 1024`.
 
 Da xac nhan: sau moi Run All phai bam `Stop session` truoc khi doc output.
 Lan cuoi da bam, nut tro lai `Start session` => khong con quota tieu thu.
+
+---
+
+## Run 29 - do GPU utilization / that-that (2026-11-27 09:41 +0700)
+
+Chen `cuda_sync()` o moi ranh giai doan (luu y: moi sync them ~9 ms, nen tong
+308 ms so voi 265 ms ban thuong):
+
+```
+MS_LAYERS     332.14 ms / 2 = 166 ms/step   (24 layer forward)
+MS_HEAD_GEMM    7.18 ms / 2 =   3.6 ms/step  (head 512x50257x1024 - NHANH)
+MS_LOSS        94.77 ms / 2 =  47.4 ms/step
+MS_BWD        106.07 ms / 2 =  53 ms/step
+phan con lai               ~39 ms/step (SGD + host)
+```
+
+Ket luan quan trong: **head GEMM KHONG phai diem nghen**; so lieu 148 ms truoc
+do la do que work cua 24 layer (cublas async) vao vung sync. Diem nghen that la
+forward layers 166 ms/step - tuong ung 322 GFLOP / 166 ms = ~1.9 TFLOPS,
+thap hon 4.6 TFLOPS cua cac GEMM khac => GPU chay khong day.
+
+### Da thu trong run 29 (deu revert)
+
+- Strided-batched head GEMM 99 batch `512x512x1024`, vocab pad 50688:
+  loss van dung (`delta -0.2917`) nhung 318 ms/step - cham hon.
+- Loss kernel 64 block x 8 thread (thay 1 block x 512 thread) de dung 64 SM:
+  PTX load loi 218 (plain) / segfault (ex) - revert.
+- Cac PTX coalesced/shared-memory truoc do cung that bay.
+
+### Huong dung deu tien theo sau
+
+GPU under-utilization nam o **24 layer forward**: moi layer co ~30 cuLaunch
+(2 LN, 1 softmax, 6+6 hop nho, 12+ chuyen fp16), moi lan P/Invoke cap phat
+8-16 buffer `alloc_bytes`. Can gom cac launch / gom conversion bang cach
+giu shadow fp16 rieng theo layer (khong convert lai truoc moi GEMM) va
+dung stream de chong host idle. Day la huong dang cu Bridge tuung tu.
