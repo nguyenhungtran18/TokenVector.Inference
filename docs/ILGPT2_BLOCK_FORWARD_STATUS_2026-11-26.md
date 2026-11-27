@@ -781,3 +781,22 @@ Khong co thay doi compiler nao duoc ap dung vi khong co bug ro rang de sua.
 Loi nam o trang thai runtime cua chinh chuong trinh (chua xac dinh duoc).
 
 Da revert ve `6be8ef5` (= 81b7290): 264.95 ms, gate OK. Target van chua dat.
+
+---
+
+## Ket luan cuoi ve "loi do tkvc hay khong" (2026-11-27 14:13 +0700)
+
+- Early test (ngay sau cublasCreate, truoc mo cap phat): `EARLY 1` -> khong
+  phai trang thai do khoi tao ve sau.
+- C# thuan: chay duoc voi runtimeconfig SDK, runtimeconfig viet tay, co
+  cuInit+cublasCreate, va ca khi khai bao **toan long** thay IntPtr
+  (`CSLONG 0 0 0 0`).
+- Reflection: cs dãy DllImport cua tkvc va C# giong het (dll, entrypoint,
+  Cdecl, ExactSpelling=False, CharSet=None, PreserveSig=True). Khac biet
+  kieu tham so (`Int64` vs `IntPtr`) da bi loai bang test CSLONG.
+
+=> Khong tim thay defect cu the trong tkvc de ma sua compiler. Hien tuong
+chi xay ra trong PE do tkvc sinh, nhung nguyen nhan nam ngoan phan
+dtype/codegen extern da kiem tra. Khong ap dung thay doi compiler nao.
+
+Da revert ve `7c989c7` (= 81b7290): 264.95 ms, gate OK.
