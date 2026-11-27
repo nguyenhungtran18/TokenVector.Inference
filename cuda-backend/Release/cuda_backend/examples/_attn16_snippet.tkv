@@ -1,0 +1,80 @@
+﻿def attn16_init() -> "i64":
+    PTX = b".version 8.0\n.target sm_75\n.address_size 64\n.entry sf16_kernel(.param .u64 ps, .param .u64 pp, .param .u32 pT)\n{\n.reg .f32 x,mx,sum,e,p;\n.reg .u64 sb,pb,off,xa,pa;\n.reg .u32 row,j,tn,idx,head,hoff;\n.reg .pred q;\nld.param.u64 sb,[ps];\nld.param.u64 pb,[pp];\nld.param.u32 tn,[pT];\ncvta.to.global.u64 sb,sb;\ncvta.to.global.u64 pb,pb;\nmov.u32 row,%tid.x;\nmov.u32 head,%ctaid.y;\nmul.lo.u32 hoff,head,tn;\nmul.lo.u32 hoff,hoff,tn;\nsetp.ge.u32 q,row,tn;\n@q bra LEND;\nmov.f32 mx,-1000000000.0;\nmov.u32 j,0;\nL1:\nsetp.gt.u32 q,j,row;\n@q bra L1D;\nmul.lo.u32 idx,j,tn;\nadd.u32 idx,idx,row;\nadd.u32 idx,idx,hoff;\nmul.wide.u32 off,idx,4;\nadd.u64 xa,sb,off;\nld.global.f32 x,[xa];\nmax.f32 mx,mx,x;\nadd.u32 j,j,1;\nbra L1;\nL1D:\nmov.f32 sum,0.0;\nmov.u32 j,0;\nL2:\nsetp.gt.u32 q,j,row;\n@q bra L2D;\nmul.lo.u32 idx,j,tn;\nadd.u32 idx,idx,row;\nadd.u32 idx,idx,hoff;\nmul.wide.u32 off,idx,4;\nadd.u64 xa,sb,off;\nld.global.f32 x,[xa];\nsub.f32 x,x,mx;\nmul.f32 x,x,1.442695;\nex2.approx.f32 e,x;\nadd.f32 sum,sum,e;\nadd.u32 j,j,1;\nbra L2;\nL2D:\nmov.u32 j,0;\nL3:\nsetp.ge.u32 q,j,tn;\n@q bra LEND;\nmul.lo.u32 idx,j,tn;\nadd.u32 idx,idx,row;\nadd.u32 idx,idx,hoff;\nmov.f32 p,0.0;\nsetp.gt.u32 q,j,row;\n@q bra L3W;\nmul.wide.u32 off,idx,4;\nadd.u64 xa,sb,off;\nld.global.f32 x,[xa];\nsub.f32 x,x,mx;\nmul.f32 x,x,1.442695;\nex2.approx.f32 e,x;\ndiv.rn.f32 p,e,sum;\nL3W:\nmul.wide.u32 off,idx,4;\nadd.u64 pa,pb,off;\nst.global.f32 [pa],p;\nadd.u32 j,j,1;\nbra L3;\nLEND:\nret;\n}\n\n.entry sbk16_kernel(.param .u64 pdp, .param .u64 pp, .param .u64 pds, .param .u32 pT)\n{\n.reg .f32 dp,p,rs,t;\n.reg .u64 db,pb,dsb,off,da,pa,dsa;\n.reg .u32 row,j,tn,idx,head,hoff;\n.reg .pred q;\nld.param.u64 db,[pdp];\nld.param.u64 pb,[pp];\nld.param.u64 dsb,[pds];\nld.param.u32 tn,[pT];\ncvta.to.global.u64 db,db;\ncvta.to.global.u64 pb,pb;\ncvta.to.global.u64 dsb,dsb;\nmov.u32 row,%tid.x;\nmov.u32 head,%ctaid.y;\nmul.lo.u32 hoff,head,tn;\nmul.lo.u32 hoff,hoff,tn;\nsetp.ge.u32 q,row,tn;\n@q bra LEND;\nmov.f32 rs,0.0;\nmov.u32 j,0;\nL1:\nsetp.ge.u32 q,j,tn;\n@q bra L1D;\nmul.lo.u32 idx,j,tn;\nadd.u32 idx,idx,row;\nadd.u32 idx,idx,hoff;\nmul.wide.u32 off,idx,4;\nadd.u64 da,db,off;\nld.global.f32 dp,[da];\nadd.u64 pa,pb,off;\nld.global.f32 p,[pa];\nmul.f32 t,dp,p;\nadd.f32 rs,rs,t;\nadd.u32 j,j,1;\nbra L1;\nL1D:\nmov.u32 j,0;\nL2:\nsetp.ge.u32 q,j,tn;\n@q bra LEND;\nmul.lo.u32 idx,j,tn;\nadd.u32 idx,idx,row;\nadd.u32 idx,idx,hoff;\nmov.f32 t,0.0;\nsetp.gt.u32 q,j,row;\n@q bra L2W;\nmul.wide.u32 off,idx,4;\nadd.u64 da,db,off;\nld.global.f32 dp,[da];\nadd.u64 pa,pb,off;\nld.global.f32 p,[pa];\nsub.f32 t,dp,rs;\nmul.f32 t,t,p;\nL2W:\nmul.wide.u32 off,idx,4;\nadd.u64 dsa,dsb,off;\nst.global.f32 [dsa],t;\nadd.u32 j,j,1;\nbra L2;\nLEND:\nret;\n}\n"
+    F1 = b"sf16_kernel\x00"
+    F2 = b"sbk16_kernel\x00"
+    pb = alloc_bytes(len(PTX) + 1)
+    kk: "i32" = 0
+    while kk < len(PTX):
+        wh: "i64" = write_u8(pb, kk, PTX[kk])
+        kk = kk + 1
+    wh = write_u8(pb, kk, 0)
+    mc = alloc_bytes(8)
+    rc: "i32" = cu_module_load(mc, pb)
+    if rc != 0:
+        print("ATTN16 MOD FAIL", rc)
+        return 0
+    mod: "i64" = read_i64(mc, 0)
+    h = alloc_bytes(16)
+    kk = 0
+    while kk < len(F1):
+        wh = write_u8(pb, kk, F1[kk])
+        kk = kk + 1
+    wh = write_u8(pb, kk, 0)
+    fc = alloc_bytes(8)
+    rc = cu_module_fn(fc, mod, pb)
+    if rc != 0:
+        print("ATTN16 FN1 FAIL", rc)
+        return 0
+    wh = write_i64(h, 0, read_i64(fc, 0))
+    kk = 0
+    while kk < len(F2):
+        wh = write_u8(pb, kk, F2[kk])
+        kk = kk + 1
+    wh = write_u8(pb, kk, 0)
+    rc = cu_module_fn(fc, mod, pb)
+    if rc != 0:
+        print("ATTN16 FN2 FAIL", rc)
+        return 0
+    wh = write_i64(h, 8, read_i64(fc, 0))
+    return h
+
+def sf16_fwd(fnh: "i64", s: "i64", p: "i64", tn: "i32", nh: "i32") -> "i32":
+    a0 = alloc_bytes(8)
+    wh: "i64" = write_i64(a0, 0, s)
+    a1 = alloc_bytes(8)
+    wh = write_i64(a1, 0, p)
+    a2 = alloc_bytes(4)
+    wh = write_i32(a2, 0, tn)
+    pl = alloc_bytes(24)
+    wh = write_i64(pl, 0, a0)
+    wh = write_i64(pl, 8, a1)
+    wh = write_i64(pl, 16, a2)
+    rc: "i32" = cu_launch(fnh, 1, nh, 1, tn, 1, 1, 0, 0, pl, 0)
+    if rc != 0:
+        print("SF16 FWD FAIL", rc)
+    return rc
+
+def sf16_bwd(fnh: "i64", dp: "i64", p: "i64", ds: "i64", tn: "i32", nh: "i32") -> "i32":
+    a0 = alloc_bytes(8)
+    wh: "i64" = write_i64(a0, 0, dp)
+    a1 = alloc_bytes(8)
+    wh = write_i64(a1, 0, p)
+    a2 = alloc_bytes(8)
+    wh = write_i64(a2, 0, ds)
+    a3 = alloc_bytes(4)
+    wh = write_i32(a3, 0, tn)
+    pl = alloc_bytes(32)
+    wh = write_i64(pl, 0, a0)
+    wh = write_i64(pl, 8, a1)
+    wh = write_i64(pl, 16, a2)
+    wh = write_i64(pl, 24, a3)
+    rc: "i32" = cu_launch(fnh, 1, nh, 1, tn, 1, 1, 0, 0, pl, 0)
+    if rc != 0:
+        print("SF16 BWD FAIL", rc)
+    return rc
+
+def gemm16b(handle: "i64", ta: "i32", tb: "i32", m: "i32", n: "i32", k: "i32", alpha: "i64", a: "i64", lda: "i32", sa: "i64", b: "i64", ldb: "i32", sb: "i64", beta: "i64", c: "i64", ldc: "i32", sc: "i64", batch: "i32") -> "i32":
+    rc: "i32" = cublas_gemm_strided_batched_ex(handle, ta, tb, m, n, k, alpha, a, 2, lda, sa, b, 2, ldb, sb, beta, c, 0, ldc, sc, batch, 74, -1)
+    if rc != 0:
+        print("GEMM16B FAIL", rc)
+    return rc

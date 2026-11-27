@@ -1,0 +1,143 @@
+.version 8.0
+.target sm_75
+.address_size 64
+.entry sf16_kernel(.param .u64 ps, .param .u64 pp, .param .u32 pT)
+{
+.reg .f32 x,mx,sum,e,p;
+.reg .u64 sb,pb,off,xa,pa;
+.reg .u32 row,j,tn,idx,head,hoff;
+.reg .pred q;
+ld.param.u64 sb,[ps];
+ld.param.u64 pb,[pp];
+ld.param.u32 tn,[pT];
+cvta.to.global.u64 sb,sb;
+cvta.to.global.u64 pb,pb;
+mov.u32 row,%tid.x;
+mov.u32 head,%ctaid.y;
+mul.lo.u32 hoff,head,tn;
+mul.lo.u32 hoff,hoff,tn;
+setp.ge.u32 q,row,tn;
+@q bra LEND;
+mov.f32 mx,-1000000000.0;
+mov.u32 j,0;
+L1:
+setp.gt.u32 q,j,row;
+@q bra L1D;
+mul.lo.u32 idx,j,tn;
+add.u32 idx,idx,row;
+add.u32 idx,idx,hoff;
+mul.wide.u32 off,idx,4;
+add.u64 xa,sb,off;
+ld.global.f32 x,[xa];
+max.f32 mx,mx,x;
+add.u32 j,j,1;
+bra L1;
+L1D:
+mov.f32 sum,0.0;
+mov.u32 j,0;
+L2:
+setp.gt.u32 q,j,row;
+@q bra L2D;
+mul.lo.u32 idx,j,tn;
+add.u32 idx,idx,row;
+add.u32 idx,idx,hoff;
+mul.wide.u32 off,idx,4;
+add.u64 xa,sb,off;
+ld.global.f32 x,[xa];
+sub.f32 x,x,mx;
+mul.f32 x,x,1.442695;
+ex2.approx.f32 e,x;
+add.f32 sum,sum,e;
+add.u32 j,j,1;
+bra L2;
+L2D:
+mov.u32 j,0;
+L3:
+setp.ge.u32 q,j,tn;
+@q bra LEND;
+mul.lo.u32 idx,j,tn;
+add.u32 idx,idx,row;
+add.u32 idx,idx,hoff;
+mov.f32 p,0.0;
+setp.gt.u32 q,j,row;
+@q bra L3W;
+mul.wide.u32 off,idx,4;
+add.u64 xa,sb,off;
+ld.global.f32 x,[xa];
+sub.f32 x,x,mx;
+mul.f32 x,x,1.442695;
+ex2.approx.f32 e,x;
+div.rn.f32 p,e,sum;
+L3W:
+mul.wide.u32 off,idx,4;
+add.u64 pa,pb,off;
+st.global.f32 [pa],p;
+add.u32 j,j,1;
+bra L3;
+LEND:
+ret;
+}
+
+.entry sbk16_kernel(.param .u64 pdp, .param .u64 pp, .param .u64 pds, .param .u32 pT)
+{
+.reg .f32 dp,p,rs,t;
+.reg .u64 db,pb,dsb,off,da,pa,dsa;
+.reg .u32 row,j,tn,idx,head,hoff;
+.reg .pred q;
+ld.param.u64 db,[pdp];
+ld.param.u64 pb,[pp];
+ld.param.u64 dsb,[pds];
+ld.param.u32 tn,[pT];
+cvta.to.global.u64 db,db;
+cvta.to.global.u64 pb,pb;
+cvta.to.global.u64 dsb,dsb;
+mov.u32 row,%tid.x;
+mov.u32 head,%ctaid.y;
+mul.lo.u32 hoff,head,tn;
+mul.lo.u32 hoff,hoff,tn;
+setp.ge.u32 q,row,tn;
+@q bra LEND;
+mov.f32 rs,0.0;
+mov.u32 j,0;
+L1:
+setp.ge.u32 q,j,tn;
+@q bra L1D;
+mul.lo.u32 idx,j,tn;
+add.u32 idx,idx,row;
+add.u32 idx,idx,hoff;
+mul.wide.u32 off,idx,4;
+add.u64 da,db,off;
+ld.global.f32 dp,[da];
+add.u64 pa,pb,off;
+ld.global.f32 p,[pa];
+mul.f32 t,dp,p;
+add.f32 rs,rs,t;
+add.u32 j,j,1;
+bra L1;
+L1D:
+mov.u32 j,0;
+L2:
+setp.ge.u32 q,j,tn;
+@q bra LEND;
+mul.lo.u32 idx,j,tn;
+add.u32 idx,idx,row;
+add.u32 idx,idx,hoff;
+mov.f32 t,0.0;
+setp.gt.u32 q,j,row;
+@q bra L2W;
+mul.wide.u32 off,idx,4;
+add.u64 da,db,off;
+ld.global.f32 dp,[da];
+add.u64 pa,pb,off;
+ld.global.f32 p,[pa];
+sub.f32 t,dp,rs;
+mul.f32 t,t,p;
+L2W:
+mul.wide.u32 off,idx,4;
+add.u64 dsa,dsb,off;
+st.global.f32 [dsa],t;
+add.u32 j,j,1;
+bra L2;
+LEND:
+ret;
+}
