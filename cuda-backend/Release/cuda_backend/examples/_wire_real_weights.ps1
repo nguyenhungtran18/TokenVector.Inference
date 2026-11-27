@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿$ErrorActionPreference='Stop'
 cd 'D:\TokenVector.Inference\cuda-backend\Release\cuda_backend\examples'
 $p='ilgpt2_trainN_head16.tkv'
 $t=Get-Content $p -Raw
@@ -47,7 +47,7 @@ $a='    ll: "i32" = 0
         rc = cuda_malloc(cell, whb)'
 $read=@'
     lsz: "i64" = 4 * whb + w1b + w2b + 4 * hb
-    hg: "i64" = alloc_bytes(qb + 2 * hb + NL * lsz)
+    hg: "i64" = alloc_bytes(qb + 2 * hb + NL * lsz + wh2)
     fpb = b"/kaggle/working/gpt2m_weights.bin"
     fpath = alloc_bytes(64)
     fp: "i32" = 0
@@ -62,7 +62,7 @@ $read=@'
     if fh == 0:
         print("WEIGHT FILE OPEN FAIL")
         return 1
-    nr: "i64" = c_fread(hg, 1, qb + 2 * hb + NL * lsz, fh)
+    nr: "i64" = c_fread(hg, 1, qb + 2 * hb + NL * lsz + wh2, fh)
     print("WEIGHT BYTES", nr)
     rc = c_fclose(fh)
     wh = cuda_h2d(dX, hg, qb, 1)
