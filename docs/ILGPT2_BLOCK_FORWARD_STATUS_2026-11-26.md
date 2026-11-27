@@ -951,3 +951,14 @@ HEAD TokenVector.CudaBackend = `9493cd3`. Gate 2 buoc van OK:
 
 Ket luan: `176 ms/step` la diem dung da verify. Khong co them toc do thuc tu option 1;
 option 2 can dieu tra them neu quay lai.
+
+### Tra loi cau hoi "co phai gioi han compiler?" (2026-11-27 21:10 +0700)
+
+**Khong.** Thi nghiem `ilgpt2_writeonly.tkv` (commit `141f41f`): giu nguyen toan bo
+`toh`/GEMM cua mang, chi thay kernel AdamW ghi them shadow fp16 va truyen tham so
+`pS/pS2` moi. Ket qua: chay tron 2 buoc, `LOSS 11.181629 -> 10.577373`, rc=0, khong segfault.
+Vay ptxas, cuLaunchKernel voi 11 tham so, va ham wrapper 12 tham so deu hoat dong.
+
+Segfault truoc do chi xay ra khi **tieu thu** shadow (thay `toh` bang pointer shadow trong
+forward/backward). Nghia la loi nam o integration/ pointer arithmetic cua shadow, khong
+phai gioi han cua TokenVector compiler. Ban chinh van la `9493cd3` (da verify).
