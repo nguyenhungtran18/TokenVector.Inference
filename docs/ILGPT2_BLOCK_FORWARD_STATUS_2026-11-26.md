@@ -962,3 +962,28 @@ Vay ptxas, cuLaunchKernel voi 11 tham so, va ham wrapper 12 tham so deu hoat don
 Segfault truoc do chi xay ra khi **tieu thu** shadow (thay `toh` bang pointer shadow trong
 forward/backward). Nghia la loi nam o integration/ pointer arithmetic cua shadow, khong
 phai gioi han cua TokenVector compiler. Ban chinh van la `9493cd3` (da verify).
+
+###Chan doan segfault shadow (2026-11-27 22:00 +0700)
+
+Cac thi nghiem don bien (deu chay 2 buoc tren Kaggle, cung HEAD co ban):
+
+| bien the | ket qua |
+|---|---|
+| `ilgpt2_writeonly` (AdamW ghi shadow, mang van dung `toh`) | OK |
+| `_locals_test` (them 4 local i64, stloc 241->245) | OK |
+| `_emptylop` (them vong lap trong truoc step loop) | OK |
+| `_shAssignW` (init loop chi gan 6 bien trong so) | OK |
+| `_shAssignO` (init loop chi gan 3 bien offset) | OK |
+| `_shInitNone` (init loop gan ca 9 bien, KHONG goi kernel nao) | **crash** |
+| `_shSplitLoop` (tach thanh 2 vong lap nho hon, van 9 gan) | **crash** |
+| `_shRename` (doi ten bien init thanh iwqd/iso3/...) | **crash** |
+
+Ket luan: khong phai ptxas, khong phai so tham so P/Invoke, khong phai gioi han
+`stloc.s` 8-bit, khong phai kernel cu the, khong phai trung ten bien. Segfault xay ra
+chi khi gan dong thoi nhom bien trong so + offset trong 1 doan truoc step loop, va van
+xay ra du khong goi kernel nao. Day la dau hieu cua **loi codegen/loai bo local cua
+compiler** (cum ban da duoc build hoan chinh nhung IL sai o duong dan dieu khien).
+Day la gioi han thuc te cua TokenVector o dang codegen, khong phai PTX hay CUDA.
+
+Ban chinh van la `9493cd3` (`while step <= 2`, `adamw_update` 10 tham so, khong co
+shQKV/shadow), gate da verify. Khong	ri ve cac ban shadow WIP vao san pham.
