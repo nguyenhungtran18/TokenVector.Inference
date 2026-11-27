@@ -932,3 +932,22 @@ Cac ban da thu:
 
 Target dat duoc va da verify. Giu `187.8 ms` lam baseline. Cac file WIP/probe van o
 trong repo de truy vet. `TokenVector.Inference` cap nhat luc 19:45 +0700.
+
+---
+
+## Tiep tuc toi uu sau milestone (2026-11-27 20:56 +0700)
+
+HEAD TokenVector.CudaBackend = `9493cd3`. Gate 2 buoc van OK:
+`LOSS 11.181629 -> 10.577373`, 2x MARK, 0 FAIL.
+
+- **Option 1 - gop QKV**: da lam (kernel `_toh3.ptx`, 1 GEMM `(H,3H)` thay 3 GEMM).
+  Loss khong doi, steady-state van `~176 ms/step` (cung FLOPs, chi giam 2 launch/layer).
+  Giu lai vi don gian hon va da verify.
+- **Option 2 - fp16 shadow trong AdamW**: da thu nhung **da revert**. Kernel AdamW ghi
+  shadow(fp16) cho 6 trong so + ban transpose cua W2; bo 9 phep chuyen fp32->fp16/layer.
+  Suot 6 lan thu (offset i64, khoi tao shadow truoc loop, giam stloc 255->249) van
+  `dotnet rc=-11` (segfault) ngay sau `sf_bwd` cua layer 23. Cac file WIP con o repo
+  de truy vet (`_shadow_w.ps1`, `_shadow_init.ps1`, `_fix_shadow_off.ps1`, `_shadow_trace*.ps1`).
+
+Ket luan: `176 ms/step` la diem dung da verify. Khong co them toc do thuc tu option 1;
+option 2 can dieu tra them neu quay lai.
