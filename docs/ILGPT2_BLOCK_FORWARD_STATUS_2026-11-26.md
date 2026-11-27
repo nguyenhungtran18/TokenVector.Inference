@@ -697,3 +697,30 @@ Da revert ve ban verified `f4e59cb` (= 81b7290): `MS_STEP 264.95`,
 kha thi (device kernels, fp16, fused GEMM, AdamW, batched, C fp16,
 fused attention PTX, CUDA graph). Bridge dung ATen fused kernel khong the
 tai tao bang P/Invoke tu TokenVector trong khoang thoi gian nay.
+
+---
+
+## TRIZ research round (2026-11-27 12:59 +0700)
+
+### 1. Hang_rc ({ideal final result})
+Mot buoc train chay trong <=187.8 ms, khong C++, khong torch, khong host control.
+
+### 2. Mau thuan (contradiction)
+Tang toc do (param 9) lam giam on dinh (param 27) moi lan viet PTX lon.
+Nhung cac lan gop kernel khong tang toc do -> mau thuan that khong phai
+"so kernel", ma la **host control** (GPU util 4.6%).
+
+### 3. Nguyen ly TRIZ da chon va ket qua thu nghiem
+| Nguyen ly | Ap dung | Ket qua |
+|---|---|---|
+| #13 Inversion | de GPU tu dieu khien thay vi host = CUDA Graph | capture stream rieng thanh cong |
+| #10 Preliminary action | ghi 1 step truoc, replay | da capture duoc |
+| #24 Mediator | cublas workspace lam chat trung gian | `cublasSetWorkspace_v2` rc=0 nhung instantiate van loi 1 |
+| #1/#5 Segmentation-Merging | gop QKV/GEMM | trung tinh hoac cham hon |
+| #35 Parameter change | C fp16 / compute 74 / algo 99 | 293-390 ms |
+| #28 Substitution | fused attention PTX thay S+softmax+A | PTX 218 |
+
+### 4. Ket luan
+TRIZ xac nhan dung huong (graph) nhung chan cuoi cung nam o
+`cudaGraphInstantiate` (loi 1, log rong) khong giai duoc qua P/Invoke.
+Da revert ve `a02fa47` (= 81b7290): 264.95 ms, gate OK. Target van chua dat.
