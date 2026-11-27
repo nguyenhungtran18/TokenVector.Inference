@@ -1,0 +1,486 @@
+# -*- coding: utf-8 -*-
+"""PROTOTYPE: CPU AVX2 kernel backend cho TokenVector (2026-11-21).
+
+Cho phep viet kernel CPU ngay trong file .tkv:
+
+    # @tkv.cpu_kernel target="avx2"
+    def linear_dw(x: "ptr[f32]", gy: "ptr[f32]", gdw: "ptr[f32]",
+                  n: "i32", in_d: "i32", out_d: "i32") -> "void":
+        for i0 in range(in_d):
+            for c in range(out_d):
+                s = gdw[i0 * out_d + c]
+                for p in range(n):
+                    s = fma(x[p * in_d + i0], gy[p * out_d + c], s)
+                gdw[i0 * out_d + c] = s
+
+Luong bien dich:
+  1. torch_rewrite_source() (goi tu extract_program_file) quet marker, sinh
+     <stem>.torch.cpp + wrapper, thay kernel bang __tkv_extern_pinvoke__.
+  2. <stem>.torch.build.sh build bang gcc -mavx2 -mfma -ffp-contract=off
+     -fno-fast-math (tuong duong /fp:precise, KHONG reorder FMA).
+  3. phan con lai di vao pipeline binh thuong (pragma P/Invoke co san).
+
+BIT-EXACT: `fma(a,b,c)` duoc chuyen thanh fmaf() -> vfmadd (khong lam tron
+trung gian), dung thu tu vong for. Khong tree-reduce, khong -ffast-math.
+Khong co marker -> ham tra nguyen chuoi, khong doi gi ca.
+"""
+
+TORCH_MARK = '# @tkv.torch_kernel'
+
+
+def _torch_c_type(ann: "str") -> "str":
+    """'ptr[f32]' -> 'float*' ; 'i32' -> 'int'."""
+    if ann.startswith('ptr['):
+        base = ann[4:len(ann) - 1]
+        star = '*'
+    else:
+        base = ann
+        star = ''
+    if base == 'tensor':
+        return 'at::Tensor' + star
+    if base == 'f32':
+        return 'float' + star
+    if base == 'f64':
+        return 'double' + star
+    if base == 'i32':
+        return 'int' + star
+    if base == 'i64':
+        return 'long long' + star
+    return base + star
+
+
+def _torch_is_ptr(ann: "str") -> "i32":
+    if ann.startswith('ptr['):
+        return 1
+    return 0
+
+
+def _torch_expr(e: "str") -> "str":
+    # ATen helpers (sinh ra C++/ATen tu DSL)
+    """Dich bieu thuc dang Python sang C. fma() -> fmaf() (bit-exact)."""
+    if 'torch_blob_i32(' in e:
+        aa = e[e.index('torch_blob_i32(') + 15:e.rindex(')')]
+        pp = aa.split(',')
+        return e[:e.index('torch_blob_i32(')] + 'torch::from_blob(const_cast<int*>(' + pp[0].strip() + '), {' + pp[1].strip() + '}, torch::TensorOptions().dtype(at::ScalarType::Int).device(torch::kCPU).requires_grad(false))'
+    if 'torch_blob_f32(' in e:
+        aa = e[e.index('torch_blob_f32(') + 15:e.rindex(')')]
+        pp = aa.split(',')
+        return e[:e.index('torch_blob_f32(')] + 'torch::from_blob(const_cast<float*>(' + pp[0].strip() + '), {' + pp[1].strip() + '}, torch::TensorOptions().dtype(at::ScalarType::Float).device(torch::kCPU).requires_grad(false))'
+    e = e.replace('torch_arange(', 'at::arange(')
+    e = e.replace('torch_to_long(', 'tkv_to_long(')
+    e = e.replace('torch_to_half(', 'tkv_to_half(')
+    e = e.replace('torch_to_dev(', 'tkv_to_dev(')
+    e = e.replace('torch_copy_(', 'tkv_copy_(')
+    e = e.replace('torch_index_select(', 'at::index_select(')
+    e = e.replace('torch_transpose(', 'tkv_transpose(')
+    e = e.replace('torch_view3(', 'tkv_view3(')
+    e = e.replace('torch_view4(', 'tkv_view4(')
+    e = e.replace('torch_reshape2(', 'tkv_reshape2(')
+    e = e.replace('torch_select(', 'tkv_select(')
+    e = e.replace('torch_unsqueeze(', 'tkv_unsqueeze(')
+    e = e.replace('torch_ln(', 'tkv_ln(')
+    e = e.replace('torch_half_mm(', 'tkv_half_mm(')
+    e = e.replace('torch_half_addmm(', 'tkv_half_addmm(')
+    e = e.replace('torch_unsqueeze(', 'torch::unsqueeze(')
+    e = e.replace('torch_contiguous(', 'tkv_contiguous(')
+    e = e.replace('torch_addmm(', 'at::addmm(')
+    e = e.replace('torch_view2(', 'tkv_view2(')
+    e = e.replace('torch_sdpa(', 'at::scaled_dot_product_attention(')
+    e = e.replace('torch_sdpa_causal(', 'tkv_sdpa_causal(')
+    e = e.replace('torch_to_f32(', 'tkv_to_f32(')
+    e = e.replace('torch_item_f32(', 'tkv_item_f32(')
+    e = e.replace('torch_backward(', 'tkv_backward(')
+    e = e.replace('torch_grad(', 'tkv_grad(')
+    e = e.replace('torch_clear_grad(', 'tkv_clear_grad(')
+    e = e.replace('torch_put_grad(', 'tkv_put_grad(')
+    e = e.replace('torch_zero_grad(', 'tkv_zero_grad(')
+    e = e.replace('torch_adamw(', 'tkv_adamw_launch(')
+    e = e.replace('torch_sync_fp16(', 'tkv_sync_fp16(')
+    e = e.replace('torch_gelu(', 'at::gelu(')
+    e = e.replace('torch_log_softmax(', 'at::log_softmax(')
+    e = e.replace('torch_gather(', 'at::gather(')
+    e = e.replace('torch_mean(', 'at::mean(')
+    e = e.replace(' and ', ' && ')
+    e = e.replace(' or ', ' || ')
+    e = e.replace('tkv_defined(', 'tkv_defined(')
+    e = e.replace('vec_len(', 'tkv_vec_len(')
+    e = e.replace('embed_bwd(', 'tkv_embed_bwd(')
+    e = e.replace('softmax_cb(', 'tkv_softmax_cb(')
+    e = e.replace('softmax_cf(', 'tkv_softmax_cf(')
+    e = e.replace('gelu_bv(', 'tkv_gelu_bv(')
+    e = e.replace('gelu_fv(', 'tkv_gelu_fv(')
+    e = e.replace('gelu_f(', 'tkv_gelu_f(')
+    e = e.replace('gelu_b(', 'tkv_gelu_b(')
+    e = e.replace('tkv_rint(', 'rintf(')
+    e = e.replace('tkv_ldexp(', 'ldexpf(')
+    e = e.replace('tkv_fmax(', 'fmaxf(')
+    e = e.replace('tkv_fabs(', 'fabsf(')
+    e = e.replace('tkv_notfinite(', '!isfinite(')
+    e = e.replace('fma(', 'fmaf(')
+    e = e.replace('//', '/')
+    e = e.replace('d_sqrt(', '__TKVSQRT__')
+    e = e.replace('sqrt(', 'sqrtf(')
+    e = e.replace('__TKVSQRT__', 'sqrt(')
+    e = e.replace('erf(', 'erff(')
+    e = e.replace('d_exp(', '__TKVEXP__')
+    e = e.replace('exp(', 'expf(')
+    e = e.replace('log(', 'logf(')
+    e = e.replace('__TKVEXP__', 'exp(')
+    return e
+
+
+def _torch_params(header: "str") -> "list[(str,str)]":
+    out = []
+    parts = header.split(',')
+    for p in parts:
+        p = p.strip()
+        if p == '':
+            continue
+        k = p.find(':')
+        if k < 0:
+            continue
+        ten = p[:k].strip()
+        ann = p[k + 1:].strip()
+        ann = ann.replace('"', '').replace("'", '')
+        out.append((ten, ann))
+    return out
+
+
+def _torch_has_idx(s: "str", nm: "str") -> "i32":
+    # rule cu `nm + '[' in rhs` khop NHAM `n[` nam trong `lse_in[` -> is_int sai.
+    # Chi co tinh la index neu toan tu o ranh gioi tu.
+    key = nm + '['
+    p = 0
+    while True:
+        k = s.find(key, p)
+        if k < 0:
+            break
+        if k == 0 or not (s[k - 1].isalnum() or s[k - 1] == '_'):
+            return 1
+        p = k + 1
+    return 0
+
+def _torch_body_c(body: "list[str]", params: "list[(str,str)]", buffers: "list[str]", gnames: "list[str]" = None) -> "str":
+    if gnames is None:
+        gnames = []
+    """Sinh than kernel C tu than ham Python (for/if long nhau, FMA giu thu tu)."""
+    lines = []
+    declared = []
+    depth = 0
+    for ln in body:
+        st = ln.strip()
+        if st == '':
+            continue
+        ind = len(ln) - len(ln.lstrip(' '))
+        level = ind // 4
+        while depth > level - 1:
+            depth = depth - 1
+            lines.append('  ' * depth + '}')
+        if st.startswith('for ') and st.endswith(':'):
+            hdr = st[4:len(st) - 1].strip()
+            parts = hdr.split(' in ')
+            v = parts[0].strip()
+            lim = parts[1].strip()
+            if lim.startswith('range('):
+                lim = lim[6:len(lim) - 1]
+            lines.append('  ' * (level - 1) + 'for (int ' + v + ' = 0; ' + v + ' < (' + _torch_expr(lim) + '); ' + v + '++) {')
+            if v not in declared:
+                declared.append(v)
+            depth = level
+        elif st.endswith(':'):
+            cond = st[:len(st) - 1].strip()
+            if cond.startswith('if '):
+                cond = cond[3:]
+            elif cond.startswith('else'):
+                cond = '1'
+            lines.append('  ' * (level - 1) + 'if (' + _torch_expr(cond) + ') {')
+            depth = level
+        elif 'f32buf(' in st or 'i32buf(' in st:
+            left = st.split('=')[0].strip() if '=' in st else ''
+            isf = 'f32buf(' in st
+            mark = 'f32buf(' if isf else 'i32buf('
+            arg = st[st.index(mark) + len(mark):st.index(')')]
+            ct = 'float' if isf else 'int'
+            lines.append('  ' * (level - 1) + ct + '* ' + left + ' = (' + ct + '*)malloc((size_t)(' + _torch_expr(arg) + ') * sizeof(' + ct + '));')
+            if buffers is not None:
+                buffers.append(left)
+            if left not in declared:
+                declared.append(left)
+        else:
+            # khai bien cuc bo lan dau gan - suy kieu don gian nhu CUDA backend
+            if '=' in st and '[' not in st.split('=')[0]:
+                left = st.split('=')[0].strip()
+                if left not in declared and left not in ('',) and left not in gnames:
+                    rhs = st.split('=', 1)[1]
+                    is_int = 0
+                    if '%' in rhs:
+                        is_int = 1
+                    if '/' in rhs and 'sqrt' not in rhs and '1.0' not in rhs:
+                        if left == 'mean' or left == 'rstd' or left == 'var':
+                            is_int = 0
+                        if left == 'row' or left == 'stride' or left == 'base' or left == 'wid' or left == 'total' or left == 'i':
+                            is_int = 1
+                    k = 0
+                    while k < len(params):
+                        nm = params[k][0]
+                        if _torch_has_idx(rhs, nm) and 'i32' in params[k][1]:
+                            is_int = 1
+                        k = k + 1
+                    if left == 'lane' or left == 'wid' or left == 'total':
+                        is_int = 1
+                    i64use = 0
+                    for pk in params:
+                        if 'i64' in pk[1] and pk[0] + ' ' in rhs:
+                            i64use = 1
+                    if left == 'base' or left == 'p0' or left == 'r0' or left == 'c0' or left == 'ho':
+                        ctype = 'long long'
+                    elif i64use == 1:
+                        ctype = 'long long'
+                    else:
+                        ctype = 'double' if left.startswith('d_') else ('int' if is_int else 'float')
+                    isten = 0
+                    tfs = 'tkv_sdpa_causal|tkv_to_f32|tkv_dev_flat_from|tkv_dev_zeros_f32|tkv_dev_empty_f32|tkv_flat_half|torch_unsqueeze|torch_select|torch_transpose|torch_reshape2|torch_contiguous|torch_view3|torch_view4|torch_grad|torch_view2|torch_blob_i32|torch_blob_f32|torch_to_long|torch_to_half|torch_to_dev|torch_arange|tkv_view3|tkv_view4|tkv_reshape2|tkv_select|tkv_unsqueeze|tkv_transpose|tkv_contiguous|torch_ln|torch_half_mm|torch_half_addmm|torch_mm|torch_addmm|torch_sdpa|torch_gelu|torch_index_select|torch_log_softmax|torch_gather|torch_mean|tkv_empty_i64|tkv_data_i64'
+                    for tf in tfs.split('|'):
+                        if tf in rhs:
+                            isten = 1
+                        if tf in rhs:
+                            isten = 1
+                    if isten == 1:
+                        ctype = 'auto'
+                    declared.append(left)
+                    st = ctype + ' ' + st
+            lines.append('  ' * (level - 1) + _torch_expr(st) + ';')
+    while depth > 0:
+        depth = depth - 1
+        lines.append('  ' * depth + '}')
+    return '\n'.join(lines) + '\n'
+
+
+def _torch_kernel_c(name: "str", params: "list[(str,str)]", body: "list[str]", ret: "str" = "void", gnames: "list[str]" = None) -> "str":
+    decls = []
+    args = []
+    for pn, ann in params:
+        decls.append(_torch_c_type(ann) + ' ' + pn)
+        args.append(pn)
+    rt = 'void' if ret == 'void' else _torch_c_type(ret)
+    s = 'TKV_TORCH_EXPORT ' + rt + ' ' + name + '(' + ', '.join(decls) + ') {' + chr(10)
+    s = s + '  try {\n'
+    bufs = []
+    s = s + _torch_body_c(body, params, bufs, gnames)
+    for b in bufs:
+        s = s + '  free(' + b + ');\n'
+    hasret = 0
+    for bl in body:
+        if bl.strip().startswith('return '):
+            hasret = 1
+    if hasret == 0:
+        s = s + '  return 0;\n'
+    if rt == 'void':
+        s = s + '  } catch (const std::exception& tkv_e) { snprintf(g_tkv_last_err, 1024, "%s", tkv_e.what()); fprintf(stderr, "TKV_ERR ' + name + ' %s%c", tkv_e.what(), 10); fflush(stderr); return; }\n'
+    elif rt == 'float':
+        s = s + '  } catch (const std::exception& tkv_e) { snprintf(g_tkv_last_err, 1024, "%s", tkv_e.what()); fprintf(stderr, "TKV_ERR ' + name + ' %s%c", tkv_e.what(), 10); fflush(stderr); return -999.0f; }\n'
+    elif rt == 'double':
+        s = s + '  } catch (const std::exception& tkv_e) { snprintf(g_tkv_last_err, 1024, "%s", tkv_e.what()); fprintf(stderr, "TKV_ERR ' + name + ' %s%c", tkv_e.what(), 10); fflush(stderr); return -999.0; }\n'
+    elif rt == 'long long':
+        s = s + '  } catch (const std::exception& tkv_e) { snprintf(g_tkv_last_err, 1024, "%s", tkv_e.what()); fprintf(stderr, "TKV_ERR ' + name + ' %s%c", tkv_e.what(), 10); fflush(stderr); return -999LL; }\n'
+    else:
+        s = s + '  } catch (const std::exception& tkv_e) { snprintf(g_tkv_last_err, 1024, "%s", tkv_e.what()); fprintf(stderr, "TKV_ERR ' + name + ' %s%c", tkv_e.what(), 10); fflush(stderr); return -999; }\n'
+    s = s + '}\n'
+    return s
+
+
+def _torch_pragma(name: "str", params: "list[(str,str)]", so: "str") -> "str":
+    ts = []
+    for pn, ann in params:
+        if _torch_is_ptr(ann) == 1:
+            ts.append('"i64"')
+        elif ann == 'f32':
+            ts.append('"f32"')
+        elif ann == 'f64':
+            ts.append('"f64"')
+        elif ann == 'i64':
+            ts.append('"i64"')
+        else:
+            ts.append('"i32"')
+    sym = name
+    return ('    {"name": "' + sym + '", "dll": "' + so + '", "symbol": "' + sym + '",\n'
+            '     "convention": "cdecl", "params": [' + ', '.join(ts) + '], "returns": "i32"},')
+
+
+def _torch_wrapper(name: "str", params: "list[(str,str)]") -> "str":
+    sig = []
+    args = []
+    for pn, ann in params:
+        if _torch_is_ptr(ann) == 1:
+            t = 'i64'
+        else:
+            t = ann
+        sig.append(pn + ': "' + t + '"')
+        args.append(pn)
+    return ('def ' + name + '_launch(' + ', '.join(sig) + ') -> "i32":\n'
+            '    return ' + name + '(' + ', '.join(args) + ')\n')
+
+
+def torch_rewrite_source(src: "str", path: "str") -> "str":
+    """Di tim cac kernel duoc danh dau, sinh .torch.cpp + glue, tra source moi."""
+    lines = src.splitlines()
+    if not any(ln.startswith(TORCH_MARK) for ln in lines):
+        return src
+    dirp = path_dirname(path)
+    stem = path_stem(path)
+    cu_path = dirp + '/' + stem + '.torch.cpp'
+    sh_path = dirp + '/' + stem + '.torch.build.sh'
+    # Validator pragma yeu cau ten ket thuc '.dll'; Linux van la ELF .so
+    so = stem + '_torch.dll'
+    out = []
+    pragmas = []
+    wrappers = []
+    cu_parts = ['#include <torch/extension.h>\n#include <ATen/ATen.h>\n#include <cuda_runtime.h>\n']
+    cu_parts.append('#include <math.h>' + chr(10))
+    cu_parts.append('#include <stdlib.h>' + chr(10))
+    cu_parts.append('#include <vector>' + chr(10))
+    cu_parts.append('#include <cstring>' + chr(10))
+    cu_parts.append('#include <dlfcn.h>' + chr(10))
+    cu_parts.append('#include <cmath>' + chr(10))
+    cu_parts.append('#include <cstdint>' + chr(10))
+    cu_parts.append('#include <cstdio>' + chr(10))
+    cu_parts.append('#include <exception>' + chr(10))
+    cu_parts.append('static char g_tkv_last_err[1024];' + chr(10))
+    gnames = []
+    gdecl_lines = []
+    glines = []
+    for gl in lines:
+        eq = gl.find('=')
+        if gl.startswith('g_') and eq > 0:
+            gn = gl[:eq].strip()
+            rest = gl[eq+1:].strip()
+            gv = rest
+            ha = rest.find('#')
+            if ha >= 0:
+                gv = rest[:ha].strip()
+                ga = rest[ha+1:].strip()
+            else:
+                ga = 'int'
+            if gv == '0' and ga == 'int':
+                gt = 'int'
+            else:
+                gt = _torch_c_type(ga)
+            glines.append(gn)
+            gnames.append(gn)
+            if ga == 'tensor[]':
+                gdecl_lines.append('std::vector<at::Tensor> ' + gn + ';')
+            elif ga == 'ptr[]':
+                gdecl_lines.append('std::vector<float*> ' + gn + ';')
+            elif ga == 'i64[]':
+                gdecl_lines.append('std::vector<long long> ' + gn + ';')
+            elif ga == 'tensor':
+                gdecl_lines.append('at::Tensor ' + gn + ';')
+            else:
+                gdecl_lines.append(gt + ' ' + gn + ' = ' + gv + ';')
+    cu_parts.append('#define TKV_TORCH_EXPORT extern "C" __attribute__((visibility("default")))' + chr(10) + chr(10))
+    cu_parts.append('static inline bool tkv_want_cuda() { const char* s = getenv("TKV_TORCH_GPU"); return s && s[0] != 0; }' + chr(10))
+    cu_parts.append('static inline torch::TensorOptions tkv_opt_long() { return tkv_want_cuda() ? torch::TensorOptions().dtype(at::ScalarType::Long).device(torch::kCUDA) : torch::TensorOptions().dtype(at::ScalarType::Long).device(torch::kCPU); }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_to_long(const torch::Tensor& t) { return t.to(tkv_opt_long()); }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_to_half(const torch::Tensor& t) { return t.to(at::ScalarType::Half); }' + chr(10))
+    cu_parts.append('static inline void tkv_copy_(torch::Tensor& d, const torch::Tensor& s) { d.copy_(s); }' + chr(10))
+    cu_parts.append('static inline bool tkv_defined(const at::Tensor& t) { return t.defined(); }' + chr(10))
+    cu_parts.append('static inline long long tkv_numel(const at::Tensor& t) { return t.numel(); }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_to_dev(const torch::Tensor& t) { return tkv_want_cuda() ? t.to(torch::TensorOptions().dtype(at::ScalarType::Half).device(torch::kCUDA)) : t; }' + chr(10))
+    cu_parts.append('static inline long long tkv_vec_len(const std::vector<at::Tensor>& v) { return (long long)v.size(); }' + chr(10))
+    cu_parts.append('static inline void tkv_assign_tensor(std::vector<at::Tensor>& v, long long n) { v.assign((size_t)n, at::Tensor()); }' + chr(10))
+    cu_parts.append('static inline void tkv_assign_ptr(std::vector<float*>& v, long long n) { v.assign((size_t)n, nullptr); }' + chr(10))
+    cu_parts.append('static inline void tkv_assign_i64(std::vector<long long>& v, long long n) { v.assign((size_t)n, 0); }' + chr(10))
+    cu_parts.append('static inline void tkv_reset(at::Tensor& t) { t.reset(); }' + chr(10))
+    cu_parts.append('static inline void tkv_copy_out(const at::Tensor& t, float* dst, long long n) { auto h = t.to(torch::TensorOptions().dtype(at::ScalarType::Float).device(torch::kCPU)); std::memcpy(dst, h.const_data_ptr<float>(), (size_t)n * sizeof(float)); }' + chr(10))
+    cu_parts.append('static inline at::Tensor tkv_empty_i64(long long n) { return at::empty({n}, torch::TensorOptions().dtype(at::ScalarType::Long).device(torch::kCPU)); }' + chr(10))
+    cu_parts.append('static inline long long* tkv_data_i64(at::Tensor& t) { return (long long*)t.data_ptr<int64_t>(); }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_contiguous(const torch::Tensor& t) { return t.contiguous(); }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_view3(const torch::Tensor& t, long long a, long long b, long long c) { return t.view({a,b,c}); }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_view2(const torch::Tensor& t, long long a, long long b) { return t.view({a,b}); }' + chr(10))
+    cu_parts.append('static inline void tkv_backward(const torch::Tensor& t) { t.backward(); }' + chr(10))
+    cu_parts.append('static inline float tkv_item_f32(const torch::Tensor& t) { return t.item<float>(); }' + chr(10))
+    cu_parts.append('static inline void tkv_dbg(long long m, double v) { const char* s = getenv(\"TKV_FULL_DEBUG\"); if (s && s[0] != 0) { fprintf(stderr, \"TKVDBG %lld %.6f%c\", m, v, 10); fflush(stderr); } }' + chr(10))
+    cu_parts.append('typedef int (*tkv_adamw_fn)(float*, const float*, float*, float*, long long, float, float, float, float, float, float, float, int, int);' + chr(10))
+    cu_parts.append('static inline void tkv_adamw_launch() { const char* path = getenv("TKV_CUDA_KERNELS_SO"); if (!path) return; void* h = dlopen(path, RTLD_NOW); if (!h) return; tkv_adamw_fn fn = (tkv_adamw_fn)dlsym(h, "tkv_launch_adamw_step"); if (!fn) return; long long numel = g_p_all.numel(); int threads = 256; int blocks = (int)((numel + threads - 1) / threads); fn(g_p_all.data_ptr<float>(), g_grad_dev.data_ptr<float>(), g_m_dev.data_ptr<float>(), g_v_dev.data_ptr<float>(), numel, g_lr, g_b1, g_b2, 1.0f - pow(g_b1, (double)(g_cur_step + 1)), 1.0f - pow(g_b2, (double)(g_cur_step + 1)), g_eps, g_wd, blocks, threads); g_adamw_path = 1; }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_grad(const torch::Tensor& t) { return t.grad(); }' + chr(10))
+    cu_parts.append('static inline void tkv_clear_grad(torch::Tensor& t) { t.mutable_grad() = at::Tensor(); }' + chr(10))
+    cu_parts.append('static inline void tkv_put_grad(long long idx, const torch::Tensor& gr) { long long off = 0; for (long long i = 0; i < idx; ++i) off += g_p[(size_t)i].numel(); if (tkv_defined(g_grad_dev) && off + gr.numel() <= g_grad_dev.numel()) g_grad_dev.narrow(0, off, gr.numel()).copy_(gr.to(at::ScalarType::Float).contiguous().reshape({gr.numel()})); }' + chr(10))
+    cu_parts.append('static inline void tkv_zero_grad(long long idx) { long long off = 0; for (long long i = 0; i < idx; ++i) off += g_p[(size_t)i].numel(); if (tkv_defined(g_grad_dev) && off + g_p[(size_t)idx].numel() <= g_grad_dev.numel()) g_grad_dev.narrow(0, off, g_p[(size_t)idx].numel()).zero_(); }' + chr(10))
+    cu_parts.append('static inline void tkv_sync_fp16() { c10::NoGradGuard g; long long off = 0; for (size_t i = 0; i < g_p.size(); ++i) { long long nn = g_p[i].numel(); if (nn > 0) g_p[i].copy_(g_p_all.narrow(0, off, nn)); off += nn; } }' + chr(10))
+    cu_parts.append('static inline long long tkv_flat_total(const std::vector<at::Tensor>& v) { long long s = 0; for (size_t i = 0; i < v.size(); ++i) s += v[i].numel(); return s; }' + chr(10))
+    cu_parts.append('static inline long long tkv_flat_off(const std::vector<at::Tensor>& v, long long idx) { long long s = 0; for (long long i = 0; i < idx; ++i) s += v[(size_t)i].numel(); return s; }' + chr(10))
+    cu_parts.append('static inline at::Tensor tkv_dev_flat_from(const std::vector<at::Tensor>& v) { return at::empty({tkv_flat_total(v)}, torch::TensorOptions().dtype(at::ScalarType::Float).device(torch::kCUDA)); }' + chr(10))
+    cu_parts.append('static inline at::Tensor tkv_dev_empty_f32(long long n) { return at::empty({n}, torch::TensorOptions().dtype(at::ScalarType::Float).device(torch::kCUDA)); }' + chr(10))
+    cu_parts.append('static inline at::Tensor tkv_dev_zeros_f32(long long n) { return at::zeros({n}, torch::TensorOptions().dtype(at::ScalarType::Float).device(torch::kCUDA)); }' + chr(10))
+    cu_parts.append('static inline void tkv_flat_copy_f32(const at::Tensor& dst, long long off, const at::Tensor& src) { if (src.numel() > 0) dst.narrow(0, off, src.numel()).copy_(src.to(at::ScalarType::Float)); }' + chr(10))
+    cu_parts.append('static inline at::Tensor tkv_flat_half(const at::Tensor& dst, long long off, long long n) { return dst.narrow(0, off, n).to(at::ScalarType::Half); }' + chr(10))
+    cu_parts.append('static inline void tkv_host_copy_f32(at::Tensor& dst, float* buf, long long n) { if (buf && n > 0 && dst.numel() >= n) { auto h = torch::from_blob(buf, {n}, torch::TensorOptions().dtype(at::ScalarType::Float).device(torch::kCPU)); dst.narrow(0, 0, n).copy_(h); } }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_view4(const torch::Tensor& t, long long a, long long b, long long c, long long d) { return t.view({a,b,c,d}); }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_reshape2(const torch::Tensor& t, long long a, long long b) { return t.reshape({a,b}); }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_select(const torch::Tensor& t, long long dim, long long idx) { return t.select(dim, idx); }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_unsqueeze(const torch::Tensor& t, long long d) { return t.unsqueeze(d); }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_transpose(const torch::Tensor& t, long long a, long long b) { return t.transpose(a,b); }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_ln(const torch::Tensor& x, const torch::Tensor& g, const torch::Tensor& b, double eps) { return at::layer_norm(x, at::IntArrayRef{x.size(-1)}, g, b, eps).to(x.scalar_type()); }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_half_mm(const torch::Tensor& a, const torch::Tensor& w) { return at::mm(a.to(at::ScalarType::Half), w.to(at::ScalarType::Half)); }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_half_addmm(const torch::Tensor& bias, const torch::Tensor& a, const torch::Tensor& w) { return at::addmm(bias.to(at::ScalarType::Half), a.to(at::ScalarType::Half), w.to(at::ScalarType::Half)); }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_sdpa_causal(const torch::Tensor& q, const torch::Tensor& k, const torch::Tensor& v) { return at::scaled_dot_product_attention(q.contiguous().to(at::ScalarType::Half), k.contiguous().to(at::ScalarType::Half), v.contiguous().to(at::ScalarType::Half), std::nullopt, 0.0, true, std::nullopt); }' + chr(10))
+    cu_parts.append('static inline torch::Tensor tkv_to_f32(const torch::Tensor& t) { return t.to(at::ScalarType::Float); }' + chr(10))
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if ln.startswith(TORCH_MARK):
+            j = i + 1
+            while j < len(lines) and not lines[j].lstrip().startswith('def '):
+                j = j + 1
+            if j >= len(lines):
+                raise TranspileError('CPU kernel: thieu dinh nghia def sau marker')
+            head = lines[j].strip()
+            a = head.find('(')
+            b = head.find(')')
+            if a < 0 or b < 0:
+                raise TranspileError('CPU kernel: dong def khong hop le: ' + head)
+            name = head[4:a].strip()
+            params = _torch_params(head[a + 1:b])
+            ret = 'void'
+            if '->' in head:
+                ret = head[head.index('->') + 2:].strip().replace(chr(34),'').replace(chr(39),'').rstrip(':')
+            k = j + 1
+            body = []
+            while k < len(lines) and (lines[k].strip() == '' or lines[k].startswith('    ')):
+                body.append(lines[k])
+                k = k + 1
+            cu_parts.append(_torch_kernel_c(name, params, body, ret, gnames))
+            pragmas.append(_torch_pragma(name, params, so))
+            wrappers.append(_torch_wrapper(name, params))
+            i = k
+        else:
+            if not (ln.startswith('g_') and '=' in ln):
+                out.append(ln)
+            i = i + 1
+    cu_parts.append('TKV_TORCH_EXPORT long long TkvFullLastErr() { return (long long)g_tkv_last_err; }' + chr(10))
+    if len(pragmas) == 0:
+        return src
+    cu = '\n'.join(cu_parts)
+    for gn in glines:
+        for gty in ('int','long long','float','double','float*','at::Tensor'):
+            cu = cu.replace(gty + ' ' + gn + ' = ', gn + ' = ')
+    gdecls = ''
+    for gd in gdecl_lines:
+        gdecls = gdecls + gd + chr(10)
+    marker = '#define TKV_TORCH_EXPORT extern "C" __attribute__((visibility("default")))' + chr(10)
+    cu = cu.replace(marker, marker + gdecls)
+    path_write_text(cu_path, cu)
+    sh = ('#!/bin/sh\nset -e\ngcc -O2 -mavx2 -mfma -ffp-contract=off -fno-fast-math '
+          '-shared -fPIC ' + cu_path + ' -o ' + so + ' -lm -lpthread -ldl\n')
+    path_write_text(sh_path, sh)
+    gcc = os_getenv('TKV_CPU_GCC')
+    if gcc is not None and gcc != '':
+        rc = proc_ra(gcc, '-O2 -mavx2 -mfma -ffp-contract=off -fno-fast-math -shared -fPIC ' +
+                     cu_path + ' -o ' + so + ' -lm -lpthread -ldl',
+                     dirp + '/' + stem + '.cpu.build.log')
+        if rc != 0:
+            raise TranspileError('gcc that bai (xem ' + dirp + '/' + stem + '.cpu.build.log)')
+    pragma = ('__tkv_extern_pinvoke__ = [\n' + '\n'.join(pragmas) + '\n]\n\n')
+    glue = '\n'.join(wrappers) + '\n'
+    res = pragma + glue + '\n'.join(out)
+    return res

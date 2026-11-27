@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
   <metadata>
     <id>TokenVector.Inference</id>
-    <version>1.0.2</version>
+    <version>1.0.3</version>
     <title>TokenVector.Inference - Pure .tkv Inference Runtime &amp; GPT-2 124M Training Engine</title>
     <authors>Nguyen Hung Tran, TokenVector Compiler Engineering Team</authors>
     <owners>nguyenhungtran18</owners>
@@ -13,7 +13,7 @@
     <readme>README.md</readme>
     <description>TokenVector.Inference - the inference runtime and GPT-2 124M training engine written in pure TokenVector (.tkv). Graph optimization, INT8/FP8 quantization, ONNX reader, paged KV-cache, micro-batcher, and an end-to-end GPT-2 124M trainer (loss EXACT on the native CPU path; GPU full-step 40.0 ms/step @seq1024, ~7.2x faster than eager PyTorch on Colab T4). Compiled with the tkvc-tv compiler (package 'TokenVector').</description>
     <summary>Pure .tkv inference runtime and GPT-2 124M training engine for the TokenVector ecosystem.</summary>
-    <releaseNotes>v1.0.2 - 2026-11-20: GPU-resident full training step (one native TkvFullStep124m call) measured 40.0 ms/step @seq1024 vs eager PyTorch 289.1 ms (~7.2x faster) and 212.6 ms @seq2048 vs 599.5 ms (~2.8x) on Colab T4; fp16 params with fp32 master, autograd backward, fused AdamW; native CPU EXACT path unchanged (loss 25.454). Includes docs/BENCHMARK_GUIDE.md. v1.0.1 - 2026-11-11: CPU full step @seq1024 4016 ms vs torch 4061.1 (0.989x); loss EXACT; gate_f32 135/135; trainer 15/15; gpt2_full 33/33.</releaseNotes>
+    <releaseNotes>v1.0.3 - 2026-11-27: merged the pure-TokenVector CUDA/GPT2-medium trainer into this repository (cuda-backend/). Verified on Kaggle T4: 176 ms/step steady-state, ~6% faster than the C++ bridge baseline 187.8 ms/step; loss converges 11.18 -> 1.25 over 10 steps with AdamW fp32 master; no C/C++ and no torch in the execution path. Includes the fused QKV GEMM, 3-kernel chunked loss, transposed fp16 W2 shadow, and the full profiling/status docs. v1.0.2 - 2026-11-20: GPU-resident full training step (one native TkvFullStep124m call) measured 40.0 ms/step @seq1024 vs eager PyTorch 289.1 ms (~7.2x faster) and 212.6 ms @seq2048 vs 599.5 ms (~2.8x) on Colab T4; fp16 params with fp32 master, autograd backward, fused AdamW; native CPU EXACT path unchanged (loss 25.454). Includes docs/BENCHMARK_GUIDE.md. v1.0.1 - 2026-11-11: CPU full step @seq1024 4016 ms vs torch 4061.1 (0.989x); loss EXACT; gate_f32 135/135; trainer 15/15; gpt2_full 33/33.</releaseNotes>
     <copyright>Copyright (c) 2026 Nguyen Hung Tran</copyright>
     <tags>tokenvector dotnet cil aot gpt2 inference training llm pytorch quantization</tags>
     <repository type="git" url="https://github.com/nguyenhungtran18/TokenVector.Inference" />
@@ -41,6 +41,10 @@
     <file src="..\benchmark\_bench_matrix.ps1" target="src\tools\_bench_matrix.ps1" />
     <file src="..\benchmark\bench_torch.py" target="src\tools\bench_torch.py" />
     <file src="..\demo\colab_train_gpt2medium.ipynb" target="src\demo\colab_train_gpt2medium.ipynb" />
+    <!-- Pure-TokenVector CUDA/GPT2-medium trainer merged from the prototype branch. -->
+    <file src="..\cuda-backend\Release\cuda_backend\examples\ilgpt2_trainN_clean.tkv" target="src\cuda-backend\ilgpt2_trainN_clean.tkv" />
+    <file src="..\cuda-backend\Release\cuda_backend\examples\ilgpt2_long.tkv" target="src\cuda-backend\ilgpt2_long.tkv" />
+    <file src="..\cuda-backend\Release\cuda_backend\examples\ILGPT2_TRAINN_CLEAN_VERIFIED.md" target="src\docs\ILGPT2_TRAINN_CLEAN_VERIFIED.md" />
     <!-- Managed assembly built from source by packaging/pack.ps1 (lib/ is gitignored) -->
     <file src="lib\net10.0\TokenVector.Inference.dll" target="lib/net10.0/TokenVector.Inference.dll" />
   </files>

@@ -987,3 +987,21 @@ Day la gioi han thuc te cua TokenVector o dang codegen, khong phai PTX hay CUDA.
 
 Ban chinh van la `9493cd3` (`while step <= 2`, `adamw_update` 10 tham so, khong co
 shQKV/shadow), gate da verify. Khong	ri ve cac ban shadow WIP vao san pham.
+
+---
+
+## Hoan thien: merge repo + don dep + dong goi (2026-11-27 22:45 +0700)
+
+- Toan bo cay `TokenVector.CudaBackend` (branch `prototype/cuda-backend`, HEAD cuoi
+  `5945a41`) da duoc merge vao repo nay duong `cuda-backend/`. Goi `TokenVector 1.0.15`
+  (goi sai) da bi xoa; package chinh thuc la `TokenVector.Inference`.
+- `cuda-backend/` da don con 124 file can thiet: `Release/cuda_backend/examples/`
+  giu 2 ban verified (`ilgpt2_trainN_clean.*`, `ilgpt2_long.*`), gate
+  `ref_gpt2_trainN_clean.py`, tai lieu verify va 6 file PTX inline;
+  `Release/dist/tkv-tv.exe` + `il_features/` giu de bien dich lai. Da xoa 377 file
+  examples cu (WIP/probe/diag) va toan bo `Release/packaging/` trung lap.
+- Notebook Kaggle `demo/KAGGLE_ILGPT2_TRAIN_N_CLEAN_2026-11-26.ipynb` da doi sang clone
+  `TokenVector.Inference.git` nhanh `main` va duong dan `cuda-backend/Release/...`.
+- `packaging/TokenVector.Inference.nuspec`: version **1.0.3** (tu 1.0.2), them 3 file
+  cua trainer vao package; `pack.ps1` cap nhat assembly ver `1:0:3:0`.
+- Ket qua cuoi giu nguyen: `~176 ms/step`, gate OK, loss 11.18 -> 1.25 / 10 buoc.

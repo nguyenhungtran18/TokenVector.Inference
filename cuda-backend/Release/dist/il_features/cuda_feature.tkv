@@ -1,0 +1,308 @@
+# -*- coding: utf-8 -*-
+"""PROTOTYPE: CUDA kernel backend cho TokenVector (2026-11-21).
+
+Cho phep viet kernel CUDA ngay trong file .tkv:
+
+    # @tkv.cuda_kernel grid="(n + 255) // 256" block="256"
+    def vec_add(a: "ptr[f32]", b: "ptr[f32]", c: "ptr[f32]", n: "i32") -> "void":
+        i = tid()
+        if i < n:
+            c[i] = a[i] + b[i]
+
+Luong bien dich:
+  1. cuda_rewrite_source() (goi tu extract_program_file) quet marker, sinh
+     <stem>.cuda.cu + wrapper, thay kernel bang __tkv_extern_pinvoke__.
+  2. neu dat TKV_CUDA_NVCC thi goi nvcc qua proc_ra() de ra .so.
+  3. phan con lai di vao pipeline binh thuong (pragma P/Invoke co san).
+
+GIOI HAN CO Y: chi 1 cap if, bieu thuc dang C (khong goi ham Python),
+khong struct/callback; day la bang chung kha thi cua backend, khong phai
+san pham. Khong co marker -> ham tra nguyen chuoi, khong doi gi ca.
+"""
+
+CUDA_MARK = '# @tkv.cuda_kernel'
+
+
+def _cuda_c_type(ann: "str") -> "str":
+    """'ptr[f32]' -> 'float*' ; 'i32' -> 'int'."""
+    if ann.startswith('ptr['):
+        base = ann[4:len(ann) - 1]
+        star = '*'
+    else:
+        base = ann
+        star = ''
+    if base == 'f32':
+        return 'float' + star
+    if base == 'f64':
+        return 'double' + star
+    if base == 'i32':
+        return 'int' + star
+    if base == 'i64':
+        return 'long long' + star
+    return base + star
+
+
+def _cuda_is_ptr(ann: "str") -> "i32":
+    if ann.startswith('ptr['):
+        return 1
+    return 0
+
+
+def _cuda_expr(e: "str") -> "str":
+    """Dich bieu thuc dang Python sang C (cac phep toan so hoc giong nhau)."""
+    e = e.replace('ltid()', 'threadIdx.x')
+    e = e.replace('laneid()', '(threadIdx.x & 31)')
+    e = e.replace('wreduce_d(', 'tkv_wreduce_d(')
+    e = e.replace('wreduce(', 'tkv_wreduce(')
+    e = e.replace('tid()', '(blockIdx.x * blockDim.x + threadIdx.x)')
+    e = e.replace('bid()', 'blockIdx.x')
+    e = e.replace('bdim()', 'blockDim.x')
+    e = e.replace('//', '/')
+    e = e.replace('sqrt(', 'sqrtf(')
+    e = e.replace('erf(', 'erff(')
+    e = e.replace('exp(', 'expf(')
+    e = e.replace('syncthreads()', '__syncthreads()')
+    return e
+
+
+def _cuda_has_int_mul(s: "str") -> "i32":
+    # rule cu `'r * ' in rhs` khop NHAM `lr * mi` (bien lr ket thuc bang r) -> int pi.
+    # Chi co tinh la index neu toan tu o ranh gioi tu (khong nam giua ten bien).
+    for t in ('r', 'i', 'j', 'row', 'base'):
+        key = t + ' * '
+        p = 0
+        while True:
+            k = s.find(key, p)
+            if k < 0:
+                break
+            if k == 0 or not (s[k - 1].isalnum() or s[k - 1] == '_'):
+                return 1
+            p = k + 1
+    return 0
+
+def _cuda_params(header: "str") -> "list[(str,str)]":
+    out = []
+    parts = header.split(',')
+    for p in parts:
+        p = p.strip()
+        if p == '':
+            continue
+        k = p.find(':')
+        if k < 0:
+            continue
+        ten = p[:k].strip()
+        ann = p[k + 1:].strip()
+        ann = ann.replace('"', '').replace("'", '')
+        out.append((ten, ann))
+    return out
+
+
+def _cuda_body_c(body: "list[str]", params: "list[(str,str)]") -> "str":
+    """Sinh thân kernel C tu thân ham Python (ho tro cac cap if long nhau)."""
+    lines = []
+    declared = []
+    depth = 0
+    for ln in body:
+        st = ln.strip()
+        if st == '':
+            continue
+        ind = len(ln) - len(ln.lstrip(' '))
+        level = ind // 4          # 1 = than ham, 2 = ben trong if, ...
+        while depth > level - 1:
+            depth = depth - 1
+            lines.append('  ' * depth + '}')
+        if st.startswith('for ') and st.endswith(':'):
+            hdr = st[4:len(st) - 1].strip()
+            parts = hdr.split(' in ')
+            v = parts[0].strip()
+            lim = parts[1].strip()
+            if lim.startswith('range('):
+                lim = lim[6:len(lim) - 1]
+            lines.append('  ' * (level - 1) + 'for (int ' + v + ' = 0; ' + v + ' < (' + _cuda_expr(lim) + '); ' + v + '++) {')
+            if v not in declared:
+                declared.append(v)
+            depth = level
+        elif 'shared_array(' in st and '=' in st:
+            left = st.split('=')[0].strip()
+            arg = st[st.index('shared_array(') + 13:st.index(')')]
+            lines.append('  ' * (level - 1) + '__shared__ float ' + left + '[' + arg + '];')
+            if left not in declared:
+                declared.append(left)
+        elif st.endswith(':'):
+            cond = st[:len(st) - 1].strip()
+            if cond.startswith('if '):
+                cond = cond[3:]
+            elif cond.startswith('else'):
+                cond = '1'
+            lines.append('  ' * (level - 1) + 'if (' + _cuda_expr(cond) + ') {')
+            depth = level
+        else:
+            # khai bien cuc bo lan dau gan (vd `i = tid()` -> `int i = ...`)
+            if '=' in st and '[' not in st.split('=')[0]:
+                left = st.split('=')[0].strip()
+                if left not in declared and left not in ('',):
+                    rhs = st.split('=', 1)[1]
+                    is_int = ('tid()' in rhs or 'bid()' in rhs or 'bdim()' in rhs or '%' in rhs)
+                    if '/' in rhs and 'sqrt' not in rhs and '1.0' not in rhs:
+                        if 's[' in rhs:
+                            is_int = 0
+                        if 'mean' in rhs or 'var' in rhs:
+                            is_int = 0
+                        if left == 'mean' or left == 'rstd' or left == 'var':
+                            is_int = 0
+                        if left == 'row' or left == 'stride' or left == 'base' or left == 'wid' or left == 'total' or left == 'i':
+                            is_int = 1
+                    if _cuda_has_int_mul(rhs):
+                        is_int = 1
+                    k = 0
+                    while k < len(params):
+                        nm = params[k][0]
+                        if nm + '[' in rhs and 'i32' in params[k][1]:
+                            is_int = 1
+                        k = k + 1
+                    if left == 'lane' or left == 'wid' or left == 'total':
+                        is_int = 1
+                    ctype = 'double' if left.startswith('d_') else ('int' if is_int else 'float')
+                    declared.append(left)
+                    st = ctype + ' ' + st
+            lines.append('  ' * (level - 1) + _cuda_expr(st) + ';')
+    while depth > 0:
+        depth = depth - 1
+        lines.append('  ' * depth + '}')
+    return '\n'.join(lines) + '\n'
+
+
+def _cuda_kernel_c(name: "str", params: "list[(str,str)]", body: "list[str]") -> "str":
+    decls = []
+    args = []
+    for pn, ann in params:
+        if _cuda_is_ptr(ann) == 1:
+            decls.append(_cuda_c_type(ann) + ' __restrict__ ' + pn)
+        else:
+            decls.append(_cuda_c_type(ann) + ' ' + pn)
+        args.append(pn)
+    s = 'extern "C" __global__ void tkv_kernel_' + name + '(' + ', '.join(decls) + ') {\n'
+    s = s + _cuda_body_c(body, params)
+    s = s + '}\n\n'
+    s = s + 'extern "C" int tkv_launch_' + name + '(' + ', '.join(decls) + ', int grid, int block) {\n'
+    s = s + '  tkv_kernel_' + name + '<<<grid, block>>>(' + ', '.join(args) + ');\n'
+    s = s + '  cudaError_t launch_err = cudaGetLastError();\n'
+    s = s + '  cudaDeviceSynchronize();\n'
+    s = s + '  cudaError_t sync_err = cudaGetLastError();\n'
+    s = s + '  return (int)(launch_err != cudaSuccess ? launch_err : sync_err);\n'
+    s = s + '}\n'
+    return s
+
+
+def _cuda_pragma(name: "str", params: "list[(str,str)]", so: "str") -> "str":
+    ts = []
+    for pn, ann in params:
+        if _cuda_is_ptr(ann) == 1:
+            ts.append('"i64"')
+        elif ann == 'f32':
+            ts.append('"f32"')
+        elif ann == 'f64':
+            ts.append('"f64"')
+        elif ann == 'i64':
+            ts.append('"i64"')
+        else:
+            ts.append('"i32"')
+    ts.append('"i32"')
+    ts.append('"i32"')
+    sym = 'tkv_launch_' + name
+    return ('    {"name": "' + sym + '", "dll": "' + so + '", "symbol": "' + sym + '",\n'
+            '     "convention": "cdecl", "params": [' + ', '.join(ts) + '], "returns": "i32"},')
+
+
+def _cuda_wrapper(name: "str", params: "list[(str,str)]") -> "str":
+    sig = []
+    args = []
+    for pn, ann in params:
+        if _cuda_is_ptr(ann) == 1:
+            t = 'i64'
+        else:
+            t = ann
+        sig.append(pn + ': "' + t + '"')
+        args.append(pn)
+    sig.append('grid: "i32"')
+    sig.append('block: "i32"')
+    args.append('grid')
+    args.append('block')
+    return ('def ' + name + '_launch(' + ', '.join(sig) + ') -> "i32":\n'
+            '    return tkv_launch_' + name + '(' + ', '.join(args) + ')\n')
+
+
+def cuda_rewrite_source(src: "str", path: "str") -> "str":
+    """Di tim cackernel duoc danh dau, sinh .cu + glue, tra source moi."""
+    lines = src.splitlines()
+    if not any(ln.startswith(CUDA_MARK) for ln in lines):
+        return src
+    dirp = path_dirname(path)
+    stem = path_stem(path)
+    cu_path = dirp + '/' + stem + '.cuda.cu'
+    sh_path = dirp + '/' + stem + '.cuda.build.sh'
+    # Validator pragma yeu cau ten ket thuc '.dll'. Tren Linux day van la
+    # ELF shared object (nvcc -shared), chi dat ten .dll de P/Invoke tim thay.
+    so = stem + '_cuda.dll'
+    out = []
+    pragmas = []
+    wrappers = []
+    cu_parts = ['#include <cuda_runtime.h>\n']
+    cu_parts.append('#include <stdint.h>' + chr(10))
+    cu_parts.append('__device__ __forceinline__ float tkv_wreduce(float v) {' + chr(10) +
+                    '  for (int off = 16; off > 0; off >>= 1) {' + chr(10) +
+                    '    v += __shfl_down_sync(0xffffffff, v, off);' + chr(10) +
+                    '  }' + chr(10) +
+                    '  return v;' + chr(10) +
+                    '}' + chr(10) + chr(10))
+    cu_parts.append('__device__ __forceinline__ double tkv_wreduce_d(double v) {' + chr(10) +
+                    '  for (int off = 16; off > 0; off >>= 1) {' + chr(10) +
+                    '    v += __shfl_down_sync(0xffffffff, v, off);' + chr(10) +
+                    '  }' + chr(10) +
+                    '  return v;' + chr(10) +
+                    '}' + chr(10) + chr(10))
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if ln.startswith(CUDA_MARK):
+            j = i + 1
+            while j < len(lines) and not lines[j].lstrip().startswith('def '):
+                j = j + 1
+            if j >= len(lines):
+                raise TranspileError('CUDA kernel: thieu dinh nghia def sau marker')
+            head = lines[j].strip()
+            a = head.find('(')
+            b = head.find(')')
+            if a < 0 or b < 0:
+                raise TranspileError('CUDA kernel: dong def khong hop le: ' + head)
+            name = head[4:a].strip()
+            params = _cuda_params(head[a + 1:b])
+            k = j + 1
+            body = []
+            while k < len(lines) and (lines[k].strip() == '' or lines[k].startswith('    ')):
+                body.append(lines[k])
+                k = k + 1
+            cu_parts.append(_cuda_kernel_c(name, params, body))
+            pragmas.append(_cuda_pragma(name, params, so))
+            wrappers.append(_cuda_wrapper(name, params))
+            i = k
+        else:
+            out.append(ln)
+            i = i + 1
+    if len(pragmas) == 0:
+        return src
+    cu = '\n'.join(cu_parts)
+    path_write_text(cu_path, cu)
+    sh = ('#!/bin/sh\nset -e\nnvcc -O2 -shared -std=c++20 --expt-relaxed-constexpr -x cu '
+          '-Xcompiler -std=c++20 -Xcompiler -fPIC ' + cu_path + ' -o ' + so + ' -lcudart\n')
+    path_write_text(sh_path, sh)
+    nvcc = os_getenv('TKV_CUDA_NVCC')
+    if nvcc is not None and nvcc != '':
+        rc = proc_ra(nvcc, '-O2 -shared -std=c++20 --expt-relaxed-constexpr -x cu ' + cu_path +
+                     ' -o ' + so + ' -lcudart', dirp + '/' + stem + '.cuda.build.log')
+        if rc != 0:
+            raise TranspileError('nvcc that bai (xem ' + dirp + '/' + stem + '.cuda.build.log)')
+    pragma = ('__tkv_extern_pinvoke__ = [\n' + '\n'.join(pragmas) + '\n]\n\n')
+    glue = '\n'.join(wrappers) + '\n'
+    res = pragma + glue + '\n'.join(out)
+    return res

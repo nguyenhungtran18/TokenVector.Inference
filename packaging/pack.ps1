@@ -37,7 +37,7 @@ if (-not (Test-Path $dll)) {
 $ilSrc = Join-Path $libDir "TokenVector.Inference.il"
 if (Test-Path $ilSrc) {
     $t = Get-Content $ilSrc -Raw
-    $t = $t.Replace(".assembly TKVApp {}", ".assembly TokenVector.Inference`n{`n  .ver 1:0:2:0`n}")
+    $t = $t.Replace(".assembly TKVApp {}", ".assembly TokenVector.Inference`n{`n  .ver 1:0:3:0`n}")
     $t = $t.Replace(".module TKVApp.exe", ".module TokenVector.Inference.dll")
     Set-Content $ilSrc -Value $t -Encoding UTF8
     $prevEAP = $ErrorActionPreference
