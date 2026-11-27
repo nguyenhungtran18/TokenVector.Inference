@@ -1463,13 +1463,16 @@ def run() -> "i32":
     tb: "f64" = 0.0
     thd: "f64" = 0.0
     step: "i32" = 1
+    print("PROBE P5")
     while step <= 10:
         b1t = b1t * 0.9
         b2t = b2t * 0.999
         ac1: "f32" = 1.0 - b1t
         ac2: "f32" = 1.0 - b2t
+        print("PROBE P6")
         tA = time_perf()
         wh = cuda_h2d(dX, hIN, qb, 1)
+        print("PROBE P7")
         xin = dX
         # ---- forward layers ----
         ll = 0
@@ -1503,6 +1506,7 @@ def run() -> "i32":
             od = read_i64(AO, ll * 8)
             # LN1 tren device: xin -> Y1 / XH1 / ST1
             y1d: "i64" = read_i64(AY1, ll * 8)
+            print("PROBE P8")
             rc = ln_fwd(lnf, xin, lg1, lb1, y1d, xh1d, s1d, T, H)
             if rc != 0:
                 print("LN1 FWD FAIL", ll)
