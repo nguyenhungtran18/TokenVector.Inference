@@ -1180,8 +1180,6 @@ def run() -> "i32":
     gY1 = read_i64(cell, 0)
     rc = cuda_malloc(cell, qb)
     gOUT = read_i64(cell, 0)
-    print("PROBE P4")
-    # host scratch (dung lai)    print("PROBE P4")
     # host scratch (dung lai)
     hY1 = alloc_bytes(qb)
     hY2 = alloc_bytes(qb)
@@ -1225,12 +1223,10 @@ def run() -> "i32":
         return 1
     rc = c_fread(hg, 1, qb + 2 * hb + NL * lsz + wh2, fh)
     print("WEIGHT BYTES", rc)
-    print("PROBE P1")
     rc = c_fclose(fh)
     wh = cuda_h2d(dX, hg, qb, 1)
     wh = cuda_h2d(dFG, hg + qb, hb, 1)
     wh = cuda_h2d(dFB, hg + qb + hb, hb, 1)
-    print("PROBE P2")
     wo: "i64" = 0
     ll: "i32" = 0
     while ll < NL:
@@ -1329,8 +1325,6 @@ def run() -> "i32":
         rc = cuda_malloc(cell, hb)
         wh = write_i64(AB2, ll * 8, read_i64(cell, 0))
         wh = cuda_h2d(read_i64(AB2, ll * 8), hg + wo, hb, 1)
-        if ll == 0:
-            print("PROBE P3")
         ll = ll + 1
     # head weight
 
@@ -1403,7 +1397,6 @@ def run() -> "i32":
     if rc != 0:
         print("GELU SELFTEST FAIL")
         return 1
-    print("PROBE K1")
     kh: "i64" = kern_init()
     if kh == 0:
         print("KERN INIT FAIL")
@@ -1412,22 +1405,20 @@ def run() -> "i32":
     lnb: "i64" = read_i64(kh, 8)
     gadd: "i64" = read_i64(kh, 32)
     th: "i64" = read_i64(kh, 40)
-    print("PROBE K2")
     tht: "i64" = toht_init()
     if tht == 0:
         print("TOHT INIT FAIL")
         return 1
     rc = cuda_malloc(cell, H * F * 2)
     fpT: "i64" = read_i64(cell, 0)
-    print("PROBE K3")
     th3: "i64" = toh3_init()
     if th3 == 0:
         print("TOH3 INIT FAIL")
         return 1
     rc = cuda_malloc(cell, 3 * H * H * 2)
     fpQKV: "i64" = read_i64(cell, 0)
-    rc = loss_init()
-    if rc == 0:
+    hg = loss_init()
+    if hg == 0:
         print("LOSS INIT FAIL")
         return 1
     l3h: "i64" = loss3_init()
@@ -1442,14 +1433,12 @@ def run() -> "i32":
     dGM: "i64" = read_i64(cell, 0)
     rc = cuda_malloc(cell, stb)
     dGI: "i64" = read_i64(cell, 0)
-    print("PROBE K4")
     a16h: "i64" = attn16_init()
     if a16h == 0:
         print("ATTN16 INIT FAIL")
         return 1
     sff16: "i64" = read_i64(a16h, 0)
     sbk16: "i64" = read_i64(a16h, 8)
-    print("PROBE K5")
     bh: "i64" = bias_init()
     if bh == 0:
         print("BIAS INIT FAIL")
@@ -1468,16 +1457,13 @@ def run() -> "i32":
     tb: "f64" = 0.0
     thd: "f64" = 0.0
     step: "i32" = 1
-    print("PROBE P5")
     while step <= 10:
         b1t = b1t * 0.9
         b2t = b2t * 0.999
         ac1: "f32" = 1.0 - b1t
         ac2: "f32" = 1.0 - b2t
-        print("PROBE P6")
         tA = time_perf()
         wh = cuda_h2d(dX, hIN, qb, 1)
-        print("PROBE P7")
         xin = dX
         # ---- forward layers ----
         ll = 0
@@ -1511,7 +1497,6 @@ def run() -> "i32":
             od = read_i64(AO, ll * 8)
             # LN1 tren device: xin -> Y1 / XH1 / ST1
             y1d: "i64" = read_i64(AY1, ll * 8)
-            print("PROBE P8")
             rc = ln_fwd(lnf, xin, lg1, lb1, y1d, xh1d, s1d, T, H)
             if rc != 0:
                 print("LN1 FWD FAIL", ll)
