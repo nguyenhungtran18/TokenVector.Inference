@@ -800,3 +800,27 @@ chi xay ra trong PE do tkvc sinh, nhung nguyen nhan nam ngoan phan
 dtype/codegen extern da kiem tra. Khong ap dung thay doi compiler nao.
 
 Da revert ve `7c989c7` (= 81b7290): 264.95 ms, gate OK.
+
+---
+
+## TIM BUOC VA SUA COMPILER (2026-11-27 15:01 +0700)
+
+Da xac dinh va SUA duoc bug compiler that:
+- `__tkv_extern_pinvoke__` khong co dtype anh xa sang `native int&` (C# `out IntPtr`).
+  Moi con tro deu anh xa `i64 -> int64`. Khi goi CUDA API co out-pointer
+  (`cudaStreamEndCapture`, `cudaGraphInstantiate`), .NET P/Invoke nhan `int64`
+  thay vi `native int&` => CUDA tra `CUDA_ERROR_INVALID_VALUE (1)`.
+- Sua `compiler_bootstrap/compiler/il_extern_dtype.tkv`: them `ptr -> native int`,
+  `pref -> native int&`, `_tokenvector_facing_dtype` tra `i64` cho ca hai.
+- Sua `compiler_bootstrap/tkv_compile.tkv`: `_make_extern_pinvoke_call_codegen`
+  phat hien `pref` + bien `var` thi goi `_load_var_addr` (emit `ldloca.s`).
+- `tools\\vong.exe` self-host: `IL_IDENTICAL`.
+- Ket qua: `cudaGraphInstantiate` trong PE do tkvc sinh chay, `EARLY 0`,
+  `GRAPHINST 0` (truoc do luon `1`).
+
+Ap dung vao full step: capture 1 step, replay = 1 step, `LOSS 11.1816 -> 10.8922`,
+gate OK, nhung `MS_STEP 313 ms` (cham hon baseline 265 ms). Da revert train step ve
+ban verified `e4f2e8a`, giu lai compiler fix.
+
+**Target 187.8 ms van chua dat.** Phat hien quan trong nhat la compiler bug da duoc
+sua, khong phai loi runtime khong xac dinh nhu ket luan truoc.
