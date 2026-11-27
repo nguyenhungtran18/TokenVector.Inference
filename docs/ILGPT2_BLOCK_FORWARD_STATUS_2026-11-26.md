@@ -464,3 +464,17 @@ the C++ bridge. Target NOT met.
 - Coalesced single-thread-per-token loss with transposed head logits:
   CUDA_ERROR_ILLEGAL_ADDRESS (700) at layer-10 LN backward.
 - `CUBLAS_COMPUTE_32F_FAST_16F` (74): no measurable change vs 68.
+
+---
+
+## Kaggle quota hygiene (bat buoc)
+
+Sau moi Run All va doc output xong: **tat session ngay**. Trong notebook editor,
+phan `Draft Session` phai hien `off (run a cell to start)`. Nut
+`power_settings_new` luc do co aria-label `Start session` (khong bam).
+Neu dang `on`, bam nut tuong ung de `Shut down session` truoc khi ket thuc.
+Khong de GPU session chay khong lam viec: Kaggle tinh quota theo thoi gian.
+
+Check nhanh (browser evaluate):
+`[...document.querySelectorAll('button')].filter(b=>/session/i.test(b.getAttribute('aria-label')||'')).map(b=>b.getAttribute('aria-label'))`
+-> `["Start session"]` nghia la da tat, an toan.
