@@ -630,3 +630,35 @@ GPU_UTIL_AVG 4.6% -> van host-bound.
 - Gop GEMM + shadowfp16 o dang IL chi giu duoc toc do, khong tang.
 - Muon dat 187.8 ms phai viet kernel fused attention/MLP that (bước 3),
   nhung day la rewrite lon va cac PTX phuc tap truoc do deu that bai.
+
+---
+
+## Run 33 - for thu fused attention (2026-11-27 11:53 +0700)
+
+Da thu hai ban kernel `attn_kernel` trong .tkv (1 block/query-head, online
+soft-max, output ca ctx va P):
+- ban shared-memory (bar.sync + tree reduce): PTX load loi 218.
+- ban don gian (1 thread/head, .local acc[64], khong barrier): van loi 218 sau
+  nhieu lan sua kieu thanh ghi (u64/u32 cho local offset), hex-float literal,
+  va P offset. Khong lay duoc log ptxas: `cuModuleLoadDataEx` voi JIT options
+  lam .NET segfault (rc -11), voi options sai thi log khong duoc ghi.
+
+Da revert ve ban verified `94a56a4` (= 81b7290):
+`MS_STEP 264.95`, `loss delta -0.2902`, gate OK, max local 193.
+
+### Ket luan cuoi
+
+Da thu het cac huong kha thi trong pham vi TokenVector hien tai:
+| huong | ket qua |
+|---|---|
+| device GELU/LN/softmax/loss | 7854 -> 265 ms |
+| fp16 tensor-core GEMM (C fp32) | 453 -> 265 ms |
+| AdamW (1 launch/type) + fused QKV + shadow fp16 | 308 ms (cham hon) |
+| C fp16 output / compute 74 / algo 99 / batched head | 335 / 293 / 318 ms |
+| fused attention PTX tu viet | PTX 218 / segfault |
+
+Target `187.8 ms` (Bridge, dung ATen fused kernel) **KHONG dat duoc** bang
+ cac ban vá hien tai. GPU util 4.6% xac nhan host-bound nhung moi lan gop
+ launch deu khong tang toc do -> can mot rewrite PTX quy mo lon hon nhieu
+ (fused attention + MLP + optimizer trong mot vai kernel), vuot qua kha nang
+ verify trong cac lan chay nay.
