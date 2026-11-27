@@ -900,6 +900,85 @@ def gemm16b(handle: "i64", ta: "i32", tb: "i32", m: "i32", n: "i32", k: "i32", a
     if rc != 0:
         print("GEMM16B FAIL", rc)
     return rc
+def bias_init() -> "i64":
+    PTX = b".version 8.0\n.target sm_75\n.address_size 64\n.entry biasadd_kernel(.param .u64 pC, .param .u64 pB, .param .u32 pT, .param .u32 pN)\n{\n.reg .f32 c,b;\n.reg .u64 cb,bb,off,ca;\n.reg .u32 i,col,n,base,nt,t;\n.reg .pred q;\nld.param.u64 cb,[pC];\nld.param.u64 bb,[pB];\nld.param.u32 t,[pT];\nld.param.u32 n,[pN];\ncvta.to.global.u64 cb,cb;\ncvta.to.global.u64 bb,bb;\nmov.u32 nt,%ntid.x;\nmov.u32 base,%ctaid.x;\nmul.lo.u32 base,base,nt;\nmov.u32 i,%tid.x;\nadd.u32 i,i,base;\nsetp.ge.u32 q,i,n;\n@q bra LEND;\ndiv.u32 col,i,t;\nmul.wide.u32 off,i,4;\nadd.u64 ca,cb,off;\nld.global.f32 c,[ca];\nmul.wide.u32 off,col,4;\nadd.u64 bb,bb,off;\nld.global.f32 b,[bb];\nadd.f32 c,c,b;\nst.global.f32 [ca],c;\nLEND:\nret;\n}\n\n.entry biasgrad_kernel(.param .u64 pG, .param .u64 pB, .param .u32 pT, .param .u32 pR)\n{\n.reg .f32 g,s;\n.reg .u64 gb,bb,off,ba;\n.reg .u32 col,i,t,r,base,nt;\n.reg .pred q;\nld.param.u64 gb,[pG];\nld.param.u64 bb,[pB];\nld.param.u32 t,[pT];\nld.param.u32 r,[pR];\ncvta.to.global.u64 gb,gb;\ncvta.to.global.u64 bb,bb;\nmov.u32 nt,%ntid.x;\nmov.u32 base,%ctaid.x;\nmul.lo.u32 base,base,nt;\nmov.u32 col,%tid.x;\nadd.u32 col,col,base;\nsetp.ge.u32 q,col,r;\n@q bra LEND;\nmov.f32 s,0.0;\nmov.u32 i,0;\nLOOP:\nsetp.ge.u32 q,i,t;\n@q bra DONE;\nmul.lo.u32 off,i,t;\nadd.u32 off,off,col;\nmul.wide.u32 off,off,4;\nadd.u64 ba,gb,off;\nld.global.f32 g,[ba];\nadd.f32 s,s,g;\nadd.u32 i,i,1;\nbra LOOP;\nDONE:\nmul.wide.u32 off,col,4;\nadd.u64 bb,bb,off;\nst.global.f32 [bb],s;\nLEND:\nret;\n}\n"
+    F1 = b"biasadd_kernel\x00"
+    F2 = b"biasgrad_kernel\x00"
+    pb = alloc_bytes(len(PTX) + 1)
+    kk: "i32" = 0
+    while kk < len(PTX):
+        wh: "i64" = write_u8(pb, kk, PTX[kk])
+        kk = kk + 1
+    wh = write_u8(pb, kk, 0)
+    mc = alloc_bytes(8)
+    rc: "i32" = cu_module_load(mc, pb)
+    if rc != 0:
+        print("BIAS MOD FAIL", rc)
+        return 0
+    mod: "i64" = read_i64(mc, 0)
+    h = alloc_bytes(16)
+    kk = 0
+    while kk < len(F1):
+        wh = write_u8(pb, kk, F1[kk])
+        kk = kk + 1
+    wh = write_u8(pb, kk, 0)
+    fc = alloc_bytes(8)
+    rc = cu_module_fn(fc, mod, pb)
+    if rc != 0:
+        print("BIAS FN1 FAIL", rc)
+        return 0
+    wh = write_i64(h, 0, read_i64(fc, 0))
+    kk = 0
+    while kk < len(F2):
+        wh = write_u8(pb, kk, F2[kk])
+        kk = kk + 1
+    wh = write_u8(pb, kk, 0)
+    rc = cu_module_fn(fc, mod, pb)
+    if rc != 0:
+        print("BIAS FN2 FAIL", rc)
+        return 0
+    wh = write_i64(h, 8, read_i64(fc, 0))
+    return h
+
+def bias_add(fnh: "i64", c: "i64", b: "i64", t: "i32", n: "i32") -> "i32":
+    a0 = alloc_bytes(8)
+    wh: "i64" = write_i64(a0, 0, c)
+    a1 = alloc_bytes(8)
+    wh = write_i64(a1, 0, b)
+    a2 = alloc_bytes(4)
+    wh = write_i32(a2, 0, t)
+    a3 = alloc_bytes(4)
+    wh = write_i32(a3, 0, n)
+    pl = alloc_bytes(32)
+    wh = write_i64(pl, 0, a0)
+    wh = write_i64(pl, 8, a1)
+    wh = write_i64(pl, 16, a2)
+    wh = write_i64(pl, 24, a3)
+    g: "i32" = (n + 255) >> 8
+    rc: "i32" = cu_launch(fnh, g, 1, 1, 256, 1, 1, 0, 0, pl, 0)
+    if rc != 0:
+        print("BIAS ADD FAIL", rc)
+    return rc
+
+def bias_grad_k(fnh: "i64", gmat: "i64", b: "i64", t: "i32", rows: "i32") -> "i32":
+    a0 = alloc_bytes(8)
+    wh: "i64" = write_i64(a0, 0, gmat)
+    a1 = alloc_bytes(8)
+    wh = write_i64(a1, 0, b)
+    a2 = alloc_bytes(4)
+    wh = write_i32(a2, 0, t)
+    a3 = alloc_bytes(4)
+    wh = write_i32(a3, 0, rows)
+    pl = alloc_bytes(32)
+    wh = write_i64(pl, 0, a0)
+    wh = write_i64(pl, 8, a1)
+    wh = write_i64(pl, 16, a2)
+    wh = write_i64(pl, 24, a3)
+    g: "i32" = (rows + 255) >> 8
+    rc: "i32" = cu_launch(fnh, g, 1, 1, 256, 1, 1, 0, 0, pl, 0)
+    if rc != 0:
+        print("BIAS GRAD FAIL", rc)
+    return rc
 def wrand(i: "i32", j: "i32", s: "f32") -> "f32":
     h: "i32" = i * 374761393 + j * 668265263
     h = (h ^ (h >> 13)) * 1274126177
@@ -992,6 +1071,10 @@ def run() -> "i32":
     ALG1 = alloc_bytes(msz)
     ALB1 = alloc_bytes(msz)
     ALG2 = alloc_bytes(msz)
+    ABQ = alloc_bytes(msz)
+    ABO = alloc_bytes(msz)
+    AB1 = alloc_bytes(msz)
+    AB2 = alloc_bytes(msz)
     ALB2 = alloc_bytes(msz)
     AX1 = alloc_bytes(msz)
     AY1 = alloc_bytes(msz)
@@ -1124,7 +1207,7 @@ def run() -> "i32":
     hGY2 = alloc_bytes(fb)
     hGDX2 = alloc_bytes(qb)
     # khoi tao moi lop
-    lsz: "i64" = 4 * whb + w1b + w2b + 4 * hb
+    lsz: "i64" = 4 * whb + w1b + w2b + 10 * hb
     hg: "i64" = alloc_bytes(qb + 2 * hb + NL * lsz + wh2)
     fpb = b"/kaggle/working/gpt2m_weights.bin"
     fpath = alloc_bytes(64)
@@ -1229,6 +1312,21 @@ def run() -> "i32":
         rc = cuda_malloc(cell, hb)
         wh = write_i64(ALB2, ll * 8, read_i64(cell, 0))
         wh = cuda_h2d(read_i64(ALB2, ll * 8), hg + wo, hb, 1)
+        rc = cuda_malloc(cell, 3 * hb)
+        wh = write_i64(ABQ, ll * 8, read_i64(cell, 0))
+        wh = cuda_h2d(read_i64(ABQ, ll * 8), hg + wo, 3 * hb, 1)
+        wo = wo + 3 * hb
+        rc = cuda_malloc(cell, hb)
+        wh = write_i64(ABO, ll * 8, read_i64(cell, 0))
+        wh = cuda_h2d(read_i64(ABO, ll * 8), hg + wo, hb, 1)
+        wo = wo + hb
+        rc = cuda_malloc(cell, 4 * hb)
+        wh = write_i64(AB1, ll * 8, read_i64(cell, 0))
+        wh = cuda_h2d(read_i64(AB1, ll * 8), hg + wo, 4 * hb, 1)
+        wo = wo + 4 * hb
+        rc = cuda_malloc(cell, hb)
+        wh = write_i64(AB2, ll * 8, read_i64(cell, 0))
+        wh = cuda_h2d(read_i64(AB2, ll * 8), hg + wo, hb, 1)
         ll = ll + 1
     # head weight
 
@@ -1345,6 +1443,14 @@ def run() -> "i32":
         return 1
     sff16: "i64" = read_i64(a16h, 0)
     sbk16: "i64" = read_i64(a16h, 8)
+    bh: "i64" = bias_init()
+    if bh == 0:
+        print("BIAS INIT FAIL")
+        return 1
+    bhadd: "i64" = read_i64(bh, 0)
+    bhgrad: "i64" = read_i64(bh, 8)
+    h3: "i64" = 3 * hb
+    h4: "i64" = 4 * hb
     s64T: "i64" = 64 * T
     sATT: "i64" = T * T
     hal16 = alloc_bytes(4)
@@ -1383,6 +1489,10 @@ def run() -> "i32":
             lg1: "i64" = read_i64(ALG1, ll * 8)
             lb1: "i64" = read_i64(ALB1, ll * 8)
             lg2: "i64" = read_i64(ALG2, ll * 8)
+            bq: "i64" = read_i64(ABQ, ll * 8)
+            bo: "i64" = read_i64(ABO, ll * 8)
+            bf1: "i64" = read_i64(AB1, ll * 8)
+            bf2: "i64" = read_i64(AB2, ll * 8)
             lb2: "i64" = read_i64(ALB2, ll * 8)
             qd = read_i64(AQ, ll * 8)
             qoff: "i64" = qb
@@ -1401,6 +1511,7 @@ def run() -> "i32":
             rc = toh(th, y1d, fpA, sQH)
             rc = toh3(th3, wqd, wkd, wvd, fpQKV, H * H)
             rc = gemm16(ch, 0, 0, T, 3 * H, H, one, fpA, T, fpQKV, H, zero, qd, T)
+            rc = bias_add(bhadd, qd, bq, T, 3 * T * H)
             if rc != 0:
                 print("QKV GEMM FAIL", ll, rc)
                 return 1
@@ -1423,6 +1534,7 @@ def run() -> "i32":
             rc = toh(th, ad, fpA, sQH)
             rc = toh(th, wod, fpB, sHH)
             rc = gemm16(ch, 0, 0, T, H, H, one, fpA, T, fpB, H, zero, dO, T)
+            rc = bias_add(bhadd, dO, bo, T, T * H)
             if rc != 0:
                 print("O GEMM FAIL", ll, rc)
                 return 1
@@ -1437,10 +1549,12 @@ def run() -> "i32":
             rc = toh(th, y2d, fpA, sQH)
             rc = toh(th, w1d, fpB, H * F)
             rc = gemm16(ch, 0, 0, T, F, H, one, fpA, T, fpB, H, zero, zd, T)
+            rc = bias_add(bhadd, zd, bf1, T, T * F)
             rc = gelu_fwd(gfn, zd, dHH, T * F)
             rc = toh(th, dHH, fpA, sTF)
             rc = toh(th, w2d, fpB, sFH)
             rc = gemm16(ch, 0, 0, T, H, F, one, fpA, T, fpB, F, zero, dO2, T)
+            rc = bias_add(bhadd, dO2, bf2, T, T * H)
             rc = add_k(gadd, dX2, dO2, dOUT, T * H)
             if rc != 0:
                 print("ADD OUT FAIL", ll)
@@ -1504,6 +1618,10 @@ def run() -> "i32":
             lg1 = read_i64(ALG1, ll * 8)
             lb1 = read_i64(ALB1, ll * 8)
             lg2 = read_i64(ALG2, ll * 8)
+            bq = read_i64(ABQ, ll * 8)
+            bo = read_i64(ABO, ll * 8)
+            bf1 = read_i64(AB1, ll * 8)
+            bf2 = read_i64(AB2, ll * 8)
             lb2 = read_i64(ALB2, ll * 8)
             qd = read_i64(AQ, ll * 8)
             qoff: "i64" = qb
@@ -1521,6 +1639,7 @@ def run() -> "i32":
             rc = toh(th, dHH, fpA, sTF)
             rc = toh(th, gOUT, fpB, sQH)
             rc = gemm16(ch, 1, 0, F, H, T, one, fpA, T, fpB, T, zero, g2d, F)
+            rc = bias_grad_k(bhgrad, g2d, bf2, T, H)
             rc = toh(th, gOUT, fpA, sQH)
             rc = toht(tht, w2d, fpT, H * F, F)
             rc = gemm16(ch, 0, 0, T, F, H, one, fpA, T, fpT, H, zero, gHH, T)
@@ -1528,6 +1647,7 @@ def run() -> "i32":
             rc = toh(th, y2d, fpA, sQH)
             rc = toh(th, gZ, fpB, sTF)
             rc = gemm16(ch, 1, 0, H, F, T, one, fpA, T, fpB, T, zero, g1d, H)
+            rc = bias_grad_k(bhgrad, g1d, bf1, T, F)
             rc = toh(th, gZ, fpA, sTF)
             rc = toh(th, w1d, fpB, H * F)
             rc = gemm16(ch, 0, 1, T, H, F, one, fpA, T, fpB, H, zero, gY2, T)
@@ -1545,6 +1665,7 @@ def run() -> "i32":
             rc = toh(th, ad, fpA, sQH)
             rc = toh(th, gDX2, fpB, sQH)
             rc = gemm16(ch, 1, 0, H, H, T, one, fpA, T, fpB, T, zero, gWo, H)
+            rc = bias_grad_k(bhgrad, gWo, bo, T, H)
             rc = toh(th, gA, fpA, sQH)
             rc = toh(th, vd, fpB, sQH)
             rc = gemm16b(ch, 0, 1, T, T, 64, one, fpA, T, s64T, fpB, T, s64T, zero, gP, T, sATT, 16)
@@ -1564,6 +1685,9 @@ def run() -> "i32":
             rc = toh(th, yb1, fpA, sQH)
             rc = toh(th, gQ, fpB, sQH)
             rc = gemm16(ch, 1, 0, H, H, T, one, fpA, T, fpB, T, zero, gqd, H)
+            rc = bias_grad_k(bhgrad, gqd, bq, T, H)
+            rc = bias_grad_k(bhgrad, gkd, bq + h3, T, H)
+            rc = bias_grad_k(bhgrad, gvd, bq + h3 + h3, T, H)
             rc = toh(th, gK, fpB, sQH)
             rc = gemm16(ch, 1, 0, H, H, T, one, fpA, T, fpB, T, zero, gkd, H)
             rc = toh(th, gV, fpB, sQH)

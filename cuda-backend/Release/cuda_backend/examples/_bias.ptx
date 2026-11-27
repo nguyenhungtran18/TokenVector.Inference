@@ -1,0 +1,74 @@
+.version 8.0
+.target sm_75
+.address_size 64
+.entry biasadd_kernel(.param .u64 pC, .param .u64 pB, .param .u32 pT, .param .u32 pN)
+{
+.reg .f32 c,b;
+.reg .u64 cb,bb,off,ca;
+.reg .u32 i,col,n,base,nt,t;
+.reg .pred q;
+ld.param.u64 cb,[pC];
+ld.param.u64 bb,[pB];
+ld.param.u32 t,[pT];
+ld.param.u32 n,[pN];
+cvta.to.global.u64 cb,cb;
+cvta.to.global.u64 bb,bb;
+mov.u32 nt,%ntid.x;
+mov.u32 base,%ctaid.x;
+mul.lo.u32 base,base,nt;
+mov.u32 i,%tid.x;
+add.u32 i,i,base;
+setp.ge.u32 q,i,n;
+@q bra LEND;
+div.u32 col,i,t;
+mul.wide.u32 off,i,4;
+add.u64 ca,cb,off;
+ld.global.f32 c,[ca];
+mul.wide.u32 off,col,4;
+add.u64 bb,bb,off;
+ld.global.f32 b,[bb];
+add.f32 c,c,b;
+st.global.f32 [ca],c;
+LEND:
+ret;
+}
+
+.entry biasgrad_kernel(.param .u64 pG, .param .u64 pB, .param .u32 pT, .param .u32 pR)
+{
+.reg .f32 g,s;
+.reg .u64 gb,bb,off,ba;
+.reg .u32 col,i,t,r,base,nt;
+.reg .pred q;
+ld.param.u64 gb,[pG];
+ld.param.u64 bb,[pB];
+ld.param.u32 t,[pT];
+ld.param.u32 r,[pR];
+cvta.to.global.u64 gb,gb;
+cvta.to.global.u64 bb,bb;
+mov.u32 nt,%ntid.x;
+mov.u32 base,%ctaid.x;
+mul.lo.u32 base,base,nt;
+mov.u32 col,%tid.x;
+add.u32 col,col,base;
+setp.ge.u32 q,col,r;
+@q bra LEND;
+mov.f32 s,0.0;
+mov.u32 i,0;
+LOOP:
+setp.ge.u32 q,i,t;
+@q bra DONE;
+mul.lo.u32 off,i,t;
+add.u32 off,off,col;
+mul.wide.u32 off,off,4;
+add.u64 ba,gb,off;
+ld.global.f32 g,[ba];
+add.f32 s,s,g;
+add.u32 i,i,1;
+bra LOOP;
+DONE:
+mul.wide.u32 off,col,4;
+add.u64 bb,bb,off;
+st.global.f32 [bb],s;
+LEND:
+ret;
+}

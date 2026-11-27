@@ -79,6 +79,9 @@ Assembled method TKVApp::attn16_init
 Assembled method TKVApp::sf16_fwd
 Assembled method TKVApp::sf16_bwd
 Assembled method TKVApp::gemm16b
+Assembled method TKVApp::bias_init
+Assembled method TKVApp::bias_add
+Assembled method TKVApp::bias_grad_k
 Assembled method TKVApp::wrand
 Assembled method TKVApp::copy_buf
 Assembled method TKVApp::zero_buf
@@ -98,8 +101,8 @@ Global
 Class 1	Fields: 2;	Methods: 27;	
 Class 2	Methods: 15;	
 Class 3	Methods: 3;	
-Class 4	Methods: 51;	
-Resolving local member refs: 470 -> 470 defs, 0 refs, 0 unresolved
+Class 4	Methods: 54;	
+Resolving local member refs: 499 -> 499 defs, 0 refs, 0 unresolved
 
 Emitting events and properties:
 Global 	

@@ -44,7 +44,9 @@ for i in range(NL):
               f32(sd[p + "mlp.c_fc.weight"]).T.copy(),
               f32(sd[p + "mlp.c_proj.weight"]).T.copy(),
               f32(sd[p + "ln_1.weight"]), f32(sd[p + "ln_1.bias"]),
-              f32(sd[p + "ln_2.weight"]), f32(sd[p + "ln_2.bias"])]
+              f32(sd[p + "ln_2.weight"]), f32(sd[p + "ln_2.bias"]),
+              f32(sd[p + "attn.c_attn.bias"]), f32(sd[p + "attn.c_proj.bias"]),
+              f32(sd[p + "mlp.c_fc.bias"]), f32(sd[p + "mlp.c_proj.bias"])]
 parts.append(wte.T.copy())              # tied head, last
 
 blob = b"".join(p.tobytes(order="F") for p in parts)
