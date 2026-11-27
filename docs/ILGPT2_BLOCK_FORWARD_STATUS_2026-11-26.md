@@ -598,3 +598,35 @@ Ghi chu de tranh lap lai: da thu va loai ca
 - weight shadow convert 1 lan/step (275 ms, delta -0.2107)
 - CUBLAS_COMPUTE_32F_FAST_16F / GEMM_DEFAULT_TENSOR_OP (khong doi)
 - head fp16 output (NaN / 374 ms)
+
+---
+
+## Run 32 - bắt chước Bridge (HEAD `e867d01`, 2026-11-27 10:57 +0700)
+
+Da lam theo thu tu Bridge:
+
+1. **AdamW thay SGD**: kernel PTX `adamw_kernel` voi fp32 master + buffer m/v
+   gop, `bc1=1-b1^step`, `bc2=1-b2^step`, `wd` decoupling. Co them bước scrub
+   NaN (`max/min/add`) nhu SGD kernel cu — neu khong, gradient NaN lam moi trong so
+   thanh NaN (`M SCAN 99 0.0 <n> nan`). lr Piloting: 0.0015 -> loss 87 (qua lon),
+   0.003 -> -0.795, 0.0003 -> -0.0907, chon **0.0008**.
+2. **Gop QKV thanh 1 GEMM**: ma trận trong số `[Wq||Wk||Wv]` `(H,3H)` fp16,
+   output `T×3H`, dQ/dK/dV la offset byte vao cung buffer. **Bug da fix**:
+   `ldb` phai la `H`, khong phai `3*H` (neu sai => S GEMM tra zeros).
+3. **AdamW ghi luon fp16 shadow** (tuong duong `tkv_sync_fp16` cua Bridge),
+   bo 72 kernel `toh`/step. Can khoi tao shadow 1 lan truoc vung đo.
+
+Ket qua (co thread sampling nvidia-smi, them ~58 ms/step):
+```
+LOSS 11.181629 -> 10.949804, delta -0.2318, gate OK
+MS_STEP 318.92 (sampling)  ~= 261 ms khi bo sampling  (= baseline 265 ms)
+```
+GPU_UTIL_AVG 4.6% -> van host-bound.
+
+### Bai hoc
+
+- Bridge khong nhanh nhow lp GEMM; no nhanh nhow **ATen fused kernel**
+  (layer_norm, addmm QKV, SDPA flash, gelu, autograd backward, mot AdamW).
+- Gop GEMM + shadowfp16 o dang IL chi giu duoc toc do, khong tang.
+- Muon dat 187.8 ms phai viet kernel fused attention/MLP that (bước 3),
+  nhung day la rewrite lon va cac PTX phuc tap truoc do deu that bai.
