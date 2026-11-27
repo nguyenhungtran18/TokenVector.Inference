@@ -291,3 +291,176 @@ Ket qua: `M SCAN 1 111.12657 0` / `M SCAN 2 72.47433 0` / `LOSS inf` /
 `lr = 0.5` (uoc luong `sum g^2 ~ 0.1` cho `Delta loss ~ -0.05`).
 
 HEAD: `TokenVector.CudaBackend@fd2bd61`. max local 186, exe 35328 bytes.
+---
+
+## Run 22 (2026-11-27 06:53 +0700) - HEAD `TokenVector.CudaBackend@4f2f22d`
+
+Forward da sach (`M SCAN 10 1.0648886`, `M SCAN 2 5.0969634`, `LOSS 11.181591`,
+`nan_count = 0`). Loi con lai: buoc 2 no ra `OUT 1.85e12` / `LOSS 5.03e11`.
+
+### Loi chan doan da tim ra
+`scan(3, hGDX2, H*H)` doc **4 MB** tu buffer `hGDX2` chi duoc cap **2 MB**
+(`alloc_bytes(qb)`), va `cuda_h2d` chi copy `qb` byte. Nua sau cua lan scan la
+bo nho khong duoc khoi tao => `3.32e38 / 1620 nan` la **artifact**, khong phai
+gradient that. Da tach `hgW = alloc_bytes(whb)` (4 MB) va copy du `whb` byte.
+
+### Them thang do gradient (tat ca dung kich thuoc buffer)
+| tag | noi dung | kich thuoc |
+|-----|----------|-----------|
+| 4   | `gOUT` ngay sau head gemm (`dDL^T * Wh`) | `T*H` |
+| 54  | `gHH` lop 23 | `T*F` |
+| 55  | `gZ`  lop 23 | `T*F` |
+| 50  | `dL/dX2` lop 23 | `T*H` |
+| 51  | `gP` lop 23 | `T*T` |
+| 52  | `gQ` lop 23 | `T*H` |
+| 53  | `gWq` lop 23 | `H*H` |
+| 40  | `dL/dhX` lop 23 | `T*H` |
+| 41  | `dL/dhX` lop 12 | `T*H` |
+| 42  | `dL/dhX` lop 0  | `T*H` |
+| 3   | `gWq` lop 0 | `H*H` |
+
+Uoc luong ly thuyet (gain 0.04, hal = 1/sqrt(H), loss chia T):
+`gOUT ~ 2e-5`, `gP ~ 1e-4`, `gQ ~ 1e-7`, `gWq ~ 1e-6`, `dL/dhX ~ 1e-5`.
+Neu mot tag lon hon ~1e6 lan => khuech dai o dung tang do.
+
+max local 188 (<= 255), exe 35328 bytes.
+
+### Run 22 - ket qua do (HEAD `4f2f22d`)
+
+```
+M SCAN 4  2.3572116e-05   0   1.6809872e-10   <- gOUT head  (dung)
+M SCAN 54 2.438499e-05    0   2.2904633e-11   <- gHH lop 23 (dung)
+M SCAN 55 2.2143755e-05   0   7.3942545e-12   <- gZ  lop 23 (dung)
+M SCAN 50 21.463848       0   17.647236       <- dL/dX2 lop 23  == M SCAN 1 !
+M SCAN 51 598.71045       0   56450.32
+M SCAN 52 3.8030431       0   0.07621061
+M SCAN 53 223.79373       0   672.1243
+M SCAN 40 21.28449        0   17.685993
+M SCAN 41 21.1565         0   17.938654
+M SCAN 42 254.19131       0   599.72986
+M SCAN 3  46.37529        0   89.80882
+```
+
+`M SCAN 50` trung **tung chu so** voi `M SCAN 1` (21.463848 / 17.647236)
+=> `hGDX2` chua chinh OUT cua forward, khong phai gradient.
+
+### Nguyen nhan goc (da fix, HEAD `a5dce8c`)
+
+```tkv
+wh = cuda_h2d(gOUT, hOUT, qb, 2)   # dst=device, src=host, kind=D2H  -> SAI
+```
+
+`cudaMemcpy` kiem tra huong con tro theo `kind`, tra `cudaErrorInvalidValue`
+va **khong copy**. `wh` khong duoc kiem tra nen loi im lang; `hOUT` giu
+nguyen OUT cua forward trong suot backward. Moi lop cong OUT (21 -> 254)
+vao `dL/dhX` thay vi `dL/dOUT` (~2e-5), nen gradient lon hon that ~1e6 lan
+va `gWq lop 0 = 46.4` thay vi ~1e-4. SGD `lr=0.5` -> `dW ~ 23` ->
+buoc 2 `OUT 1.85e12`, `LOSS 5.03e11`.
+
+Day la **copy kind-2 nguoc chieu duy nhat** trong file (55 lenh con lai deu
+dung thu tu `host_dst, dev_src`); `ilgpt2_bwd_clean.tkv` cung dung thu tu
+nen ket qua verify 16 gradient `<= 1.1e-5` van hieu luc.
+
+Fix: `cuda_h2d(hOUT, gOUT, qb, 2)` + kiem tra `wh != 0`.
+
+Uoc luong sau fix (gradient tuyen tinh theo `dX2`):
+`dX2 ~ 2.4e-5`, `gP ~ 7e-4`, `gQ ~ 4e-6`, `gWq ~ 3e-5`,
+`sum g^2 ~ 0.3` => voi `lr = 0.5` ky vong `loss delta ~ -0.1`.
+
+---
+
+## Run 23 - buoc train dau tien VERIFIED (HEAD `a5dce8c`, 2026-11-27 07:05 +0700)
+
+```
+LOSS 11.181591   LOSSF 11.181591033935547
+LOSS 10.860526   LOSSF 10.860526084899902
+loss delta = -0.32106494903564453
+MS_STEP 7853.769   KET LUAN: OK   (0 nan tren 22 scan)
+```
+
+Thang gradient sau fix (buoc 1):
+
+| tag | dai luong | max | mean-square |
+|-----|-----------|-----|-------------|
+| 4  | `gOUT` head | 2.357e-05 | 1.681e-10 |
+| 54 | `gHH` lop 23 | 2.438e-05 | 2.290e-11 |
+| 55 | `gZ` lop 23 | 2.214e-05 | 7.394e-12 |
+| 50 | `dL/dX2` lop 23 | 2.462e-05 | 1.683e-10 |
+| 51 | `gP` lop 23 | 2.743e-04 | 3.373e-09 |
+| 52 | `gQ` lop 23 | 1.089e-06 | 5.495e-15 |
+| 53 | `gWq` lop 23 | 2.372e-05 | 8.722e-12 |
+| 40 | `dL/dhX` 23 | 2.422e-05 | 1.681e-10 |
+| 41 | `dL/dhX` 12 | 4.237e-05 | 1.715e-10 |
+| 42 | `dL/dhX` 0 | 8.280e-04 | 2.478e-09 |
+| 3  | `gWq` lop 0 | 3.261e-05 | 4.123e-11 |
+
+`scan 50` da khac han `scan 1` (21.463848) => bug dong 617 da het.
+Gradient tang deu 2.4e-05 -> 8.3e-04 qua 24 lop (~1.16x/lop), dung ban chat residual.
+
+## Run 24 - GELU len device (HEAD `f55ae4f`)
+
+Thay 3 vong `exp` host moi lop bang 2 PTX kernel:
+- `gelu_fwd_kernel(x, y, n)` - copy nguyen van tu probe da verify.
+- `gelu_bwd_kernel(x, dy, dx, n)` - `dx = dy * (0.5(1+t) + 0.5x(1-t^2)*0.79788456*(1+0.134145x^2))`,
+  `t = tanh.approx(0.79788456(x + 0.044715x^3))`.
+- `gelu_selftest()` chay truoc vung do (n=1024, x in [-4,4)) va in
+  `GELU SELFTEST MAXERR`; > 1e-4 thi dung.
+- Bo toan bo scan trong vong lap (ke ca `scan 2` doc 25.7M phan tu logits)
+  va mot `cuda_h2d(hY2, y2d, qb, 2)` chet (2 MB/lop).
+
+Khong con host `exp` nao trong vong lap lop. max local 183, exe 61440 bytes.
+Ky vong: loss gan nhu khong doi (11.181591 / ~10.8605), `MS_STEP` giam tu 7853.
+
+---
+
+## Run 24 - device GELU (HEAD `f55ae4f`, 2026-11-27 07:03 +0700)
+
+`GELU SELFTEST MAXERR 3.015995e-05` (< 1e-4). `LOSS 11.181594 -> 10.860524`,
+delta `-0.3210697`, `MS_STEP 2844.28` (from 7853.77), OK.
+
+## Run 25 - device CE loss (HEAD `c100157`, 2026-11-27 08:06 +0700)
+
+`LOSS 11.181591 -> 10.860525`, delta `-0.3210659`, `MS_STEP 453.71`
+(6.27x faster than run 24), OK. Removed 100 MB logits D2H + 25.7M host exp/div.
+
+## Run 26 - full fp16 tensor-core GEMMs (HEAD `0fff60c` / `c6f08ec`)
+
+`cublasGemmEx(CUDA_R_16F in, CUDA_R_32F out, CUBLAS_COMPUTE_32F)`,
+fp32 master weights + SGD in device PTX. Two pooled fp16 scratch buffers
+`fpA`/`fpB` keep IL locals at 193 <= 255.
+
+- `lr=0.5`: delta only `-0.0146` - SGD updates ~1.5e-6 are ~1/10 of fp16 ULP
+  at weight magnitude ~0.01, so they round away when weights are cast to fp16.
+- `lr=8.0`: `LOSS 11.181629 -> 10.890945`, delta `-0.290685`, `MS_STEP 270.07`, OK.
+
+## Run 27 - final verified (HEAD `81b7290`, 2026-11-27 08:51 +0700)
+
+```
+LOSS  11.181629 -> 10.891400
+loss delta = -0.29022884368896484
+MS_LAYERS 111.62   MS_HEAD 257.43   MS_BWD 88.15
+MS_TOTAL 529.90    MS_STEP 264.95
+KET LUAN: OK  (2 fwd / 2 bwd / 2 upd, 0 FAIL)
+```
+
+Timing breakdown (2 steps): head+loss 257 ms is the single biggest cost,
+24 forward layers 112 ms, backward 88 ms, remainder ~73 ms (SGD updates).
+
+### Speed status
+
+| path | ms/step |
+|------|---------|
+| torch eager | 442.3 |
+| C++-generated bridge (target) | **187.8** (`2.36x` vs torch) |
+| IL-only fp32 device kernels | 453.7 |
+| IL-only fp16 tensor core | **264.9** |
+
+IL-only is now `1.67x` faster than torch eager but still `1.41x` slower than
+the C++ bridge. Target NOT met.
+
+### Failed speed experiments (reverted)
+
+- Coalesced shared-memory loss kernel: PTX loaded but segfaulted .NET (rc -11).
+- Coalesced single-thread-per-token loss with transposed head logits:
+  CUDA_ERROR_ILLEGAL_ADDRESS (700) at layer-10 LN backward.
+- `CUBLAS_COMPUTE_32F_FAST_16F` (74): no measurable change vs 68.
