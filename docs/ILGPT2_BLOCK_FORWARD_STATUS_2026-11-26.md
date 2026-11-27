@@ -835,3 +835,60 @@ Da revert ve `7cca40f` (= 81b7290), giu compiler fix. Target 187.8 ms chua dat.
 
 Huong con lai (chua thu): cuBLASLt epilogue (bias+GELU+residual) hoac batched
 attention theo 16 head de giam so GEMM va luong S/P.
+
+---
+
+## Profile tung phase + loss 3-kernel + steady-state (2026-11-27 18:53 +0700)
+
+HEAD TokenVector.CudaBackend = `147067e` (khoi phuc ban verify cuoi `6ef653c`),
+TokenVector.Inference = `3f867f4`.
+
+### Ket qua toc do (Kaggle T4, da do)
+
+- **Steady-state 10 buoc: ~163 ms/step** (các bước 4..10: 164.9, 164.2, 164.9, 163.9,
+  164.0, 163.3, 163.1). `MS_STEP 183.54` la trung binh 10 buoc, bi nhieu warm-up.
+- Nhanh hon bridge `187.8 ms/step` khoang **1.15x** ở trạng thái ổn định.
+- Ban 2 buoc (gate OK): `LOSS 11.181629 -> 10.892552`, `MS_STEP 265.9 ms`
+  (bước 1 có ~200 ms warm-up cuBLAS nên trung bình 2 bước bị nhiễu).
+
+### Phat hien tu profiling
+
+| do | gia tri | ket luan |
+|---|---|---|
+| `h_gemm` (head GEMM 512x1024x50257) | 1.48 ms | khong phai nut |
+| `h_tohw` (fp32->fp16 head weight) | 1.21 ms | khong phai nut |
+| `h_loss` (kernel loss cu) | 30.9 ms | lon nhat head -> da thay bang loss3 |
+| `MB alloc8_us` | 0.086 us | AllocHGlobal re, KHONG phai nut |
+| `MB tohcall_us` | 3.87 us | P/Invoke + launch re |
+| SG FWD / HEAD / BWD / UPD (buoc 2) | 50 / 5 / 87 / 16 ms | backward lon nhat |
+
+`MS_LAYERS`/`MS_HEAD`/`MS_BWD` in ra `tf*1000` (tich luy 2 buoc) nen **gap 2x**;
+`MS_STEP` moi la gia tri dung.
+
+### Da lam / da thu
+
+- Loss 3 kernel PTX (`_l3_pm.ptx`, `_l3_cb.ptx`, `_l3_dx.ptx`): chia ca chieu V
+  (16 chunk x 4 row-block) + combine + dlogits. ptxas rc 0. Loat bug da sua: thieu
+  `cvta.to.global.u64 pb,pb;`, thieu `.reg .u64 pb`, va **host khong ghi `nb=16` vao
+  `hPK+12`** (gay `LOSS -inf`).
+- Bo 9 lenh `cudaMemcpy` D2D dong bo/layer -> `MS_STEP 285.8` (cham hon, khong giup).
+- Bo 336 lenh `print` debug/layer -> `MS_STEP 265.9` (khong giup).
+- Microbench `ilgpt2_mb.tkv` chung minh host-side khong phai nut cai.
+- AdamW (`_adamw.ptx`, lr 0.0008, wd 0.01, fp32 master) da viet, ptxas rc 0,
+  nhung **LOSS = nan ngay buoc 2** -> da revert khoi ban chinh, giu file WIP.
+
+### Loi chua xac minh (quan trong nhat)
+
+Gradient truoc update da la NaN: `DIAG gOUT` huu han, `DIAG dDL` huu han,
+nhung `DIAG gpre` (= `gqd`) = nan. SGD cu co `max/min` voi 0 nen **am thay nan thanh 0**,
+che giấu loi; vi vay ban 2 buoc van pass gate nhung 10 buoc loss -> 126 -> nan.
+Nguon nan nam trong backward layer (co the `dQ/dK/dV/dA` duoc dung la scratch cho moi
+layer, da thu recompute nhung van nan). Can tim nut nan cu the truoc khi cong nhan
+huan luyen đúng.
+
+### Huong tiep theo
+
+1. Tim nguon NaN trong backward bang D2H tai cac diem: g2d, gHH, gZ, g1d, gY2,
+   gDX2, gA, gP, gS, gQ, gqd (lay mau layer 23 truoc).
+2. Sau khi sach NaN, bat lai AdamW va do lai 10 buoc; so sanh voi bridge.
+3. Giu `187.8 ms` lam baseline den khi co ket qua verify day du.
