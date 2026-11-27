@@ -103123,7 +103123,7 @@
   .method public static int32 'run'() cil managed
   {
     .maxstack 653
-    .locals init (int32 'rc', int64 'hcell', int64 'ch', int32 'NL', int32 'T', int32 'H', int32 'F', int32 'V', int32 'hb', int32 'h4', int32 'qb', int32 'fb', int32 'sb', int32 'tvb', int32 'stb', int32 'whb', int32 'w1b', int32 'w2b', int32 'wh2', int32 'msz', int32 'sQH', int32 'sHH', int32 'sTT', int32 'sTF', int32 'sFH', int64 'cell', int64 'AWq', int64 'AWk', int64 'AWv', int64 'AWo', int64 'AW1', int64 'AW2', int64 'AGq', int64 'AGk', int64 'AGv', int64 'AGo', int64 'AG1', int64 'AG2', int64 'AQ', int64 'AK', int64 'AV', int64 'AA', int64 'ALG1', int64 'ALB1', int64 'ALG2', int64 'ABQ', int64 'ABO', int64 'AB1', int64 'AB2', int64 'ALB2', int64 'AX1', int64 'AY1', int64 'AS1', int64 'AY2', int64 'AX2', int64 'AS2', int64 'AP', int64 'AZ', int64 'AO', int64 'one', int64 'wh', int64 'zero', int64 'hal', int64 'hX', int64 'hIN', int64 'hIds', int32 'ii', int32 'jj', int32 '__idiv1008595_a', int32 '__idiv1008595_b', int32 '__idiv1008595_q', int32 '__idiv1008595_r', int64 'dY1', int64 '__tern1', int64 'dS', int64 'dP', int64 'dQ', int64 'dK', int64 'dV', int64 'dA', int64 'dO', int64 'dX', int64 'dX2', int64 'dgam', int64 'dbet', int64 'dFG', int64 'dFB', int64 'dY2', int64 'dZ', int64 'dHH', int64 'dO2', int64 'dOUT', int64 'dLG', int64 'dDL', int64 'dPK', int64 'dLS', int64 'fpA', int64 'fpB', int64 'gHH', int64 'gZ', int64 'gY2', int64 'gDX2', int64 'gA', int64 'gWo', int64 'gP', int64 'gV', int64 'gS', int64 'gQ', int64 'gK', int64 'gY1', int64 'gOUT', int64 'hY1', int64 'hY2', int64 'hST', int64 'hXH', int64 'g1h', int64 'b1h', int64 'g2h', int64 'b2h', int64 'hS', int64 'hP', int64 'hO', int64 'hX2', int64 'hO2', int64 'hOUT', int64 'hZ', int64 'hLG', int64 'hDL', int64 'hPK', int64 'hLS', int64 'hGP', int64 'hDS', int64 'hGY2', int64 'hGDX2', int64 'lsz', int64 'hg', class [mscorlib]System.Collections.Generic.List`1<unsigned int8> 'fpb', int64 'fpath', int32 'fp', int64 'mode', int64 'fh', int64 'wo', int32 'll', int64 'wqd', int64 'wkd', int64 'wvd', int64 'wod', int64 'w1d', int64 'w2d', int64 'dWh', int64 'afn', float32 'lr', float32 'wd', float32 'b1t', float32 'b2t', int64 'mq', int64 'vq', int64 'mk', int64 'vk', int64 'mv', int64 'vv', int64 'mo', int64 'vo', int64 'm1', int64 'v1', int64 'm2', int64 'v2', int64 'gfn', int64 'bfn', int64 'kh', int64 'lnf', int64 'lnb', int64 'gadd', int64 'th', int64 'tht', int64 'fpT', int64 'th3', int64 'fpQKV', int64 'l3h', int64 'dPM', int64 'dPS', int64 'dGM', int64 'dGI', int64 'a16h', int64 'sff16', int64 'sbk16', int64 'bh', int64 'bhadd', int64 'bhgrad', int64 'h3', int64 'hal16', int64 'xin', float64 't0', float64 'tf', float64 'tb', float64 'thd', int32 'step', float32 'ac1', float32 'ac2', float64 'tA', int64 'xh1d', int64 's1d', int64 'y2d', int64 'xh2d', int64 's2d', int64 'lg1', int64 'lb1', int64 'lg2', int64 'bq', int64 'bo', int64 'bf1', int64 'bf2', int64 'lb2', int64 'qd', int64 'qoff', int64 'kd', int64 'vd', int64 'ad', int64 'pd', int64 'zd', int64 'od', int64 'y1d', float64 'tH', float32 'lossv', float64 'tB', int64 'gqd', int64 'gkd', int64 'gvd', int64 'god', int64 'g1d', int64 'g2d', int64 'yb1', float64 'tC', int64 'uo', int64 'uo1', int64 'uo2', float64 't1', float64 'dtm', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum', int32 '__licm248', int32 '__licm249', int32 '__licm250', int32 '__licm251', int32 '__licm252', int32 '__licm253', int32 '__licm254', int32 '__licm255')
+    .locals init (int32 'rc', int64 'hcell', int64 'ch', int32 'NL', int32 'T', int32 'H', int32 'F', int32 'V', int32 'hb', int32 'h4', int32 'qb', int32 'fb', int32 'sb', int32 'tvb', int32 'stb', int32 'whb', int32 'w1b', int32 'w2b', int32 'wh2', int32 'msz', int32 'sQH', int32 'sHH', int32 'sTT', int32 'sTF', int32 'sFH', int64 'cell', int64 'AWq', int64 'AWk', int64 'AWv', int64 'AWo', int64 'AW1', int64 'AW2', int64 'AGq', int64 'AGk', int64 'AGv', int64 'AGo', int64 'AG1', int64 'AG2', int64 'AQ', int64 'AK', int64 'AV', int64 'AA', int64 'ALG1', int64 'ALB1', int64 'ALG2', int64 'ABQ', int64 'ABO', int64 'AB1', int64 'AB2', int64 'ALB2', int64 'AX1', int64 'AY1', int64 'AS1', int64 'AY2', int64 'AX2', int64 'AS2', int64 'AP', int64 'AZ', int64 'AO', int64 'one', int64 'wh', int64 'zero', int64 'hal', int64 'hX', int64 'hIN', int64 'hIds', int32 'ii', int32 'jj', int32 '__idiv1008595_a', int32 '__idiv1008595_b', int32 '__idiv1008595_q', int32 '__idiv1008595_r', int64 'dY1', int64 '__tern1', int64 'dS', int64 'dP', int64 'dQ', int64 'dK', int64 'dV', int64 'dA', int64 'dO', int64 'dX', int64 'dX2', int64 'dgam', int64 'dbet', int64 'dFG', int64 'dFB', int64 'dY2', int64 'dZ', int64 'dHH', int64 'dO2', int64 'dOUT', int64 'dLG', int64 'dDL', int64 'dPK', int64 'dLS', int64 'fpA', int64 'fpB', int64 'gHH', int64 'gZ', int64 'gY2', int64 'gDX2', int64 'gA', int64 'gWo', int64 'gP', int64 'gV', int64 'gS', int64 'gQ', int64 'gK', int64 'gY1', int64 'gOUT', int64 'hY1', int64 'hY2', int64 'hST', int64 'hXH', int64 'g1h', int64 'b1h', int64 'g2h', int64 'b2h', int64 'hS', int64 'hP', int64 'hO', int64 'hX2', int64 'hO2', int64 'hOUT', int64 'hZ', int64 'hLG', int64 'hDL', int64 'hPK', int64 'hLS', int64 'hGP', int64 'hDS', int64 'hGY2', int64 'hGDX2', int64 'lsz', int64 'hg', class [mscorlib]System.Collections.Generic.List`1<unsigned int8> 'fpb', int64 'fpath', int32 'fp', int64 'mode', int64 'fh', int64 'wo', int32 'll', int64 'wqd', int64 'wkd', int64 'wvd', int64 'wod', int64 'w1d', int64 'w2d', int64 'dWh', int64 'afn', float32 'lr', float32 'wd', float32 'b1t', float32 'b2t', int64 'mq', int64 'vq', int64 'mk', int64 'vk', int64 'mv', int64 'vv', int64 'mo', int64 'vo', int64 'm1', int64 'v1', int64 'm2', int64 'v2', int64 'gfn', int64 'bfn', int64 'kh', int64 'lnf', int64 'lnb', int64 'gadd', int64 'th', int64 'tht', int64 'fpT', int64 'th3', int64 'fpQKV', int64 'l3h', int64 'dPM', int64 'dPS', int64 'dGM', int64 'dGI', int64 'a16h', int64 'sff16', int64 'sbk16', int64 'bh', int64 'bhadd', int64 'bhgrad', int64 'h3', int64 'hal16', int64 'xin', float64 't0', float64 'tf', float64 'tb', float64 'thd', int32 'step', float32 'ac1', float32 'ac2', float64 'tA', int64 'xh1d', int64 's1d', int64 'y2d', int64 'xh2d', int64 's2d', int64 'lg1', int64 'lb1', int64 'lg2', int64 'bq', int64 'bo', int64 'bf1', int64 'bf2', int64 'lb2', int64 'qd', int64 'qoff', int64 'kd', int64 'vd', int64 'ad', int64 'pd', int64 'zd', int64 'od', int64 'y1d', float64 'tH', float32 'lossv', float64 'tB', int64 'gqd', int64 'gkd', int64 'gvd', int64 'god', int64 'g1d', int64 'g2d', float64 'tC', int64 'uo', int64 'uo1', int64 'uo2', float64 't1', float64 'dtm', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum', int32 '__licm247', int32 '__licm248', int32 '__licm249', int32 '__licm250', int32 '__licm251', int32 '__licm252', int32 '__licm253', int32 '__licm254')
     ldc.i4 0
     call int32 TKVApp::__pinvoke_cu_init(int32)
     stloc.s 0
@@ -106038,35 +106038,35 @@
     ldloc.s 5
     ldloc.s 5
     mul
+    stloc.s 247
+    ldloc.s 4
+    ldloc.s 4
+    mul
     stloc.s 248
     ldloc.s 4
-    ldloc.s 4
+    ldloc.s 5
     mul
     stloc.s 249
-    ldloc.s 4
     ldloc.s 5
+    ldloc.s 6
     mul
     stloc.s 250
-    ldloc.s 5
+    ldloc.s 4
     ldloc.s 6
     mul
     stloc.s 251
-    ldloc.s 4
-    ldloc.s 6
+    ldloc.s 5
+    ldloc.s 7
     mul
     stloc.s 252
-    ldloc.s 5
+    ldloc.s 4
     ldloc.s 7
     mul
     stloc.s 253
-    ldloc.s 4
-    ldloc.s 7
-    mul
-    stloc.s 254
     ldloc.s 6
     ldloc.s 5
     mul
-    stloc.s 255
+    stloc.s 254
   run_W21_start:
     ldloc.s 196
     ldc.i4 10
@@ -106383,7 +106383,7 @@
     ldloc.s 144
     ldloc.s 145
     ldloc.s 177
-    ldloc.s 248
+    ldloc.s 247
     call int32 TKVApp::'toh3'(int64, int64, int64, int64, int64, int32)
     stloc.s 0
     ldloc.s 2
@@ -106470,7 +106470,7 @@
     ldloc.s 61
     ldloc.s 74
     ldloc.s 4
-    ldloc.s 249
+    ldloc.s 248
     conv.i8
     ldc.i4 16
     call int32 TKVApp::'gemm16b'(int64, int32, int32, int32, int32, int32, int64, int64, int32, int64, int64, int32, int64, int64, int64, int32, int64, int32)
@@ -106542,7 +106542,7 @@
     ldloc.s 59
     ldloc.s 96
     ldloc.s 4
-    ldloc.s 249
+    ldloc.s 248
     conv.i8
     ldloc.s 97
     ldloc.s 4
@@ -106613,7 +106613,7 @@
     ldloc.s 80
     ldloc.s 209
     ldloc.s 4
-    ldloc.s 250
+    ldloc.s 249
     call int32 TKVApp::'bias_add'(int64, int64, int64, int32, int32)
     stloc.s 0
     ldloc.s 0
@@ -106641,7 +106641,7 @@
     ldloc.s 191
     ldloc.s 80
     ldloc.s 82
-    ldloc.s 250
+    ldloc.s 249
     call int32 TKVApp::'add_k'(int64, int64, int64, int64, int32)
     stloc.s 0
     ldloc.s 0
@@ -106696,7 +106696,7 @@
     ldloc.s 173
     ldloc.s 147
     ldloc.s 97
-    ldloc.s 251
+    ldloc.s 250
     call int32 TKVApp::'toh'(int64, int64, int64, int32)
     stloc.s 0
     ldloc.s 2
@@ -106719,13 +106719,13 @@
     ldloc.s 219
     ldloc.s 210
     ldloc.s 4
-    ldloc.s 252
+    ldloc.s 251
     call int32 TKVApp::'bias_add'(int64, int64, int64, int32, int32)
     stloc.s 0
     ldloc.s 167
     ldloc.s 219
     ldloc.s 89
-    ldloc.s 252
+    ldloc.s 251
     call int32 TKVApp::'gelu_fwd'(int64, int64, int64, int32)
     stloc.s 0
     ldloc.s 173
@@ -106760,14 +106760,14 @@
     ldloc.s 90
     ldloc.s 211
     ldloc.s 4
-    ldloc.s 250
+    ldloc.s 249
     call int32 TKVApp::'bias_add'(int64, int64, int64, int32, int32)
     stloc.s 0
     ldloc.s 172
     ldloc.s 82
     ldloc.s 90
     ldloc.s 91
-    ldloc.s 250
+    ldloc.s 249
     call int32 TKVApp::'add_k'(int64, int64, int64, int64, int32)
     stloc.s 0
     ldloc.s 0
@@ -106816,7 +106816,7 @@
     ldloc.s 173
     ldloc.s 149
     ldloc.s 97
-    ldloc.s 253
+    ldloc.s 252
     call int32 TKVApp::'toh'(int64, int64, int64, int32)
     stloc.s 0
     ldloc.s 2
@@ -107017,7 +107017,7 @@
     ldloc.s 173
     ldloc.s 93
     ldloc.s 96
-    ldloc.s 254
+    ldloc.s 253
     call int32 TKVApp::'toh'(int64, int64, int64, int32)
     stloc.s 0
     ldloc.s 2
@@ -107331,7 +107331,7 @@
     ldloc.s 167
     ldloc.s 219
     ldloc.s 89
-    ldloc.s 252
+    ldloc.s 251
     call int32 TKVApp::'gelu_fwd'(int64, int64, int64, int32)
     stloc.s 0
     ldloc.s 51
@@ -107342,7 +107342,7 @@
     add
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
-    stloc.s 231
+    stloc.s 221
     ldloc.s 173
     ldloc.s 89
     ldloc.s 96
@@ -107387,7 +107387,7 @@
     ldloc.s 174
     ldloc.s 148
     ldloc.s 175
-    ldloc.s 251
+    ldloc.s 250
     ldloc.s 6
     call int32 TKVApp::'toht'(int64, int64, int64, int32, int32)
     stloc.s 0
@@ -107411,7 +107411,7 @@
     ldloc.s 219
     ldloc.s 98
     ldloc.s 99
-    ldloc.s 252
+    ldloc.s 251
     call int32 TKVApp::'gelu_bwd'(int64, int64, int64, int64, int32)
     stloc.s 0
     ldloc.s 173
@@ -107458,7 +107458,7 @@
     ldloc.s 173
     ldloc.s 147
     ldloc.s 97
-    ldloc.s 251
+    ldloc.s 250
     call int32 TKVApp::'toh'(int64, int64, int64, int32)
     stloc.s 0
     ldloc.s 2
@@ -107507,7 +107507,7 @@
     ldloc.s 101
     ldloc.s 110
     ldloc.s 101
-    ldloc.s 250
+    ldloc.s 249
     call int32 TKVApp::'add_k'(int64, int64, int64, int64, int32)
     stloc.s 0
     ldloc.s 0
@@ -107623,7 +107623,7 @@
     ldloc.s 61
     ldloc.s 104
     ldloc.s 4
-    ldloc.s 249
+    ldloc.s 248
     conv.i8
     ldc.i4 16
     call int32 TKVApp::'gemm16b'(int64, int32, int32, int32, int32, int32, int64, int64, int32, int64, int64, int32, int64, int64, int64, int32, int64, int32)
@@ -107651,7 +107651,7 @@
     ldloc.s 59
     ldloc.s 96
     ldloc.s 4
-    ldloc.s 249
+    ldloc.s 248
     conv.i8
     ldloc.s 97
     ldloc.s 4
@@ -107716,7 +107716,7 @@
     ldloc.s 190
     ldloc.s 96
     ldloc.s 4
-    ldloc.s 249
+    ldloc.s 248
     conv.i8
     ldloc.s 97
     ldloc.s 4
@@ -107757,7 +107757,7 @@
     ldloc.s 190
     ldloc.s 96
     ldloc.s 4
-    ldloc.s 249
+    ldloc.s 248
     conv.i8
     ldloc.s 97
     ldloc.s 4
@@ -107776,7 +107776,7 @@
     call int32 TKVApp::'gemm16b'(int64, int32, int32, int32, int32, int32, int64, int64, int32, int64, int64, int32, int64, int64, int64, int32, int64, int32)
     stloc.s 0
     ldloc.s 173
-    ldloc.s 231
+    ldloc.s 221
     ldloc.s 96
     ldloc.s 20
     call int32 TKVApp::'toh'(int64, int64, int64, int32)
@@ -107988,7 +107988,7 @@
     ldloc.s 109
     ldloc.s 110
     ldloc.s 110
-    ldloc.s 250
+    ldloc.s 249
     call int32 TKVApp::'add_k'(int64, int64, int64, int64, int32)
     stloc.s 0
     ldloc.s 0
@@ -108014,9 +108014,9 @@
     br run_W35_start
   run_W35_end:
     call float64 TkvTime::Perf()
-    stloc.s 232
+    stloc.s 231
     ldloc.s 194
-    ldloc.s 232
+    ldloc.s 231
     ldloc.s 224
     sub
     add
@@ -108093,17 +108093,17 @@
     ldloc.s 15
     mul
     conv.i8
-    stloc.s 233
+    stloc.s 232
     ldloc.s 142
     ldloc.s 16
     mul
     conv.i8
-    stloc.s 234
+    stloc.s 233
     ldloc.s 142
     ldloc.s 17
     mul
     conv.i8
-    stloc.s 235
+    stloc.s 234
     ldloc.s 150
     ldloc.s 26
     ldloc.s 142
@@ -108115,12 +108115,12 @@
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
     ldloc.s 225
     ldloc.s 155
-    ldloc.s 233
+    ldloc.s 232
     add
     ldloc.s 156
-    ldloc.s 233
+    ldloc.s 232
     add
-    ldloc.s 248
+    ldloc.s 247
     ldloc.s 151
     ldloc.s 197
     ldloc.s 198
@@ -108138,12 +108138,12 @@
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
     ldloc.s 226
     ldloc.s 157
-    ldloc.s 233
+    ldloc.s 232
     add
     ldloc.s 158
-    ldloc.s 233
+    ldloc.s 232
     add
-    ldloc.s 248
+    ldloc.s 247
     ldloc.s 151
     ldloc.s 197
     ldloc.s 198
@@ -108161,12 +108161,12 @@
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
     ldloc.s 227
     ldloc.s 159
-    ldloc.s 233
+    ldloc.s 232
     add
     ldloc.s 160
-    ldloc.s 233
+    ldloc.s 232
     add
-    ldloc.s 248
+    ldloc.s 247
     ldloc.s 151
     ldloc.s 197
     ldloc.s 198
@@ -108184,12 +108184,12 @@
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
     ldloc.s 228
     ldloc.s 161
-    ldloc.s 233
+    ldloc.s 232
     add
     ldloc.s 162
-    ldloc.s 233
+    ldloc.s 232
     add
-    ldloc.s 248
+    ldloc.s 247
     ldloc.s 151
     ldloc.s 197
     ldloc.s 198
@@ -108207,12 +108207,12 @@
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
     ldloc.s 229
     ldloc.s 163
-    ldloc.s 234
+    ldloc.s 233
     add
     ldloc.s 164
-    ldloc.s 234
+    ldloc.s 233
     add
-    ldloc.s 251
+    ldloc.s 250
     ldloc.s 151
     ldloc.s 197
     ldloc.s 198
@@ -108230,12 +108230,12 @@
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
     ldloc.s 230
     ldloc.s 165
-    ldloc.s 235
+    ldloc.s 234
     add
     ldloc.s 166
-    ldloc.s 235
+    ldloc.s 234
     add
-    ldloc.s 255
+    ldloc.s 254
     ldloc.s 151
     ldloc.s 197
     ldloc.s 198
@@ -108273,11 +108273,11 @@
     br run_W21_start
   run_W21_end:
     call float64 TkvTime::Perf()
-    stloc.s 236
-    ldloc.s 236
+    stloc.s 235
+    ldloc.s 235
     ldloc.s 192
     sub
-    stloc.s 237
+    stloc.s 236
     ldstr "MS_LAYERS"
     ldstr " "
     ldloc.s 193
@@ -108307,7 +108307,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldstr "MS_TOTAL"
     ldstr " "
-    ldloc.s 237
+    ldloc.s 236
     ldc.r8 1000.0
     mul
     call string TkvStr::F64(float64)
@@ -108316,7 +108316,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldstr "MS_STEP"
     ldstr " "
-    ldloc.s 237
+    ldloc.s 236
     ldc.r8 1000.0
     mul
     ldc.r8 10.0

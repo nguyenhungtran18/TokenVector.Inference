@@ -1626,7 +1626,7 @@ def run() -> "i32":
             od = read_i64(AO, ll * 8)
             # reload THIS layer's forward activations (no stale shared buffers)
             rc = gelu_fwd(gfn, zd, dHH, T * F)
-            yb1: "i64" = read_i64(AY1, ll * 8)
+            y1d = read_i64(AY1, ll * 8)
 
             rc = toh(th, dHH, fpA, sTF)
             rc = toh(th, gOUT, fpB, sQH)
@@ -1674,7 +1674,7 @@ def run() -> "i32":
             rc = toh(th, gS, fpA, 16 * sTT)
             rc = toh(th, qd, fpB, sQH)
             rc = gemm16b(ch, 1, 0, T, 64, T, hal16, fpA, T, T * T, fpB, T, 64 * T, zero, gK, T, 64 * T, 16)
-            rc = toh(th, yb1, fpA, sQH)
+            rc = toh(th, y1d, fpA, sQH)
             rc = toh(th, gQ, fpB, sQH)
             rc = gemm16(ch, 1, 0, H, H, T, one, fpA, T, fpB, T, zero, gqd, H)
             rc = bias_grad_k(bhgrad, gqd, bq, T, H)
