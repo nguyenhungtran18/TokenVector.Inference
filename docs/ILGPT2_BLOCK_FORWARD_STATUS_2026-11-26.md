@@ -892,3 +892,43 @@ huan luyen đúng.
    gDX2, gA, gP, gS, gQ, gqd (lay mau layer 23 truoc).
 2. Sau khi sach NaN, bat lai AdamW va do lai 10 buoc; so sanh voi bridge.
 3. Giu `187.8 ms` lam baseline den khi co ket qua verify day du.
+
+---
+
+## Milestone: da vuot bridge, huan luyen on dinh 10 buoc (2026-11-27 19:45 +0700)
+
+HEAD TokenVector.CudaBackend = `eb720c1`, xac nhan bang Kaggle T4.
+
+### Ket qua verify
+
+- Ban 2 buoc (`ilgpt2_trainN_clean.exe`, gate): `LOSS 11.181629 -> 10.577373`,
+  2x `MARK FWD/BWD/UPD`, 0 FAIL, `dotnet rc=0`.
+- Ban 10 buoc (`ilgpt2_long.exe`): loss 11.1816 -> 10.5774 -> 9.4073 -> 8.8755 ->
+  9.4556 -> 6.5953 -> 4.6917 -> 3.3388 -> 2.1593 -> **1.2534**, moi gia tri huu han.
+- **Steady-state 176.1 - 176.8 ms/step** (các bước 3..10), nhanh hon bridge
+  `187.8 ms/step` khoang **6%**. `MS_STEP 197.3` la trung binh 10 buoc, con nhieu warm-up.
+
+### Nguon gon nan da tim va sua
+
+Probe D2H tai layer 23: `gOUT` sach, `dDL` sach, `gHH` co **393216/2097152** phan tu
+nan/inf ngay sau `gemm16(ch,0,1,T,F,H,...zero,gHH,T)` (transb=1, ldb=F) du `fpA`
+va `fpB` deu sach. `gelu_bwd` nhan gHH nan -> `gZ` nan -> toan bo gradient sau nan.
+SGD cu dung `max/min` voi 0 nen am thay nan = 0, che giau loi suot 2 buoc dau.
+
+Cac ban da thu:
+- `sgemm` fp32 thay GEMM gHH: het nan nhung chay `~209 ms/step`.
+- **`_toht.ptx`**: chuyen W2 sang buffer fp16 da transpose (F x H -> H x F),
+  dung `gemm16(ch,0,0,T,F,H,...ldb=H)` nhu forward -> het nan, giu tensor core.
+  `toht` dung `shr.u32`/`mul.lo` thay chia nguyen -> `~176 ms/step`.
+
+### Toi uu khac
+
+- Luu Q/K/V/A theo tung layer (AQ/AK/AV/AA) thay vi tinh lai 4 GEMM/layer o backward;
+  bo khong bo `cuda_malloc` cua AY1 (loi cu deu tu script mat AY1).
+- Bo khoi recompute bi lap 2 lan trong backward.
+- AdamW fp32 master (`_adamw.ptx`, lr=0.0008, wd=0.01, bc1/bc2 bias-correct) thay SGD lr=8.
+
+### Trang thai
+
+Target dat duoc va da verify. Giu `187.8 ms` lam baseline. Cac file WIP/probe van o
+trong repo de truy vet. `TokenVector.Inference` cap nhat luc 19:45 +0700.
