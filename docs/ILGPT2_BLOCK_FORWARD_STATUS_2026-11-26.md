@@ -678,3 +678,22 @@ Code chay duoc tot nhat van la
 Bridge dat 187.8 ms nhờ ATen fused kernel (layer_norm, addmm, flash SDPA,
 gelu, autograd) — khong the mo phong bang cac cuLaunch rieng le.
 Moi huong da thu va ket qua deu duoc ghi trong cac muc Run 24-33 o tren.
+
+---
+
+## Run 34 - CUDA Graph (2026-11-27 12:45 +0700)
+
+Da thu ghi toan bo step vao CUDA graph de xoa host launch overhead:
+- `cudaStreamBeginCapture` tren stream 0: loi 900 (unsupported).
+- Chuyen toan bo `cuLaunchKernel` va `cudaMemcpyAsync` sang stream rieng,
+  set `cublasSetStream_v2`, pin host buffer: capture thanh cong (`begin/end = 0`).
+- `cudaGraphInstantiate` va `cudaGraphInstantiateWithFlags` deu tra loi 1, log
+  rong. Khong xac dinh duoc nguyen nhan trong pham vi P/Invoke hien tai.
+
+Da revert ve ban verified `f4e59cb` (= 81b7290): `MS_STEP 264.95`,
+`loss delta -0.2902`, gate OK.
+
+**Ket luan: target 187.8 ms khong dat duoc** sau 34 lan chay va tat ca huong
+kha thi (device kernels, fp16, fused GEMM, AdamW, batched, C fp16,
+fused attention PTX, CUDA graph). Bridge dung ATen fused kernel khong the
+tai tao bang P/Invoke tu TokenVector trong khoang thoi gian nay.
