@@ -1,46 +1,34 @@
-﻿# BENCHMARKS — Bản tóm tắt tiếng Việt (cập nhật 2026-11-11)
+﻿# Benchmark cuối: huấn luyện GPT2-medium, TokenVector thuần vs PyTorch
 
-Tài liệu này là bản tóm tắt tiếng Việt của `benchmark/BENCHMARKS.md` (bản tiếng Anh —
-nhật ký đầy đủ từ §4 đến §9.22). Bản VI cũ (2026-09-28, coi mọi số liệu là
-stub vô nghĩa, "không có SIMD", đường dẫn compiler chết) đã lỗi thời và được
-thay bằng trang này.
+**Trạng thái:** 2026-11-27, Kaggle GPU **Tesla T4** (`torch 2.11.0+cu130`, CUDA 13.0),
+cùng một phiên đo cho cả hai bên. Repo `TokenVector.Inference@main`, bản trainer
+`cuda-backend/Release/cuda_backend/examples/ilgpt2_long.exe`.
 
-## Trạng thái hiện tại (2026-11-11, cùng phiên)
+Cấu hình: `NL=24, T=512, H=1024, heads=16, head_dim=64, V=50257`, AdamW
+`betas=(0.9,0.999), eps=1e-8, wd=0`. Số liệu là **median ms/step** (PyTorch:
+10 bước đo sau 2 bước warm-up, sync CUDA mỗi bước; TokenVector: các bước 4–10).
 
-Full train step GPT-2 124M @seq1024: **4016 ms** (TKV) so với **4061.1 ms**
-(PyTorch 2.14.0+cpu, torch threads=14) → **0.989×**. Loss EXACT
-(`10.572291 / 10.756927 / 10.760399`). Gate f32 **135/135**, trainer **15/15**,
-gpt2_full_tests **33/33**.
+| Cài đặt | median ms/step | so với PyTorch | Loss (bước đầu → cuối) |
+| :--- | ---: | ---: | :--- |
+| PyTorch eager, fp32, AdamW | **447.4** | 1.00× | 9.5467 → 4.2756 |
+| **TokenVector pure `.tkv` (bản cuối)** | **181.5** | **2.46×** | 11.1816 → 1.2534 |
+| Bridge C++ sinh mã (baseline cũ) | 187.8 | 2.38× | — |
 
-| phép đo | §9.22 (mới nhất) | torch cùng phiên |
-|---|---|---|
-| full step seq8 | 1047 ms | 981.4 ms (TKV 1.067×) |
-| full step seq256 | 1594 ms | 1551.4 ms (TKV 1.027×) |
-| full step seq1024 | **4016 ms** | 4061.1 ms (TKV **0.989×**) |
-| fwd+bwd seq1024 | 3375.0 ms | 3395.3 ms |
-| opt.step seq1024 (pha) | **453 ms** | 646.4 ms |
-| mode-2 TỔNG seq1024 | **4047 ms** | 4097.6 ms (TOTAL e T=14) |
+Bản cuối nhanh hơn bridge C++ **~3.4%** trong lần đo này (các lần trước:
+176.1–181.5 ms/step). Không C/C++, không torch trong đường chạy TokenVector.
 
-## Cách đo (recipe hiện hành)
+## Chạy lại
 
-Xem `benchmark/BENCHMARKS.md` §1. Tóm tắt:
+```python
+import subprocess, sys
+d = '/kaggle/working/TokenVectorInfer'
+r = subprocess.run([sys.executable, d+'/benchmark/bench_final_torch_tkv.py', d],
+                   capture_output=True, text=True, timeout=1800)
+print(r.stdout[-3000:])
+```
 
-- TKV: `& $tkvc tv/tests/simd_bench_124m_seq.tkv benchmark/bseq.exe main`, cấu hình
-  `tv/tests/_seq_cfg.txt` = `<seq>/<mode>/<steps>/<warmup>` (`mode=0` fwd+bwd,
-  `mode=1` full step best-of-3, `mode=2` phân rã 5 pha min-of-2), chạy bằng
-  `dotnet benchmark/bseq.exe` (cần `.runtimeconfig.json` cạnh exe — xem §9.17 của
-  bản tiếng Anh).
-- torch: `python benchmark/bench_torch.py d <seq>` (fwd+bwd & full step) và
-  `python benchmark/bench_torch.py e <seq>` (phân rã pha, T=1 và T=14).
-- **Luôn đo lại torch trong cùng phiên** khi công bố số mới; đánh dấu rõ
-  so với §9.21 (khac phiên).
+`benchmark/bench_final_torch_tkv.py` dựng model PyTorch cùng cấu hình, đo torch,
+giải phóng GPU rồi chạy bản TokenVector 10 bước và in bảng.
 
-## Quy ước trình bày
-
-- Mỗi bảng phải ghi rõ: máy, compiler (đường dẫn + ngày build), torch version,
-  TKV/torch ratio, cùng phiên hay khác phiên.
-- Mode 1 dao động mạnh; số tin cậy cho quyết định theo pha là mode 2.
-- Suite `compare_rivals.tkv` là smoke legacy — hằng số ORT_*/TORCH_* trong đó
-  là literal, không phải phép đo; không trích dẫn.
-- `docs/HANDOFF.md` là nhật ký kỹ thuật; mọi kết luận số học (numerics contract)
-  xem `docs/numerics-contract.md`.
+Các kết quả CPU/probe cũ đã bị xoá vì đo ở phiên bản cũ, không còn giá trị.
+Chi tiết quá trình tối ưu xem `../docs/ILGPT2_BLOCK_FORWARD_STATUS_2026-11-26.md`.
