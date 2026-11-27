@@ -551,3 +551,23 @@ GPU under-utilization nam o **24 layer forward**: moi layer co ~30 cuLaunch
 8-16 buffer `alloc_bytes`. Can gom cac launch / gom conversion bang cach
 giu shadow fp16 rieng theo layer (khong convert lai truoc moi GEMM) va
 dung stream de chong host idle. Day la huong dang cu Bridge tuung tu.
+
+---
+
+## Run 30 - weight shadow thu (2026-11-27 09:57 +0700)
+
+Giu shadow fp16 rieng cho 6 trong so moi layer, convert 1 lan/step (bo 15
+weight-conversion launch/step) -> `MS_STEP 275.19` (cham hon 265), va
+`loss delta` giam tu `-0.2902` xuong `-0.2107`. Da revert.
+
+Ket luan: so luong `toh` launch khong phai nguyen nhan chinh cua under-
+utilization. Budget GPU thuc (sync tai moi stage):
+
+```
+forward 166 ms/step (1.9 TFLOPS), loss 47, backward 53, SGD+host ~39
+```
+
+Huong con lai: gom chinh cac cuLaunch `cublasGemmEx` trong moi layer (hien
+~12 GEMM/layer, moi lan P/Invoke + cap phat 24-32 buffer host), hoac dung
+mot kernel PTX hop nhat thay 2 LN + softmax + 6 GEMM nho. Day la phan tuong
+duong voi “Bridge dung GPU tot len nhanh” ma chua thuc hien duoc.
