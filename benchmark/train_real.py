@@ -87,7 +87,9 @@ print("TORCH step0 loss %.4f" % float(l0), flush=True)
 opt = torch.optim.AdamW(model.parameters(), lr=5e-5, betas=(0.9, 0.999),
                         eps=1e-8, weight_decay=0.0)
 times, losses = [], []
-for step in range(NUP + 2):
+# 13 lan tinh loss: lan dau truoc update, lan cuoi SAU 12 update.
+# Giong het TKV (LOSSF step 1..13) -> hai trace ket thuc cung mot moc.
+for step in range(NUP + 1):
     t0 = time.perf_counter()
     loss = ce(model, xi, yi)
     loss.backward(); opt.step(); opt.zero_grad(set_to_none=True)
@@ -96,7 +98,8 @@ for step in range(NUP + 2):
     if step >= 2:
         times.append((time.perf_counter() - t0) * 1000.0)
 torch_ms = st.median(times)
-print("TORCH trace: " + " -> ".join("%.4f" % x for x in losses), flush=True)
+print("TORCH trace (%d gia tri, cuoi = sau %d update): " % (len(losses), NUP)
+      + " -> ".join("%.4f" % x for x in losses), flush=True)
 print("TORCH train: median %.1f ms/step  loss sau %d update %.4f"
       % (torch_ms, NUP, losses[NUP]), flush=True)
 torch.save(model.state_dict(), "/kaggle/working/trained_gpt2m.pt")
