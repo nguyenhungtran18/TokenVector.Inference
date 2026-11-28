@@ -1661,6 +1661,13 @@ def run() -> "i32":
             rc = toh(th, gOUT, fpA, sQH)
             rc = toht(tht, w2d, fpT, H * F, F)
             rc = gemm16(ch, 0, 0, T, F, H, one, fpA, T, fpT, H, zero, gHH, T)
+            if step == 1:
+                if ll == 0:
+                    wh = cuda_h2d(hPK, gHH, T * 4, 2)
+                    ii = 0
+                    while ii < 32:
+                        print("DGH00", read_f32(hPK, ii * 64))
+                        ii = ii + 1
             rc = gelu_bwd(bfn, zd, gHH, gZ, T * F)
             if step == 1:
                 if ll == 0:
