@@ -28,7 +28,7 @@ model = AutoModelForCausalLM.from_pretrained("gpt2-medium", config=cfg).to("cuda
 xi = torch.from_numpy(xb.astype(np.int64)).unsqueeze(0).cuda()
 yi = torch.from_numpy(yb.astype(np.int64)).unsqueeze(0).cuda()
 with torch.no_grad():
-    WQ_REF = model.transformer.h[0].attn.c_attn.weight[:H].detach().cpu().numpy().astype(np.float32)
+    WQ_REF = model.transformer.h[0].attn.c_attn.weight[:, :H].T.detach().cpu().numpy().astype(np.float32)
     _emb = model.transformer.wte(xi) + model.transformer.wpe(
         torch.arange(T, device="cuda").unsqueeze(0))
     LN1_REF = model.transformer.h[0].ln_1(_emb).detach().cpu().numpy().astype(np.float32)
@@ -96,6 +96,7 @@ _d1 = _dump(2)
 _d2 = _dump(3)
 _cmp("wq_col0", _d0, WQ_REF[0])
 _cmp("wq_col1", _d1, WQ_REF[1])
-_cmp("ln1_row0", _d2, LN1_REF[0])
+print("DUMPCHK ref_shapes", WQ_REF.shape, LN1_REF.shape, flush=True)
+_cmp("ln1_row0", _d2, LN1_REF.reshape(T, H)[0])
 if len(_d0) == H:
     print("DUMPCHK wq_T_alt  maxerr=%.6g" % float(np.abs(_d0 - WQ_REF[:, 0]).max()), flush=True)

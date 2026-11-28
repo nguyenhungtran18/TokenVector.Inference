@@ -38,11 +38,15 @@ emb = (wte[xb] + wpe).copy()             # [T,H] -> column-major i+j*T
 parts = [emb, f32(sd["transformer.ln_f.weight"]), f32(sd["transformer.ln_f.bias"])]
 for i in range(NL):
     p = "transformer.h.%d." % i
+    # HF Conv1D luu weight dang [input, output] = [H, 3H] / [H, 4H] / [4H, H].
+    # CatQ/K/V theo TRUC OUTPUT (cot), roi transpose thanh [H, H] cho GEMM B.
     qkv = f32(sd[p + "attn.c_attn.weight"])
-    parts += [qkv[0:H].T.copy(), qkv[H:2 * H].T.copy(), qkv[2 * H:3 * H].T.copy(),
+    parts += [qkv[:, 0:H].T.copy(), qkv[:, H:2 * H].T.copy(), qkv[:, 2 * H:3 * H].T.copy(),
               f32(sd[p + "attn.c_proj.weight"]).T.copy(),
-              f32(sd[p + "mlp.c_fc.weight"]).T.copy(),
-              f32(sd[p + "mlp.c_proj.weight"]).T.copy(),
+              # W1: B can dang [H, F] = chinh weight [input, output], KHONG transpose.
+              f32(sd[p + "mlp.c_fc.weight"]).copy(),
+              # W2: B can dang [F, H] = chinh weight [input, output], KHONG transpose.
+              f32(sd[p + "mlp.c_proj.weight"]).copy(),
               f32(sd[p + "ln_1.weight"]), f32(sd[p + "ln_1.bias"]),
               f32(sd[p + "ln_2.weight"]), f32(sd[p + "ln_2.bias"]),
               f32(sd[p + "attn.c_attn.bias"]), f32(sd[p + "attn.c_proj.bias"]),
