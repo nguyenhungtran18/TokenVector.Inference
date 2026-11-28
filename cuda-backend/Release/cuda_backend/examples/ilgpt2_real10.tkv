@@ -1571,6 +1571,7 @@ def run() -> "i32":
             if step == 1:
                 if ll == 0:
                     rc = dumpc(23, qd, T)
+                    rc = dumpc(35, bq, 1)
             rc = bias_add(bhadd, qd, bq, T, 3 * T * H)
             if rc != 0:
                 print("QKV GEMM FAIL", ll, rc)

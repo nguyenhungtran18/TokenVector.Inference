@@ -109454,6 +109454,11 @@
     ldloc.s 4
     call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
+    ldc.i4 35
+    ldloc.s 204
+    ldc.i4 1
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
+    stloc.s 0
   run_If28_else:
   run_If27_else:
     ldloc.s 183
