@@ -1217,6 +1217,7 @@ def run() -> "i32":
     rc = c_fread(hg, 1, qb + 2 * hb + NL * lsz + wh2 + T * 4 + T * H * 4 + T * 4, fh)
     print("WEIGHT BYTES", rc)
     rc = c_fclose(fh)
+    BG: "i64" = alloc_bytes(128)
     hIds = hg + qb + 2 * hb + NL * lsz + wh2
     wh = write_i64(BG, 120, hg + qb + 2 * hb + NL * lsz + wh2 + T * 4)
     hIN = hg + qb + 2 * hb + NL * lsz + wh2 + T * 4 + T * 4
@@ -1452,7 +1453,6 @@ def run() -> "i32":
     if bh == 0:
         print("BIAS INIT FAIL")
         return 1
-    BG: "i64" = alloc_bytes(128)
     rc = cuda_malloc(cell, 3 * hb)
     wh = write_i64(BG, 0, read_i64(cell, 0))
     rc = cuda_malloc(cell, hb)
