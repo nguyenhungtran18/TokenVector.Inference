@@ -1488,7 +1488,7 @@ def run() -> "i32":
         if step < 10:
             warm = step / 10.0
         else:
-            warm = (151 - step) / 141.0
+            warm = ((151 - step) / 141.0) * ((151 - step) / 141.0)
         tA = time_perf()
         xin = dX
         # ---- forward layers ----
