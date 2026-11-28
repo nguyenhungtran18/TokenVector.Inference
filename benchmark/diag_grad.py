@@ -62,6 +62,8 @@ model.transformer.h[0].mlp.c_proj.register_full_backward_hook(cap_gi("DGH00"))
 model.transformer.h[0].mlp.c_fc.register_full_backward_hook(cap_bw("DGZ00"))
 model.transformer.h[0].ln_2.register_full_backward_hook(cap_bw("DGY20"))
 model.transformer.h[0].ln_1.register_full_backward_hook(cap_gi("DGY10"))
+model.transformer.h[23].ln_1.register_full_backward_hook(cap_bw("DDX23"))
+model.transformer.h[23].ln_1.register_full_backward_hook(cap_gi("DY123"))
 
 logits = model(input_ids=xi).logits
 logits.retain_grad()
@@ -82,7 +84,7 @@ r = subprocess.run([DOTNET, EXE], env=dict(os.environ), capture_output=True,
 print("TKV rc=%d" % r.returncode, flush=True)
 
 tags = ("DGD0", "DGO0", "DGQ23", "DGQ16", "DGQ08", "DGQ00", "DY10",
-        "DGA00", "DGH00", "DGZ00", "DGY20", "DGY10")
+        "DGA00", "DGH00", "DGZ00", "DGY20", "DGY10", "DDX23", "DY123")
 vals = {t: [] for t in tags}
 for line in (r.stdout or "").splitlines():
     p = line.split()

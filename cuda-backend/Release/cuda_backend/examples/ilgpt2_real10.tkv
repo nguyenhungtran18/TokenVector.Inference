@@ -1788,6 +1788,17 @@ def run() -> "i32":
             rc = gemm16(ch, 0, 1, T, H, H, one, fpA, T, fpB, H, one, gDX2, T)
             rc = ln_bwd(lnb, xh1d, gDX2, lg1, s1d, gY1, T, H)
             if step == 1:
+                if ll == 23:
+                    wh = cuda_h2d(hPK, gDX2, T * 4, 2)
+                    ii = 0
+                    while ii < 32:
+                        print("DDX23", read_f32(hPK, ii * 64))
+                        ii = ii + 1
+                    wh = cuda_h2d(hPK, gY1, T * 4, 2)
+                    ii = 0
+                    while ii < 32:
+                        print("DY123", read_f32(hPK, ii * 64))
+                        ii = ii + 1
                 if ll == 0:
                     wh = cuda_h2d(hPK, gY1, T * 4, 2)
                     ii = 0
