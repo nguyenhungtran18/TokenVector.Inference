@@ -62,7 +62,7 @@ ms = [float(l.split()[1]) for l in lines if l.startswith("STEPMS ")]
 tl = [float(l.split()[1]) for l in lines if l.startswith("LOSSF ")]
 if not tl:
     sys.exit(1)
-tkv_ms = st.median(ms[3:]) if len(ms) > 6 else st.median(ms)
+tkv_ms = st.median(ms[3:10]) if len(ms) > 10 else st.median(ms)
 print("TKV step losses: " + " -> ".join("%.4f" % x for x in tl), flush=True)
 drops = [round(tl[i - 1] - tl[i], 4) for i in range(1, len(tl))]
 print("TKV per-step drops: " + ", ".join("%.4f" % x for x in drops), flush=True)
