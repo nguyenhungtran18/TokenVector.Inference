@@ -1,4 +1,4 @@
-"""BƯỚC 2/3 - train that: PyTorch eager vs TokenVector pure .tkv.
+﻿"""BÆ¯á»šC 2/3 - train that: PyTorch eager vs TokenVector pure .tkv.
 Chay sau export_gpt2m_weights.py. Luu model da train de cell test dung lai.
 """
 import gc
@@ -18,8 +18,6 @@ EXE = BASE + "/cuda-backend/Release/cuda_backend/examples/ilgpt2_real10.exe"
 DOTNET = "/kaggle/working/dotnet/dotnet"
 NL, H, NH, V, T = 24, 1024, 16, 50257, 512
 
-if os.environ.get("TKV_DIAG") != "0":
-    subprocess.run([sys.executable, BASE + "/benchmark/diag_variants.py"], check=False)
 
 d = np.load("/kaggle/working/gpt2m_ids.npz")
 xb, yb = d["xb"], d["yb"]
