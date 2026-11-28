@@ -46,15 +46,26 @@ def cap_fwd(tag):
         cap[tag] = inp[0][0, :, 0].detach().float().cpu().numpy()[IDX]
     return fn
 
+def cap_gi(tag):
+    def fn(m, gi, go):
+        cap[tag] = gi[0][0, :, 0].detach().float().cpu().numpy()[IDX]
+    return fn
+
 model.transformer.ln_f.register_full_backward_hook(cap_lnf("DGO0"))
 model.transformer.h[23].attn.c_attn.register_full_backward_hook(cap_bw("DGQ23"))
 model.transformer.h[0].attn.c_attn.register_full_backward_hook(cap_bw("DGQ00"))
 model.transformer.h[0].attn.c_attn.register_forward_hook(cap_fwd("DY10"))
+model.transformer.h[0].attn.c_proj.register_full_backward_hook(cap_gi("DGA00"))
+model.transformer.h[0].mlp.c_proj.register_full_backward_hook(cap_gi("DGZ00"))
+model.transformer.h[0].ln_2.register_full_backward_hook(cap_bw("DGY20"))
+model.transformer.h[0].ln_1.register_full_backward_hook(cap_bw("DGY10"))
 
 logits = model(input_ids=xi).logits
 logits.retain_grad()
 tnf.cross_entropy(logits[0], yi[0]).backward()
-cap["DGD0"] = logits.grad[0, :, 0].detach().float().cpu().numpy()[IDX]
+lg = logits.grad[0].detach().float().cpu().numpy().astype(np.float64)
+wh0 = model.lm_head.weight.detach().cpu().numpy().astype(np.float64)[:, 0]
+cap["DGD0"] = (lg @ wh0)[IDX]
 print("TORCH ref loss %.4f" % float(tnf.cross_entropy(logits.detach()[0], yi[0])), flush=True)
 
 cfg_rt = {"runtimeOptions": {"tfm": "net10.0",
@@ -67,7 +78,8 @@ r = subprocess.run([DOTNET, EXE], env=dict(os.environ), capture_output=True,
                    text=True, timeout=2400)
 print("TKV rc=%d" % r.returncode, flush=True)
 
-tags = ("DGD0", "DGO0", "DGQ23", "DGQ00", "DY10")
+tags = ("DGD0", "DGO0", "DGQ23", "DGQ00", "DY10",
+        "DGA00", "DGZ00", "DGY20", "DGY10")
 vals = {t: [] for t in tags}
 for line in (r.stdout or "").splitlines():
     p = line.split()
@@ -80,6 +92,8 @@ for line in (r.stdout or "").splitlines():
 for t in tags:
     a = np.array(vals[t], dtype=np.float64)
     b = cap[t]
+    if t != "DY10":
+        a = a / 1024.0          # loss_dx nhan 1024x
     if a.size != 32:
         print("DIAG %-6s MISSING (%d values)" % (t, a.size), flush=True)
         continue

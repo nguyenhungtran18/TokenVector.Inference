@@ -1662,6 +1662,13 @@ def run() -> "i32":
             rc = toht(tht, w2d, fpT, H * F, F)
             rc = gemm16(ch, 0, 0, T, F, H, one, fpA, T, fpT, H, zero, gHH, T)
             rc = gelu_bwd(bfn, zd, gHH, gZ, T * F)
+            if step == 1:
+                if ll == 0:
+                    wh = cuda_h2d(hPK, gZ, T * 4, 2)
+                    ii = 0
+                    while ii < 32:
+                        print("DGZ00", read_f32(hPK, ii * 64))
+                        ii = ii + 1
             rc = bias_grad_k(bhgrad, gZ, read_i64(BG, 16), T, F)
             rc = toh(th, y2d, fpA, sQH)
             rc = toh(th, gZ, fpB, sTF)
@@ -1669,6 +1676,13 @@ def run() -> "i32":
             rc = toh(th, gZ, fpA, sTF)
             rc = toh(th, w1d, fpB, H * F)
             rc = gemm16(ch, 0, 1, T, H, F, one, fpA, T, fpB, H, zero, gY2, T)
+            if step == 1:
+                if ll == 0:
+                    wh = cuda_h2d(hPK, gY2, T * 4, 2)
+                    ii = 0
+                    while ii < 32:
+                        print("DGY20", read_f32(hPK, ii * 64))
+                        ii = ii + 1
             rc = ln_bwd(lnb, xh2d, gY2, lg2, s2d, gDX2, T, H)
             if rc != 0:
                 print("LN2 BWD FAIL", ll)
@@ -1681,6 +1695,13 @@ def run() -> "i32":
             rc = toh(th, gDX2, fpA, sQH)
             rc = toh(th, wod, fpB, sHH)
             rc = gemm16(ch, 0, 1, T, H, H, one, fpA, T, fpB, H, zero, gA, T)
+            if step == 1:
+                if ll == 0:
+                    wh = cuda_h2d(hPK, gA, T * 4, 2)
+                    ii = 0
+                    while ii < 32:
+                        print("DGA00", read_f32(hPK, ii * 64))
+                        ii = ii + 1
             rc = toh(th, ad, fpA, sQH)
             rc = toh(th, gDX2, fpB, sQH)
             # dW cua attn.c_proj phai ghi vao buffer RIENG cua lop (AGo[ll]);
@@ -1747,6 +1768,13 @@ def run() -> "i32":
             rc = toh(th, wvd, fpB, sHH)
             rc = gemm16(ch, 0, 1, T, H, H, one, fpA, T, fpB, H, one, gDX2, T)
             rc = ln_bwd(lnb, xh1d, gDX2, lg1, s1d, gY1, T, H)
+            if step == 1:
+                if ll == 0:
+                    wh = cuda_h2d(hPK, gY1, T * 4, 2)
+                    ii = 0
+                    while ii < 32:
+                        print("DGY10", read_f32(hPK, ii * 64))
+                        ii = ii + 1
             if rc != 0:
                 print("LN1 BWD FAIL", ll)
                 return 1

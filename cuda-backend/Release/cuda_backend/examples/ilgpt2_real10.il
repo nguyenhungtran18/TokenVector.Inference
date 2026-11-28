@@ -103218,7 +103218,7 @@
   }
   .method public static int32 'run'() cil managed
   {
-    .maxstack 777
+    .maxstack 805
     .locals init (int32 'rc', int64 'hcell', int64 'ch', int32 'NL', int32 'T', int32 'H', int32 'F', int32 'V', int32 'hb', int32 'h4', int32 'qb', int32 'fb', int32 'sb', int32 'tvb', int32 'stb', int32 'whb', int32 'w1b', int32 'w2b', int32 'wh2', int32 'msz', int32 'sQH', int32 'sHH', int32 'sTT', int32 'sTF', int32 'sFH', int64 'cell', int64 'AWq', int64 'AWk', int64 'AWv', int64 'AWo', int64 'AW1', int64 'AW2', int64 'AGq', int64 'AGk', int64 'AGv', int64 'AGo', int64 'AG1', int64 'AG2', int64 'AQ', int64 'AK', int64 'AV', int64 'AA', int64 'ALG1', int64 'ALB1', int64 'ALG2', int64 'ABQ', int64 'ABO', int64 'AB1', int64 'AB2', int64 'ALB2', int64 'AX1', int64 'AY1', int64 'AS1', int64 'AY2', int64 'AX2', int64 'AS2', int64 'AP', int64 'AZ', int64 'AO', int64 'one', int64 'wh', int64 'zero', int64 'hal', int64 'hX', int64 'hIN', int64 'hIds', int32 'ii', int64 'dY1', int64 '__tern1', int64 'dS', int64 'dO', int64 'dX', int64 'dX2', int64 'dgam', int64 'dbet', int64 'dFG', int64 'dFB', int64 'dHH', int64 'dO2', int64 'dOUT', int64 'dLG', int64 'dDL', int64 'dPK', int64 'dLS', int64 'fpA', int64 'fpB', int64 'gHH', int64 'gZ', int64 'gY2', int64 'gDX2', int64 'gA', int64 'gP', int64 'gV', int64 'gS', int64 'gQ', int64 'gK', int64 'gY1', int64 'gOUT', int64 'g1h', int64 'b1h', int64 'g2h', int64 'b2h', int64 'hP', int64 'hPK', int64 'hLS', int64 'lsz', int64 'hg', class [mscorlib]System.Collections.Generic.List`1<unsigned int8> 'fpb', int64 'fpath', int32 'fp', int64 'mode', int64 'fh', int64 'wo', int32 'll', int64 'wqd', int64 'wkd', int64 'wvd', int64 'wod', int64 'w1d', int64 'w2d', int64 'dWh', int64 'afn', float32 'lr', float32 'wd', class [mscorlib]System.Collections.Generic.List`1<unsigned int8> 'lrp', int64 'lfh', int64 'lbuf', float32 'b1t', float32 'b2t', int64 'mq', int64 'vq', int64 'mk', int64 'vk', int64 'mv', int64 'vv', int64 'mo', int64 'vo', int64 'm1', int64 'v1', int64 'm2', int64 'v2', int64 'gfn', int64 'bfn', int64 'kh', int64 'lnf', int64 'lnb', int64 'gadd', int64 'th', int64 'tht', int64 'fpT', int64 'th3', int64 'fpQKV', int64 'l3h', int64 'dPM', int64 'dPS', int64 'dGM', int64 'dGI', int64 'a16h', int64 'sff16', int64 'sbk16', int64 'bh', int64 'BG', int64 'bhadd', int64 'bhgrad', int64 'h3', int64 'hal16', int64 'xin', float64 't0', float64 'tf', float64 'tb', float64 'thd', int32 'step', float32 'ac1', float32 'ac2', float32 'warm', float64 'tA', int64 'xh1d', int64 's1d', int64 'y2d', int64 'xh2d', int64 's2d', int64 'lg1', int64 'lb1', int64 'lg2', int64 'bq', int64 'bo', int64 'bf1', int64 'bf2', int64 'lb2', int64 'qd', int64 'qoff', int64 'kd', int64 'vd', int64 'ad', int64 'pd', int64 'zd', int64 'od', int64 'y1d', float64 'tH', float32 'lossv', float64 'tB', int64 'gqd', int64 'gkd', int64 'gvd', int64 'god', int64 'g1d', int64 'g2d', float64 'tC', int64 'uo', int64 'uo1', int64 'uo2', float64 't1', float64 'dtm', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum', int32 '__licm223', int32 '__licm224', int32 '__licm225', int32 '__licm226', int32 '__licm227', int32 '__licm228', int32 '__licm229', int32 '__licm230', float32 '__licm231', float32 '__licm232')
     ldc.i4 0
     call int32 TKVApp::__pinvoke_cu_init(int32)
@@ -107874,6 +107874,53 @@
     ldloc.s 227
     call int32 TKVApp::'gelu_bwd'(int64, int64, int64, int64, int32)
     stloc.s 0
+    ldloc.s 171
+    ldc.i4 1
+    ceq
+    brfalse run_If40_else
+    ldloc.s 113
+    ldc.i4 0
+    ceq
+    brfalse run_If41_else
+    ldloc.s 103
+    ldloc.s 87
+    ldloc.s 4
+    ldc.i4 4
+    mul
+    conv.i8
+    ldc.i4 2
+    call int32 TKVApp::__pinvoke_cuda_h2d(int64, int64, int64, int32)
+    conv.i8
+    stloc.s 60
+    ldc.i4 0
+    stloc.s 66
+  run_W42_start:
+    ldloc.s 66
+    ldc.i4 32
+    clt
+    brfalse run_W42_end
+    ldstr "DGZ00"
+    ldstr " "
+    ldloc.s 103
+    ldloc.s 66
+    ldc.i4 64
+    mul
+    conv.i8
+    add
+    conv.i
+    ldind.r4
+    call string TkvStr::F32(float32)
+    call string [mscorlib]System.String::Concat(string, string)
+    call string [mscorlib]System.String::Concat(string, string)
+    call void [mscorlib]System.Console::WriteLine(string)
+    ldloc.s 66
+    ldc.i4 1
+    add
+    stloc.s 66
+    br run_W42_start
+  run_W42_end:
+  run_If41_else:
+  run_If40_else:
     ldloc.s 163
     ldloc.s 87
     ldloc.s 161
@@ -107942,6 +107989,53 @@
     ldloc.s 4
     call int32 TKVApp::'gemm16'(int64, int32, int32, int32, int32, int32, int64, int64, int32, int64, int32, int64, int64, int32)
     stloc.s 0
+    ldloc.s 171
+    ldc.i4 1
+    ceq
+    brfalse run_If43_else
+    ldloc.s 113
+    ldc.i4 0
+    ceq
+    brfalse run_If44_else
+    ldloc.s 103
+    ldloc.s 88
+    ldloc.s 4
+    ldc.i4 4
+    mul
+    conv.i8
+    ldc.i4 2
+    call int32 TKVApp::__pinvoke_cuda_h2d(int64, int64, int64, int32)
+    conv.i8
+    stloc.s 60
+    ldc.i4 0
+    stloc.s 66
+  run_W45_start:
+    ldloc.s 66
+    ldc.i4 32
+    clt
+    brfalse run_W45_end
+    ldstr "DGY20"
+    ldstr " "
+    ldloc.s 103
+    ldloc.s 66
+    ldc.i4 64
+    mul
+    conv.i8
+    add
+    conv.i
+    ldind.r4
+    call string TkvStr::F32(float32)
+    call string [mscorlib]System.String::Concat(string, string)
+    call string [mscorlib]System.String::Concat(string, string)
+    call void [mscorlib]System.Console::WriteLine(string)
+    ldloc.s 66
+    ldc.i4 1
+    add
+    stloc.s 66
+    br run_W45_start
+  run_W45_end:
+  run_If44_else:
+  run_If43_else:
     ldloc.s 145
     ldloc.s 179
     ldloc.s 88
@@ -107957,7 +108051,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If40_else
+    brfalse run_If46_else
     ldstr "LN2 BWD FAIL"
     ldstr " "
     ldloc.s 113
@@ -107967,7 +108061,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If40_else:
+  run_If46_else:
     ldloc.s 146
     ldloc.s 89
     ldloc.s 97
@@ -107992,7 +108086,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If41_else
+    brfalse run_If47_else
     ldstr "ADD DX2 FAIL"
     ldstr " "
     ldloc.s 113
@@ -108002,7 +108096,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If41_else:
+  run_If47_else:
     ldloc.s 147
     ldloc.s 89
     ldloc.s 84
@@ -108031,6 +108125,53 @@
     ldloc.s 4
     call int32 TKVApp::'gemm16'(int64, int32, int32, int32, int32, int32, int64, int64, int32, int64, int32, int64, int64, int32)
     stloc.s 0
+    ldloc.s 171
+    ldc.i4 1
+    ceq
+    brfalse run_If48_else
+    ldloc.s 113
+    ldc.i4 0
+    ceq
+    brfalse run_If49_else
+    ldloc.s 103
+    ldloc.s 90
+    ldloc.s 4
+    ldc.i4 4
+    mul
+    conv.i8
+    ldc.i4 2
+    call int32 TKVApp::__pinvoke_cuda_h2d(int64, int64, int64, int32)
+    conv.i8
+    stloc.s 60
+    ldc.i4 0
+    stloc.s 66
+  run_W50_start:
+    ldloc.s 66
+    ldc.i4 32
+    clt
+    brfalse run_W50_end
+    ldstr "DGA00"
+    ldstr " "
+    ldloc.s 103
+    ldloc.s 66
+    ldc.i4 64
+    mul
+    conv.i8
+    add
+    conv.i
+    ldind.r4
+    call string TkvStr::F32(float32)
+    call string [mscorlib]System.String::Concat(string, string)
+    call string [mscorlib]System.String::Concat(string, string)
+    call void [mscorlib]System.Console::WriteLine(string)
+    ldloc.s 66
+    ldc.i4 1
+    add
+    stloc.s 66
+    br run_W50_start
+  run_W50_end:
+  run_If49_else:
+  run_If48_else:
     ldloc.s 147
     ldloc.s 193
     ldloc.s 84
@@ -108152,7 +108293,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If42_else
+    brfalse run_If51_else
     ldstr "SF BWD FAIL"
     ldstr " "
     ldloc.s 113
@@ -108162,7 +108303,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If42_else:
+  run_If51_else:
     ldloc.s 147
     ldloc.s 93
     ldloc.s 84
@@ -108207,11 +108348,11 @@
     ldloc.s 171
     ldc.i4 1
     ceq
-    brfalse run_If43_else
+    brfalse run_If52_else
     ldloc.s 113
     ldc.i4 23
     ceq
-    brfalse run_If44_else
+    brfalse run_If53_else
     ldloc.s 103
     ldloc.s 94
     ldloc.s 4
@@ -108224,11 +108365,11 @@
     stloc.s 60
     ldc.i4 0
     stloc.s 66
-  run_W45_start:
+  run_W54_start:
     ldloc.s 66
     ldc.i4 32
     clt
-    brfalse run_W45_end
+    brfalse run_W54_end
     ldstr "DGQ23"
     ldstr " "
     ldloc.s 103
@@ -108247,13 +108388,13 @@
     ldc.i4 1
     add
     stloc.s 66
-    br run_W45_start
-  run_W45_end:
-  run_If44_else:
+    br run_W54_start
+  run_W54_end:
+  run_If53_else:
     ldloc.s 113
     ldc.i4 0
     ceq
-    brfalse run_If46_else
+    brfalse run_If55_else
     ldloc.s 103
     ldloc.s 94
     ldloc.s 4
@@ -108266,11 +108407,11 @@
     stloc.s 60
     ldc.i4 0
     stloc.s 66
-  run_W47_start:
+  run_W56_start:
     ldloc.s 66
     ldc.i4 32
     clt
-    brfalse run_W47_end
+    brfalse run_W56_end
     ldstr "DGQ00"
     ldstr " "
     ldloc.s 103
@@ -108289,8 +108430,8 @@
     ldc.i4 1
     add
     stloc.s 66
-    br run_W47_start
-  run_W47_end:
+    br run_W56_start
+  run_W56_end:
     ldloc.s 103
     ldloc.s 197
     ldloc.s 4
@@ -108303,11 +108444,11 @@
     stloc.s 60
     ldc.i4 0
     stloc.s 66
-  run_W48_start:
+  run_W57_start:
     ldloc.s 66
     ldc.i4 32
     clt
-    brfalse run_W48_end
+    brfalse run_W57_end
     ldstr "DY10"
     ldstr " "
     ldloc.s 103
@@ -108326,10 +108467,10 @@
     ldc.i4 1
     add
     stloc.s 66
-    br run_W48_start
-  run_W48_end:
-  run_If46_else:
-  run_If43_else:
+    br run_W57_start
+  run_W57_end:
+  run_If55_else:
+  run_If52_else:
     ldloc.s 147
     ldloc.s 93
     ldloc.s 84
@@ -108446,11 +108587,11 @@
     ldloc.s 171
     ldc.i4 1
     ceq
-    brfalse run_If49_else
+    brfalse run_If58_else
     ldloc.s 113
     ldc.i4 0
     ceq
-    brfalse run_If50_else
+    brfalse run_If59_else
     ldloc.s 103
     ldloc.s 201
     ldc.i8 1024
@@ -108460,11 +108601,11 @@
     stloc.s 60
     ldc.i4 0
     stloc.s 66
-  run_W51_start:
+  run_W60_start:
     ldloc.s 66
     ldc.i4 256
     clt
-    brfalse run_W51_end
+    brfalse run_W60_end
     ldstr "GQ0"
     ldstr " "
     ldloc.s 103
@@ -108483,10 +108624,10 @@
     ldc.i4 1
     add
     stloc.s 66
-    br run_W51_start
-  run_W51_end:
-  run_If50_else:
-  run_If49_else:
+    br run_W60_start
+  run_W60_end:
+  run_If59_else:
+  run_If58_else:
     ldloc.s 147
     ldloc.s 95
     ldloc.s 85
@@ -108625,12 +108766,59 @@
     ldloc.s 5
     call int32 TKVApp::'ln_bwd'(int64, int64, int64, int64, int64, int64, int32, int32)
     stloc.s 0
+    ldloc.s 171
+    ldc.i4 1
+    ceq
+    brfalse run_If61_else
+    ldloc.s 113
+    ldc.i4 0
+    ceq
+    brfalse run_If62_else
+    ldloc.s 103
+    ldloc.s 96
+    ldloc.s 4
+    ldc.i4 4
+    mul
+    conv.i8
+    ldc.i4 2
+    call int32 TKVApp::__pinvoke_cuda_h2d(int64, int64, int64, int32)
+    conv.i8
+    stloc.s 60
+    ldc.i4 0
+    stloc.s 66
+  run_W63_start:
+    ldloc.s 66
+    ldc.i4 32
+    clt
+    brfalse run_W63_end
+    ldstr "DGY10"
+    ldstr " "
+    ldloc.s 103
+    ldloc.s 66
+    ldc.i4 64
+    mul
+    conv.i8
+    add
+    conv.i
+    ldind.r4
+    call string TkvStr::F32(float32)
+    call string [mscorlib]System.String::Concat(string, string)
+    call string [mscorlib]System.String::Concat(string, string)
+    call void [mscorlib]System.Console::WriteLine(string)
+    ldloc.s 66
+    ldc.i4 1
+    add
+    stloc.s 66
+    br run_W63_start
+  run_W63_end:
+  run_If62_else:
+  run_If61_else:
     ldloc.s 0
     ldc.i4 0
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If52_else
+    brfalse run_If64_else
     ldstr "LN1 BWD FAIL"
     ldstr " "
     ldloc.s 113
@@ -108640,7 +108828,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If52_else:
+  run_If64_else:
     ldloc.s 146
     ldloc.s 96
     ldloc.s 97
@@ -108653,7 +108841,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If53_else
+    brfalse run_If65_else
     ldstr "ADD DX1 FAIL"
     ldstr " "
     ldloc.s 113
@@ -108663,7 +108851,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If53_else:
+  run_If65_else:
     ldloc.s 121
     ldloc.s 45
     ldloc.s 113
@@ -108922,11 +109110,11 @@
     ldloc.s 174
     mul
     stloc.s 232
-  run_W54_start:
+  run_W66_start:
     ldloc.s 113
     ldloc.s 3
     clt
-    brfalse run_W54_end
+    brfalse run_W66_end
     ldloc.s 32
     ldloc.s 113
     ldc.i4 8
@@ -109138,8 +109326,8 @@
     ldc.i4 1
     add
     stloc.s 113
-    br run_W54_start
-  run_W54_end:
+    br run_W66_start
+  run_W66_end:
     ldstr "MARK UPD"
     ldstr " "
     ldloc.s 171
