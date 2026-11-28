@@ -1338,8 +1338,8 @@ def run() -> "i32":
     if afn == 0:
         print("ADAMW INIT FAIL")
         return 1
-    lr: "f32" = 0.0008
-    wd: "f32" = 0.01
+    lr: "f32" = 0.0025
+    wd: "f32" = 0.0
     b1t: "f32" = 1.0
     b2t: "f32" = 1.0
     rc = cuda_malloc(cell, NL * whb)
