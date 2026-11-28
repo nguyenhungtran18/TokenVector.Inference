@@ -52,7 +52,7 @@ with open(os.path.join(os.path.dirname(EXE), "ilgpt2_real10.runtimeconfig.json")
     json.dump(cfg_rt, f)
 LRF = "/kaggle/working/tkv_lr.bin"
 with open(LRF, "wb") as _f:
-    _f.write(np.float32(0.00005).tobytes())
+    _f.write(np.float32(0.0001).tobytes())
 r = subprocess.run([DOTNET, EXE], env=dict(os.environ), capture_output=True, text=True, timeout=1200)
 print("TKV rc=", r.returncode, flush=True)
 if r.returncode != 0:

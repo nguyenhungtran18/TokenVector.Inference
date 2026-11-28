@@ -1338,7 +1338,7 @@ def run() -> "i32":
     if afn == 0:
         print("ADAMW INIT FAIL")
         return 1
-    lr: "f32" = 0.0008
+    lr: "f32" = 0.0001
     wd: "f32" = 0.0
     lrp = b"/kaggle/working/tkv_lr.bin"
     ii = 0
@@ -1484,6 +1484,9 @@ def run() -> "i32":
         b2t = b2t * 0.999
         ac1: "f32" = 1.0 - b1t
         ac2: "f32" = 1.0 - b2t
+        warm: "f32" = 1.0
+        if step < 10:
+            warm = step / 10.0
         tA = time_perf()
         xin = dX
         # ---- forward layers ----
@@ -1742,16 +1745,16 @@ def run() -> "i32":
             uo: "i64" = ll * whb
             uo1: "i64" = ll * w1b
             uo2: "i64" = ll * w2b
-            rc = adamw_update(afn, read_i64(AWq, ll * 8), gqd, mq + uo, vq + uo, H * H, lr, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(AWk, ll * 8), gkd, mk + uo, vk + uo, H * H, lr, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(AWv, ll * 8), gvd, mv + uo, vv + uo, H * H, lr, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(AWo, ll * 8), god, mo + uo, vo + uo, H * H, lr, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(AW1, ll * 8), g1d, m1 + uo1, v1 + uo1, H * F, lr, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(AW2, ll * 8), g2d, m2 + uo2, v2 + uo2, F * H, lr, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(ABQ, ll * 8), read_i64(BG, 0), read_i64(BG, 32), read_i64(BG, 40), 3 * H, lr, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(ABO, ll * 8), read_i64(BG, 24), read_i64(BG, 48), read_i64(BG, 56), H, lr, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(AB1, ll * 8), read_i64(BG, 16), read_i64(BG, 64), read_i64(BG, 72), 4 * H, lr, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(AB2, ll * 8), read_i64(BG, 8), read_i64(BG, 80), read_i64(BG, 88), H, lr, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(AWq, ll * 8), gqd, mq + uo, vq + uo, H * H, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(AWk, ll * 8), gkd, mk + uo, vk + uo, H * H, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(AWv, ll * 8), gvd, mv + uo, vv + uo, H * H, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(AWo, ll * 8), god, mo + uo, vo + uo, H * H, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(AW1, ll * 8), g1d, m1 + uo1, v1 + uo1, H * F, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(AW2, ll * 8), g2d, m2 + uo2, v2 + uo2, F * H, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(ABQ, ll * 8), read_i64(BG, 0), read_i64(BG, 32), read_i64(BG, 40), 3 * H, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(ABO, ll * 8), read_i64(BG, 24), read_i64(BG, 48), read_i64(BG, 56), H, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(AB1, ll * 8), read_i64(BG, 16), read_i64(BG, 64), read_i64(BG, 72), 4 * H, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(AB2, ll * 8), read_i64(BG, 8), read_i64(BG, 80), read_i64(BG, 88), H, lr * warm, ac1, ac2, wd)
 
             ll = ll + 1
         print("MARK UPD", step)
