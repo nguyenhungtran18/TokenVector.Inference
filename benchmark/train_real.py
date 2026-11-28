@@ -17,11 +17,6 @@ BASE = sys.argv[1] if len(sys.argv) > 1 else "/kaggle/working/TokenVectorInfer"
 EXE = BASE + "/cuda-backend/Release/cuda_backend/examples/ilgpt2_real10.exe"
 DOTNET = "/kaggle/working/dotnet/dotnet"
 NL, H, NH, V, T = 24, 1024, 16, 50257, 512
-ABL = ""
-if os.environ.get("TKV_ABL", "1") != "0":
-    _ar = subprocess.run([sys.executable, BASE + "/benchmark/diag_ablation.py"],
-                         capture_output=True, text=True, timeout=900)
-    ABL = _ar.stdout or ""
 
 
 d = np.load("/kaggle/working/gpt2m_ids.npz")
@@ -32,15 +27,10 @@ cfg = GPT2Config(n_layer=NL, n_head=NH, n_embd=H, n_positions=1024,
 model = AutoModelForCausalLM.from_pretrained("gpt2-medium", config=cfg).to("cuda").train()
 xi = torch.from_numpy(xb.astype(np.int64)).unsqueeze(0).cuda()
 yi = torch.from_numpy(yb.astype(np.int64)).unsqueeze(0).cuda()
-model.zero_grad(set_to_none=True)
-_l0 = model(input_ids=xi, labels=yi).loss
-_l0.backward()
-GQ_REF = model.transformer.h[0].attn.c_attn.weight.grad[:64, 0].detach().cpu().numpy()
-model.zero_grad(set_to_none=True)
 opt = torch.optim.AdamW(model.parameters(), lr=5e-5, betas=(0.9, 0.999),
                         eps=1e-8, weight_decay=0.0)
 times, losses = [], []
-for step in range(2 + 150):
+for step in range(2 + 10):
     t0 = time.perf_counter()
     loss = model(input_ids=xi, labels=yi).loss
     loss.backward(); opt.step(); opt.zero_grad(set_to_none=True)
@@ -86,13 +76,3 @@ print("| PyTorch eager | gpt2-medium pretrained | %.1f | 1.00x | %.4f -> %.4f |"
       % (torch_ms, losses[0], losses[-1]), flush=True)
 print("| TokenVector pure .tkv | gpt2-medium pretrained | %.1f | %.2fx | %.4f -> %.4f |"
       % (tkv_ms, torch_ms / tkv_ms, first_loss, end_loss), flush=True)
-for _l in ABL.splitlines():
-    if _l.startswith("ABL"):
-        print(_l, flush=True)
-GD = []
-for _l in lines:
-    _p = _l.split()
-    if len(_p) >= 10 and _p[0] == "GD" and _p[1] == "1":
-        GD.extend(float(_x) for _x in _p[2:])
-if len(GD) == 64:
-    print("GRADCHK dWq maxerr=%.6g  TKV=%s  REF=%s" % (float(np.max(np.abs(np.array(GD) - GQ_REF))), np.array(GD)[:4], GQ_REF[:4]), flush=True)
