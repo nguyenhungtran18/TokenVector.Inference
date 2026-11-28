@@ -44106,7 +44106,7 @@
     ldarg.s 12
     ldc.i4 0
     ldarg.s 13
-    ldc.i4 74
+    ldc.i4 0
     ldc.i4 1
     neg
     call int32 TKVApp::__pinvoke_cublas_gemm_ex(int64, int32, int32, int32, int32, int32, int64, int64, int32, int32, int64, int32, int32, int64, int64, int32, int32, int32, int32)
@@ -96503,7 +96503,7 @@
     ldarg.s 15
     ldarg.s 16
     ldarg.s 17
-    ldc.i4 74
+    ldc.i4 0
     ldc.i4 1
     neg
     call int32 TKVApp::__pinvoke_cublas_gemm_strided_batched_ex(int64, int32, int32, int32, int32, int32, int64, int64, int32, int32, int64, int64, int32, int32, int64, int64, int64, int32, int32, int64, int32, int32, int32)
