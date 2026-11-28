@@ -66,6 +66,7 @@ Assembled method TKVApp::h2f
 Assembled method TKVApp::dumpc
 Assembled method TKVApp::add_k
 Assembled method TKVApp::toh
+Assembled method TKVApp::gemm32
 Assembled method TKVApp::gemm16
 Assembled method TKVApp::loss_init
 Assembled method TKVApp::loss_fwd
@@ -104,8 +105,8 @@ Global
 Class 1	Fields: 2;	Methods: 27;	
 Class 2	Methods: 15;	
 Class 3	Methods: 3;	
-Class 4	Methods: 57;	
-Resolving local member refs: 661 -> 661 defs, 0 refs, 0 unresolved
+Class 4	Methods: 58;	
+Resolving local member refs: 665 -> 665 defs, 0 refs, 0 unresolved
 
 Emitting events and properties:
 Global 	

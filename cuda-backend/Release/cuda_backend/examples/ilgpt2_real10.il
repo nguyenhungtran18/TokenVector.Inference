@@ -47051,6 +47051,49 @@
     ldc.i4 0
     ret
   }
+  .method public static int32 'gemm32'(int64 'handle', int32 'ta', int32 'tb', int32 'm', int32 'n', int32 'k', int64 'alpha', int64 'a', int32 'lda', int64 'b', int32 'ldb', int64 'beta', int64 'c', int32 'ldc') cil managed
+  {
+    .maxstack 27
+    .locals init (int32 'rc', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum')
+    ldarg.s 0
+    ldarg.s 1
+    ldarg.s 2
+    ldarg.s 3
+    ldarg.s 4
+    ldarg.s 5
+    ldarg.s 6
+    ldarg.s 7
+    ldc.i4 0
+    ldarg.s 8
+    ldarg.s 9
+    ldc.i4 0
+    ldarg.s 10
+    ldarg.s 11
+    ldarg.s 12
+    ldc.i4 0
+    ldarg.s 13
+    ldc.i4 66
+    ldc.i4 1
+    neg
+    call int32 TKVApp::__pinvoke_cublas_gemm_ex(int64, int32, int32, int32, int32, int32, int64, int64, int32, int32, int64, int32, int32, int64, int64, int32, int32, int32, int32)
+    stloc.s 0
+    ldloc.s 0
+    ldc.i4 0
+    ceq
+    ldc.i4.0
+    ceq
+    brfalse gemm32_If1_else
+    ldstr "GEMM32 FAIL"
+    ldstr " "
+    ldloc.s 0
+    call string TkvStr::I32(int32)
+    call string [mscorlib]System.String::Concat(string, string)
+    call string [mscorlib]System.String::Concat(string, string)
+    call void [mscorlib]System.Console::WriteLine(string)
+  gemm32_If1_else:
+    ldloc.s 0
+    ret
+  }
   .method public static int32 'gemm16'(int64 'handle', int32 'ta', int32 'tb', int32 'm', int32 'n', int32 'k', int64 'alpha', int64 'a', int32 'lda', int64 'b', int32 'ldb', int64 'beta', int64 'c', int32 'ldc') cil managed
   {
     .maxstack 27
@@ -47072,7 +47115,7 @@
     ldarg.s 12
     ldc.i4 0
     ldarg.s 13
-    ldc.i4 66
+    ldc.i4 74
     ldc.i4 1
     neg
     call int32 TKVApp::__pinvoke_cublas_gemm_ex(int64, int32, int32, int32, int32, int32, int64, int64, int32, int32, int64, int32, int32, int64, int64, int32, int32, int32, int32)
@@ -54811,7 +54854,7 @@
   .method public static int32 'loss_fwd'(int64 'fnh', int64 'lg', int64 'pk', int64 'dl', int64 'ls', int32 'tn') cil managed
   {
     .maxstack 36
-    .locals init (int64 'a0', int64 'wh', int64 'a1', int64 'a2', int64 'a3', int64 'pl', int32 'nb', int32 '__idiv1002919_a', int32 '__idiv1002919_b', int32 '__idiv1002919_q', int32 '__idiv1002919_r', int32 'rc', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum')
+    .locals init (int64 'a0', int64 'wh', int64 'a1', int64 'a2', int64 'a3', int64 'pl', int32 'nb', int32 '__idiv1002954_a', int32 '__idiv1002954_b', int32 '__idiv1002954_q', int32 '__idiv1002954_r', int32 'rc', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum')
     ldc.i4 8
     call native int [mscorlib]System.Runtime.InteropServices.Marshal::AllocHGlobal(int32)
     conv.i8
@@ -74691,7 +74734,7 @@
   .method public static int32 'loss3_fwd'(int64 'h', int64 'lg', int64 'pk', int64 'dl', int64 'ls', int64 'pm', int64 'ps', int64 'gm', int64 'gi', int32 'tn', int32 'nb') cil managed
   {
     .maxstack 34
-    .locals init (int64 'fa', int64 'fb', int64 'fc', int64 'zz', int32 'rb', int32 'gy', int32 '__idiv1003594_a', int32 '__idiv1003594_b', int32 '__idiv1003594_q', int32 '__idiv1003594_r', int32 'rc', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum')
+    .locals init (int64 'fa', int64 'fb', int64 'fc', int64 'zz', int32 'rb', int32 'gy', int32 '__idiv1003629_a', int32 '__idiv1003629_b', int32 '__idiv1003629_q', int32 '__idiv1003629_r', int32 'rc', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum')
     ldarg.s 0
     ldc.i4 0
     conv.i8
@@ -99469,7 +99512,7 @@
     ldarg.s 15
     ldarg.s 16
     ldarg.s 17
-    ldc.i4 66
+    ldc.i4 74
     ldc.i4 1
     neg
     call int32 TKVApp::__pinvoke_cublas_gemm_strided_batched_ex(int64, int32, int32, int32, int32, int32, int64, int64, int32, int32, int64, int64, int32, int32, int64, int64, int64, int32, int32, int64, int32, int32, int32)
@@ -106088,7 +106131,7 @@
   }
   .method public static int32 'run'() cil managed
   {
-    .maxstack 831
+    .maxstack 833
     .locals init (int32 'rc', int64 'hcell', int64 'ch', int32 'NL', int32 'T', int32 'H', int32 'F', int32 'V', int32 'hb', int32 'h4', int32 'qb', int32 'fb', int32 'sb', int32 'tvb', int32 'stb', int32 'whb', int32 'w1b', int32 'w2b', int32 'wh2', int32 'msz', int32 'sQH', int32 'sHH', int32 'sTT', int32 'sTF', int32 'sFH', int64 'cell', int64 'AWq', int64 'AWk', int64 'AWv', int64 'AWo', int64 'AW1', int64 'AW2', int64 'AGq', int64 'AGk', int64 'AGv', int64 'AGo', int64 'AG1', int64 'AG2', int64 'AQ', int64 'AK', int64 'AV', int64 'AA', int64 'ALG1', int64 'ALB1', int64 'ALG2', int64 'ABQ', int64 'ABO', int64 'AB1', int64 'AB2', int64 'ALB2', int64 'AX1', int64 'AY1', int64 'AS1', int64 'AY2', int64 'AX2', int64 'AS2', int64 'AP', int64 'AZ', int64 'AO', int64 'one', int64 'wh', int64 'zero', int64 'hal', int64 'hX', int64 'hIN', int64 'hIds', int32 'ii', int64 'dY1', int64 '__tern1', int64 'dS', int64 'dP', int64 'dQ', int64 'dK', int64 'dV', int64 'dA', int64 'dO', int64 'dX', int64 'dX2', int64 'dgam', int64 'dbet', int64 'dFG', int64 'dFB', int64 'dY2', int64 'dZ', int64 'dHH', int64 'dO2', int64 'dOUT', int64 'dLG', int64 'dDL', int64 'dPK', int64 'dLS', int64 'fpA', int64 'fpB', int64 'gHH', int64 'gZ', int64 'gY2', int64 'gDX2', int64 'gA', int64 'gWo', int64 'gP', int64 'gV', int64 'gS', int64 'gQ', int64 'gK', int64 'gY1', int64 'gOUT', int64 'hY1', int64 'hY2', int64 'hST', int64 'hXH', int64 'g1h', int64 'b1h', int64 'g2h', int64 'b2h', int64 'hS', int64 'hP', int64 'hO', int64 'hX2', int64 'hO2', int64 'hOUT', int64 'hZ', int64 'hLG', int64 'hDL', int64 'hPK', int64 'hLS', int64 'hGP', int64 'hDS', int64 'hGY2', int64 'hGDX2', int64 'lsz', int64 'hg', class [mscorlib]System.Collections.Generic.List`1<unsigned int8> 'fpb', int64 'fpath', int32 'fp', int64 'mode', int64 'fh', int64 'wo', int32 'll', int64 'wqd', int64 'wkd', int64 'wvd', int64 'wod', int64 'w1d', int64 'w2d', int64 'dWh', int64 'afn', float32 'lr', float32 'wd', float32 'b1t', float32 'b2t', int64 'mq', int64 'vq', int64 'mk', int64 'vk', int64 'mv', int64 'vv', int64 'mo', int64 'vo', int64 'm1', int64 'v1', int64 'm2', int64 'v2', int64 'gfn', int64 'bfn', int64 'kh', int64 'lnf', int64 'lnb', int64 'gadd', int64 'th', int64 'tht', int64 'fpT', int64 'th3', int64 'h2fh', int64 'fpQKV', int64 'l3h', int64 'dPM', int64 'dPS', int64 'dGM', int64 'dGI', int64 'a16h', int64 'sff16', int64 'sbk16', int64 'bh', int64 'bhadd', int64 'bhgrad', int64 'h3', int64 'hal16', int64 'xin', float64 't0', float64 'tf', float64 'tb', float64 'thd', int32 'step', float32 'ac1', float32 'ac2', float64 'tA', int64 'xh1d', int64 's1d', int64 'y2d', int64 'xh2d', int64 's2d', int64 'lg1', int64 'lb1', int64 'lg2', int64 'bq', int64 'bo', int64 'bf1', int64 'bf2', int64 'lb2', int64 'qd', int64 'qoff', int64 'kd', int64 'vd', int64 'ad', int64 'pd', int64 'zd', int64 'od', int64 'y1d', valuetype TkvInt 'jj', float64 'tH', float32 'lossv', float64 'tB', int64 'gqd', int64 'gkd', int64 'gvd', int64 'god', int64 'g1d', int64 'g2d', float64 'tC', int64 'uo', int64 'uo1', int64 'uo2', float64 't1', float64 'dtm', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum', int32 '__licm244', int32 '__licm245', int32 '__licm246', int32 '__licm247', int32 '__licm248', int32 '__licm249', int32 '__licm250', int32 '__licm251')
     ldc.i4 0
     call int32 TKVApp::__pinvoke_cu_init(int32)
@@ -109345,6 +109388,37 @@
     ldloc.s 244
     call int32 TKVApp::'toh3'(int64, int64, int64, int64, int64, int32)
     stloc.s 0
+    ldloc.s 192
+    ldc.i4 1
+    ceq
+    brfalse run_If25_else
+    ldloc.s 137
+    ldc.i4 0
+    ceq
+    brfalse run_If26_else
+    ldloc.s 2
+    ldc.i4 0
+    ldc.i4 0
+    ldloc.s 4
+    ldloc.s 5
+    ldloc.s 5
+    ldloc.s 59
+    ldloc.s 217
+    ldloc.s 4
+    ldloc.s 138
+    ldloc.s 5
+    ldloc.s 61
+    ldloc.s 71
+    ldloc.s 4
+    call int32 TKVApp::'gemm32'(int64, int32, int32, int32, int32, int32, int64, int64, int32, int64, int32, int64, int64, int32)
+    stloc.s 0
+    ldc.i4 32
+    ldloc.s 71
+    ldloc.s 4
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
+    stloc.s 0
+  run_If26_else:
+  run_If25_else:
     ldloc.s 2
     ldc.i4 0
     ldc.i4 0
@@ -109366,18 +109440,18 @@
     ldloc.s 192
     ldc.i4 1
     ceq
-    brfalse run_If25_else
+    brfalse run_If27_else
     ldloc.s 137
     ldc.i4 0
     ceq
-    brfalse run_If26_else
+    brfalse run_If28_else
     ldc.i4 23
     ldloc.s 209
     ldloc.s 4
     call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
-  run_If26_else:
-  run_If25_else:
+  run_If28_else:
+  run_If27_else:
     ldloc.s 183
     ldloc.s 209
     ldloc.s 204
@@ -109394,7 +109468,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If27_else
+    brfalse run_If29_else
     ldstr "QKV GEMM FAIL"
     ldstr " "
     ldloc.s 137
@@ -109409,7 +109483,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If27_else:
+  run_If29_else:
     ldloc.s 168
     ldloc.s 209
     ldloc.s 91
@@ -109454,7 +109528,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If28_else
+    brfalse run_If30_else
     ldstr "S GEMM FAIL"
     ldstr " "
     ldloc.s 137
@@ -109469,7 +109543,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If28_else:
+  run_If30_else:
     ldloc.s 180
     ldloc.s 69
     ldloc.s 214
@@ -109482,7 +109556,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If29_else
+    brfalse run_If31_else
     ldstr "SF FWD FAIL"
     ldstr " "
     ldloc.s 137
@@ -109492,7 +109566,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If29_else:
+  run_If31_else:
     ldloc.s 168
     ldloc.s 214
     ldloc.s 91
@@ -109539,7 +109613,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If30_else
+    brfalse run_If32_else
     ldstr "A GEMM FAIL"
     ldstr " "
     ldloc.s 137
@@ -109554,7 +109628,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If30_else:
+  run_If32_else:
     ldloc.s 168
     ldloc.s 213
     ldloc.s 91
@@ -109595,7 +109669,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If31_else
+    brfalse run_If33_else
     ldstr "O GEMM FAIL"
     ldstr " "
     ldloc.s 137
@@ -109610,7 +109684,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If31_else:
+  run_If33_else:
     ldloc.s 167
     ldloc.s 187
     ldloc.s 75
@@ -109623,7 +109697,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If32_else
+    brfalse run_If34_else
     ldstr "ADD X2 FAIL"
     ldstr " "
     ldloc.s 137
@@ -109633,7 +109707,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If32_else:
+  run_If34_else:
     ldloc.s 165
     ldloc.s 77
     ldloc.s 203
@@ -109650,7 +109724,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If33_else
+    brfalse run_If35_else
     ldstr "LN2 FWD FAIL"
     ldstr " "
     ldloc.s 137
@@ -109660,7 +109734,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If33_else:
+  run_If35_else:
     ldloc.s 168
     ldloc.s 198
     ldloc.s 91
@@ -109749,7 +109823,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If34_else
+    brfalse run_If36_else
     ldstr "ADD OUT FAIL"
     ldstr " "
     ldloc.s 137
@@ -109759,22 +109833,22 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If34_else:
+  run_If36_else:
     ldloc.s 192
     ldc.i4 1
     ceq
-    brfalse run_If35_else
+    brfalse run_If37_else
     ldloc.s 137
     ldc.i4 0
     ceq
-    brfalse run_If36_else
+    brfalse run_If38_else
     ldc.i4 0
     stloc.s 66
-  run_W37_start:
+  run_W39_start:
     ldloc.s 66
     ldc.i4 8
     clt
-    brfalse run_W37_end
+    brfalse run_W39_end
     ldloc.s 172
     ldloc.s 91
     ldloc.s 66
@@ -109797,8 +109871,8 @@
     ldc.i4 1
     add
     stloc.s 66
-    br run_W37_start
-  run_W37_end:
+    br run_W39_start
+  run_W39_end:
     ldc.i4 26
     ldloc.s 67
     ldc.i4 1
@@ -109828,11 +109902,11 @@
     stloc.s 0
     ldc.i4 0
     stloc.s 66
-  run_W38_start:
+  run_W40_start:
     ldloc.s 66
     ldc.i4 16
     clt
-    brfalse run_W38_end
+    brfalse run_W40_end
     ldloc.s 63
     ldloc.s 66
     ldc.i4 4
@@ -109867,8 +109941,8 @@
     ldc.i4 1
     add
     stloc.s 66
-    br run_W38_start
-  run_W38_end:
+    br run_W40_start
+  run_W40_end:
     ldloc.s 71
     ldloc.s 63
     ldc.i8 64
@@ -109920,11 +109994,11 @@
     stloc.s 66
     ldc.i4 0
     stloc.s 66
-  run_W39_start:
+  run_W41_start:
     ldloc.s 66
     ldc.i4 96
     clt
-    brfalse run_W39_end
+    brfalse run_W41_end
     ldloc.s 63
     ldloc.s 66
     ldc.i4 4
@@ -109951,26 +110025,26 @@
     ldc.i4 1
     add
     stloc.s 66
-    br run_W39_start
-  run_W39_end:
+    br run_W41_start
+  run_W41_end:
     ldc.i4 0
     stloc.s 66
-  run_W40_start:
+  run_W42_start:
     ldloc.s 66
     ldc.i4 4
     clt
-    brfalse run_W40_end
+    brfalse run_W42_end
     ldc.i8 0
     call valuetype TkvInt TkvInt::FromI64(int64)
     stloc.s 218
-  run_W41_start:
+  run_W43_start:
     ldloc.s 218
     ldc.i8 4
     call valuetype TkvInt TkvInt::FromI64(int64)
     call int32 TkvInt::Cmp(valuetype TkvInt, valuetype TkvInt)
     ldc.i4.0
     clt
-    brfalse run_W41_end
+    brfalse run_W43_end
     ldloc.s 63
     ldloc.s 66
     ldc.i4 32
@@ -109982,26 +110056,26 @@
     stloc.s 234
     ldloca.s 234
     ldfld object TkvInt::big
-    brtrue run_int42_slow
+    brtrue run_int44_slow
     ldloca.s 235
     ldfld object TkvInt::big
-    brtrue run_int42_slow
+    brtrue run_int44_slow
     ldloca.s 234
     ldfld int64 TkvInt::lo
     ldc.i8 -2147483648
-    blt run_int42_slow
+    blt run_int44_slow
     ldloca.s 234
     ldfld int64 TkvInt::lo
     ldc.i8 2147483647
-    bgt run_int42_slow
+    bgt run_int44_slow
     ldloca.s 235
     ldfld int64 TkvInt::lo
     ldc.i8 -2147483648
-    blt run_int42_slow
+    blt run_int44_slow
     ldloca.s 235
     ldfld int64 TkvInt::lo
     ldc.i8 2147483647
-    bgt run_int42_slow
+    bgt run_int44_slow
     ldloca.s 234
     ldfld int64 TkvInt::lo
     ldloca.s 235
@@ -110015,12 +110089,12 @@
     ldnull
     stfld object TkvInt::big
     ldloc.s 236
-    br run_int42_done
-  run_int42_slow:
+    br run_int44_done
+  run_int44_slow:
     ldloc.s 234
     ldloc.s 235
     call valuetype TkvInt TkvInt::MulSlow(valuetype TkvInt, valuetype TkvInt)
-  run_int42_done:
+  run_int44_done:
     call int32 TkvInt::ToI32(valuetype TkvInt)
     add
     conv.i8
@@ -110033,26 +110107,26 @@
     stloc.s 234
     ldloca.s 234
     ldfld object TkvInt::big
-    brtrue run_int43_slow
+    brtrue run_int45_slow
     ldloca.s 235
     ldfld object TkvInt::big
-    brtrue run_int43_slow
+    brtrue run_int45_slow
     ldloca.s 234
     ldfld int64 TkvInt::lo
     ldc.i8 -2147483648
-    blt run_int43_slow
+    blt run_int45_slow
     ldloca.s 234
     ldfld int64 TkvInt::lo
     ldc.i8 2147483647
-    bgt run_int43_slow
+    bgt run_int45_slow
     ldloca.s 235
     ldfld int64 TkvInt::lo
     ldc.i8 -2147483648
-    blt run_int43_slow
+    blt run_int45_slow
     ldloca.s 235
     ldfld int64 TkvInt::lo
     ldc.i8 2147483647
-    bgt run_int43_slow
+    bgt run_int45_slow
     ldloca.s 234
     ldfld int64 TkvInt::lo
     ldloca.s 235
@@ -110066,12 +110140,12 @@
     ldnull
     stfld object TkvInt::big
     ldloc.s 236
-    br run_int43_done
-  run_int43_slow:
+    br run_int45_done
+  run_int45_slow:
     ldloc.s 234
     ldloc.s 235
     call valuetype TkvInt TkvInt::MulSlow(valuetype TkvInt, valuetype TkvInt)
-  run_int43_done:
+  run_int45_done:
     ldloc.s 66
     conv.i8
     call valuetype TkvInt TkvInt::FromI64(int64)
@@ -110079,10 +110153,10 @@
     stloc.s 234
     ldloca.s 234
     ldfld object TkvInt::big
-    brtrue run_int44_slow
+    brtrue run_int46_slow
     ldloca.s 235
     ldfld object TkvInt::big
-    brtrue run_int44_slow
+    brtrue run_int46_slow
     ldloca.s 234
     ldfld int64 TkvInt::lo
     ldloca.s 235
@@ -110099,7 +110173,7 @@
     xor
     and
     ldc.i8 0
-    blt run_int44_slow
+    blt run_int46_slow
     ldloca.s 236
     ldloc.s 237
     stfld int64 TkvInt::lo
@@ -110107,22 +110181,22 @@
     ldnull
     stfld object TkvInt::big
     ldloc.s 236
-    br run_int44_done
-  run_int44_slow:
+    br run_int46_done
+  run_int46_slow:
     ldloc.s 234
     ldloc.s 235
     call valuetype TkvInt TkvInt::AddSlow(valuetype TkvInt, valuetype TkvInt)
-  run_int44_done:
+  run_int46_done:
     ldc.i8 1
     call valuetype TkvInt TkvInt::FromI64(int64)
     stloc.s 235
     stloc.s 234
     ldloca.s 234
     ldfld object TkvInt::big
-    brtrue run_int45_slow
+    brtrue run_int47_slow
     ldloca.s 235
     ldfld object TkvInt::big
-    brtrue run_int45_slow
+    brtrue run_int47_slow
     ldloca.s 234
     ldfld int64 TkvInt::lo
     ldloca.s 235
@@ -110139,7 +110213,7 @@
     xor
     and
     ldc.i8 0
-    blt run_int45_slow
+    blt run_int47_slow
     ldloca.s 236
     ldloc.s 237
     stfld int64 TkvInt::lo
@@ -110147,12 +110221,12 @@
     ldnull
     stfld object TkvInt::big
     ldloc.s 236
-    br run_int45_done
-  run_int45_slow:
+    br run_int47_done
+  run_int47_slow:
     ldloc.s 234
     ldloc.s 235
     call valuetype TkvInt TkvInt::AddSlow(valuetype TkvInt, valuetype TkvInt)
-  run_int45_done:
+  run_int47_done:
     call float64 TkvInt::ToF64(valuetype TkvInt)
     conv.r4
     stind.r4
@@ -110169,26 +110243,26 @@
     stloc.s 234
     ldloca.s 234
     ldfld object TkvInt::big
-    brtrue run_int46_slow
+    brtrue run_int48_slow
     ldloca.s 235
     ldfld object TkvInt::big
-    brtrue run_int46_slow
+    brtrue run_int48_slow
     ldloca.s 234
     ldfld int64 TkvInt::lo
     ldc.i8 -2147483648
-    blt run_int46_slow
+    blt run_int48_slow
     ldloca.s 234
     ldfld int64 TkvInt::lo
     ldc.i8 2147483647
-    bgt run_int46_slow
+    bgt run_int48_slow
     ldloca.s 235
     ldfld int64 TkvInt::lo
     ldc.i8 -2147483648
-    blt run_int46_slow
+    blt run_int48_slow
     ldloca.s 235
     ldfld int64 TkvInt::lo
     ldc.i8 2147483647
-    bgt run_int46_slow
+    bgt run_int48_slow
     ldloca.s 234
     ldfld int64 TkvInt::lo
     ldloca.s 235
@@ -110202,12 +110276,12 @@
     ldnull
     stfld object TkvInt::big
     ldloc.s 236
-    br run_int46_done
-  run_int46_slow:
+    br run_int48_done
+  run_int48_slow:
     ldloc.s 234
     ldloc.s 235
     call valuetype TkvInt TkvInt::MulSlow(valuetype TkvInt, valuetype TkvInt)
-  run_int46_done:
+  run_int48_done:
     call int32 TkvInt::ToI32(valuetype TkvInt)
     add
     conv.i8
@@ -110220,26 +110294,26 @@
     stloc.s 234
     ldloca.s 234
     ldfld object TkvInt::big
-    brtrue run_int47_slow
+    brtrue run_int49_slow
     ldloca.s 235
     ldfld object TkvInt::big
-    brtrue run_int47_slow
+    brtrue run_int49_slow
     ldloca.s 234
     ldfld int64 TkvInt::lo
     ldc.i8 -2147483648
-    blt run_int47_slow
+    blt run_int49_slow
     ldloca.s 234
     ldfld int64 TkvInt::lo
     ldc.i8 2147483647
-    bgt run_int47_slow
+    bgt run_int49_slow
     ldloca.s 235
     ldfld int64 TkvInt::lo
     ldc.i8 -2147483648
-    blt run_int47_slow
+    blt run_int49_slow
     ldloca.s 235
     ldfld int64 TkvInt::lo
     ldc.i8 2147483647
-    bgt run_int47_slow
+    bgt run_int49_slow
     ldloca.s 234
     ldfld int64 TkvInt::lo
     ldloca.s 235
@@ -110253,100 +110327,14 @@
     ldnull
     stfld object TkvInt::big
     ldloc.s 236
-    br run_int47_done
-  run_int47_slow:
-    ldloc.s 234
-    ldloc.s 235
-    call valuetype TkvInt TkvInt::MulSlow(valuetype TkvInt, valuetype TkvInt)
-  run_int47_done:
-    ldloc.s 66
-    conv.i8
-    call valuetype TkvInt TkvInt::FromI64(int64)
-    stloc.s 235
-    stloc.s 234
-    ldloca.s 234
-    ldfld object TkvInt::big
-    brtrue run_int48_slow
-    ldloca.s 235
-    ldfld object TkvInt::big
-    brtrue run_int48_slow
-    ldloca.s 234
-    ldfld int64 TkvInt::lo
-    ldloca.s 235
-    ldfld int64 TkvInt::lo
-    add
-    stloc.s 237
-    ldloca.s 234
-    ldfld int64 TkvInt::lo
-    ldloc.s 237
-    xor
-    ldloca.s 235
-    ldfld int64 TkvInt::lo
-    ldloc.s 237
-    xor
-    and
-    ldc.i8 0
-    blt run_int48_slow
-    ldloca.s 236
-    ldloc.s 237
-    stfld int64 TkvInt::lo
-    ldloca.s 236
-    ldnull
-    stfld object TkvInt::big
-    ldloc.s 236
-    br run_int48_done
-  run_int48_slow:
-    ldloc.s 234
-    ldloc.s 235
-    call valuetype TkvInt TkvInt::AddSlow(valuetype TkvInt, valuetype TkvInt)
-  run_int48_done:
-    ldc.i8 17
-    call valuetype TkvInt TkvInt::FromI64(int64)
-    stloc.s 235
-    stloc.s 234
-    ldloca.s 234
-    ldfld object TkvInt::big
-    brtrue run_int49_slow
-    ldloca.s 235
-    ldfld object TkvInt::big
-    brtrue run_int49_slow
-    ldloca.s 234
-    ldfld int64 TkvInt::lo
-    ldloca.s 235
-    ldfld int64 TkvInt::lo
-    add
-    stloc.s 237
-    ldloca.s 234
-    ldfld int64 TkvInt::lo
-    ldloc.s 237
-    xor
-    ldloca.s 235
-    ldfld int64 TkvInt::lo
-    ldloc.s 237
-    xor
-    and
-    ldc.i8 0
-    blt run_int49_slow
-    ldloca.s 236
-    ldloc.s 237
-    stfld int64 TkvInt::lo
-    ldloca.s 236
-    ldnull
-    stfld object TkvInt::big
-    ldloc.s 236
     br run_int49_done
   run_int49_slow:
     ldloc.s 234
     ldloc.s 235
-    call valuetype TkvInt TkvInt::AddSlow(valuetype TkvInt, valuetype TkvInt)
+    call valuetype TkvInt TkvInt::MulSlow(valuetype TkvInt, valuetype TkvInt)
   run_int49_done:
-    call float64 TkvInt::ToF64(valuetype TkvInt)
-    conv.r4
-    stind.r4
-    ldc.i8 0
-    stloc.s 60
-    ldloc.s 218
-    ldc.i8 1
+    ldloc.s 66
+    conv.i8
     call valuetype TkvInt TkvInt::FromI64(int64)
     stloc.s 235
     stloc.s 234
@@ -110386,15 +110374,101 @@
     ldloc.s 235
     call valuetype TkvInt TkvInt::AddSlow(valuetype TkvInt, valuetype TkvInt)
   run_int50_done:
+    ldc.i8 17
+    call valuetype TkvInt TkvInt::FromI64(int64)
+    stloc.s 235
+    stloc.s 234
+    ldloca.s 234
+    ldfld object TkvInt::big
+    brtrue run_int51_slow
+    ldloca.s 235
+    ldfld object TkvInt::big
+    brtrue run_int51_slow
+    ldloca.s 234
+    ldfld int64 TkvInt::lo
+    ldloca.s 235
+    ldfld int64 TkvInt::lo
+    add
+    stloc.s 237
+    ldloca.s 234
+    ldfld int64 TkvInt::lo
+    ldloc.s 237
+    xor
+    ldloca.s 235
+    ldfld int64 TkvInt::lo
+    ldloc.s 237
+    xor
+    and
+    ldc.i8 0
+    blt run_int51_slow
+    ldloca.s 236
+    ldloc.s 237
+    stfld int64 TkvInt::lo
+    ldloca.s 236
+    ldnull
+    stfld object TkvInt::big
+    ldloc.s 236
+    br run_int51_done
+  run_int51_slow:
+    ldloc.s 234
+    ldloc.s 235
+    call valuetype TkvInt TkvInt::AddSlow(valuetype TkvInt, valuetype TkvInt)
+  run_int51_done:
+    call float64 TkvInt::ToF64(valuetype TkvInt)
+    conv.r4
+    stind.r4
+    ldc.i8 0
+    stloc.s 60
+    ldloc.s 218
+    ldc.i8 1
+    call valuetype TkvInt TkvInt::FromI64(int64)
+    stloc.s 235
+    stloc.s 234
+    ldloca.s 234
+    ldfld object TkvInt::big
+    brtrue run_int52_slow
+    ldloca.s 235
+    ldfld object TkvInt::big
+    brtrue run_int52_slow
+    ldloca.s 234
+    ldfld int64 TkvInt::lo
+    ldloca.s 235
+    ldfld int64 TkvInt::lo
+    add
+    stloc.s 237
+    ldloca.s 234
+    ldfld int64 TkvInt::lo
+    ldloc.s 237
+    xor
+    ldloca.s 235
+    ldfld int64 TkvInt::lo
+    ldloc.s 237
+    xor
+    and
+    ldc.i8 0
+    blt run_int52_slow
+    ldloca.s 236
+    ldloc.s 237
+    stfld int64 TkvInt::lo
+    ldloca.s 236
+    ldnull
+    stfld object TkvInt::big
+    ldloc.s 236
+    br run_int52_done
+  run_int52_slow:
+    ldloc.s 234
+    ldloc.s 235
+    call valuetype TkvInt TkvInt::AddSlow(valuetype TkvInt, valuetype TkvInt)
+  run_int52_done:
     stloc.s 218
-    br run_W41_start
-  run_W41_end:
+    br run_W43_start
+  run_W43_end:
     ldloc.s 66
     ldc.i4 1
     add
     stloc.s 66
-    br run_W40_start
-  run_W40_end:
+    br run_W42_start
+  run_W42_end:
     ldloc.s 71
     ldloc.s 63
     ldc.i8 128
@@ -110512,8 +110586,8 @@
     ldloc.s 4
     call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
-  run_If36_else:
-  run_If35_else:
+  run_If38_else:
+  run_If37_else:
     ldloc.s 86
     stloc.s 187
     ldloc.s 137
@@ -110538,13 +110612,13 @@
     ldloc.s 192
     ldc.i4 1
     ceq
-    brfalse run_If51_else
+    brfalse run_If53_else
     ldc.i4 12
     ldloc.s 217
     ldloc.s 4
     call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
-  run_If51_else:
+  run_If53_else:
     ldloc.s 168
     ldloc.s 217
     ldloc.s 91
@@ -110614,11 +110688,11 @@
     stloc.s 60
     ldc.i4 0
     stloc.s 66
-  run_W52_start:
+  run_W54_start:
     ldloc.s 66
     ldloc.s 4
     clt
-    brfalse run_W52_end
+    brfalse run_W54_end
     ldloc.s 123
     ldc.i4 16
     ldloc.s 66
@@ -110643,8 +110717,8 @@
     ldc.i4 1
     add
     stloc.s 66
-    br run_W52_start
-  run_W52_end:
+    br run_W54_start
+  run_W54_end:
     ldloc.s 89
     ldloc.s 123
     ldc.i4 16
@@ -110675,12 +110749,12 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If53_else
+    brfalse run_If55_else
     ldstr "LOSS KERNEL FAIL"
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If53_else:
+  run_If55_else:
     ldloc.s 124
     ldloc.s 90
     ldloc.s 4
@@ -110694,7 +110768,7 @@
     ldloc.s 192
     ldc.i4 1
     ceq
-    brfalse run_If54_else
+    brfalse run_If56_else
     ldloc.s 121
     ldloc.s 87
     ldc.i4 256
@@ -110759,16 +110833,16 @@
     call string [mscorlib]System.String::Concat(string, string)
     call string [mscorlib]System.String::Concat(string, string)
     call void [mscorlib]System.Console::WriteLine(string)
-  run_If54_else:
+  run_If56_else:
     ldc.r4 0.0
     stloc.s 220
     ldc.i4 0
     stloc.s 66
-  run_W55_start:
+  run_W57_start:
     ldloc.s 66
     ldloc.s 4
     clt
-    brfalse run_W55_end
+    brfalse run_W57_end
     ldloc.s 220
     ldloc.s 124
     ldloc.s 66
@@ -110784,8 +110858,8 @@
     ldc.i4 1
     add
     stloc.s 66
-    br run_W55_start
-  run_W55_end:
+    br run_W57_start
+  run_W57_end:
     ldstr "LOSS"
     ldstr " "
     ldloc.s 220
@@ -110847,13 +110921,13 @@
     ldc.i4 1
     sub
     stloc.s 137
-  run_W56_start:
+  run_W58_start:
     ldloc.s 137
     ldc.i4 0
     clt
     ldc.i4.0
     ceq
-    brfalse run_W56_end
+    brfalse run_W58_end
     ldloc.s 26
     ldloc.s 137
     ldc.i4 8
@@ -111299,7 +111373,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If57_else
+    brfalse run_If59_else
     ldstr "LN2 BWD FAIL"
     ldstr " "
     ldloc.s 137
@@ -111309,7 +111383,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If57_else:
+  run_If59_else:
     ldloc.s 167
     ldloc.s 96
     ldloc.s 105
@@ -111322,7 +111396,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If58_else
+    brfalse run_If60_else
     ldstr "ADD DX2 FAIL"
     ldstr " "
     ldloc.s 137
@@ -111332,7 +111406,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If58_else:
+  run_If60_else:
     ldloc.s 168
     ldloc.s 96
     ldloc.s 91
@@ -111489,7 +111563,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If59_else
+    brfalse run_If61_else
     ldstr "SF BWD FAIL"
     ldstr " "
     ldloc.s 137
@@ -111499,7 +111573,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If59_else:
+  run_If61_else:
     ldloc.s 168
     ldloc.s 101
     ldloc.s 91
@@ -111591,18 +111665,18 @@
     ldloc.s 192
     ldc.i4 1
     ceq
-    brfalse run_If60_else
+    brfalse run_If62_else
     ldloc.s 137
     ldc.i4 0
     ceq
-    brfalse run_If61_else
+    brfalse run_If63_else
     ldc.i4 0
     stloc.s 66
-  run_W62_start:
+  run_W64_start:
     ldloc.s 66
     ldc.i4 8
     clt
-    brfalse run_W62_end
+    brfalse run_W64_end
     ldloc.s 172
     ldloc.s 91
     ldloc.s 66
@@ -111625,15 +111699,15 @@
     ldc.i4 1
     add
     stloc.s 66
-    br run_W62_start
-  run_W62_end:
+    br run_W64_start
+  run_W64_end:
     ldc.i4 27
     ldloc.s 67
     ldc.i4 1
     call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
-  run_If61_else:
-  run_If60_else:
+  run_If63_else:
+  run_If62_else:
     ldloc.s 168
     ldloc.s 102
     ldloc.s 92
@@ -111826,7 +111900,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If63_else
+    brfalse run_If65_else
     ldstr "LN1 BWD FAIL"
     ldstr " "
     ldloc.s 137
@@ -111836,7 +111910,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If63_else:
+  run_If65_else:
     ldloc.s 167
     ldloc.s 104
     ldloc.s 105
@@ -111849,7 +111923,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If64_else
+    brfalse run_If66_else
     ldstr "ADD DX1 FAIL"
     ldstr " "
     ldloc.s 137
@@ -111859,13 +111933,13 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If64_else:
+  run_If66_else:
     ldloc.s 137
     ldc.i4 1
     sub
     stloc.s 137
-    br run_W56_start
-  run_W56_end:
+    br run_W58_start
+  run_W58_end:
     call float64 TkvTime::Perf()
     stloc.s 228
     ldloc.s 190
@@ -111883,11 +111957,11 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 0
     stloc.s 137
-  run_W65_start:
+  run_W67_start:
     ldloc.s 137
     ldloc.s 3
     clt
-    brfalse run_W65_end
+    brfalse run_W67_end
     ldloc.s 32
     ldloc.s 137
     ldc.i4 8
@@ -112099,8 +112173,8 @@
     ldc.i4 1
     add
     stloc.s 137
-    br run_W65_start
-  run_W65_end:
+    br run_W67_start
+  run_W67_end:
     ldstr "MARK UPD"
     ldstr " "
     ldloc.s 192
