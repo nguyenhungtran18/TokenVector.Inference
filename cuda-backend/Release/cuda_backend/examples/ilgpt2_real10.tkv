@@ -1734,6 +1734,18 @@ def run() -> "i32":
                     while ii < 32:
                         print("DGQ23", read_f32(hPK, ii * 64))
                         ii = ii + 1
+                if ll == 16:
+                    wh = cuda_h2d(hPK, gQ, T * 4, 2)
+                    ii = 0
+                    while ii < 32:
+                        print("DGQ16", read_f32(hPK, ii * 64))
+                        ii = ii + 1
+                if ll == 8:
+                    wh = cuda_h2d(hPK, gQ, T * 4, 2)
+                    ii = 0
+                    while ii < 32:
+                        print("DGQ08", read_f32(hPK, ii * 64))
+                        ii = ii + 1
                 if ll == 0:
                     wh = cuda_h2d(hPK, gQ, T * 4, 2)
                     ii = 0
