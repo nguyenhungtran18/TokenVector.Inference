@@ -48,6 +48,7 @@ for i in range(NL):
               f32(sd[p + "attn.c_attn.bias"]), f32(sd[p + "attn.c_proj.bias"]),
               f32(sd[p + "mlp.c_fc.bias"]), f32(sd[p + "mlp.c_proj.bias"])]
 parts.append(wte.T.copy())              # tied head, last
+parts.append(yb.astype(np.int32))       # nhan that (int32), T phan tu
 
 blob = b"".join(p.tobytes(order="F") for p in parts)
 with open(OUT, "wb") as f:

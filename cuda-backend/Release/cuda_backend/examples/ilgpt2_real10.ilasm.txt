@@ -102,7 +102,7 @@ Class 1	Fields: 2;	Methods: 27;
 Class 2	Methods: 15;	
 Class 3	Methods: 3;	
 Class 4	Methods: 54;	
-Resolving local member refs: 503 -> 503 defs, 0 refs, 0 unresolved
+Resolving local member refs: 501 -> 501 defs, 0 refs, 0 unresolved
 
 Emitting events and properties:
 Global 	

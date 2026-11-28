@@ -1095,14 +1095,7 @@ def run() -> "i32":
     hIN = alloc_bytes(qb)
     hIds = alloc_bytes(T * 4)
     ii: "i32" = 0
-    jj: "i32" = 0
-    while ii < T:
-        jj = 0
-        while jj < H:
-            wh = write_f32(hIN, (ii + jj * T) * 4, wrand(ii, jj, 0.4))
-            jj = jj + 1
-        wh = write_i32(hIds, ii * 4, (ii + 1) % V)
-        ii = ii + 1
+
     # shared temp device buffers (dung lai qua moi lop)
     dY1 = read_i64(cell, 0) if False else alloc_bytes(8)
     rc = cuda_malloc(cell, qb)
@@ -1206,7 +1199,7 @@ def run() -> "i32":
     hGDX2 = alloc_bytes(qb)
     # khoi tao moi lop
     lsz: "i64" = 4 * whb + w1b + w2b + 13 * hb
-    hg: "i64" = alloc_bytes(qb + 2 * hb + NL * lsz + wh2)
+    hg: "i64" = alloc_bytes(qb + 2 * hb + NL * lsz + wh2 + T * 4)
     fpb = b"/kaggle/working/gpt2m_weights.bin"
     fpath = alloc_bytes(64)
     fp: "i32" = 0
@@ -1221,9 +1214,10 @@ def run() -> "i32":
     if fh == 0:
         print("WEIGHT FILE OPEN FAIL")
         return 1
-    rc = c_fread(hg, 1, qb + 2 * hb + NL * lsz + wh2, fh)
+    rc = c_fread(hg, 1, qb + 2 * hb + NL * lsz + wh2 + T * 4, fh)
     print("WEIGHT BYTES", rc)
     rc = c_fclose(fh)
+    hIds = hg + qb + 2 * hb + NL * lsz + wh2
     wh = cuda_h2d(dX, hg, qb, 1)
     wh = cuda_h2d(dFG, hg + qb, hb, 1)
     wh = cuda_h2d(dFB, hg + qb + hb, hb, 1)
@@ -1463,7 +1457,6 @@ def run() -> "i32":
         ac1: "f32" = 1.0 - b1t
         ac2: "f32" = 1.0 - b2t
         tA = time_perf()
-        wh = cuda_h2d(dX, hIN, qb, 1)
         xin = dX
         # ---- forward layers ----
         ll = 0

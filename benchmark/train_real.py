@@ -57,6 +57,9 @@ print("TKV rc=", r.returncode, flush=True)
 if r.returncode != 0:
     print((r.stdout or "")[-2500:]); print((r.stderr or "")[:800]); sys.exit(1)
 lines = (r.stdout or "").splitlines()
+for l in lines:
+    if l.startswith("LG0"):
+        print(l, flush=True)
 ms = [float(l.split()[1]) for l in lines if l.startswith("STEPMS ")]
 tl = [float(l.split()[1]) for l in lines if l.startswith("LOSSF ")]
 tkv_ms = st.median(ms[3:]) if len(ms) > 6 else st.median(ms)
