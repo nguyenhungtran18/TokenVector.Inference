@@ -17,7 +17,7 @@ import time
 
 import numpy as np
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as tnf
 from transformers import AutoModelForCausalLM, GPT2Config
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "/kaggle/working/TokenVectorInfer"
@@ -29,7 +29,7 @@ NUP = 12          # so update moi ben
 
 
 def ce(m, x, y):
-    return F.cross_entropy(m(input_ids=x).logits[0], y[0])
+    return tnf.cross_entropy(m(input_ids=x).logits[0], y[0])
 
 
 d = np.load("/kaggle/working/gpt2m_ids.npz")
