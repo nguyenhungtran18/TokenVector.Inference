@@ -1,6 +1,6 @@
 # Benchmark / dieu tra: TokenVector vs PyTorch (GPT2-medium, Kaggle T4)
 
-HEAD verify cuoi `5e00a4a` — 2026-11-28. 12 update moi ben, cung mot batch
+HEAD verify cuoi `285ed5a` — 2026-11-28. 12 update moi ben, cung mot batch
 512 token tinyshakespeare, cung mot nhiem vu `position t -> token t+1`.
 Khong co row C++ bridge trong bang.
 
@@ -8,16 +8,16 @@ Khong co row C++ bridge trong bang.
 
 | implementation | weights | median ms/step | speedup | loss truoc -> sau 12 update | step tang |
 | :--- | :--- | ---: | ---: | :--- | ---: |
-| PyTorch eager, AdamW lr 5e-5, all params | gpt2-medium pretrained | 451.0 | 1.00x | 3.6676 -> **0.1457** | - |
-| TokenVector .tkv, AdamW lr 2e-4 constant | gpt2-medium pretrained | 219.3 | **2.06x** | 3.6676 -> 0.1693 | **0** |
+| PyTorch eager, AdamW lr 5e-5, all params | gpt2-medium pretrained | 465.2 | 1.00x | 3.6676 -> **0.1457** | - |
+| TokenVector .tkv, AdamW lr 2e-4 constant | gpt2-medium pretrained | 222.4 | **2.09x** | 3.6676 -> 0.1693 | **0** |
 
 Chuoi loss TKV (lr 2e-4, 13 gia tri = truoc update + sau moi update):
 `3.6676 -> 3.4786 -> 2.9517 -> 2.6590 -> 2.3124 -> 1.8646 -> 1.5026 ->
 1.0932 -> 0.7609 -> 0.5588 -> 0.3653 -> 0.2512 -> 0.1693` — moi drop > 0.
 
 **Chua dat yeu cau "loss TKV <= PyTorch"**: 0.1693 vs 0.1457 (chenh 0.0236
-nat). TKV thang toc do 2.06x va giam don dieu, nhung van thua loss. Khong
-duoc phep cong bo nguoc lai.
+nat). TKV thang toc do 2.09x va giam don dieu, nhung van thua loss. Khong
+duoc phep cong bo nguoc lai. (Lan truoc: 451.0 vs 219.3 ms = 2.06x, cung loss.)
 
 `187.8 ms/step` cua C++ bridge la baseline lich su, chi tham chieu; khong
 xuat hien trong bang so sanh.
@@ -59,15 +59,15 @@ khong co loi. Day la ly do loss khong the san bang PyTorch hoan toan.
 ## Test noi dung da train (PyTorch, HEAD 5e00a4a)
 
 ```
-BASELINE pretrained held-out CE = <xem output>
-CE loss train batch   = 0.0466
-CE loss held-out      = 6.7884
-PROMPT 'ROMEO: ' -> ... (van la Shakespeare, khong mustanh)
+BASELINE pretrained held-out CE = 4.0695
+CE loss train batch   = 0.0466      (sau 14 update cua PyTorch)
+CE loss held-out      = 6.7884      (CAO HON baseline 4.0695)
+PROMPT 'ROMEO: ' -> van la Shakespeare, nhung lap tu "I know not"
 ```
 
 Loss duoi 1 tren cungmot batch 512 token lap lai = **memorization**, khong
-phai chat luong ngon ngu that. Held-out van cao hon pretrained; khong duoc
-xay dung claim "AI hoc tieng Anh".
+phai chat luong ngon ngu that. Held-out CAO HON pretrained 2.72 nat -> model
+da overfit batch train; khong duoc xay dung claim "AI hoc tieng Anh".
 
 ## Ghi chu
 

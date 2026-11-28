@@ -1,62 +1,73 @@
-# Benchmark / dieu tra: TokenVector vs PyTorch (GPT2-medium, Kaggle T4)
+# Benchmark / điều tra: TokenVector vs PyTorch (GPT2-medium, Kaggle T4)
 
-HEAD verify cuoi `b6e61e2`. 150 step moi ben.
+HEAD xác minh cuối `285ed5a` — 2026-11-28. Mỗi bên 12 update, cùng một batch
+512 token tinyshakespeare, cùng nhiệm vụ `vị trí t -> token t+1`.
+Không có hàng C++ bridge trong bảng.
 
-## Ket qua hien tai (khong co step nao loss tang)
+## Kết quả mới nhất (đã xác minh)
 
-| | median ms/step | loss dau -> cuoi | step tang |
-| :--- | ---: | :--- | ---: |
-| PyTorch eager (lr 5e-5) | 460 - 508 | 9.0423 -> 0.0001 | - |
-| TokenVector .tkv (lr 1e-4, warmup + decay bac hai) | 210 - 225 | 8.7249 -> **1.4503** | **0** |
+| implementation | weights | median ms/step | speedup | loss trước -> sau 12 update | step tăng |
+| :--- | :--- | ---: | ---: | :--- | ---: |
+| PyTorch eager, AdamW lr 5e-5, all params | gpt2-medium pretrained | 465.2 | 1.00x | 3.6676 -> **0.1457** | - |
+| TokenVector .tkv, AdamW lr 2e-4 constant | gpt2-medium pretrained | 222.4 | **2.09x** | 3.6676 -> 0.1693 | **0** |
 
-Chuoi loss khong tang o step nao. Linh canh: decay manh giu on dinh nhung loss
-cuoi cao hon ban decay tuyen tinh (0.4387, co 5 step tang: 90,100,102,109,110).
+Chuỗi loss TKV:
+`3.6676 -> 3.4786 -> 2.9517 -> 2.6590 -> 2.3124 -> 1.8646 -> 1.5026 ->
+1.0932 -> 0.7609 -> 0.5588 -> 0.3653 -> 0.2512 -> 0.1693` — mọi drop > 0.
 
-## Tai sao co gia tri am (loss tang giua chung)
+**Chưa đạt yêu cầu "loss TKV <= PyTorch"**: 0.1693 vs 0.1457 (chênh 0.0236
+nat). TKV thắng tốc độ 2.09x và giảm đơn điệu, nhưng vẫn thua loss. Không
+được phép công bố ngược lại. `187.8 ms/step` của C++ bridge chỉ là baseline
+lịch sử, không xuất hiện trong bảng so sánh.
 
-1. AdamW cap nhat dang `w -= lr * mhat/(sqrt(vhat)+eps)` â€” **do lon buoc khong
-   giam theo do lon gradient** (khac SGD). Khi loss da nho (~1.0 tro xuong),
-   buoc co dinh ~1e-4 co the vuot qua cuc tieu nho -> loss tang.
-2. Ban dac them tied-head (50M params) lam nhieu step tang hon (update dau ra
-    lon). Da bo head training (khong cai thien loss: 0.3714 -> 0.3427).
-3. Warmup don thuan `lr*min(step/10,1)` giu lr 1e-4 den cuoi -> con 5 step tang.
-   Decay tuyen tinh `lr*(151-step)/141` giam con 5 step; decay bac hai
-   `lr*((151-step)/141)^2` cho **0 step tang**.
+## Các bước đã xác minh
 
-## Dieu tra quan trong: KHONG phai do thieu tham so
+1. **Exporter (root cause lớn nhất)**: `qkv[:,0:H].T` và `attn.c_proj.weight.T`
+   ghi ra `W^T`, trong khi cublas GEMM cần `B[i,o]=W[i,o]`. Toàn bộ khối
+   attention dùng sai trọng số pretrained. Đã bỏ `.T`. Kiểm tra trực tiếp từ
+   blob: q/k/v/c_proj/c_fc/mlp_proj/head `maxerr=0.000e+00` (7/7 OK).
+2. **Forward khớp chính xác**: torch step0 `3.6676`, TKV step1 `3.6676`.
+   Trước khi sửa exporter là `9.0423` vs `8.7249`.
+3. **Backward**: sửa dW `attn.c_proj` ghi vào buffer dùng chung `gWo` thay vì
+   `AGo[ll]`; bias AdamW cập ngay trong vòng lặp để mỗi tầng dùng gradient của
+   chính nó; buffer riêng cho `ln_f`.
+4. **Gradient subnormal**: `dL/dlogits ~ 1e-6` nằm sâu vùng subnormal fp16;
+   nhân 1024× trong `loss_dx`. AdamW scale-invariant nên không đổi bước cập
+   nhật. Loss cải thiện 2.70 -> 0.1693 và không còn step nào tăng.
 
-Chay PyTorch voi **dung tap tham so ma TKV cap nhat** (dong bang LN gamma/beta
-va wte embedding, chi train 4 ma tran + bias moi layer):
+## Chẩn đoán gradient còn lại (step 1)
+
+| đại lượng | corr |
+| :--- | ---: |
+| dL/dlogits @ Wh (đầu vào ln_f) | +1.00000 |
+| dL/d(hidden cuối) sau ln_bwd | +0.99999 |
+| gQ tầng 23 | +0.99999 |
+| gDX / gY1 tầng 23 | +0.99999 / +0.99993 |
+| gQ tầng 16 / 8 / 0 | +0.733 / +0.420 / +0.223 |
+| dWq tầng 0 (256 phần tử) | +0.195 |
+
+Lỗi nằm ở sai số tích lũy qua các block (block 23 đúng, suy dần về layer 0),
+nhiều khả năng do cast fp16 ở các GEMM backward. Đây là lý do loss chưa san
+bằng PyTorch hoàn toàn.
+
+## Test nội dung đã train (PyTorch)
 
 ```
-ABL head=False  s1=9.0423  s10=5.0051  s50=0.0004  s150=0.0001
-ABL head=True   s1=9.0423  s10=4.7941  s50=0.0003  s150=0.0000
+BASELINE pretrained held-out CE = 4.0695
+CE loss train batch   = 0.0466
+CE loss held-out      = 6.7884   (CAO HON baseline 2.72 nat)
+PROMPT 'ROMEO: ' -> vẫn là Shakespeare nhưng lặp "I know not"
 ```
 
-PyTorch dat 0.0004 o step 50 trong khi TKV ~4.0 -> **loi nam o gradient/duong
-backward cua TKV, khong phai do khong train LN/head**. Kernel AdamW da kiem tra
-dung cong thuc; loss gradient (/T) dung. So sanh dWq step 1: `GRADCHK maxerr
-= 4.2e-4` va dau khac nhau o 4 phan tu dau (TKV ~2e-6, PyTorch ~4e-5) â€” can
-doi chieu them (co the do transpose/chi so hoac scale).
+Loss dưới 1 trên cùng batch 512 token lặp lại = **memorization**, không phải
+chất lượng ngôn ngữ thật. Held-out cao hơn pretrained -> model đã overfit;
+không được xây dựng claim "AI học tiếng Anh".
 
-## Cac bug da sua truoc do
+## Ghi chú
 
-embedding that, nhan that, offset bias `ABQ`, huong weight Conv1D (exporter cat
-qkv theo cot, W1/W2 khong transpose: loss 21.22 -> 8.72), gradient bias rieng,
-backward ln_f, IL local <= 255, loss_init overflow, PTX mul.wide.
-
-## Ghi chu
-
-`c_fwrite` khong co trong runtime (chi fopen/fread/fclose). Thu tinh held-out
-trong .tkv cho `HELDOUT` nhung TKV thoat rc=1 (CUDA illegal address) -> da revert.
-Khong co row bridge; so lich su 187.8 ms/step chi tham chieu.
-## Test 12 step (yeu cau moi nhat, HEAD 285ecf1)
-
-| | median ms/step | loss dau -> cuoi | step tang |
-| :--- | ---: | :--- | ---: |
-| PyTorch eager (2 warm-up + 12) | 454.4 | 6.0951 -> 3.1089 | - |
-| TokenVector .tkv (12 step) | 215.9 (**2.10x**) | 8.7249 -> 6.3718 | **0** |
-
-Chuoi loss TKV: 8.7249 -> 8.1827 -> 7.6403 -> 7.3655 -> 7.2680 -> 7.0690
--> 6.9027 -> 6.7974 -> 6.6568 -> 6.5418 -> 6.4931 -> 6.3718 (moi drop > 0).
-Van chua dat yeu cau "loss TKV <= PyTorch"; TKV thang toc do, thua loss.
+- `c_fwrite` không có trong runtime; không thể lưu weight của TKV ra file.
+  Bước 3 hiện test model PyTorch (`trained_gpt2m.pt`).
+- Không có GPU/python local; mọi số liệu đều từ Kaggle T4, Stop session trước
+  khi đọc output theo yêu cầu quota.
+- Các lần chạy cũ (loss 8.72 -> 6.37, 1.45, 0.3427) dùng exporter/gradient sai
+  và không còn đại diện cho kết quả hiện tại.
