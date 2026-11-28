@@ -111,7 +111,7 @@ with open(os.path.join(os.path.dirname(EXE), "ilgpt2_real10.runtimeconfig.json")
 LRF = "/kaggle/working/tkv_lr.bin"
 
 runs = []
-for lrv in (1e-4, 2e-4, 3e-4, 4e-4):
+for lrv in (1.5e-4, 2e-4, 2.5e-4, 3e-4):
     with open(LRF, "wb") as _f:
         _f.write(np.float32(lrv).tobytes())
     r = subprocess.run([DOTNET, EXE], env=dict(os.environ), capture_output=True,

@@ -1470,8 +1470,6 @@ def run() -> "i32":
         ac1: "f32" = 1.0 - b1t
         ac2: "f32" = 1.0 - b2t
         warm: "f32" = 1.0
-        if step < 10:
-            warm = step / 10.0
         tA = time_perf()
         xin = dX
         # ---- forward layers ----
