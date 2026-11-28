@@ -1631,6 +1631,26 @@ def run() -> "i32":
                     rc = toh(th, dK, fpB, 16)
                     rc = gemm16(ch, 0, 0, 4, 4, 4, one, fpA, 4, fpB, 4, zero, dA, 4)
                     rc = dumpc(30, dA, 4)
+                    ii = 0
+                    ii = 0
+                    while ii < 96:
+                        wh = write_f32(hX, ii * 4, 0.0)
+                        wh = write_f32(hS, ii * 4, 0.0)
+                        ii = ii + 1
+                    ii = 0
+                    while ii < 4:
+                        jj = 0
+                        while jj < 4:
+                            wh = write_f32(hX, ii * 32 + jj * 4, jj * 4 + ii + 1)
+                            wh = write_f32(hS, ii * 48 + jj * 4, jj * 4 + ii + 17)
+                            jj = jj + 1
+                        ii = ii + 1
+                    wh = cuda_h2d(dQ, hX, 128, 1)
+                    wh = cuda_h2d(dK, hS, 192, 1)
+                    rc = toh(th, dQ, fpA, 32)
+                    rc = toh(th, dK, fpB, 48)
+                    rc = gemm16(ch, 0, 0, 4, 4, 4, one, fpA, 8, fpB, 12, zero, dA, 16)
+                    rc = dumpc(31, dA, 16)
                     rc = dumpc(20, wqd, 1)
                     rc = dumpc(21, wkd, 1)
                     rc = dumpc(22, wvd, 1)
