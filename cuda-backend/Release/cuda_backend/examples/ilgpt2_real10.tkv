@@ -1809,6 +1809,13 @@ def run() -> "i32":
                 print("LN1 BWD FAIL", ll)
                 return 1
             rc = add_k(gadd, gY1, gOUT, gOUT, T * H)
+            if step == 1:
+                if ll == 23:
+                    wh = cuda_h2d(hPK, gOUT, T * 4, 2)
+                    ii = 0
+                    while ii < 32:
+                        print("DOU23", read_f32(hPK, ii * 64))
+                        ii = ii + 1
             if rc != 0:
                 print("ADD DX1 FAIL", ll)
                 return 1
