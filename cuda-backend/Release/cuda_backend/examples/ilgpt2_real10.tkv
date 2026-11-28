@@ -1340,6 +1340,18 @@ def run() -> "i32":
         return 1
     lr: "f32" = 0.0008
     wd: "f32" = 0.0
+    lrp = b"/kaggle/working/tkv_lr.bin"
+    ii = 0
+    while ii < len(lrp):
+        wh = write_u8(fpath, ii, lrp[ii])
+        ii = ii + 1
+    wh = write_u8(fpath, ii, 0)
+    lfh: "i64" = c_fopen(fpath, mode)
+    if lfh != 0:
+        lbuf: "i64" = alloc_bytes(8)
+        rc = c_fread(lbuf, 1, 4, lfh)
+        lr = read_f32(lbuf, 0)
+        rc = c_fclose(lfh)
     b1t: "f32" = 1.0
     b2t: "f32" = 1.0
     rc = cuda_malloc(cell, NL * whb)

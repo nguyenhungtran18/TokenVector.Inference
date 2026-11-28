@@ -50,23 +50,34 @@ cfg_rt = {"runtimeOptions": {"tfm": "net10.0",
           "framework": {"name": "Microsoft.NETCore.App", "version": "10.0.0"}}}
 with open(os.path.join(os.path.dirname(EXE), "ilgpt2_real10.runtimeconfig.json"), "w") as f:
     json.dump(cfg_rt, f)
-r = subprocess.run([DOTNET, EXE], env=dict(os.environ), capture_output=True, text=True, timeout=1200)
-print("TKV rc=", r.returncode, flush=True)
-if r.returncode != 0:
-    print((r.stdout or "")[-2500:]); print((r.stderr or "")[:800]); sys.exit(1)
-lines = (r.stdout or "").splitlines()
-for l in lines:
-    if l.startswith("LG0"):
-        print(l, flush=True)
-ms = [float(l.split()[1]) for l in lines if l.startswith("STEPMS ")]
-tl = [float(l.split()[1]) for l in lines if l.startswith("LOSSF ")]
-tkv_ms = st.median(ms[3:]) if len(ms) > 6 else st.median(ms)
-print("TKV train: median %.1f ms/step  loss %.4f -> %.4f"
-      % (tkv_ms, tl[0], tl[-1]), flush=True)
+LRF = "/kaggle/working/tkv_lr.bin"
+best = None
+for _lr in (0.0005, 0.0008, 0.0012, 0.0018):
+    with open(LRF, "wb") as _f:
+        _f.write(np.float32(_lr).tobytes())
+    r = subprocess.run([DOTNET, EXE], env=dict(os.environ), capture_output=True, text=True, timeout=1200)
+    if r.returncode != 0:
+        print("TKV rc=", r.returncode, (r.stdout or "")[-600:], (r.stderr or "")[:300], flush=True)
+        continue
+    _lines = (r.stdout or "").splitlines()
+    _tl = [float(l.split()[1]) for l in _lines if l.startswith("LOSSF ")]
+    _ms = [float(l.split()[1]) for l in _lines if l.startswith("STEPMS ")]
+    if not _tl:
+        continue
+    _tkv_ms = st.median(_ms[3:]) if len(_ms) > 6 else st.median(_ms)
+    print("SWEEP lr=%.4f  loss %.4f -> %.4f  median %.1f ms/step"
+          % (_lr, _tl[0], _tl[-1], _tkv_ms), flush=True)
+    if best is None or _tl[-1] < best[2]:
+        best = (_lr, _tkv_ms, _tl[-1], _tl[0], _lines)
+if best is None:
+    sys.exit(1)
+lr, tkv_ms, end_loss, first_loss, lines = best
+print("TKV best lr=%.4f: median %.1f ms/step  loss %.4f -> %.4f"
+      % (lr, tkv_ms, first_loss, end_loss), flush=True)
 print("BENCH TABLE (no C++ bridge)", flush=True)
 print("| implementation | weights | median ms/step | speedup | train loss |", flush=True)
 print("| :--- | :--- | ---: | ---: | :--- |", flush=True)
 print("| PyTorch eager | gpt2-medium pretrained | %.1f | 1.00x | %.4f -> %.4f |"
       % (torch_ms, losses[0], losses[-1]), flush=True)
 print("| TokenVector pure .tkv | gpt2-medium pretrained | %.1f | %.2fx | %.4f -> %.4f |"
-      % (tkv_ms, torch_ms / tkv_ms, tl[0], tl[-1]), flush=True)
+      % (tkv_ms, torch_ms / tkv_ms, first_loss, end_loss), flush=True)
