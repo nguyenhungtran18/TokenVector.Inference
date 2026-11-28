@@ -1103,15 +1103,10 @@ def run() -> "i32":
     rc = cuda_malloc(cell, 16 * sb)
     dS = read_i64(cell, 0)
     rc = cuda_malloc(cell, 16 * sb)
-    dP = read_i64(cell, 0)
     rc = cuda_malloc(cell, qb)
-    dQ = read_i64(cell, 0)
     rc = cuda_malloc(cell, qb)
-    dK = read_i64(cell, 0)
     rc = cuda_malloc(cell, qb)
-    dV = read_i64(cell, 0)
     rc = cuda_malloc(cell, qb)
-    dA = read_i64(cell, 0)
     rc = cuda_malloc(cell, qb)
     dO = read_i64(cell, 0)
     rc = cuda_malloc(cell, qb)
@@ -1127,9 +1122,7 @@ def run() -> "i32":
     rc = cuda_malloc(cell, hb)
     dFB: "i64" = read_i64(cell, 0)
     rc = cuda_malloc(cell, qb)
-    dY2 = read_i64(cell, 0)
     rc = cuda_malloc(cell, fb)
-    dZ = read_i64(cell, 0)
     rc = cuda_malloc(cell, fb)
     dHH = read_i64(cell, 0)
     rc = cuda_malloc(cell, fb)
@@ -1158,7 +1151,6 @@ def run() -> "i32":
     rc = cuda_malloc(cell, qb)
     gA = read_i64(cell, 0)
     rc = cuda_malloc(cell, whb)
-    gWo = read_i64(cell, 0)
     rc = cuda_malloc(cell, 16 * sb)
     gP = read_i64(cell, 0)
     rc = cuda_malloc(cell, qb)
@@ -1174,29 +1166,13 @@ def run() -> "i32":
     rc = cuda_malloc(cell, qb)
     gOUT = read_i64(cell, 0)
     # host scratch (dung lai)
-    hY1 = alloc_bytes(qb)
-    hY2 = alloc_bytes(qb)
-    hST = alloc_bytes(stb)
-    hXH = alloc_bytes(qb)
     g1h = alloc_bytes(hb)
     b1h = alloc_bytes(hb)
     g2h = alloc_bytes(hb)
     b2h = alloc_bytes(hb)
-    hS = alloc_bytes(sb)
     hP = alloc_bytes(sb)
-    hO = alloc_bytes(qb)
-    hX2 = alloc_bytes(qb)
-    hO2 = alloc_bytes(qb)
-    hOUT = alloc_bytes(qb)
-    hZ = alloc_bytes(fb)
-    hLG = alloc_bytes(tvb)
-    hDL = alloc_bytes(tvb)
     hPK = alloc_bytes(16 + T * 4)
     hLS = alloc_bytes(stb)
-    hGP = alloc_bytes(sb)
-    hDS = alloc_bytes(sb)
-    hGY2 = alloc_bytes(fb)
-    hGDX2 = alloc_bytes(qb)
     # khoi tao moi lop
     lsz: "i64" = 4 * whb + w1b + w2b + 13 * hb
     hg: "i64" = alloc_bytes(qb + 2 * hb + NL * lsz + wh2 + T * 4)
@@ -1494,6 +1470,8 @@ def run() -> "i32":
         ac1: "f32" = 1.0 - b1t
         ac2: "f32" = 1.0 - b2t
         warm: "f32" = 1.0
+        if step < 10:
+            warm = step / 10.0
         tA = time_perf()
         xin = dX
         # ---- forward layers ----
@@ -1668,7 +1646,6 @@ def run() -> "i32":
             rc = toh(th, dHH, fpA, sTF)
             rc = toh(th, gOUT, fpB, sQH)
             rc = gemm16(ch, 1, 0, F, H, T, one, fpA, T, fpB, T, zero, g2d, F)
-            # bias frozen: rc = bias_grad_k(bhgrad, g2d, bf2, T, H)
             rc = toh(th, gOUT, fpA, sQH)
             rc = toht(tht, w2d, fpT, H * F, F)
             rc = gemm16(ch, 0, 0, T, F, H, one, fpA, T, fpT, H, zero, gHH, T)
@@ -1677,7 +1654,6 @@ def run() -> "i32":
             rc = toh(th, y2d, fpA, sQH)
             rc = toh(th, gZ, fpB, sTF)
             rc = gemm16(ch, 1, 0, H, F, T, one, fpA, T, fpB, T, zero, g1d, H)
-            # bias frozen: rc = bias_grad_k(bhgrad, g1d, bf1, T, F)
             rc = toh(th, gZ, fpA, sTF)
             rc = toh(th, w1d, fpB, H * F)
             rc = gemm16(ch, 0, 1, T, H, F, one, fpA, T, fpB, H, zero, gY2, T)
@@ -1695,8 +1671,9 @@ def run() -> "i32":
             rc = gemm16(ch, 0, 1, T, H, H, one, fpA, T, fpB, H, zero, gA, T)
             rc = toh(th, ad, fpA, sQH)
             rc = toh(th, gDX2, fpB, sQH)
-            rc = gemm16(ch, 1, 0, H, H, T, one, fpA, T, fpB, T, zero, gWo, H)
-            # bias frozen: rc = bias_grad_k(bhgrad, gWo, bo, T, H)
+            # dW cua attn.c_proj phai ghi vao buffer RIENG cua lop (AGo[ll]);
+            # truoc day ghi vao gWo dung chung => AGo[ll] khong bao gio duoc ghi.
+            rc = gemm16(ch, 1, 0, H, H, T, one, fpA, T, fpB, T, zero, god, H)
             rc = toh(th, gA, fpA, sQH)
             rc = toh(th, vd, fpB, sQH)
             rc = gemm16b(ch, 0, 1, T, T, 64, one, fpA, T, 64 * T, fpB, T, 64 * T, zero, gP, T, T * T, 16)
@@ -1747,6 +1724,12 @@ def run() -> "i32":
             if rc != 0:
                 print("ADD DX1 FAIL", ll)
                 return 1
+            # bias: gradient o BG[0/8/16/24] la cua DUY NHAT lop nay (bias_grad_k ghi de),
+            # nen phai cap nhat bias ngay trong vong lap nay, voi state rieng cua lop.
+            rc = adamw_update(afn, read_i64(ABQ, ll * 8), read_i64(BG, 0), read_i64(BG, 144) + ll * 18 * hb, read_i64(BG, 144) + ll * 18 * hb + 3 * hb, 3 * H, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(ABO, ll * 8), read_i64(BG, 24), read_i64(BG, 144) + ll * 18 * hb + 6 * hb, read_i64(BG, 144) + ll * 18 * hb + 7 * hb, H, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(AB1, ll * 8), read_i64(BG, 16), read_i64(BG, 144) + ll * 18 * hb + 8 * hb, read_i64(BG, 144) + ll * 18 * hb + 12 * hb, 4 * H, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(AB2, ll * 8), read_i64(BG, 8), read_i64(BG, 144) + ll * 18 * hb + 16 * hb, read_i64(BG, 144) + ll * 18 * hb + 17 * hb, H, lr * warm, ac1, ac2, wd)
             ll = ll - 1
         tC = time_perf()
         tb = tb + (tC - tB)
@@ -1768,10 +1751,6 @@ def run() -> "i32":
             rc = adamw_update(afn, read_i64(AWo, ll * 8), god, mo + uo, vo + uo, H * H, lr * warm, ac1, ac2, wd)
             rc = adamw_update(afn, read_i64(AW1, ll * 8), g1d, m1 + uo1, v1 + uo1, H * F, lr * warm, ac1, ac2, wd)
             rc = adamw_update(afn, read_i64(AW2, ll * 8), g2d, m2 + uo2, v2 + uo2, F * H, lr * warm, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(ABQ, ll * 8), read_i64(BG, 0), read_i64(BG, 144) + ll * 18 * hb, read_i64(BG, 144) + ll * 18 * hb + 3 * hb, 3 * H, lr * warm, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(ABO, ll * 8), read_i64(BG, 24), read_i64(BG, 144) + ll * 18 * hb + 6 * hb, read_i64(BG, 144) + ll * 18 * hb + 7 * hb, H, lr * warm, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(AB1, ll * 8), read_i64(BG, 16), read_i64(BG, 144) + ll * 18 * hb + 8 * hb, read_i64(BG, 144) + ll * 18 * hb + 12 * hb, 4 * H, lr * warm, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(AB2, ll * 8), read_i64(BG, 8), read_i64(BG, 144) + ll * 18 * hb + 16 * hb, read_i64(BG, 144) + ll * 18 * hb + 17 * hb, H, lr * warm, ac1, ac2, wd)
 
             ll = ll + 1
         print("MARK UPD", step)

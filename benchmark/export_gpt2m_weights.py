@@ -39,10 +39,11 @@ parts = [emb, f32(sd["transformer.ln_f.weight"]), f32(sd["transformer.ln_f.bias"
 for i in range(NL):
     p = "transformer.h.%d." % i
     # HF Conv1D luu weight dang [input, output] = [H, 3H] / [H, 4H] / [4H, H].
-    # CatQ/K/V theo TRUC OUTPUT (cot), roi transpose thanh [H, H] cho GEMM B.
+    # TKV tinh qd[t,o] = sum_i y1[t,i]*B[i,o]  =>  B phai la W[input,output] NGUYEN BAN.
+    # (Truoc day co .T o day: do la loi - khoi attention dung W^T cua pretrained.)
     qkv = f32(sd[p + "attn.c_attn.weight"])
-    parts += [qkv[:, 0:H].T.copy(), qkv[:, H:2 * H].T.copy(), qkv[:, 2 * H:3 * H].T.copy(),
-              f32(sd[p + "attn.c_proj.weight"]).T.copy(),
+    parts += [qkv[:, 0:H].copy(), qkv[:, H:2 * H].copy(), qkv[:, 2 * H:3 * H].copy(),
+              f32(sd[p + "attn.c_proj.weight"]).copy(),
               # W1: B can dang [H, F] = chinh weight [input, output], KHONG transpose.
               f32(sd[p + "mlp.c_fc.weight"]).copy(),
               # W2: B can dang [F, H] = chinh weight [input, output], KHONG transpose.
