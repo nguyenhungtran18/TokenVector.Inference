@@ -109403,16 +109403,20 @@
     ldloc.s 5
     ldloc.s 5
     ldloc.s 59
-    ldloc.s 217
+    ldloc.s 91
     ldloc.s 4
-    ldloc.s 138
+    ldc.i8 0
+    ldloc.s 173
     ldloc.s 5
+    ldc.i8 0
     ldloc.s 61
     ldloc.s 71
     ldloc.s 4
-    call int32 TKVApp::'gemm32'(int64, int32, int32, int32, int32, int32, int64, int64, int32, int64, int32, int64, int64, int32)
+    ldc.i8 0
+    ldc.i4 1
+    call int32 TKVApp::'gemm16b'(int64, int32, int32, int32, int32, int32, int64, int64, int32, int64, int64, int32, int64, int64, int64, int32, int64, int32)
     stloc.s 0
-    ldc.i4 32
+    ldc.i4 33
     ldloc.s 71
     ldloc.s 4
     call int32 TKVApp::'dumpc'(int32, int64, int32)

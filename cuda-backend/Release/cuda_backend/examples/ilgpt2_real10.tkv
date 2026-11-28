@@ -1565,8 +1565,8 @@ def run() -> "i32":
             rc = toh3(th3, wqd, wkd, wvd, fpQKV, H * H)
             if step == 1:
                 if ll == 0:
-                    rc = gemm32(ch, 0, 0, T, H, H, one, y1d, T, wqd, H, zero, dQ, T)
-                    rc = dumpc(32, dQ, T)
+                    rc = gemm16b(ch, 0, 0, T, H, H, one, fpA, T, 0, fpQKV, H, 0, zero, dQ, T, 0, 1)
+                    rc = dumpc(33, dQ, T)
             rc = gemm16(ch, 0, 0, T, 3 * H, H, one, fpA, T, fpQKV, H, zero, qd, T)
             if step == 1:
                 if ll == 0:
