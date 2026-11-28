@@ -75,5 +75,6 @@ v16w = np.float16(wq[0, :8])
 print("DUMP 25 %s" % " ".join("%.6f" % float(x) for x in v16w), flush=True)
 for tag, row in ((20, 0), (21, H), (22, 2 * H)):
     print("DUMP %d %s" % (tag, " ".join("%.6f" % v for v in wq[row, :8])), flush=True)
-print("DUMP 30 30.000000 70.000000 110.000000 150.000000  (ref GEMM 4x4)", flush=True)
+print("DUMP 26 %s" % " ".join("%.6f" % float(x) for x in np.float16(ln1[0, 0, :8].detach().cpu().numpy())), flush=True)
+print("DUMP 30 538.000000 650.000000 762.000000 874.000000  (ref GEMM 4x4, B=A+16)", flush=True)
 print("DIAG done", flush=True)

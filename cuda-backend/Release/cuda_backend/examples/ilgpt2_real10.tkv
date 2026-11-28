@@ -1604,6 +1604,11 @@ def run() -> "i32":
                 return 1
             if step == 1:
                 if ll == 0:
+                    ii = 0
+                    while ii < 8:
+                        rc = h2f(h2fh, fpA + ii * T * 2, dY1 + ii * 4, 1)
+                        ii = ii + 1
+                    rc = dumpc(26, dY1, 1)
                     rc = h2f(h2fh, fpA, dY1, 8)
                     rc = dumpc(24, dY1, 1)
                     rc = h2f(h2fh, fpQKV, dY1, 8)
@@ -1611,7 +1616,7 @@ def run() -> "i32":
                     ii = 0
                     while ii < 16:
                         wh = write_f32(hX, ii * 4, ii + 1)
-                        wh = write_f32(hS, ii * 4, ii + 1)
+                        wh = write_f32(hS, ii * 4, ii + 17)
                         ii = ii + 1
                     wh = cuda_h2d(dQ, hX, 64, 1)
                     wh = cuda_h2d(dK, hS, 64, 1)
