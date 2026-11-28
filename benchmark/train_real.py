@@ -132,7 +132,8 @@ for lrv in (5e-5, 1e-4, 2e-4):
     if ms:
         print("TKV ms lr=%.0e median %.1f" % (lrv, st.median(ms)), flush=True)
     if len(gq) == 256:
-        a = np.array(gq, dtype=np.float64)
+        # loss_dx nhan gradient 1024x de tranh fp16 subnormal; AdamW scale-invariant.
+        a = np.array(gq, dtype=np.float64) / 1024.0
         print("GRADCHK dWq[0:256,0] corr=%+.5f  maxerr=%.3e  ratio=%.4f"
               % (float(np.corrcoef(a, GQ)[0, 1]), float(np.max(np.abs(a - GQ))),
                  float(np.linalg.norm(a) / np.linalg.norm(GQ))), flush=True)
