@@ -1599,9 +1599,21 @@ def run() -> "i32":
         print("MARK FWD", step)
         rc = toh(th, dDL, fpA, T * V)
         rc = gemm16(ch, 0, 1, T, H, V, one, fpA, T, fpB, H, zero, gOUT, T)
+        if step == 1:
+            wh = cuda_h2d(hPK, gOUT, T * 4, 2)
+            ii = 0
+            while ii < 32:
+                print("DGD0", read_f32(hPK, ii * 64))
+                ii = ii + 1
         # ---- backward layers (nguoc) ----
         rc = ln_fwd(lnf, dOUT, dFG, dFB, y1d, xh1d, s1d, T, H)
         rc = ln_bwd(lnb, xh1d, gOUT, dFG, s1d, gOUT, T, H)
+        if step == 1:
+            wh = cuda_h2d(hPK, gOUT, T * 4, 2)
+            ii = 0
+            while ii < 32:
+                print("DGO0", read_f32(hPK, ii * 64))
+                ii = ii + 1
         ll = NL - 1
         while ll >= 0:
             wqd = read_i64(AWq, ll * 8)
@@ -1687,6 +1699,24 @@ def run() -> "i32":
             rc = toh(th, gS, fpA, 16 * sTT)
             rc = toh(th, kd, fpB, sQH)
             rc = gemm16b(ch, 0, 0, T, 64, T, hal16, fpA, T, T * T, fpB, T, 64 * T, zero, gQ, T, 64 * T, 16)
+            if step == 1:
+                if ll == 23:
+                    wh = cuda_h2d(hPK, gQ, T * 4, 2)
+                    ii = 0
+                    while ii < 32:
+                        print("DGQ23", read_f32(hPK, ii * 64))
+                        ii = ii + 1
+                if ll == 0:
+                    wh = cuda_h2d(hPK, gQ, T * 4, 2)
+                    ii = 0
+                    while ii < 32:
+                        print("DGQ00", read_f32(hPK, ii * 64))
+                        ii = ii + 1
+                    wh = cuda_h2d(hPK, y1d, T * 4, 2)
+                    ii = 0
+                    while ii < 32:
+                        print("DY10", read_f32(hPK, ii * 64))
+                        ii = ii + 1
             rc = toh(th, gS, fpA, 16 * sTT)
             rc = toh(th, qd, fpB, sQH)
             rc = gemm16b(ch, 1, 0, T, 64, T, hal16, fpA, T, T * T, fpB, T, 64 * T, zero, gK, T, 64 * T, 16)
