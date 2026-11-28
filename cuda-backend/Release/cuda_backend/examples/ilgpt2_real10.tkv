@@ -1199,7 +1199,7 @@ def run() -> "i32":
     hGDX2 = alloc_bytes(qb)
     # khoi tao moi lop
     lsz: "i64" = 4 * whb + w1b + w2b + 13 * hb
-    hg: "i64" = alloc_bytes(qb + 2 * hb + NL * lsz + wh2 + T * 4 + T * H * 4 + T * 4)
+    hg: "i64" = alloc_bytes(qb + 2 * hb + NL * lsz + wh2 + T * 4)
     fpb = b"/kaggle/working/gpt2m_weights.bin"
     fpath = alloc_bytes(64)
     fp: "i32" = 0
@@ -1214,13 +1214,10 @@ def run() -> "i32":
     if fh == 0:
         print("WEIGHT FILE OPEN FAIL")
         return 1
-    rc = c_fread(hg, 1, qb + 2 * hb + NL * lsz + wh2 + T * 4 + T * H * 4 + T * 4, fh)
+    rc = c_fread(hg, 1, qb + 2 * hb + NL * lsz + wh2 + T * 4, fh)
     print("WEIGHT BYTES", rc)
     rc = c_fclose(fh)
-    BG: "i64" = alloc_bytes(128)
     hIds = hg + qb + 2 * hb + NL * lsz + wh2
-    wh = write_i64(BG, 120, hg + qb + 2 * hb + NL * lsz + wh2 + T * 4)
-    hIN = hg + qb + 2 * hb + NL * lsz + wh2 + T * 4 + T * 4
     wh = cuda_h2d(dX, hg, qb, 1)
     wh = cuda_h2d(dFG, hg + qb, hb, 1)
     wh = cuda_h2d(dFB, hg + qb + hb, hb, 1)
@@ -1453,6 +1450,7 @@ def run() -> "i32":
     if bh == 0:
         print("BIAS INIT FAIL")
         return 1
+    BG: "i64" = alloc_bytes(120)
     rc = cuda_malloc(cell, 3 * hb)
     wh = write_i64(BG, 0, read_i64(cell, 0))
     rc = cuda_malloc(cell, hb)
@@ -1489,7 +1487,7 @@ def run() -> "i32":
     tb: "f64" = 0.0
     thd: "f64" = 0.0
     step: "i32" = 1
-    while step <= 151:
+    while step <= 150:
         b1t = b1t * 0.9
         b2t = b2t * 0.999
         ac1: "f32" = 1.0 - b1t
@@ -1497,10 +1495,6 @@ def run() -> "i32":
         warm: "f32" = 1.0
         if step < 10:
             warm = step / 10.0
-        if step == 151:
-            hIds = read_i64(BG, 120)
-            wh = cuda_h2d(dX, hIN, qb, 1)
-            warm = 0.0
         tA = time_perf()
         xin = dX
         # ---- forward layers ----
@@ -1619,8 +1613,6 @@ def run() -> "i32":
             ii = ii + 1
         print("LOSS", lossv)
         print("LOSSF", lossv)
-        if step == 151:
-            print("HELDOUT", lossv)
         tB = time_perf()
         thd = thd + (tB - tH)
         tf = tf + (tH - tA)

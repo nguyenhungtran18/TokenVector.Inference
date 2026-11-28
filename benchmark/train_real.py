@@ -60,9 +60,6 @@ if r.returncode != 0:
 lines = (r.stdout or "").splitlines()
 ms = [float(l.split()[1]) for l in lines if l.startswith("STEPMS ")]
 tl = [float(l.split()[1]) for l in lines if l.startswith("LOSSF ")]
-hd = [float(l.split()[1]) for l in lines if l.startswith("HELDOUT ")]
-if hd:
-    tl = tl[:150]
 if not tl:
     sys.exit(1)
 tkv_ms = st.median(ms[3:10]) if len(ms) > 10 else st.median(ms)
@@ -70,8 +67,6 @@ print("TKV step losses: " + " -> ".join("%.4f" % x for x in tl), flush=True)
 drops = [round(tl[i - 1] - tl[i], 4) for i in range(1, len(tl))]
 print("TKV per-step drops: " + ", ".join("%.4f" % x for x in drops), flush=True)
 end_loss, first_loss = tl[-1], tl[0]
-if hd:
-    print("TKV held-out loss (own trained weights) = %.4f  | pretrained HF = 8.97" % hd[0], flush=True)
 print("TKV train: median %.1f ms/step  loss %.4f -> %.4f"
       % (tkv_ms, first_loss, end_loss), flush=True)
 print("BENCH TABLE (no C++ bridge)", flush=True)
