@@ -431,6 +431,50 @@ def sf_bwd(fnh: "i64", dp: "i64", p: "i64", ds: "i64", tn: "i32") -> "i32":
         return 1
     return 0
 
+def h2f_init() -> "i64":
+    PTX = b".version 8.0\n.target sm_75\n.address_size 64\n.entry h2f_kernel(.param .u64 pS, .param .u64 pD, .param .u32 pN)\n{\n.reg .f16 h;\n.reg .f32 f;\n.reg .b16 u;\n.reg .u64 sb,db,off,sa,da;\n.reg .u32 i,n,base,nt;\n.reg .pred q;\nld.param.u64 sb,[pS];\nld.param.u64 db,[pD];\nld.param.u32 n,[pN];\ncvta.to.global.u64 sb,sb;\ncvta.to.global.u64 db,db;\nmov.u32 nt,%ntid.x;\nmov.u32 base,%ctaid.x;\nmul.lo.u32 base,base,nt;\nmov.u32 i,%tid.x;\nadd.u32 i,i,base;\nsetp.ge.u32 q,i,n;\n@q bra LEND;\nmul.wide.u32 off,i,2;\nadd.u64 sa,sb,off;\nld.global.b16 u,[sa];\nmov.b16 h,u;\ncvt.f32.f16 f,h;\nmul.wide.u32 off,i,4;\nadd.u64 da,db,off;\nst.global.f32 [da],f;\nLEND:\nret;\n}"
+    F1 = b"h2f_kernel\x00"
+    pb = alloc_bytes(len(PTX) + 1)
+    kk: "i32" = 0
+    while kk < len(PTX):
+        wh: "i64" = write_u8(pb, kk, PTX[kk])
+        kk = kk + 1
+    wh = write_u8(pb, kk, 0)
+    mc = alloc_bytes(8)
+    rc: "i32" = cu_module_load(mc, pb)
+    if rc != 0:
+        print("H2F MOD FAIL", rc)
+        return 0
+    mod: "i64" = read_i64(mc, 0)
+    kk = 0
+    while kk < len(F1):
+        wh = write_u8(pb, kk, F1[kk])
+        kk = kk + 1
+    wh = write_u8(pb, kk, 0)
+    fc = alloc_bytes(8)
+    rc = cu_module_fn(fc, mod, pb)
+    if rc != 0:
+        print("H2F FN FAIL", rc)
+        return 0
+    return read_i64(fc, 0)
+
+def h2f(fnh: "i64", src: "i64", dst: "i64", n: "i32") -> "i32":
+    a0 = alloc_bytes(8)
+    wh: "i64" = write_i64(a0, 0, src)
+    a1 = alloc_bytes(8)
+    wh = write_i64(a1, 0, dst)
+    a2 = alloc_bytes(8)
+    wh = write_i64(a2, 0, n)
+    pl = alloc_bytes(24)
+    wh = write_i64(pl, 0, a0)
+    wh = write_i64(pl, 8, a1)
+    wh = write_i64(pl, 16, a2)
+    g: "i32" = (n + 255) >> 8
+    rc: "i32" = cu_launch(fnh, g, 1, 1, 256, 1, 1, 0, 0, pl, 0)
+    if rc != 0:
+        print("H2F LAUNCH FAIL", rc)
+    return rc
+
 def dumpc(tag: "i32", src: "i64", tn: "i32") -> "i32":
     db: "i64" = alloc_bytes(tn * 32)
     wh: "i64" = cuda_h2d(db, src, tn * 32, 2)
@@ -1415,6 +1459,10 @@ def run() -> "i32":
     if th3 == 0:
         print("TOH3 INIT FAIL")
         return 1
+    h2fh: "i64" = h2f_init()
+    if h2fh == 0:
+        print("H2F INIT FAIL")
+        return 1
     rc = cuda_malloc(cell, 3 * H * H * 2)
     fpQKV: "i64" = read_i64(cell, 0)
     hg = loss_init()
@@ -1503,6 +1551,9 @@ def run() -> "i32":
             rc = toh(th, y1d, fpA, sQH)
             rc = toh3(th3, wqd, wkd, wvd, fpQKV, H * H)
             rc = gemm16(ch, 0, 0, T, 3 * H, H, one, fpA, T, fpQKV, H, zero, qd, T)
+            if step == 1:
+                if ll == 0:
+                    rc = dumpc(23, qd, T)
             rc = bias_add(bhadd, qd, bq, T, 3 * T * H)
             if rc != 0:
                 print("QKV GEMM FAIL", ll, rc)
@@ -1553,6 +1604,10 @@ def run() -> "i32":
                 return 1
             if step == 1:
                 if ll == 0:
+                    rc = h2f(h2fh, fpA, dY1, 8)
+                    rc = dumpc(24, dY1, 1)
+                    rc = h2f(h2fh, fpQKV, dY1, 8)
+                    rc = dumpc(25, dY1, 1)
                     rc = dumpc(20, wqd, 1)
                     rc = dumpc(21, wkd, 1)
                     rc = dumpc(22, wvd, 1)

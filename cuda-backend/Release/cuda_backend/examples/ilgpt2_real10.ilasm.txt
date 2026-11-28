@@ -61,6 +61,8 @@ Assembled method TKVApp::ln_fwd
 Assembled method TKVApp::ln_bwd
 Assembled method TKVApp::sf_fwd
 Assembled method TKVApp::sf_bwd
+Assembled method TKVApp::h2f_init
+Assembled method TKVApp::h2f
 Assembled method TKVApp::dumpc
 Assembled method TKVApp::add_k
 Assembled method TKVApp::toh
@@ -102,8 +104,8 @@ Global
 Class 1	Fields: 2;	Methods: 27;	
 Class 2	Methods: 15;	
 Class 3	Methods: 3;	
-Class 4	Methods: 55;	
-Resolving local member refs: 526 -> 526 defs, 0 refs, 0 unresolved
+Class 4	Methods: 57;	
+Resolving local member refs: 538 -> 538 defs, 0 refs, 0 unresolved
 
 Emitting events and properties:
 Global 	

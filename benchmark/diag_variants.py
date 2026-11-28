@@ -1,4 +1,4 @@
-"""DIAG: so sanh tung buoc forward cua HF voi TKV (cung batch 512 token).
+﻿"""DIAG: so sanh tung buoc forward cua HF voi TKV (cung batch 512 token).
 
 Tag dump (khop voi ilgpt2_real10.tkv):
   1 embedding   2 ln1   3 Q   4 attn-out   5 c_proj   6 x2
@@ -56,16 +56,23 @@ with torch.no_grad():
     hh = 0.5 * z * (1.0 + torch.erf(z / math.sqrt(2.0)))
     o2 = blk.mlp.c_proj(hh)
     out = x2 + o2
+    qpre = q - blk.attn.c_attn.bias[:H].view(1, 1, H)
     for tag, t in ((1, h0), (2, ln1), (3, q), (4, y), (5, o), (6, x2),
                    (7, ln2), (8, z), (9, hh), (10, o2), (11, out)):
         dump(tag, t)
     hs = m(input_ids=xi, output_hidden_states=True).hidden_states
     dump(12, m.transformer.ln_f(hs[-1]))
+    dump(23, qpre)
+    import numpy as np16
+    v16 = np16.float16(ln1[0, 0, :8].detach().cpu().numpy())
+    print("DUMP 24 %s" % " ".join("%.6f" % float(x) for x in v16), flush=True)
     lg = m(input_ids=xi).logits
     print("DIAG logits[0,0:4] %.6f %.6f %.6f %.6f"
           % tuple(float(x) for x in lg[0, 0, :4]), flush=True)
 
 wq = m.transformer.h[0].attn.c_attn.weight.detach().cpu().numpy()
+v16w = np.float16(wq[0, :8])
+print("DUMP 25 %s" % " ".join("%.6f" % float(x) for x in v16w), flush=True)
 for tag, row in ((20, 0), (21, H), (22, 2 * H)):
     print("DUMP %d %s" % (tag, " ".join("%.6f" % v for v in wq[row, :8])), flush=True)
 print("DIAG done", flush=True)
