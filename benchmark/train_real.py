@@ -18,6 +18,9 @@ EXE = BASE + "/cuda-backend/Release/cuda_backend/examples/ilgpt2_real10.exe"
 DOTNET = "/kaggle/working/dotnet/dotnet"
 NL, H, NH, V, T = 24, 1024, 16, 50257, 512
 
+if os.environ.get("TKV_DIAG") != "0":
+    subprocess.run([sys.executable, BASE + "/benchmark/diag_variants.py"], check=False)
+
 d = np.load("/kaggle/working/gpt2m_ids.npz")
 xb, yb = d["xb"], d["yb"]
 cfg = GPT2Config(n_layer=NL, n_head=NH, n_embd=H, n_positions=1024,

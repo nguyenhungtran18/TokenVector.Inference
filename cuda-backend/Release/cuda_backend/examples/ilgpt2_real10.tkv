@@ -1574,6 +1574,9 @@ def run() -> "i32":
             print("LOSS KERNEL FAIL")
             return 1
         wh = cuda_h2d(hLS, dLS, T * 4, 2)
+        if step == 1:
+            wh = cuda_h2d(hLG, dLG, 256 * T * 4, 2)
+            print("LG0", read_f32(hLG, 0), read_f32(hLG, T * 4), read_f32(hLG, 2 * T * 4), read_f32(hLG, 3 * T * 4))
         lossv: "f32" = 0.0
         ii = 0
         while ii < T:
