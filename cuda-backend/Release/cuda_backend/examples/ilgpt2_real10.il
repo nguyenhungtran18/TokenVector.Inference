@@ -43839,37 +43839,26 @@
     ldc.i4 0
     ret
   }
-  .method public static int32 'dumpc'(int32 'tag', int64 'src', int32 'cols', int32 'tn') cil managed
+  .method public static int32 'dumpc'(int32 'tag', int64 'src', int32 'tn') cil managed
   {
-    .maxstack 19
-    .locals init (int64 'db', int64 'wh', int32 'ii', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum')
-    ldarg.s 3
+    .maxstack 28
+    .locals init (int64 'db', int64 'wh', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum')
     ldarg.s 2
-    mul
-    ldc.i4 4
+    ldc.i4 32
     mul
     call native int [mscorlib]System.Runtime.InteropServices.Marshal::AllocHGlobal(int32)
     conv.i8
     stloc.s 0
     ldloc.s 0
     ldarg.s 1
-    ldarg.s 3
     ldarg.s 2
-    mul
-    ldc.i4 4
+    ldc.i4 32
     mul
     conv.i8
     ldc.i4 2
     call int32 TKVApp::__pinvoke_cuda_h2d(int64, int64, int64, int32)
     conv.i8
     stloc.s 1
-    ldc.i4 0
-    stloc.s 2
-  dumpc_W1_start:
-    ldloc.s 2
-    ldarg.s 2
-    clt
-    brfalse dumpc_W1_end
     ldstr "DUMP"
     ldstr " "
     ldarg.s 0
@@ -43877,15 +43866,18 @@
     call string [mscorlib]System.String::Concat(string, string)
     call string [mscorlib]System.String::Concat(string, string)
     ldstr " "
-    ldloc.s 2
-    call string TkvStr::I32(int32)
+    ldloc.s 0
+    ldc.i4 0
+    conv.i8
+    add
+    conv.i
+    ldind.r4
+    call string TkvStr::F32(float32)
     call string [mscorlib]System.String::Concat(string, string)
     call string [mscorlib]System.String::Concat(string, string)
     ldstr " "
     ldloc.s 0
-    ldloc.s 2
-    ldarg.s 3
-    mul
+    ldarg.s 2
     ldc.i4 4
     mul
     conv.i8
@@ -43895,13 +43887,79 @@
     call string TkvStr::F32(float32)
     call string [mscorlib]System.String::Concat(string, string)
     call string [mscorlib]System.String::Concat(string, string)
-    call void [mscorlib]System.Console::WriteLine(string)
-    ldloc.s 2
-    ldc.i4 1
+    ldstr " "
+    ldloc.s 0
+    ldarg.s 2
+    ldc.i4 8
+    mul
+    conv.i8
     add
-    stloc.s 2
-    br dumpc_W1_start
-  dumpc_W1_end:
+    conv.i
+    ldind.r4
+    call string TkvStr::F32(float32)
+    call string [mscorlib]System.String::Concat(string, string)
+    call string [mscorlib]System.String::Concat(string, string)
+    ldstr " "
+    ldloc.s 0
+    ldarg.s 2
+    ldc.i4 12
+    mul
+    conv.i8
+    add
+    conv.i
+    ldind.r4
+    call string TkvStr::F32(float32)
+    call string [mscorlib]System.String::Concat(string, string)
+    call string [mscorlib]System.String::Concat(string, string)
+    ldstr " "
+    ldloc.s 0
+    ldarg.s 2
+    ldc.i4 16
+    mul
+    conv.i8
+    add
+    conv.i
+    ldind.r4
+    call string TkvStr::F32(float32)
+    call string [mscorlib]System.String::Concat(string, string)
+    call string [mscorlib]System.String::Concat(string, string)
+    ldstr " "
+    ldloc.s 0
+    ldarg.s 2
+    ldc.i4 20
+    mul
+    conv.i8
+    add
+    conv.i
+    ldind.r4
+    call string TkvStr::F32(float32)
+    call string [mscorlib]System.String::Concat(string, string)
+    call string [mscorlib]System.String::Concat(string, string)
+    ldstr " "
+    ldloc.s 0
+    ldarg.s 2
+    ldc.i4 24
+    mul
+    conv.i8
+    add
+    conv.i
+    ldind.r4
+    call string TkvStr::F32(float32)
+    call string [mscorlib]System.String::Concat(string, string)
+    call string [mscorlib]System.String::Concat(string, string)
+    ldstr " "
+    ldloc.s 0
+    ldarg.s 2
+    ldc.i4 28
+    mul
+    conv.i8
+    add
+    conv.i
+    ldind.r4
+    call string TkvStr::F32(float32)
+    call string [mscorlib]System.String::Concat(string, string)
+    call string [mscorlib]System.String::Concat(string, string)
+    call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 0
     ret
   }
@@ -51911,7 +51969,7 @@
   .method public static int32 'loss_fwd'(int64 'fnh', int64 'lg', int64 'pk', int64 'dl', int64 'ls', int32 'tn') cil managed
   {
     .maxstack 36
-    .locals init (int64 'a0', int64 'wh', int64 'a1', int64 'a2', int64 'a3', int64 'pl', int32 'nb', int32 '__idiv1002653_a', int32 '__idiv1002653_b', int32 '__idiv1002653_q', int32 '__idiv1002653_r', int32 'rc', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum')
+    .locals init (int64 'a0', int64 'wh', int64 'a1', int64 'a2', int64 'a3', int64 'pl', int32 'nb', int32 '__idiv1002696_a', int32 '__idiv1002696_b', int32 '__idiv1002696_q', int32 '__idiv1002696_r', int32 'rc', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum')
     ldc.i4 8
     call native int [mscorlib]System.Runtime.InteropServices.Marshal::AllocHGlobal(int32)
     conv.i8
@@ -71791,7 +71849,7 @@
   .method public static int32 'loss3_fwd'(int64 'h', int64 'lg', int64 'pk', int64 'dl', int64 'ls', int64 'pm', int64 'ps', int64 'gm', int64 'gi', int32 'tn', int32 'nb') cil managed
   {
     .maxstack 34
-    .locals init (int64 'fa', int64 'fb', int64 'fc', int64 'zz', int32 'rb', int32 'gy', int32 '__idiv1003328_a', int32 '__idiv1003328_b', int32 '__idiv1003328_q', int32 '__idiv1003328_r', int32 'rc', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum')
+    .locals init (int64 'fa', int64 'fb', int64 'fc', int64 'zz', int32 'rb', int32 'gy', int32 '__idiv1003371_a', int32 '__idiv1003371_b', int32 '__idiv1003371_q', int32 '__idiv1003371_r', int32 'rc', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum')
     ldarg.s 0
     ldc.i4 0
     conv.i8
@@ -106798,69 +106856,58 @@
     brfalse run_If30_else
     ldc.i4 1
     ldloc.s 76
-    ldc.i4 8
     ldloc.s 4
-    call int32 TKVApp::'dumpc'(int32, int64, int32, int32)
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
     ldc.i4 2
     ldloc.s 216
-    ldc.i4 8
     ldloc.s 4
-    call int32 TKVApp::'dumpc'(int32, int64, int32, int32)
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
     ldc.i4 3
     ldloc.s 208
-    ldc.i4 8
     ldloc.s 4
-    call int32 TKVApp::'dumpc'(int32, int64, int32, int32)
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
     ldc.i4 4
     ldloc.s 212
-    ldc.i4 8
     ldloc.s 4
-    call int32 TKVApp::'dumpc'(int32, int64, int32, int32)
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
     ldc.i4 5
     ldloc.s 75
-    ldc.i4 8
     ldloc.s 4
-    call int32 TKVApp::'dumpc'(int32, int64, int32, int32)
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
     ldc.i4 6
     ldloc.s 77
-    ldc.i4 8
     ldloc.s 4
-    call int32 TKVApp::'dumpc'(int32, int64, int32, int32)
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
     ldc.i4 7
     ldloc.s 197
-    ldc.i4 8
     ldloc.s 4
-    call int32 TKVApp::'dumpc'(int32, int64, int32, int32)
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
     ldc.i4 8
     ldloc.s 214
-    ldc.i4 8
     ldloc.s 4
-    call int32 TKVApp::'dumpc'(int32, int64, int32, int32)
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
     ldc.i4 9
     ldloc.s 84
-    ldc.i4 8
     ldloc.s 4
-    call int32 TKVApp::'dumpc'(int32, int64, int32, int32)
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
     ldc.i4 10
     ldloc.s 85
-    ldc.i4 8
     ldloc.s 4
-    call int32 TKVApp::'dumpc'(int32, int64, int32, int32)
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
     ldc.i4 11
     ldloc.s 86
-    ldc.i4 8
     ldloc.s 4
-    call int32 TKVApp::'dumpc'(int32, int64, int32, int32)
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
   run_If30_else:
   run_If29_else:
@@ -106891,9 +106938,8 @@
     brfalse run_If31_else
     ldc.i4 12
     ldloc.s 216
-    ldc.i4 8
     ldloc.s 4
-    call int32 TKVApp::'dumpc'(int32, int64, int32, int32)
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
     stloc.s 0
   run_If31_else:
     ldloc.s 168

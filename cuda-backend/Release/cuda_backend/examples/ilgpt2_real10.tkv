@@ -431,13 +431,10 @@ def sf_bwd(fnh: "i64", dp: "i64", p: "i64", ds: "i64", tn: "i32") -> "i32":
         return 1
     return 0
 
-def dumpc(tag: "i32", src: "i64", cols: "i32", tn: "i32") -> "i32":
-    db: "i64" = alloc_bytes(tn * cols * 4)
-    wh: "i64" = cuda_h2d(db, src, tn * cols * 4, 2)
-    ii: "i32" = 0
-    while ii < cols:
-        print("DUMP", tag, ii, read_f32(db, ii * tn * 4))
-        ii = ii + 1
+def dumpc(tag: "i32", src: "i64", tn: "i32") -> "i32":
+    db: "i64" = alloc_bytes(tn * 32)
+    wh: "i64" = cuda_h2d(db, src, tn * 32, 2)
+    print("DUMP", tag, read_f32(db, 0), read_f32(db, tn * 4), read_f32(db, tn * 8), read_f32(db, tn * 12), read_f32(db, tn * 16), read_f32(db, tn * 20), read_f32(db, tn * 24), read_f32(db, tn * 28))
     return 0
 
 def add_k(fnh: "i64", a: "i64", b: "i64", o: "i64", n: "i32") -> "i32":
@@ -1556,24 +1553,24 @@ def run() -> "i32":
                 return 1
             if step == 1:
                 if ll == 0:
-                    rc = dumpc(1, dX, 8, T)
-                    rc = dumpc(2, y1d, 8, T)
-                    rc = dumpc(3, qd, 8, T)
-                    rc = dumpc(4, ad, 8, T)
-                    rc = dumpc(5, dO, 8, T)
-                    rc = dumpc(6, dX2, 8, T)
-                    rc = dumpc(7, y2d, 8, T)
-                    rc = dumpc(8, zd, 8, T)
-                    rc = dumpc(9, dHH, 8, T)
-                    rc = dumpc(10, dO2, 8, T)
-                    rc = dumpc(11, dOUT, 8, T)
+                    rc = dumpc(1, dX, T)
+                    rc = dumpc(2, y1d, T)
+                    rc = dumpc(3, qd, T)
+                    rc = dumpc(4, ad, T)
+                    rc = dumpc(5, dO, T)
+                    rc = dumpc(6, dX2, T)
+                    rc = dumpc(7, y2d, T)
+                    rc = dumpc(8, zd, T)
+                    rc = dumpc(9, dHH, T)
+                    rc = dumpc(10, dO2, T)
+                    rc = dumpc(11, dOUT, T)
             xin = dOUT
             ll = ll + 1
         tH = time_perf()
         # logits + loss tu OUT cua lop cuoi
         rc = ln_fwd(lnf, dOUT, dFG, dFB, y1d, xh1d, s1d, T, H)
         if step == 1:
-            rc = dumpc(12, y1d, 8, T)
+            rc = dumpc(12, y1d, T)
         rc = toh(th, y1d, fpA, sQH)
         rc = toh(th, dWh, fpB, H * V)
         rc = gemm16(ch, 0, 0, T, V, H, one, fpA, T, fpB, H, zero, dLG, T)
