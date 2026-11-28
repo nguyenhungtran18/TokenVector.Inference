@@ -56,7 +56,7 @@ if r.returncode != 0:
     print((r.stdout or "")[-2500:]); print((r.stderr or "")[:800]); sys.exit(1)
 lines = (r.stdout or "").splitlines()
 for l in lines:
-    if l.startswith("LG0"):
+    if l.startswith("LG0") or l.startswith("DUMP"):
         print(l, flush=True)
 ms = [float(l.split()[1]) for l in lines if l.startswith("STEPMS ")]
 tl = [float(l.split()[1]) for l in lines if l.startswith("LOSSF ")]
