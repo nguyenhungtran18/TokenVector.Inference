@@ -14,7 +14,7 @@ cuoi cao hon ban decay tuyen tinh (0.4387, co 5 step tang: 90,100,102,109,110).
 
 ## Tai sao co gia tri am (loss tang giua chung)
 
-1. AdamW cap nhat dang `w -= lr * mhat/(sqrt(vhat)+eps)` — **do lon buoc khong
+1. AdamW cap nhat dang `w -= lr * mhat/(sqrt(vhat)+eps)` â€” **do lon buoc khong
    giam theo do lon gradient** (khac SGD). Khi loss da nho (~1.0 tro xuong),
    buoc co dinh ~1e-4 co the vuot qua cuc tieu nho -> loss tang.
 2. Ban dac them tied-head (50M params) lam nhieu step tang hon (update dau ra
@@ -36,7 +36,7 @@ ABL head=True   s1=9.0423  s10=4.7941  s50=0.0003  s150=0.0000
 PyTorch dat 0.0004 o step 50 trong khi TKV ~4.0 -> **loi nam o gradient/duong
 backward cua TKV, khong phai do khong train LN/head**. Kernel AdamW da kiem tra
 dung cong thuc; loss gradient (/T) dung. So sanh dWq step 1: `GRADCHK maxerr
-= 4.2e-4` va dau khac nhau o 4 phan tu dau (TKV ~2e-6, PyTorch ~4e-5) — can
+= 4.2e-4` va dau khac nhau o 4 phan tu dau (TKV ~2e-6, PyTorch ~4e-5) â€” can
 doi chieu them (co the do transpose/chi so hoac scale).
 
 ## Cac bug da sua truoc do
@@ -50,3 +50,13 @@ backward ln_f, IL local <= 255, loss_init overflow, PTX mul.wide.
 `c_fwrite` khong co trong runtime (chi fopen/fread/fclose). Thu tinh held-out
 trong .tkv cho `HELDOUT` nhung TKV thoat rc=1 (CUDA illegal address) -> da revert.
 Khong co row bridge; so lich su 187.8 ms/step chi tham chieu.
+## Test 12 step (yeu cau moi nhat, HEAD 285ecf1)
+
+| | median ms/step | loss dau -> cuoi | step tang |
+| :--- | ---: | :--- | ---: |
+| PyTorch eager (2 warm-up + 12) | 454.4 | 6.0951 -> 3.1089 | - |
+| TokenVector .tkv (12 step) | 215.9 (**2.10x**) | 8.7249 -> 6.3718 | **0** |
+
+Chuoi loss TKV: 8.7249 -> 8.1827 -> 7.6403 -> 7.3655 -> 7.2680 -> 7.0690
+-> 6.9027 -> 6.7974 -> 6.6568 -> 6.5418 -> 6.4931 -> 6.3718 (moi drop > 0).
+Van chua dat yeu cau "loss TKV <= PyTorch"; TKV thang toc do, thua loss.
