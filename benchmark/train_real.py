@@ -20,7 +20,7 @@ NL, H, NH, V, T = 24, 1024, 16, 50257, 512
 
 DIAG = ""
 if os.environ.get("TKV_DIAG") != "0":
-    _dr = subprocess.run([sys.executable, BASE + "/benchmark/diag_variants.py"],
+    _dr = subprocess.run([sys.executable, BASE + "/benchmark/diag_bias.py"],
                          capture_output=True, text=True)
     DIAG = _dr.stdout or ""
 
