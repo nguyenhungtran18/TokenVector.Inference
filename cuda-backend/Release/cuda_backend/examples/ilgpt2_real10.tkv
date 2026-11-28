@@ -1338,7 +1338,7 @@ def run() -> "i32":
     if afn == 0:
         print("ADAMW INIT FAIL")
         return 1
-    lr: "f32" = 0.0025
+    lr: "f32" = 0.0008
     wd: "f32" = 0.0
     b1t: "f32" = 1.0
     b2t: "f32" = 1.0
@@ -1438,6 +1438,21 @@ def run() -> "i32":
     if bh == 0:
         print("BIAS INIT FAIL")
         return 1
+    BG: "i64" = alloc_bytes(96)
+    rc = cuda_malloc(cell, 3 * hb)
+    wh = write_i64(BG, 0, read_i64(cell, 0))
+    rc = cuda_malloc(cell, hb)
+    wh = write_i64(BG, 8, read_i64(cell, 0))
+    rc = cuda_malloc(cell, 4 * hb)
+    wh = write_i64(BG, 16, read_i64(cell, 0))
+    rc = cuda_malloc(cell, hb)
+    wh = write_i64(BG, 24, read_i64(cell, 0))
+    ii = 0
+    while ii < 8:
+        rc = cuda_malloc(cell, 4 * hb)
+        wh = write_i64(BG, 32 + ii * 8, read_i64(cell, 0))
+        rc = cuda_memset(read_i64(BG, 32 + ii * 8), 0, 4 * hb)
+        ii = ii + 1
     bhadd: "i64" = read_i64(bh, 0)
     bhgrad: "i64" = read_i64(bh, 8)
     h3: "i64" = 3 * hb
@@ -1630,6 +1645,7 @@ def run() -> "i32":
             rc = toht(tht, w2d, fpT, H * F, F)
             rc = gemm16(ch, 0, 0, T, F, H, one, fpA, T, fpT, H, zero, gHH, T)
             rc = gelu_bwd(bfn, zd, gHH, gZ, T * F)
+            rc = bias_grad_k(bhgrad, gZ, read_i64(BG, 16), T, F)
             rc = toh(th, y2d, fpA, sQH)
             rc = toh(th, gZ, fpB, sTF)
             rc = gemm16(ch, 1, 0, H, F, T, one, fpA, T, fpB, T, zero, g1d, H)
@@ -1642,6 +1658,7 @@ def run() -> "i32":
                 print("LN2 BWD FAIL", ll)
                 return 1
             rc = add_k(gadd, gDX2, gOUT, gDX2, T * H)
+            rc = bias_grad_k(bhgrad, gDX2, read_i64(BG, 24), T, H)
             if rc != 0:
                 print("ADD DX2 FAIL", ll)
                 return 1
@@ -1668,6 +1685,7 @@ def run() -> "i32":
             rc = toh(th, gS, fpA, 16 * sTT)
             rc = toh(th, qd, fpB, sQH)
             rc = gemm16b(ch, 1, 0, T, 64, T, hal16, fpA, T, T * T, fpB, T, 64 * T, zero, gK, T, 64 * T, 16)
+            rc = bias_grad_k(bhgrad, gQ, read_i64(BG, 0), T, H)
             rc = toh(th, y1d, fpA, sQH)
             rc = toh(th, gQ, fpB, sQH)
             rc = gemm16(ch, 1, 0, H, H, T, one, fpA, T, fpB, T, zero, gqd, H)
@@ -1716,6 +1734,10 @@ def run() -> "i32":
             rc = adamw_update(afn, read_i64(AWo, ll * 8), god, mo + uo, vo + uo, H * H, lr, ac1, ac2, wd)
             rc = adamw_update(afn, read_i64(AW1, ll * 8), g1d, m1 + uo1, v1 + uo1, H * F, lr, ac1, ac2, wd)
             rc = adamw_update(afn, read_i64(AW2, ll * 8), g2d, m2 + uo2, v2 + uo2, F * H, lr, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(ABQ, ll * 8), read_i64(BG, 0), read_i64(BG, 32), read_i64(BG, 40), 3 * H, lr, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(ABO, ll * 8), read_i64(BG, 24), read_i64(BG, 48), read_i64(BG, 56), H, lr, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(AB1, ll * 8), read_i64(BG, 16), read_i64(BG, 64), read_i64(BG, 72), 4 * H, lr, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(AB2, ll * 8), read_i64(BG, 8), read_i64(BG, 80), read_i64(BG, 88), H, lr, ac1, ac2, wd)
 
             ll = ll + 1
         print("MARK UPD", step)
