@@ -470,6 +470,15 @@ def toh(fnh: "i64", src: "i64", dst: "i64", n: "i32") -> "i32":
         return 1
     return 0
 
+def dumps(tag: "i32", src: "i64", stride: "i32", n: "i32") -> "i32":
+    h: "i64" = alloc_bytes(n * stride * 4)
+    wh: "i64" = cuda_h2d(h, src, n * stride * 4, 2)
+    ii: "i32" = 0
+    while ii < n:
+        print("D", tag, read_f32(h, ii * stride * 4), read_f32(h, (ii + 1) * stride * 4), read_f32(h, (ii + 2) * stride * 4), read_f32(h, (ii + 3) * stride * 4), read_f32(h, (ii + 4) * stride * 4), read_f32(h, (ii + 5) * stride * 4), read_f32(h, (ii + 6) * stride * 4), read_f32(h, (ii + 7) * stride * 4))
+        ii = ii + 8
+    return 0
+
 def gemm16(handle: "i64", ta: "i32", tb: "i32", m: "i32", n: "i32", k: "i32", alpha: "i64", a: "i64", lda: "i32", b: "i64", ldb: "i32", beta: "i64", c: "i64", ldc: "i32") -> "i32":
     rc: "i32" = cublas_gemm_ex(handle, ta, tb, m, n, k, alpha, a, 2, lda, b, 2, ldb, beta, c, 0, ldc, 74, -1)
     if rc != 0:
@@ -1463,6 +1472,10 @@ def run() -> "i32":
         ll = 0
         while ll < NL:
             wqd = read_i64(AWq, ll * 8)
+            if step == 1:
+                if ll == 0:
+                    rc = dumps(1, wqd, 1, H)
+                    rc = dumps(2, wqd, H, H)
             wkd = read_i64(AWk, ll * 8)
             wvd = read_i64(AWv, ll * 8)
             wod = read_i64(AWo, ll * 8)
@@ -1492,6 +1505,9 @@ def run() -> "i32":
             # LN1 tren device: xin -> Y1 / XH1 / ST1
             y1d: "i64" = read_i64(AY1, ll * 8)
             rc = ln_fwd(lnf, xin, lg1, lb1, y1d, xh1d, s1d, T, H)
+            if step == 1:
+                if ll == 0:
+                    rc = dumps(3, y1d, T, H)
             if rc != 0:
                 print("LN1 FWD FAIL", ll)
                 return 1
