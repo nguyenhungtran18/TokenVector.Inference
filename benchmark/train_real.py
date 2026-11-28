@@ -72,6 +72,8 @@ chk("mlp_proj", raw[o:o + F * H].reshape(F, H, order="F"),
 hoff = T * H + 2 * H + NL * (4 * H * H + H * F + F * H + 13 * H)
 chk("head", raw[hoff:hoff + H * V].reshape(H, V, order="F"),
     f32("transformer.wte.weight").T)
+del raw, hoff, o
+gc.collect()
 
 # ---------- 2/3. tham chieu torch: loss step-0 + dWq lop 0 ----------
 model.zero_grad(set_to_none=True)
