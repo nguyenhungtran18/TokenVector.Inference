@@ -1,42 +1,46 @@
-# Benchmark cuối: train GPT2-medium, TokenVector thuần vs PyTorch
+# Benchmark cuoi: train GPT2-medium, TokenVector thuan vs PyTorch
 
-**Trạng thái:** 2026-11-27, Kaggle GPU **Tesla T4** (`torch 2.11.0+cu130`, CUDA 13.0),
-cùng một session cho cả hai bên. Repo `TokenVector.Inference@main`, bản trainer
-`cuda-backend/Release/cuda_backend/examples/ilgpt2_long.exe`.
+**Timestamp:** 2026-11-28. Kaggle GPU Tesla T4, torch 2.11.0+cu130, CUDA 13.0.
+Repo `TokenVector.Inference@main`, HEAD co verify cuoi: `2f101ac`.
 
-Cấu hình: `NL=24, T=512, H=1024, heads=16, head_dim=64, V=50257`, AdamW
-`betas=(0.9,0.999), eps=1e-8, wd=0`. Tốc độ là **median ms/step** (PyTorch:
-10 bước đo sau 2 bước warm-up, sync CUDA mỗi bước; TokenVector: các bước 4–10
-của bản 10 bước).
+Cau hinh: `NL=24, T=512, H=1024, heads=16, head_dim=64, V=50257`, AdamW
+`betas=(0.9,0.999), eps=1e-8, wd=0`. Chi so la **median ms/step**
+(PyTorch: 10 step sau 2 step warm-up, co CUDA sync; TokenVector: step 4-10).
 
-| Implementation | median ms/step | vs PyTorch | Loss (bước đầu → cuối) |
-| :--- | ---: | ---: | :--- |
-| PyTorch eager, fp32, AdamW | **447.4** | 1.00× | 9.5467 → 4.2756 |
-| **TokenVector pure `.tkv` (bản cuối)** | **181.5** | **2.46×** | 11.1816 → 1.2534 |
-| C++-generated bridge (baseline cũ) | 187.8 | 2.38× | — |
+## Bang chinh (trong so that gpt2-medium pretrained)
 
-TokenVector cuối cũng nhanh hơn bridge C++ **~3.4%** trong cùng lần đo này
-(các lần trước: 176.1–181.5 ms/step). Không có C/C++ và không có torch trong
-đường chạy TokenVector; torch chỉ là đối chiếu.
+| Implementation | Weights | median ms/step | Speedup | Train loss (dau -> cuoi) |
+| :--- | :--- | ---: | ---: | :--- |
+| PyTorch eager | gpt2-medium pretrained | 443.5 - 457.3 | 1.00x | 6.0951 -> 3.8234 |
+| TokenVector pure .tkv | gpt2-medium pretrained | 216.6 - 219.1 | ~2.05x | 21.2213 -> 11.2158 |
 
-## Cách chạy lại
+Khong co row C++ bridge trong bang so sanh (theo yeu cau).
+So lich su: C++ bridge `187.8 ms/step` (random-init, 2026-11-26) - chi de tham chieu,
+khong duoc tinh la ket qua cua lan nay.
 
-Trên Kaggle (sau khi cài .NET 10 và clone repo này):
+## Canh bao quan trong (chua xong)
 
-```python
-import subprocess, sys
-d = '/kaggle/working/TokenVectorInfer'
-r = subprocess.run([sys.executable, d+'/benchmark/bench_final_torch_tkv.py', d],
-                   capture_output=True, text=True, timeout=1800)
-print(r.stdout[-3000:])
-```
+HF tren cung 512 token cho loss khoi dau `9.0423`. TokenVector cho `21.2213`
+(roi giam ve `11.2158`), nghia la **forward TKV voi trong so that chua khop HF**
+va khong the xem la ket qua training tuong duong.
 
-Script `benchmark/bench_final_torch_tkv.py` tự dựng model PyTorch cùng cấu hình,
-đo torch trước, giải phóng GPU rồi chạy bản TokenVector 10 bước và in bảng trên.
+Da kiem tra va sua trong qua trinh debug:
+- embedding that `wte[xb]+wpe` (truoc do la nhieu ngau nhien `wrand`);
+- nhan that `yb` tu `gpt2m_ids.npz`, ghep vao cuoi blob (truoc do la `(ii+1)%V`);
+- offset bias: `wo` thieu `+ hb` sau `ALB2`, lam `ABQ` doc `ln_2.bias` thay vi
+  `c_attn.bias` (da doi chieu chinh xac voi `CAND ln2b`);
+- IL local <= 255, loss_init i64 overflow, PTX bias mul.wide.
 
-## Ghi chú về số liệu cũ
+Con lai: stage-by-stage dump cho thay embedding va LN1 khop HF chinh xac, nhung
+Q truoc bias khac HF; da thu nghiem rieng `fpA`, `fpQKV`, `gemm16` 4x4, `gemm16b`,
+`gemm32` va cac compute type 0/66/74 - A/B/GEMM tuong doi nho deu dung, nen
+nguyen nhan sai so lon van chua xac dinh. Khong khang dinh loss 9.04 cho TKV.
 
-Các bảng CPU (`compare_rivals.tkv`, `bseq*.exe`, `fullstep_min*`, log
-`_bench_matrix_post14_*`) và các probe GEMM cũ đã bị xoá: chúng đo các phiên bản
-cũ hơn, không còn đại diện cho bản cuối. Chỉ giữ script benchmark cuối và bảng
-này. Chi tiết hành trình tối ưu xem `../docs/ILGPT2_BLOCK_FORWARD_STATUS_2026-11-26.md`.
+## Tai hien
+
+Cell 2: load weights (`benchmark/export_gpt2m_weights.py`, blob 1,417,197,568 bytes).
+Cell 3: `benchmark/train_real.py` (PyTorch roi TokenVector).
+Cell 4: `benchmark/test_trained.py` (held-out + generation).
+
+Lu y: `/kaggle/working` bi xoa giua cac session, export phay lai ~10 phut.
+Dung Run menu -> Stop session sau khi chay de tiet kiem quota.

@@ -1,34 +1,37 @@
-﻿# Benchmark cuối: huấn luyện GPT2-medium, TokenVector thuần vs PyTorch
+﻿# Benchmark cuoi: huan luyen GPT2-medium, TokenVector thuan vs PyTorch
 
-**Trạng thái:** 2026-11-27, Kaggle GPU **Tesla T4** (`torch 2.11.0+cu130`, CUDA 13.0),
-cùng một phiên đo cho cả hai bên. Repo `TokenVector.Inference@main`, bản trainer
-`cuda-backend/Release/cuda_backend/examples/ilgpt2_long.exe`.
+**Thoi gian:** 2026-11-28. Kaggle GPU Tesla T4, torch 2.11.0+cu130, CUDA 13.0.
+Repo `TokenVector.Inference@main`, HEAD verify cuoi `2f101ac`.
 
-Cấu hình: `NL=24, T=512, H=1024, heads=16, head_dim=64, V=50257`, AdamW
-`betas=(0.9,0.999), eps=1e-8, wd=0`. Số liệu là **median ms/step** (PyTorch:
-10 bước đo sau 2 bước warm-up, sync CUDA mỗi bước; TokenVector: các bước 4–10).
+Cau hinh: `NL=24, T=512, H=1024, heads=16, head_dim=64, V=50257`, AdamW
+`betas=(0.9,0.999), eps=1e-8, wd=0`. So lieu la **median ms/step**
+(PyTorch: 10 buoc sau 2 buoc warm-up, co CUDA sync; TokenVector: cac buoc 4-10).
 
-| Cài đặt | median ms/step | so với PyTorch | Loss (bước đầu → cuối) |
-| :--- | ---: | ---: | :--- |
-| PyTorch eager, fp32, AdamW | **447.4** | 1.00× | 9.5467 → 4.2756 |
-| **TokenVector pure `.tkv` (bản cuối)** | **181.5** | **2.46×** | 11.1816 → 1.2534 |
-| Bridge C++ sinh mã (baseline cũ) | 187.8 | 2.38× | — |
+## Bang chinh (trong so that gpt2-medium pretrained)
 
-Bản cuối nhanh hơn bridge C++ **~3.4%** trong lần đo này (các lần trước:
-176.1–181.5 ms/step). Không C/C++, không torch trong đường chạy TokenVector.
+| Cai dat | Weights | median ms/step | Speedup | Train loss (dau -> cuoi) |
+| :--- | :--- | ---: | ---: | :--- |
+| PyTorch eager | gpt2-medium pretrained | 443.5 - 457.3 | 1.00x | 6.0951 -> 3.8234 |
+| TokenVector pure .tkv | gpt2-medium pretrained | 216.6 - 219.1 | ~2.05x | 21.2213 -> 11.2158 |
 
-## Chạy lại
+Khong co row C++ bridge trong bang so sanh (theo yeu cau). So lich su:
+C++ bridge `187.8 ms/step` (random-init, 2026-11-26) - chi de tham chieu,
+khong tinh la ket qua lan nay.
 
-```python
-import subprocess, sys
-d = '/kaggle/working/TokenVectorInfer'
-r = subprocess.run([sys.executable, d+'/benchmark/bench_final_torch_tkv.py', d],
-                   capture_output=True, text=True, timeout=1800)
-print(r.stdout[-3000:])
-```
+## Canh bao quan trong (chua xong)
 
-`benchmark/bench_final_torch_tkv.py` dựng model PyTorch cùng cấu hình, đo torch,
-giải phóng GPU rồi chạy bản TokenVector 10 bước và in bảng.
+HF tren cung 512 token cho loss khoi dau `9.0423`. TokenVector cho `21.2213`
+(roi giam ve `11.2158`). Forward TKV voi trong so that **chua khop HF**,
+khong the xem la ket qua training tuong duong.
 
-Các kết quả CPU/probe cũ đã bị xoá vì đo ở phiên bản cũ, không còn giá trị.
-Chi tiết quá trình tối ưu xem `../docs/ILGPT2_BLOCK_FORWARD_STATUS_2026-11-26.md`.
+Da sua trong debug: embedding that, nhan that, offset bias (`ABQ` doc
+`ln_2.bias` thay vi `c_attn.bias`), IL local <= 255, loss_init i64 overflow,
+PTX bias mul.wide. Stage dump cho thay embedding va LN1 khop HF, nhung Q truoc
+bias khac HF. Da thu rieng fpA/fpQKV/gemm16 4x4/gemm16b/gemm32 va compute
+0/66/74 - nguyen nhan sai so lon van chua xac dinh. Khong khang dinh loss 9.04.
+
+## Tai hien
+
+Cell 2 load weights, cell 3 train (PyTorch roi TokenVector), cell 4 test.
+`/kaggle/working` bi xoa giua cac session nen export chay lai ~10 phut.
+Dung Run menu -> Stop session sau khi chay.
