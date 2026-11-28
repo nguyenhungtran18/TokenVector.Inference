@@ -1450,7 +1450,7 @@ def run() -> "i32":
     if bh == 0:
         print("BIAS INIT FAIL")
         return 1
-    BG: "i64" = alloc_bytes(96)
+    BG: "i64" = alloc_bytes(120)
     rc = cuda_malloc(cell, 3 * hb)
     wh = write_i64(BG, 0, read_i64(cell, 0))
     rc = cuda_malloc(cell, hb)
@@ -1465,6 +1465,14 @@ def run() -> "i32":
         wh = write_i64(BG, 32 + ii * 8, read_i64(cell, 0))
         rc = cuda_memset(read_i64(BG, 32 + ii * 8), 0, 4 * hb)
         ii = ii + 1
+    rc = cuda_malloc(cell, wh2)
+    wh = write_i64(BG, 96, read_i64(cell, 0))
+    rc = cuda_malloc(cell, wh2)
+    wh = write_i64(BG, 104, read_i64(cell, 0))
+    rc = cuda_malloc(cell, wh2)
+    wh = write_i64(BG, 112, read_i64(cell, 0))
+    rc = cuda_memset(read_i64(BG, 104), 0, wh2)
+    rc = cuda_memset(read_i64(BG, 112), 0, wh2)
     bhadd: "i64" = read_i64(bh, 0)
     bhgrad: "i64" = read_i64(bh, 8)
     h3: "i64" = 3 * hb
@@ -1614,6 +1622,9 @@ def run() -> "i32":
         # ---- backward layers (nguoc) ----
         rc = ln_fwd(lnf, dOUT, dFG, dFB, y1d, xh1d, s1d, T, H)
         rc = ln_bwd(lnb, xh1d, gOUT, dFG, s1d, gOUT, T, H)
+        rc = toh(th, dDL, fpB, T * V)
+        rc = toh(th, y1d, fpA, sQH)
+        rc = gemm16(ch, 1, 0, V, H, T, one, fpB, T, fpA, T, zero, read_i64(BG, 96), V)
         ll = NL - 1
         while ll >= 0:
             wqd = read_i64(AWq, ll * 8)
@@ -1757,6 +1768,7 @@ def run() -> "i32":
             rc = adamw_update(afn, read_i64(AB2, ll * 8), read_i64(BG, 8), read_i64(BG, 80), read_i64(BG, 88), H, lr * warm, ac1, ac2, wd)
 
             ll = ll + 1
+        rc = adamw_update(afn, dWh, read_i64(BG, 96), read_i64(BG, 104), read_i64(BG, 112), H * V, lr * warm, ac1, ac2, wd)
         print("MARK UPD", step)
         print("STEPMS", (time_perf() - tA) * 1000.0)
         step = step + 1
