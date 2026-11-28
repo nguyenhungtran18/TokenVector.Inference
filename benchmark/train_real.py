@@ -30,7 +30,7 @@ yi = torch.from_numpy(yb.astype(np.int64)).unsqueeze(0).cuda()
 opt = torch.optim.AdamW(model.parameters(), lr=5e-5, betas=(0.9, 0.999),
                         eps=1e-8, weight_decay=0.0)
 times, losses = [], []
-for step in range(2 + 10):
+for step in range(2 + 12):
     t0 = time.perf_counter()
     loss = model(input_ids=xi, labels=yi).loss
     loss.backward(); opt.step(); opt.zero_grad(set_to_none=True)
@@ -62,7 +62,7 @@ ms = [float(l.split()[1]) for l in lines if l.startswith("STEPMS ")]
 tl = [float(l.split()[1]) for l in lines if l.startswith("LOSSF ")]
 if not tl:
     sys.exit(1)
-tkv_ms = st.median(ms[3:10]) if len(ms) > 10 else st.median(ms)
+tkv_ms = st.median(ms[3:]) if len(ms) > 6 else st.median(ms)
 print("TKV step losses: " + " -> ".join("%.4f" % x for x in tl), flush=True)
 drops = [round(tl[i - 1] - tl[i], 4) for i in range(1, len(tl))]
 print("TKV per-step drops: " + ", ".join("%.4f" % x for x in drops), flush=True)
