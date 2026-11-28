@@ -30,7 +30,7 @@ yi = torch.from_numpy(yb.astype(np.int64)).unsqueeze(0).cuda()
 opt = torch.optim.AdamW(model.parameters(), lr=5e-5, betas=(0.9, 0.999),
                         eps=1e-8, weight_decay=0.0)
 times, losses = [], []
-for step in range(2 + 10):
+for step in range(2 + 150):
     t0 = time.perf_counter()
     loss = model(input_ids=xi, labels=yi).loss
     loss.backward(); opt.step(); opt.zero_grad(set_to_none=True)
