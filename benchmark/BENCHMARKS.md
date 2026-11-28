@@ -1,62 +1,79 @@
 # Benchmark / dieu tra: TokenVector vs PyTorch (GPT2-medium, Kaggle T4)
 
-HEAD verify cuoi `b6e61e2`. 150 step moi ben.
+HEAD verify cuoi `5e00a4a` — 2026-11-28. 12 update moi ben, cung mot batch
+512 token tinyshakespeare, cung mot nhiem vu `position t -> token t+1`.
+Khong co row C++ bridge trong bang.
 
-## Ket qua hien tai (khong co step nao loss tang)
+## Ket qua moi nhat (da xac minh)
 
-| | median ms/step | loss dau -> cuoi | step tang |
-| :--- | ---: | :--- | ---: |
-| PyTorch eager (lr 5e-5) | 460 - 508 | 9.0423 -> 0.0001 | - |
-| TokenVector .tkv (lr 1e-4, warmup + decay bac hai) | 210 - 225 | 8.7249 -> **1.4503** | **0** |
+| implementation | weights | median ms/step | speedup | loss truoc -> sau 12 update | step tang |
+| :--- | :--- | ---: | ---: | :--- | ---: |
+| PyTorch eager, AdamW lr 5e-5, all params | gpt2-medium pretrained | 451.0 | 1.00x | 3.6676 -> **0.1457** | - |
+| TokenVector .tkv, AdamW lr 2e-4 constant | gpt2-medium pretrained | 219.3 | **2.06x** | 3.6676 -> 0.1693 | **0** |
 
-Chuoi loss khong tang o step nao. Linh canh: decay manh giu on dinh nhung loss
-cuoi cao hon ban decay tuyen tinh (0.4387, co 5 step tang: 90,100,102,109,110).
+Chuoi loss TKV (lr 2e-4, 13 gia tri = truoc update + sau moi update):
+`3.6676 -> 3.4786 -> 2.9517 -> 2.6590 -> 2.3124 -> 1.8646 -> 1.5026 ->
+1.0932 -> 0.7609 -> 0.5588 -> 0.3653 -> 0.2512 -> 0.1693` — moi drop > 0.
 
-## Tai sao co gia tri am (loss tang giua chung)
+**Chua dat yeu cau "loss TKV <= PyTorch"**: 0.1693 vs 0.1457 (chenh 0.0236
+nat). TKV thang toc do 2.06x va giam don dieu, nhung van thua loss. Khong
+duoc phep cong bo nguoc lai.
 
-1. AdamW cap nhat dang `w -= lr * mhat/(sqrt(vhat)+eps)` â€” **do lon buoc khong
-   giam theo do lon gradient** (khac SGD). Khi loss da nho (~1.0 tro xuong),
-   buoc co dinh ~1e-4 co the vuot qua cuc tieu nho -> loss tang.
-2. Ban dac them tied-head (50M params) lam nhieu step tang hon (update dau ra
-    lon). Da bo head training (khong cai thien loss: 0.3714 -> 0.3427).
-3. Warmup don thuan `lr*min(step/10,1)` giu lr 1e-4 den cuoi -> con 5 step tang.
-   Decay tuyen tinh `lr*(151-step)/141` giam con 5 step; decay bac hai
-   `lr*((151-step)/141)^2` cho **0 step tang**.
+`187.8 ms/step` cua C++ bridge la baseline lich su, chi tham chieu; khong
+xuat hien trong bang so sanh.
 
-## Dieu tra quan trong: KHONG phai do thieu tham so
+## cac buoc da xac minh
 
-Chay PyTorch voi **dung tap tham so ma TKV cap nhat** (dong bang LN gamma/beta
-va wte embedding, chi train 4 ma tran + bias moi layer):
+1. **Exporter (root cause lon nhat)**: `qkv[:,0:H].T` va
+   `attn.c_proj.weight.T` ghi ra `W^T`, trong khi cublas GEMM can `B[i,o]=W[i,o]`.
+   Toan bo khoi attention dung sai trong so pretrained. Da bo `.T`.
+   Kiem tra truc tiep tue blob: q/k/v/c_proj/c_fc/mlp_proj/head
+   `maxerr=0.000e+00` (7/7 OK).
+2. **Forward khop chinh xac**: torch step0 `3.6676`, TKV step1 `3.6676`
+   (4 chu so thap phan). Truoc khi sua exporter la `9.0423` vs `8.7249`.
+3. **Backward**: sua dW `attn.c_proj` ghi vao buffer dung chung `gWo` thay vi
+   `AGo[ll]`; bias AdamW cap nhat ngay trong vong lap de moi lop dung gradient
+   cua chinh no; buffer rieng cho `ln_f` (khong giay mau buffer cua lop cuoi).
+4. **Gradient subnormal**: `dL/dlogits ~ 1e-6` nam sau vung subnormal fp16
+   (~6e-8/step), nhan 1024x trong `loss_dx`. AdamW scale-invariant nen
+   khong doi buoc cap nhat. Ket qua: loss 2.70 (`lr 2e-4` co warmup) -> 0.1693
+   (constant lr), va khong con step nao tang.
+
+## chan doan gradient con lai (step 1, HEAD 4c9e952)
+
+So sanh 32 diem bang hook PyTorch vs dump trong .tkv:
+
+| dai luong | corr |
+| :--- | ---: |
+| dL/dlogits @ Wh (dau vao ln_f) | +1.00000 |
+| dL/d(hidden cuoi) sau ln_bwd | +0.99999 |
+| gQ layer 23 | +0.99999 |
+| gDX / gY1 layer 23 | +0.99999 / +0.99993 |
+| gQ layer 16 / 8 / 0 | +0.733 / +0.420 / +0.223 |
+| dWq layer 0 (256 phan tu) | +0.195 |
+
+Loi nam o sai so tich luy qua cac block (khoi 23 dung, suy dan dan ve layer 0),
+nhieu kha nang do cast fp16 o cac GEMM backward. Forward va 2 block dau
+khong co loi. Day la ly do loss khong the san bang PyTorch hoan toan.
+
+## Test noi dung da train (PyTorch, HEAD 5e00a4a)
 
 ```
-ABL head=False  s1=9.0423  s10=5.0051  s50=0.0004  s150=0.0001
-ABL head=True   s1=9.0423  s10=4.7941  s50=0.0003  s150=0.0000
+BASELINE pretrained held-out CE = <xem output>
+CE loss train batch   = 0.0466
+CE loss held-out      = 6.7884
+PROMPT 'ROMEO: ' -> ... (van la Shakespeare, khong mustanh)
 ```
 
-PyTorch dat 0.0004 o step 50 trong khi TKV ~4.0 -> **loi nam o gradient/duong
-backward cua TKV, khong phai do khong train LN/head**. Kernel AdamW da kiem tra
-dung cong thuc; loss gradient (/T) dung. So sanh dWq step 1: `GRADCHK maxerr
-= 4.2e-4` va dau khac nhau o 4 phan tu dau (TKV ~2e-6, PyTorch ~4e-5) â€” can
-doi chieu them (co the do transpose/chi so hoac scale).
-
-## Cac bug da sua truoc do
-
-embedding that, nhan that, offset bias `ABQ`, huong weight Conv1D (exporter cat
-qkv theo cot, W1/W2 khong transpose: loss 21.22 -> 8.72), gradient bias rieng,
-backward ln_f, IL local <= 255, loss_init overflow, PTX mul.wide.
+Loss duoi 1 tren cungmot batch 512 token lap lai = **memorization**, khong
+phai chat luong ngon ngu that. Held-out van cao hon pretrained; khong duoc
+xay dung claim "AI hoc tieng Anh".
 
 ## Ghi chu
 
-`c_fwrite` khong co trong runtime (chi fopen/fread/fclose). Thu tinh held-out
-trong .tkv cho `HELDOUT` nhung TKV thoat rc=1 (CUDA illegal address) -> da revert.
-Khong co row bridge; so lich su 187.8 ms/step chi tham chieu.
-## Test 12 step (yeu cau moi nhat, HEAD 285ecf1)
-
-| | median ms/step | loss dau -> cuoi | step tang |
-| :--- | ---: | :--- | ---: |
-| PyTorch eager (2 warm-up + 12) | 454.4 | 6.0951 -> 3.1089 | - |
-| TokenVector .tkv (12 step) | 215.9 (**2.10x**) | 8.7249 -> 6.3718 | **0** |
-
-Chuoi loss TKV: 8.7249 -> 8.1827 -> 7.6403 -> 7.3655 -> 7.2680 -> 7.0690
--> 6.9027 -> 6.7974 -> 6.6568 -> 6.5418 -> 6.4931 -> 6.3718 (moi drop > 0).
-Van chua dat yeu cau "loss TKV <= PyTorch"; TKV thang toc do, thua loss.
+- `c_fwrite` khong co trong runtime; khong the luu weight cua TKV ra file.
+  Step 3 hien test model PyTorch (file `trained_gpt2m.pt`).
+- Khong co GPU/python local; moi so lieu tren deu tu Kaggle T4, Stop session
+  truoc khi doc output theo yeu cau quota.
+- Cac lan chay cu (loss 8.72 -> 6.37, 1.45, 0.3427) dung exporter/gradient sai
+  va khong con dai dien cho ket qua hien tai.
