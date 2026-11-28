@@ -107286,6 +107286,27 @@
     ldloc.s 4
     call int32 TKVApp::'gemm16'(int64, int32, int32, int32, int32, int32, int64, int64, int32, int64, int32, int64, int64, int32)
     stloc.s 0
+    ldloc.s 168
+    ldloc.s 86
+    ldloc.s 80
+    ldloc.s 81
+    ldloc.s 220
+    ldloc.s 199
+    ldloc.s 200
+    ldloc.s 4
+    ldloc.s 5
+    call int32 TKVApp::'ln_fwd'(int64, int64, int64, int64, int64, int64, int64, int32, int32)
+    stloc.s 0
+    ldloc.s 169
+    ldloc.s 199
+    ldloc.s 105
+    ldloc.s 80
+    ldloc.s 200
+    ldloc.s 105
+    ldloc.s 4
+    ldloc.s 5
+    call int32 TKVApp::'ln_bwd'(int64, int64, int64, int64, int64, int64, int32, int32)
+    stloc.s 0
     ldloc.s 3
     ldc.i4 1
     sub
