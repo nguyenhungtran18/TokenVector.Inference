@@ -1497,7 +1497,7 @@ def run() -> "i32":
                 return 1
             rc = toh(th, y1d, fpA, sQH)
             rc = toh3(th3, wqd, wkd, wvd, fpQKV, H * H)
-            rc = gemm16(ch, 0, 0, T, 3 * H, H, one, fpA, T, fpQKV, H, zero, qd, T)
+            rc = gemm16(ch, 0, 0, T, 3 * H, H, one, fpA, H, fpQKV, T, zero, qd, T)
             rc = bias_add(bhadd, qd, bq, T, 3 * T * H)
             if rc != 0:
                 print("QKV GEMM FAIL", ll, rc)
