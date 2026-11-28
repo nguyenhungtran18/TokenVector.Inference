@@ -3,6 +3,7 @@
 Tag dump (khop voi ilgpt2_real10.tkv):
   1 embedding   2 ln1   3 Q   4 attn-out   5 c_proj   6 x2
   7 ln2         8 z     9 gelu  10 o2   11 out(layer0)   12 ln_f(out layer23)
+  20 Wq[0,:8]   21 Wk[0,:8]   22 Wv[0,:8]  (tu c_attn.weight)
 """
 import math
 
@@ -23,15 +24,14 @@ yi = torch.from_numpy(yb.astype(np.int64)).unsqueeze(0).cuda()
 
 with torch.no_grad():
     loss = float(m(input_ids=xi, labels=yi).loss)
-print("DIAG base(ids)          %.4f" % loss, flush=True)
+print("DIAG base(ids) %.4f" % loss, flush=True)
 
 mask = torch.tril(torch.ones(T, T, device="cuda")).view(1, 1, T, T)
 
 
 def dump(tag, x, n=8):
     v = x.reshape(-1, x.shape[-1])[0, :n].tolist()
-    for i, val in enumerate(v):
-        print("DUMP %d %d %.6f" % (tag, i, val), flush=True)
+    print("DUMP %d %s" % (tag, " ".join("%.6f" % q for q in v)), flush=True)
 
 
 with torch.no_grad():
@@ -64,4 +64,8 @@ with torch.no_grad():
     lg = m(input_ids=xi).logits
     print("DIAG logits[0,0:4] %.6f %.6f %.6f %.6f"
           % tuple(float(x) for x in lg[0, 0, :4]), flush=True)
+
+wq = m.transformer.h[0].attn.c_attn.weight.detach().cpu().numpy()
+for tag, row in ((20, 0), (21, H), (22, 2 * H)):
+    print("DUMP %d %s" % (tag, " ".join("%.6f" % v for v in wq[row, :8])), flush=True)
 print("DIAG done", flush=True)

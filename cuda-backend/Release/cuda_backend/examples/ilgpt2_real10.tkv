@@ -1553,6 +1553,9 @@ def run() -> "i32":
                 return 1
             if step == 1:
                 if ll == 0:
+                    rc = dumpc(20, wqd, 1)
+                    rc = dumpc(21, wkd, 1)
+                    rc = dumpc(22, wvd, 1)
                     rc = dumpc(1, dX, T)
                     rc = dumpc(2, y1d, T)
                     rc = dumpc(3, qd, T)

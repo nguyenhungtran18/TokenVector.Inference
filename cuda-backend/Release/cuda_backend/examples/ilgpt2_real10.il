@@ -106854,6 +106854,21 @@
     ldc.i4 0
     ceq
     brfalse run_If30_else
+    ldc.i4 20
+    ldloc.s 138
+    ldc.i4 1
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
+    stloc.s 0
+    ldc.i4 21
+    ldloc.s 139
+    ldc.i4 1
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
+    stloc.s 0
+    ldc.i4 22
+    ldloc.s 140
+    ldc.i4 1
+    call int32 TKVApp::'dumpc'(int32, int64, int32)
+    stloc.s 0
     ldc.i4 1
     ldloc.s 76
     ldloc.s 4
