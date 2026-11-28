@@ -1,15 +1,17 @@
-"""DIAG: kiem tra loss HF tren cung batch 512 token + in logits de so voi TKV.
+"""DIAG: so sanh tung buoc forward cua HF voi TKV (cung batch 512 token).
 
-In ra:
-  DIAG base(ids)        loss cua gpt2-medium pretrained tren 512 token dau
-  DIAG logits[0,0:4]    4 logit dau tien cua vi tri 0 (so sanh truc tiep voi TKV LG0)
-  DIAG <bien the>       vai phep bien doi de tham chieu
+Tag dump (khop voi ilgpt2_real10.tkv):
+  1 embedding   2 ln1   3 Q   4 attn-out   5 c_proj   6 x2
+  7 ln2         8 z     9 gelu  10 o2   11 out(layer0)   12 ln_f(out layer23)
 """
+import math
+
 import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, GPT2Config
 
 NL, H, NH, V, T = 24, 1024, 16, 50257, 512
+NH, HD = 16, H // 16
 d = np.load("/kaggle/working/gpt2m_ids.npz")
 xb, yb = d["xb"], d["yb"]
 cfg = GPT2Config(n_layer=NL, n_head=NH, n_embd=H, n_positions=1024,
@@ -18,70 +20,48 @@ cfg = GPT2Config(n_layer=NL, n_head=NH, n_embd=H, n_positions=1024,
 m = AutoModelForCausalLM.from_pretrained("gpt2-medium", config=cfg).to("cuda").eval()
 xi = torch.from_numpy(xb.astype(np.int64)).unsqueeze(0).cuda()
 yi = torch.from_numpy(yb.astype(np.int64)).unsqueeze(0).cuda()
-sd0 = {k: v.detach().clone() for k, v in m.state_dict().items()}
 
-
-def loss():
-    with torch.no_grad():
-        return float(m(input_ids=xi, labels=yi).loss)
-
-
-def tryp(name, fn):
-    try:
-        fn()
-        print("DIAG %-20s %.4f" % (name, loss()), flush=True)
-    except Exception as e:  # noqa: BLE001
-        print("DIAG %-20s SKIP %s" % (name, type(e).__name__), flush=True)
-    m.load_state_dict(sd0)
-
-
-print("DIAG base(ids)          %.4f" % loss(), flush=True)
 with torch.no_grad():
+    loss = float(m(input_ids=xi, labels=yi).loss)
+print("DIAG base(ids)          %.4f" % loss, flush=True)
+
+mask = torch.tril(torch.ones(T, T, device="cuda")).view(1, 1, T, T)
+
+
+def dump(tag, x, n=8):
+    v = x.reshape(-1, x.shape[-1])[0, :n].tolist()
+    for i, val in enumerate(v):
+        print("DUMP %d %d %.6f" % (tag, i, val), flush=True)
+
+
+with torch.no_grad():
+    h0 = m.transformer.wte(xi) + m.transformer.wpe(
+        torch.arange(T, device="cuda").unsqueeze(0))
+    blk = m.transformer.h[0]
+    ln1 = blk.ln_1(h0)
+    qkv = blk.attn.c_attn(ln1)
+    q, k, v = qkv.split(H, dim=2)
+
+    def sp(x):
+        return x.view(1, T, NH, HD).permute(0, 2, 1, 3)
+
+    att = (sp(q) @ sp(k).transpose(-2, -1)) / math.sqrt(HD)
+    att = att.masked_fill(mask == 0, float("-inf"))
+    att = torch.softmax(att, dim=-1)
+    y = (att @ sp(v)).permute(0, 2, 1, 3).contiguous().view(1, T, H)
+    o = blk.attn.c_proj(y)
+    x2 = h0 + o
+    ln2 = blk.ln_2(x2)
+    z = blk.mlp.c_fc(ln2)
+    hh = 0.5 * z * (1.0 + torch.erf(z / math.sqrt(2.0)))
+    o2 = blk.mlp.c_proj(hh)
+    out = x2 + o2
+    for tag, t in ((1, h0), (2, ln1), (3, q), (4, y), (5, o), (6, x2),
+                   (7, ln2), (8, z), (9, hh), (10, o2), (11, out)):
+        dump(tag, t)
+    hs = m(input_ids=xi, output_hidden_states=True).hidden_states
+    dump(12, m.transformer.ln_f(hs[-1]))
     lg = m(input_ids=xi).logits
-print("DIAG logits[0,0:4] %.6f %.6f %.6f %.6f"
-      % tuple(float(x) for x in lg[0, 0, :4]), flush=True)
-del lg
-torch.cuda.empty_cache()
-
-
-def lnf_identity():
-    with torch.no_grad():
-        m.transformer.ln_f.weight.fill_(1.0)
-        m.transformer.ln_f.bias.fill_(0.0)
-
-
-def all_ln_identity():
-    with torch.no_grad():
-        for ln in [m.transformer.ln_f] + [b.ln_1 for b in m.transformer.h] + \
-                  [b.ln_2 for b in m.transformer.h]:
-            ln.weight.fill_(1.0)
-            ln.bias.fill_(0.0)
-
-
-def bias_zero():
-    with torch.no_grad():
-        for b in m.transformer.h:
-            b.attn.c_attn.bias.zero_()
-            b.attn.c_proj.bias.zero_()
-            b.mlp.c_fc.bias.zero_()
-            b.mlp.c_proj.bias.zero_()
-
-
-def no_attn_out():
-    with torch.no_grad():
-        for b in m.transformer.h:
-            b.attn.c_proj.weight.zero_()
-
-
-def no_mlp_out():
-    with torch.no_grad():
-        for b in m.transformer.h:
-            b.mlp.c_proj.weight.zero_()
-
-
-tryp("ln_f identity", lnf_identity)
-tryp("all LN identity", all_ln_identity)
-tryp("bias zero", bias_zero)
-tryp("no attn out", no_attn_out)
-tryp("no mlp out", no_mlp_out)
+    print("DIAG logits[0,0:4] %.6f %.6f %.6f %.6f"
+          % tuple(float(x) for x in lg[0, 0, :4]), flush=True)
 print("DIAG done", flush=True)

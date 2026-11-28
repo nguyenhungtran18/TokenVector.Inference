@@ -60,6 +60,9 @@ lines = (r.stdout or "").splitlines()
 for l in lines:
     if l.startswith("LG0"):
         print(l, flush=True)
+for l in lines:
+    if l.startswith("DUMP"):
+        print(l, flush=True)
 ms = [float(l.split()[1]) for l in lines if l.startswith("STEPMS ")]
 tl = [float(l.split()[1]) for l in lines if l.startswith("LOSSF ")]
 tkv_ms = st.median(ms[3:]) if len(ms) > 6 else st.median(ms)
