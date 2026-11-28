@@ -17,6 +17,11 @@ BASE = sys.argv[1] if len(sys.argv) > 1 else "/kaggle/working/TokenVectorInfer"
 EXE = BASE + "/cuda-backend/Release/cuda_backend/examples/ilgpt2_real10.exe"
 DOTNET = "/kaggle/working/dotnet/dotnet"
 NL, H, NH, V, T = 24, 1024, 16, 50257, 512
+ABL = ""
+if os.environ.get("TKV_ABL", "1") != "0":
+    _ar = subprocess.run([sys.executable, BASE + "/benchmark/diag_ablation.py"],
+                         capture_output=True, text=True, timeout=900)
+    ABL = _ar.stdout or ""
 
 
 d = np.load("/kaggle/working/gpt2m_ids.npz")
@@ -76,3 +81,6 @@ print("| PyTorch eager | gpt2-medium pretrained | %.1f | 1.00x | %.4f -> %.4f |"
       % (torch_ms, losses[0], losses[-1]), flush=True)
 print("| TokenVector pure .tkv | gpt2-medium pretrained | %.1f | %.2fx | %.4f -> %.4f |"
       % (tkv_ms, torch_ms / tkv_ms, first_loss, end_loss), flush=True)
+for _l in ABL.splitlines():
+    if _l.startswith("ABL"):
+        print(_l, flush=True)
