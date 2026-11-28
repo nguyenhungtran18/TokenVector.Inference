@@ -103122,7 +103122,7 @@
   }
   .method public static int32 'run'() cil managed
   {
-    .maxstack 699
+    .maxstack 752
     .locals init (int32 'rc', int64 'hcell', int64 'ch', int32 'NL', int32 'T', int32 'H', int32 'F', int32 'V', int32 'hb', int32 'h4', int32 'qb', int32 'fb', int32 'sb', int32 'tvb', int32 'stb', int32 'whb', int32 'w1b', int32 'w2b', int32 'wh2', int32 'msz', int32 'sQH', int32 'sHH', int32 'sTT', int32 'sTF', int32 'sFH', int64 'cell', int64 'AWq', int64 'AWk', int64 'AWv', int64 'AWo', int64 'AW1', int64 'AW2', int64 'AGq', int64 'AGk', int64 'AGv', int64 'AGo', int64 'AG1', int64 'AG2', int64 'AQ', int64 'AK', int64 'AV', int64 'AA', int64 'ALG1', int64 'ALB1', int64 'ALG2', int64 'ABQ', int64 'ABO', int64 'AB1', int64 'AB2', int64 'ALB2', int64 'AX1', int64 'AY1', int64 'AS1', int64 'AY2', int64 'AX2', int64 'AS2', int64 'AP', int64 'AZ', int64 'AO', int64 'one', int64 'wh', int64 'zero', int64 'hal', int64 'hX', int64 'hIN', int64 'hIds', int32 'ii', int64 'dY1', int64 '__tern1', int64 'dS', int64 'dP', int64 'dQ', int64 'dK', int64 'dV', int64 'dA', int64 'dO', int64 'dX', int64 'dX2', int64 'dgam', int64 'dbet', int64 'dFG', int64 'dFB', int64 'dY2', int64 'dZ', int64 'dHH', int64 'dO2', int64 'dOUT', int64 'dLG', int64 'dDL', int64 'dPK', int64 'dLS', int64 'fpA', int64 'fpB', int64 'gHH', int64 'gZ', int64 'gY2', int64 'gDX2', int64 'gA', int64 'gWo', int64 'gP', int64 'gV', int64 'gS', int64 'gQ', int64 'gK', int64 'gY1', int64 'gOUT', int64 'hY1', int64 'hY2', int64 'hST', int64 'hXH', int64 'g1h', int64 'b1h', int64 'g2h', int64 'b2h', int64 'hS', int64 'hP', int64 'hO', int64 'hX2', int64 'hO2', int64 'hOUT', int64 'hZ', int64 'hLG', int64 'hDL', int64 'hPK', int64 'hLS', int64 'hGP', int64 'hDS', int64 'hGY2', int64 'hGDX2', int64 'lsz', int64 'hg', class [mscorlib]System.Collections.Generic.List`1<unsigned int8> 'fpb', int64 'fpath', int32 'fp', int64 'mode', int64 'fh', int64 'wo', int32 'll', int64 'wqd', int64 'wkd', int64 'wvd', int64 'wod', int64 'w1d', int64 'w2d', int64 'dWh', int64 'afn', float32 'lr', float32 'wd', class [mscorlib]System.Collections.Generic.List`1<unsigned int8> 'lrp', int64 'lfh', int64 'lbuf', float32 'b1t', float32 'b2t', int64 'mq', int64 'vq', int64 'mk', int64 'vk', int64 'mv', int64 'vv', int64 'mo', int64 'vo', int64 'm1', int64 'v1', int64 'm2', int64 'v2', int64 'gfn', int64 'bfn', int64 'kh', int64 'lnf', int64 'lnb', int64 'gadd', int64 'th', int64 'tht', int64 'fpT', int64 'th3', int64 'fpQKV', int64 'l3h', int64 'dPM', int64 'dPS', int64 'dGM', int64 'dGI', int64 'a16h', int64 'sff16', int64 'sbk16', int64 'bh', int64 'BG', int64 'bhadd', int64 'bhgrad', int64 'h3', int64 'hal16', int64 'xin', float64 't0', float64 'tf', float64 'tb', float64 'thd', int32 'step', float32 'ac1', float32 'ac2', float32 'warm', float64 'tA', int64 'xh1d', int64 's1d', int64 'y2d', int64 'xh2d', int64 's2d', int64 'lg1', int64 'lb1', int64 'lg2', int64 'bq', int64 'bo', int64 'bf1', int64 'bf2', int64 'lb2', int64 'qd', int64 'qoff', int64 'kd', int64 'vd', int64 'ad', int64 'pd', int64 'zd', int64 'od', int64 'y1d', float64 'tH', float32 'lossv', float64 'tB', int64 'gqd', int64 'gkd', int64 'gvd', int64 'god', int64 'g1d', int64 'g2d', float64 'tC', int64 'uo', int64 'uo1', int64 'uo2', float64 't1', float64 'dtm', valuetype TkvInt '__tkvint_a', valuetype TkvInt '__tkvint_b', valuetype TkvInt '__tkvint_r', int64 '__tkvint_x', valuetype [System.Numerics]System.Numerics.Complex '__tkvcplx_str', object '__arr2d_src', object '__arr2d_dst', int32 '__arr2d_i', int32 '__arr2d_n', valuetype [System.Numerics]System.Numerics.Vector4 '__v4hsum', int32 '__licm247', int32 '__licm248', int32 '__licm249', int32 '__licm250', int32 '__licm251', int32 '__licm252', int32 '__licm253', int32 '__licm254', float32 '__licm255')
     ldc.i4 0
     call int32 TKVApp::__pinvoke_cu_init(int32)
@@ -106088,7 +106088,7 @@
     ldc.i4 1
     ret
   run_If19_else:
-    ldc.i4 96
+    ldc.i4 152
     call native int [mscorlib]System.Runtime.InteropServices.Marshal::AllocHGlobal(int32)
     conv.i8
     stloc.s 185
@@ -106113,6 +106113,19 @@
     call void [mscorlib]System.Runtime.InteropServices.Marshal::WriteInt64(native int, int64)
     ldc.i8 0
     stloc.s 60
+    ldloc.s 185
+    ldc.i4 0
+    conv.i8
+    add
+    conv.i
+    call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    ldc.i4 0
+    ldc.i4 3
+    ldloc.s 8
+    mul
+    conv.i8
+    call int32 TKVApp::__pinvoke_cuda_memset(int64, int32, int64)
+    stloc.s 0
     ldloc.s 25
     ldloc.s 8
     conv.i8
@@ -106132,6 +106145,17 @@
     call void [mscorlib]System.Runtime.InteropServices.Marshal::WriteInt64(native int, int64)
     ldc.i8 0
     stloc.s 60
+    ldloc.s 185
+    ldc.i4 8
+    conv.i8
+    add
+    conv.i
+    call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    ldc.i4 0
+    ldloc.s 8
+    conv.i8
+    call int32 TKVApp::__pinvoke_cuda_memset(int64, int32, int64)
+    stloc.s 0
     ldloc.s 25
     ldc.i4 4
     ldloc.s 8
@@ -106153,6 +106177,19 @@
     call void [mscorlib]System.Runtime.InteropServices.Marshal::WriteInt64(native int, int64)
     ldc.i8 0
     stloc.s 60
+    ldloc.s 185
+    ldc.i4 16
+    conv.i8
+    add
+    conv.i
+    call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    ldc.i4 0
+    ldc.i4 4
+    ldloc.s 8
+    mul
+    conv.i8
+    call int32 TKVApp::__pinvoke_cuda_memset(int64, int32, int64)
+    stloc.s 0
     ldloc.s 25
     ldloc.s 8
     conv.i8
@@ -106172,26 +106209,28 @@
     call void [mscorlib]System.Runtime.InteropServices.Marshal::WriteInt64(native int, int64)
     ldc.i8 0
     stloc.s 60
+    ldloc.s 185
+    ldc.i4 24
+    conv.i8
+    add
+    conv.i
+    call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
     ldc.i4 0
-    stloc.s 66
-  run_W20_start:
-    ldloc.s 66
-    ldc.i4 8
-    clt
-    brfalse run_W20_end
+    ldloc.s 8
+    conv.i8
+    call int32 TKVApp::__pinvoke_cuda_memset(int64, int32, int64)
+    stloc.s 0
     ldloc.s 25
-    ldc.i4 4
+    ldloc.s 3
+    ldc.i4 18
+    mul
     ldloc.s 8
     mul
     conv.i8
     call int32 TKVApp::__pinvoke_cuda_malloc(int64, int64)
     stloc.s 0
     ldloc.s 185
-    ldc.i4 32
-    ldloc.s 66
-    ldc.i4 8
-    mul
-    add
+    ldc.i4 144
     conv.i8
     add
     conv.i
@@ -106205,28 +106244,20 @@
     ldc.i8 0
     stloc.s 60
     ldloc.s 185
-    ldc.i4 32
-    ldloc.s 66
-    ldc.i4 8
-    mul
-    add
+    ldc.i4 144
     conv.i8
     add
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
     ldc.i4 0
-    ldc.i4 4
+    ldloc.s 3
+    ldc.i4 18
+    mul
     ldloc.s 8
     mul
     conv.i8
     call int32 TKVApp::__pinvoke_cuda_memset(int64, int32, int64)
     stloc.s 0
-    ldloc.s 66
-    ldc.i4 1
-    add
-    stloc.s 66
-    br run_W20_start
-  run_W20_end:
     ldloc.s 184
     ldc.i4 0
     conv.i8
@@ -106241,11 +106272,67 @@
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
     stloc.s 187
-    ldc.i4 3
-    ldloc.s 8
-    mul
+    ldc.i4 24
+    call native int [mscorlib]System.Runtime.InteropServices.Marshal::AllocHGlobal(int32)
     conv.i8
     stloc.s 188
+    ldloc.s 25
+    ldloc.s 10
+    conv.i8
+    call int32 TKVApp::__pinvoke_cuda_malloc(int64, int64)
+    stloc.s 0
+    ldloc.s 188
+    ldc.i4 0
+    conv.i8
+    add
+    conv.i
+    ldloc.s 25
+    ldc.i4 0
+    conv.i8
+    add
+    conv.i
+    call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    call void [mscorlib]System.Runtime.InteropServices.Marshal::WriteInt64(native int, int64)
+    ldc.i8 0
+    stloc.s 60
+    ldloc.s 25
+    ldloc.s 10
+    conv.i8
+    call int32 TKVApp::__pinvoke_cuda_malloc(int64, int64)
+    stloc.s 0
+    ldloc.s 188
+    ldc.i4 8
+    conv.i8
+    add
+    conv.i
+    ldloc.s 25
+    ldc.i4 0
+    conv.i8
+    add
+    conv.i
+    call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    call void [mscorlib]System.Runtime.InteropServices.Marshal::WriteInt64(native int, int64)
+    ldc.i8 0
+    stloc.s 60
+    ldloc.s 25
+    ldloc.s 14
+    conv.i8
+    call int32 TKVApp::__pinvoke_cuda_malloc(int64, int64)
+    stloc.s 0
+    ldloc.s 188
+    ldc.i4 16
+    conv.i8
+    add
+    conv.i
+    ldloc.s 25
+    ldc.i4 0
+    conv.i8
+    add
+    conv.i
+    call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    call void [mscorlib]System.Runtime.InteropServices.Marshal::WriteInt64(native int, int64)
+    ldc.i8 0
+    stloc.s 60
     ldc.i4 4
     call native int [mscorlib]System.Runtime.InteropServices.Marshal::AllocHGlobal(int32)
     conv.i8
@@ -106325,13 +106412,13 @@
     ldloc.s 5
     mul
     stloc.s 254
-  run_W21_start:
+  run_W20_start:
     ldloc.s 195
-    ldc.i4 12
+    ldc.i4 13
     cgt
     ldc.i4.0
     ceq
-    brfalse run_W21_end
+    brfalse run_W20_end
     ldloc.s 151
     ldc.r4 0.9
     mul
@@ -106350,45 +106437,17 @@
     stloc.s 197
     ldc.r4 1.0
     stloc.s 198
-    ldloc.s 195
-    ldc.i4 10
-    clt
-    brfalse run_If22_else
-    ldloc.s 195
-    conv.r4
-    ldc.r4 10.0
-    div
-    stloc.s 198
-    br run_If22_end
-  run_If22_else:
-    ldc.r4 151
-    ldloc.s 195
-    conv.r4
-    sub
-    conv.r4
-    ldc.r4 141.0
-    div
-    ldc.r4 151
-    ldloc.s 195
-    conv.r4
-    sub
-    conv.r4
-    ldc.r4 141.0
-    div
-    mul
-    stloc.s 198
-  run_If22_end:
     call float64 TkvTime::Perf()
     stloc.s 199
     ldloc.s 76
     stloc.s 190
     ldc.i4 0
     stloc.s 137
-  run_W23_start:
+  run_W21_start:
     ldloc.s 137
     ldloc.s 3
     clt
-    brfalse run_W23_end
+    brfalse run_W21_end
     ldloc.s 26
     ldloc.s 137
     ldc.i4 8
@@ -106641,7 +106700,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If24_else
+    brfalse run_If22_else
     ldstr "LN1 FWD FAIL"
     ldstr " "
     ldloc.s 137
@@ -106651,7 +106710,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If24_else:
+  run_If22_else:
     ldloc.s 171
     ldloc.s 221
     ldloc.s 91
@@ -106700,7 +106759,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If25_else
+    brfalse run_If23_else
     ldstr "QKV GEMM FAIL"
     ldstr " "
     ldloc.s 137
@@ -106715,7 +106774,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If25_else:
+  run_If23_else:
     ldloc.s 171
     ldloc.s 213
     ldloc.s 91
@@ -106760,7 +106819,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If26_else
+    brfalse run_If24_else
     ldstr "S GEMM FAIL"
     ldstr " "
     ldloc.s 137
@@ -106775,7 +106834,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If26_else:
+  run_If24_else:
     ldloc.s 182
     ldloc.s 69
     ldloc.s 218
@@ -106788,7 +106847,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If27_else
+    brfalse run_If25_else
     ldstr "SF FWD FAIL"
     ldstr " "
     ldloc.s 137
@@ -106798,7 +106857,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If27_else:
+  run_If25_else:
     ldloc.s 171
     ldloc.s 218
     ldloc.s 91
@@ -106845,7 +106904,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If28_else
+    brfalse run_If26_else
     ldstr "A GEMM FAIL"
     ldstr " "
     ldloc.s 137
@@ -106860,7 +106919,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If28_else:
+  run_If26_else:
     ldloc.s 171
     ldloc.s 217
     ldloc.s 91
@@ -106901,7 +106960,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If29_else
+    brfalse run_If27_else
     ldstr "O GEMM FAIL"
     ldstr " "
     ldloc.s 137
@@ -106916,7 +106975,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If29_else:
+  run_If27_else:
     ldloc.s 170
     ldloc.s 190
     ldloc.s 75
@@ -106929,7 +106988,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If30_else
+    brfalse run_If28_else
     ldstr "ADD X2 FAIL"
     ldstr " "
     ldloc.s 137
@@ -106939,7 +106998,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If30_else:
+  run_If28_else:
     ldloc.s 168
     ldloc.s 77
     ldloc.s 207
@@ -106956,7 +107015,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If31_else
+    brfalse run_If29_else
     ldstr "LN2 FWD FAIL"
     ldstr " "
     ldloc.s 137
@@ -106966,7 +107025,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If31_else:
+  run_If29_else:
     ldloc.s 171
     ldloc.s 202
     ldloc.s 91
@@ -107055,7 +107114,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If32_else
+    brfalse run_If30_else
     ldstr "ADD OUT FAIL"
     ldstr " "
     ldloc.s 137
@@ -107065,17 +107124,38 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If32_else:
+  run_If30_else:
     ldloc.s 86
     stloc.s 190
     ldloc.s 137
     ldc.i4 1
     add
     stloc.s 137
-    br run_W23_start
-  run_W23_end:
+    br run_W21_start
+  run_W21_end:
     call float64 TkvTime::Perf()
     stloc.s 222
+    ldloc.s 188
+    ldc.i4 0
+    conv.i8
+    add
+    conv.i
+    call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    stloc.s 221
+    ldloc.s 188
+    ldc.i4 8
+    conv.i8
+    add
+    conv.i
+    call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    stloc.s 200
+    ldloc.s 188
+    ldc.i4 16
+    conv.i8
+    add
+    conv.i
+    call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    stloc.s 201
     ldloc.s 168
     ldloc.s 86
     ldloc.s 80
@@ -107156,11 +107236,11 @@
     stloc.s 60
     ldc.i4 0
     stloc.s 66
-  run_W33_start:
+  run_W31_start:
     ldloc.s 66
     ldloc.s 4
     clt
-    brfalse run_W33_end
+    brfalse run_W31_end
     ldloc.s 123
     ldc.i4 16
     ldloc.s 66
@@ -107185,8 +107265,8 @@
     ldc.i4 1
     add
     stloc.s 66
-    br run_W33_start
-  run_W33_end:
+    br run_W31_start
+  run_W31_end:
     ldloc.s 89
     ldloc.s 123
     ldc.i4 16
@@ -107217,12 +107297,12 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If34_else
+    brfalse run_If32_else
     ldstr "LOSS KERNEL FAIL"
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If34_else:
+  run_If32_else:
     ldloc.s 124
     ldloc.s 90
     ldloc.s 4
@@ -107237,11 +107317,11 @@
     stloc.s 223
     ldc.i4 0
     stloc.s 66
-  run_W35_start:
+  run_W33_start:
     ldloc.s 66
     ldloc.s 4
     clt
-    brfalse run_W35_end
+    brfalse run_W33_end
     ldloc.s 223
     ldloc.s 124
     ldloc.s 66
@@ -107257,8 +107337,8 @@
     ldc.i4 1
     add
     stloc.s 66
-    br run_W35_start
-  run_W35_end:
+    br run_W33_start
+  run_W33_end:
     ldstr "LOSS"
     ldstr " "
     ldloc.s 223
@@ -107341,13 +107421,13 @@
     ldc.i4 1
     sub
     stloc.s 137
-  run_W36_start:
+  run_W34_start:
     ldloc.s 137
     ldc.i4 0
     clt
     ldc.i4.0
     ceq
-    brfalse run_W36_end
+    brfalse run_W34_end
     ldloc.s 26
     ldloc.s 137
     ldc.i4 8
@@ -107644,6 +107724,18 @@
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
     stloc.s 221
+    ldloc.s 187
+    ldloc.s 105
+    ldloc.s 185
+    ldc.i4 8
+    conv.i8
+    add
+    conv.i
+    call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    ldloc.s 4
+    ldloc.s 5
+    call int32 TKVApp::'bias_grad_k'(int64, int64, int64, int32, int32)
+    stloc.s 0
     ldloc.s 171
     ldloc.s 84
     ldloc.s 91
@@ -107791,7 +107883,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If37_else
+    brfalse run_If35_else
     ldstr "LN2 BWD FAIL"
     ldstr " "
     ldloc.s 137
@@ -107801,7 +107893,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If37_else:
+  run_If35_else:
     ldloc.s 170
     ldloc.s 96
     ldloc.s 105
@@ -107826,7 +107918,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If38_else
+    brfalse run_If36_else
     ldstr "ADD DX2 FAIL"
     ldstr " "
     ldloc.s 137
@@ -107836,7 +107928,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If38_else:
+  run_If36_else:
     ldloc.s 171
     ldloc.s 96
     ldloc.s 91
@@ -107986,7 +108078,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If39_else
+    brfalse run_If37_else
     ldstr "SF BWD FAIL"
     ldstr " "
     ldloc.s 137
@@ -107996,7 +108088,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If39_else:
+  run_If37_else:
     ldloc.s 171
     ldloc.s 101
     ldloc.s 91
@@ -108091,6 +108183,38 @@
     ldloc.s 5
     call int32 TKVApp::'bias_grad_k'(int64, int64, int64, int32, int32)
     stloc.s 0
+    ldloc.s 187
+    ldloc.s 103
+    ldloc.s 185
+    ldc.i4 0
+    conv.i8
+    add
+    conv.i
+    call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    ldloc.s 8
+    conv.i8
+    add
+    ldloc.s 4
+    ldloc.s 5
+    call int32 TKVApp::'bias_grad_k'(int64, int64, int64, int32, int32)
+    stloc.s 0
+    ldloc.s 187
+    ldloc.s 100
+    ldloc.s 185
+    ldc.i4 0
+    conv.i8
+    add
+    conv.i
+    call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    ldc.i4 2
+    ldloc.s 8
+    mul
+    conv.i8
+    add
+    ldloc.s 4
+    ldloc.s 5
+    call int32 TKVApp::'bias_grad_k'(int64, int64, int64, int32, int32)
+    stloc.s 0
     ldloc.s 171
     ldloc.s 221
     ldloc.s 91
@@ -108119,6 +108243,50 @@
     ldloc.s 5
     call int32 TKVApp::'gemm16'(int64, int32, int32, int32, int32, int32, int64, int64, int32, int64, int32, int64, int64, int32)
     stloc.s 0
+    ldloc.s 195
+    ldc.i4 1
+    ceq
+    brfalse run_If38_else
+    ldloc.s 137
+    ldc.i4 0
+    ceq
+    brfalse run_If39_else
+    ldloc.s 123
+    ldloc.s 225
+    ldc.i8 1024
+    ldc.i4 2
+    call int32 TKVApp::__pinvoke_cuda_h2d(int64, int64, int64, int32)
+    conv.i8
+    stloc.s 60
+    ldc.i4 0
+    stloc.s 66
+  run_W40_start:
+    ldloc.s 66
+    ldc.i4 256
+    clt
+    brfalse run_W40_end
+    ldstr "GQ0"
+    ldstr " "
+    ldloc.s 123
+    ldloc.s 66
+    ldc.i4 4
+    mul
+    conv.i8
+    add
+    conv.i
+    ldind.r4
+    call string TkvStr::F32(float32)
+    call string [mscorlib]System.String::Concat(string, string)
+    call string [mscorlib]System.String::Concat(string, string)
+    call void [mscorlib]System.Console::WriteLine(string)
+    ldloc.s 66
+    ldc.i4 1
+    add
+    stloc.s 66
+    br run_W40_start
+  run_W40_end:
+  run_If39_else:
+  run_If38_else:
     ldloc.s 171
     ldloc.s 103
     ldloc.s 92
@@ -108262,7 +108430,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If40_else
+    brfalse run_If41_else
     ldstr "LN1 BWD FAIL"
     ldstr " "
     ldloc.s 137
@@ -108272,7 +108440,7 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If40_else:
+  run_If41_else:
     ldloc.s 170
     ldloc.s 104
     ldloc.s 105
@@ -108285,7 +108453,7 @@
     ceq
     ldc.i4.0
     ceq
-    brfalse run_If41_else
+    brfalse run_If42_else
     ldstr "ADD DX1 FAIL"
     ldstr " "
     ldloc.s 137
@@ -108295,13 +108463,13 @@
     call void [mscorlib]System.Console::WriteLine(string)
     ldc.i4 1
     ret
-  run_If41_else:
+  run_If42_else:
     ldloc.s 137
     ldc.i4 1
     sub
     stloc.s 137
-    br run_W36_start
-  run_W36_end:
+    br run_W34_start
+  run_W34_end:
     call float64 TkvTime::Perf()
     stloc.s 231
     ldloc.s 193
@@ -108323,11 +108491,11 @@
     ldloc.s 198
     mul
     stloc.s 255
-  run_W42_start:
+  run_W43_start:
     ldloc.s 137
     ldloc.s 3
     clt
-    brfalse run_W42_end
+    brfalse run_W43_end
     ldloc.s 32
     ldloc.s 137
     ldc.i4 8
@@ -108551,17 +108719,36 @@
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
     ldloc.s 185
-    ldc.i4 32
+    ldc.i4 144
     conv.i8
     add
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    ldloc.s 137
+    ldc.i4 18
+    mul
+    ldloc.s 8
+    mul
+    conv.i8
+    add
     ldloc.s 185
-    ldc.i4 40
+    ldc.i4 144
     conv.i8
     add
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    ldloc.s 137
+    ldc.i4 18
+    mul
+    ldloc.s 8
+    mul
+    conv.i8
+    add
+    ldc.i4 3
+    ldloc.s 8
+    mul
+    conv.i8
+    add
     ldc.i4 3
     ldloc.s 5
     mul
@@ -108587,17 +108774,41 @@
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
     ldloc.s 185
-    ldc.i4 48
+    ldc.i4 144
     conv.i8
     add
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    ldloc.s 137
+    ldc.i4 18
+    mul
+    ldloc.s 8
+    mul
+    conv.i8
+    add
+    ldc.i4 6
+    ldloc.s 8
+    mul
+    conv.i8
+    add
     ldloc.s 185
-    ldc.i4 56
+    ldc.i4 144
     conv.i8
     add
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    ldloc.s 137
+    ldc.i4 18
+    mul
+    ldloc.s 8
+    mul
+    conv.i8
+    add
+    ldc.i4 7
+    ldloc.s 8
+    mul
+    conv.i8
+    add
     ldloc.s 5
     ldloc.s 255
     ldloc.s 196
@@ -108621,17 +108832,41 @@
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
     ldloc.s 185
-    ldc.i4 64
+    ldc.i4 144
     conv.i8
     add
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    ldloc.s 137
+    ldc.i4 18
+    mul
+    ldloc.s 8
+    mul
+    conv.i8
+    add
+    ldc.i4 8
+    ldloc.s 8
+    mul
+    conv.i8
+    add
     ldloc.s 185
-    ldc.i4 72
+    ldc.i4 144
     conv.i8
     add
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    ldloc.s 137
+    ldc.i4 18
+    mul
+    ldloc.s 8
+    mul
+    conv.i8
+    add
+    ldc.i4 12
+    ldloc.s 8
+    mul
+    conv.i8
+    add
     ldc.i4 4
     ldloc.s 5
     mul
@@ -108657,17 +108892,41 @@
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
     ldloc.s 185
-    ldc.i4 80
+    ldc.i4 144
     conv.i8
     add
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    ldloc.s 137
+    ldc.i4 18
+    mul
+    ldloc.s 8
+    mul
+    conv.i8
+    add
+    ldc.i4 16
+    ldloc.s 8
+    mul
+    conv.i8
+    add
     ldloc.s 185
-    ldc.i4 88
+    ldc.i4 144
     conv.i8
     add
     conv.i
     call int64 [mscorlib]System.Runtime.InteropServices.Marshal::ReadInt64(native int)
+    ldloc.s 137
+    ldc.i4 18
+    mul
+    ldloc.s 8
+    mul
+    conv.i8
+    add
+    ldc.i4 17
+    ldloc.s 8
+    mul
+    conv.i8
+    add
     ldloc.s 5
     ldloc.s 255
     ldloc.s 196
@@ -108679,8 +108938,8 @@
     ldc.i4 1
     add
     stloc.s 137
-    br run_W42_start
-  run_W42_end:
+    br run_W43_start
+  run_W43_end:
     ldstr "MARK UPD"
     ldstr " "
     ldloc.s 195
@@ -108703,8 +108962,8 @@
     ldc.i4 1
     add
     stloc.s 195
-    br run_W21_start
-  run_W21_end:
+    br run_W20_start
+  run_W20_end:
     call float64 TkvTime::Perf()
     stloc.s 235
     ldloc.s 235

@@ -1450,24 +1450,33 @@ def run() -> "i32":
     if bh == 0:
         print("BIAS INIT FAIL")
         return 1
-    BG: "i64" = alloc_bytes(96)
+    BG: "i64" = alloc_bytes(152)
     rc = cuda_malloc(cell, 3 * hb)
     wh = write_i64(BG, 0, read_i64(cell, 0))
+    rc = cuda_memset(read_i64(BG, 0), 0, 3 * hb)
     rc = cuda_malloc(cell, hb)
     wh = write_i64(BG, 8, read_i64(cell, 0))
+    rc = cuda_memset(read_i64(BG, 8), 0, hb)
     rc = cuda_malloc(cell, 4 * hb)
     wh = write_i64(BG, 16, read_i64(cell, 0))
+    rc = cuda_memset(read_i64(BG, 16), 0, 4 * hb)
     rc = cuda_malloc(cell, hb)
     wh = write_i64(BG, 24, read_i64(cell, 0))
-    ii = 0
-    while ii < 8:
-        rc = cuda_malloc(cell, 4 * hb)
-        wh = write_i64(BG, 32 + ii * 8, read_i64(cell, 0))
-        rc = cuda_memset(read_i64(BG, 32 + ii * 8), 0, 4 * hb)
-        ii = ii + 1
+    rc = cuda_memset(read_i64(BG, 24), 0, hb)
+    # AdamW state rieng cho tung lop (m truoc, v sau moi tham so)
+    rc = cuda_malloc(cell, NL * 18 * hb)
+    wh = write_i64(BG, 144, read_i64(cell, 0))
+    rc = cuda_memset(read_i64(BG, 144), 0, NL * 18 * hb)
     bhadd: "i64" = read_i64(bh, 0)
     bhgrad: "i64" = read_i64(bh, 8)
-    h3: "i64" = 3 * hb
+    # buffer rieng cho ln_f (khong duoc dung lai buffer cua lop cuoi)
+    h3: "i64" = alloc_bytes(24)
+    rc = cuda_malloc(cell, qb)
+    wh = write_i64(h3, 0, read_i64(cell, 0))
+    rc = cuda_malloc(cell, qb)
+    wh = write_i64(h3, 8, read_i64(cell, 0))
+    rc = cuda_malloc(cell, stb)
+    wh = write_i64(h3, 16, read_i64(cell, 0))
     hal16 = alloc_bytes(4)
     wh = write_f32(hal16, 0, 0.125)
     wh = cuda_h2d(dgam, g1h, hb, 1)
@@ -1479,16 +1488,12 @@ def run() -> "i32":
     tb: "f64" = 0.0
     thd: "f64" = 0.0
     step: "i32" = 1
-    while step <= 12:
+    while step <= 13:
         b1t = b1t * 0.9
         b2t = b2t * 0.999
         ac1: "f32" = 1.0 - b1t
         ac2: "f32" = 1.0 - b2t
         warm: "f32" = 1.0
-        if step < 10:
-            warm = step / 10.0
-        else:
-            warm = ((151 - step) / 141.0) * ((151 - step) / 141.0)
         tA = time_perf()
         xin = dX
         # ---- forward layers ----
@@ -1582,6 +1587,9 @@ def run() -> "i32":
             ll = ll + 1
         tH = time_perf()
         # logits + loss tu OUT cua lop cuoi
+        y1d = read_i64(h3, 0)
+        xh1d = read_i64(h3, 8)
+        s1d = read_i64(h3, 16)
         rc = ln_fwd(lnf, dOUT, dFG, dFB, y1d, xh1d, s1d, T, H)
         rc = toh(th, y1d, fpA, sQH)
         rc = toh(th, dWh, fpB, H * V)
@@ -1655,6 +1663,7 @@ def run() -> "i32":
             # reload THIS layer's forward activations (no stale shared buffers)
             rc = gelu_fwd(gfn, zd, dHH, T * F)
             y1d = read_i64(AY1, ll * 8)
+            rc = bias_grad_k(bhgrad, gOUT, read_i64(BG, 8), T, H)
 
             rc = toh(th, dHH, fpA, sTF)
             rc = toh(th, gOUT, fpB, sQH)
@@ -1705,12 +1714,18 @@ def run() -> "i32":
             rc = toh(th, qd, fpB, sQH)
             rc = gemm16b(ch, 1, 0, T, 64, T, hal16, fpA, T, T * T, fpB, T, 64 * T, zero, gK, T, 64 * T, 16)
             rc = bias_grad_k(bhgrad, gQ, read_i64(BG, 0), T, H)
+            rc = bias_grad_k(bhgrad, gK, read_i64(BG, 0) + hb, T, H)
+            rc = bias_grad_k(bhgrad, gV, read_i64(BG, 0) + 2 * hb, T, H)
             rc = toh(th, y1d, fpA, sQH)
             rc = toh(th, gQ, fpB, sQH)
             rc = gemm16(ch, 1, 0, H, H, T, one, fpA, T, fpB, T, zero, gqd, H)
-            # bias frozen: rc = bias_grad_k(bhgrad, gqd, bq, T, H)
-            # bias frozen: rc = bias_grad_k(bhgrad, gkd, bq + h3, T, H)
-            # bias frozen: rc = bias_grad_k(bhgrad, gvd, bq + h3 + h3, T, H)
+            if step == 1:
+                if ll == 0:
+                    wh = cuda_h2d(hPK, gqd, 1024, 2)
+                    ii = 0
+                    while ii < 256:
+                        print("GQ0", read_f32(hPK, ii * 4))
+                        ii = ii + 1
             rc = toh(th, gK, fpB, sQH)
             rc = gemm16(ch, 1, 0, H, H, T, one, fpA, T, fpB, T, zero, gkd, H)
             rc = toh(th, gV, fpB, sQH)
@@ -1753,10 +1768,10 @@ def run() -> "i32":
             rc = adamw_update(afn, read_i64(AWo, ll * 8), god, mo + uo, vo + uo, H * H, lr * warm, ac1, ac2, wd)
             rc = adamw_update(afn, read_i64(AW1, ll * 8), g1d, m1 + uo1, v1 + uo1, H * F, lr * warm, ac1, ac2, wd)
             rc = adamw_update(afn, read_i64(AW2, ll * 8), g2d, m2 + uo2, v2 + uo2, F * H, lr * warm, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(ABQ, ll * 8), read_i64(BG, 0), read_i64(BG, 32), read_i64(BG, 40), 3 * H, lr * warm, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(ABO, ll * 8), read_i64(BG, 24), read_i64(BG, 48), read_i64(BG, 56), H, lr * warm, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(AB1, ll * 8), read_i64(BG, 16), read_i64(BG, 64), read_i64(BG, 72), 4 * H, lr * warm, ac1, ac2, wd)
-            rc = adamw_update(afn, read_i64(AB2, ll * 8), read_i64(BG, 8), read_i64(BG, 80), read_i64(BG, 88), H, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(ABQ, ll * 8), read_i64(BG, 0), read_i64(BG, 144) + ll * 18 * hb, read_i64(BG, 144) + ll * 18 * hb + 3 * hb, 3 * H, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(ABO, ll * 8), read_i64(BG, 24), read_i64(BG, 144) + ll * 18 * hb + 6 * hb, read_i64(BG, 144) + ll * 18 * hb + 7 * hb, H, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(AB1, ll * 8), read_i64(BG, 16), read_i64(BG, 144) + ll * 18 * hb + 8 * hb, read_i64(BG, 144) + ll * 18 * hb + 12 * hb, 4 * H, lr * warm, ac1, ac2, wd)
+            rc = adamw_update(afn, read_i64(AB2, ll * 8), read_i64(BG, 8), read_i64(BG, 144) + ll * 18 * hb + 16 * hb, read_i64(BG, 144) + ll * 18 * hb + 17 * hb, H, lr * warm, ac1, ac2, wd)
 
             ll = ll + 1
         print("MARK UPD", step)
