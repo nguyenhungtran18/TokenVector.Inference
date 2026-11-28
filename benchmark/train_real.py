@@ -1,4 +1,4 @@
-﻿"""BÆ¯á»šC 2/3 - train that: PyTorch eager vs TokenVector pure .tkv.
+"""BƯỚC 2/3 - train that: PyTorch eager vs TokenVector pure .tkv.
 Chay sau export_gpt2m_weights.py. Luu model da train de cell test dung lai.
 """
 import gc
@@ -18,11 +18,8 @@ EXE = BASE + "/cuda-backend/Release/cuda_backend/examples/ilgpt2_real10.exe"
 DOTNET = "/kaggle/working/dotnet/dotnet"
 NL, H, NH, V, T = 24, 1024, 16, 50257, 512
 
-DIAG = ""
 if os.environ.get("TKV_DIAG") != "0":
-    _dr = subprocess.run([sys.executable, BASE + "/benchmark/diag_bias.py"],
-                         capture_output=True, text=True)
-    DIAG = _dr.stdout or ""
+    subprocess.run([sys.executable, BASE + "/benchmark/diag_variants.py"], check=False)
 
 d = np.load("/kaggle/working/gpt2m_ids.npz")
 xb, yb = d["xb"], d["yb"]
@@ -60,7 +57,9 @@ print("TKV rc=", r.returncode, flush=True)
 if r.returncode != 0:
     print((r.stdout or "")[-2500:]); print((r.stderr or "")[:800]); sys.exit(1)
 lines = (r.stdout or "").splitlines()
-
+for l in lines:
+    if l.startswith("LG0"):
+        print(l, flush=True)
 ms = [float(l.split()[1]) for l in lines if l.startswith("STEPMS ")]
 tl = [float(l.split()[1]) for l in lines if l.startswith("LOSSF ")]
 tkv_ms = st.median(ms[3:]) if len(ms) > 6 else st.median(ms)
@@ -73,10 +72,3 @@ print("| PyTorch eager | gpt2-medium pretrained | %.1f | 1.00x | %.4f -> %.4f |"
       % (torch_ms, losses[0], losses[-1]), flush=True)
 print("| TokenVector pure .tkv | gpt2-medium pretrained | %.1f | %.2fx | %.4f -> %.4f |"
       % (tkv_ms, torch_ms / tkv_ms, tl[0], tl[-1]), flush=True)
-print("=== DIAG (HF) ===", flush=True)
-for l in DIAG.splitlines():
-    print(l, flush=True)
-print("=== TKV DUMP ===", flush=True)
-for l in lines:
-    if l.startswith("DUMP") or l.startswith("LG0"):
-        print(l, flush=True)
