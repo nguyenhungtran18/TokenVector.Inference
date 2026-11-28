@@ -1608,6 +1608,17 @@ def run() -> "i32":
                     rc = dumpc(24, dY1, 1)
                     rc = h2f(h2fh, fpQKV, dY1, 8)
                     rc = dumpc(25, dY1, 1)
+                    ii = 0
+                    while ii < 16:
+                        wh = write_f32(hX, ii * 4, ii + 1)
+                        wh = write_f32(hS, ii * 4, ii + 1)
+                        ii = ii + 1
+                    wh = cuda_h2d(dQ, hX, 64, 1)
+                    wh = cuda_h2d(dK, hS, 64, 1)
+                    rc = toh(th, dQ, fpA, 16)
+                    rc = toh(th, dK, fpB, 16)
+                    rc = gemm16(ch, 0, 0, 4, 4, 4, one, fpA, 4, fpB, 4, zero, dA, 4)
+                    rc = dumpc(30, dA, 4)
                     rc = dumpc(20, wqd, 1)
                     rc = dumpc(21, wkd, 1)
                     rc = dumpc(22, wvd, 1)
