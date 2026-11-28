@@ -109285,6 +109285,12 @@
     ldc.i4 1
     ret
   run_If21_else:
+    ldloc.s 168
+    ldloc.s 217
+    ldloc.s 91
+    ldloc.s 20
+    call int32 TKVApp::'toh'(int64, int64, int64, int32)
+    stloc.s 0
     ldloc.s 192
     ldc.i4 1
     ceq
@@ -109331,12 +109337,6 @@
     stloc.s 0
   run_If23_else:
   run_If22_else:
-    ldloc.s 168
-    ldloc.s 217
-    ldloc.s 91
-    ldloc.s 20
-    call int32 TKVApp::'toh'(int64, int64, int64, int32)
-    stloc.s 0
     ldloc.s 171
     ldloc.s 138
     ldloc.s 139
@@ -111056,6 +111056,12 @@
     ldc.i4 16
     call int32 TKVApp::'gemm16b'(int64, int32, int32, int32, int32, int32, int64, int64, int32, int64, int64, int32, int64, int64, int64, int32, int64, int32)
     stloc.s 0
+    ldloc.s 168
+    ldloc.s 217
+    ldloc.s 91
+    ldloc.s 20
+    call int32 TKVApp::'toh'(int64, int64, int64, int32)
+    stloc.s 0
     ldloc.s 192
     ldc.i4 1
     ceq
@@ -111102,12 +111108,6 @@
     stloc.s 0
   run_If49_else:
   run_If48_else:
-    ldloc.s 168
-    ldloc.s 217
-    ldloc.s 91
-    ldloc.s 20
-    call int32 TKVApp::'toh'(int64, int64, int64, int32)
-    stloc.s 0
     ldloc.s 168
     ldloc.s 102
     ldloc.s 92

@@ -1548,6 +1548,7 @@ def run() -> "i32":
             if rc != 0:
                 print("LN1 FWD FAIL", ll)
                 return 1
+            rc = toh(th, y1d, fpA, sQH)
             if step == 1:
                 if ll == 0:
                     ii = 0
@@ -1555,7 +1556,6 @@ def run() -> "i32":
                         rc = h2f(h2fh, fpA + ii * T * 2, dY1 + ii * 4, 1)
                         ii = ii + 1
                     rc = dumpc(27, dY1, 1)
-            rc = toh(th, y1d, fpA, sQH)
             rc = toh3(th3, wqd, wkd, wvd, fpQKV, H * H)
             rc = gemm16(ch, 0, 0, T, 3 * H, H, one, fpA, T, fpQKV, H, zero, qd, T)
             if step == 1:
@@ -1772,6 +1772,7 @@ def run() -> "i32":
             rc = toh(th, gS, fpA, 16 * sTT)
             rc = toh(th, qd, fpB, sQH)
             rc = gemm16b(ch, 1, 0, T, 64, T, hal16, fpA, T, T * T, fpB, T, 64 * T, zero, gK, T, 64 * T, 16)
+            rc = toh(th, y1d, fpA, sQH)
             if step == 1:
                 if ll == 0:
                     ii = 0
@@ -1779,7 +1780,6 @@ def run() -> "i32":
                         rc = h2f(h2fh, fpA + ii * T * 2, dY1 + ii * 4, 1)
                         ii = ii + 1
                     rc = dumpc(27, dY1, 1)
-            rc = toh(th, y1d, fpA, sQH)
             rc = toh(th, gQ, fpB, sQH)
             rc = gemm16(ch, 1, 0, H, H, T, one, fpA, T, fpB, T, zero, gqd, H)
             rc = bias_grad_k(bhgrad, gqd, bq, T, H)
